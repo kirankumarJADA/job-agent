@@ -1,0 +1,27 @@
+version: "3.9"
+
+# Optional observability profile. Bring up alongside docker-compose.yml with:
+#   docker compose -f docker-compose.yml -f docker-compose.obs.yml --profile obs up
+# Not required for the Phase 1 DoD; provided now so Micrometer wiring in the
+# backend has somewhere to point without any later rework.
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["obs"]
+    volumes:
+      - ./grafana/provisioning/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ["obs"]
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"

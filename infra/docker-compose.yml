@@ -1,0 +1,92 @@
+version: "3.9"
+
+# Phase 1 stack: postgres (system of record), redis (cache/locks, streams later),
+# backend (Spring Boot modular monolith), frontend (Vite dev server).
+# `worker/` stays out of this file until Phase 6 — it has zero business logic
+# and is not needed for Phase 1 read-side + LLM subsystem work.
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: jobagent
+      POSTGRES_USER: jobagent
+      POSTGRES_PASSWORD: jobagent_dev_password
+    ports:
+      # Host port 5433, not 5432 — avoids clashing with a Postgres instance
+      # already running natively on your machine. The backend container
+      # still talks to this over the internal Docker network on port 5432
+      # (hostname "postgres"), so SPRING_DATASOURCE_URL below is unaffected.
+      # This only changes what port you'd use from Windows itself (psql,
+      # pgAdmin, etc.) to reach into the container: localhost:5433.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobagent -d jobagent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/jobagent
+      SPRING_DATASOURCE_USERNAME: jobagent
+      SPRING_DATASOURCE_PASSWORD: jobagent_dev_password
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      # LLM provider keys are supplied via .env at repo root (never committed).
+      NIM_BASE_URL: ${NIM_BASE_URL:-}
+      NIM_API_KEY: ${NIM_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    ports:
+      - "8080:8080"
+    volumes:
+      # P1-f: benchmark suites live in datasets/ at the repo root (sibling
+      # to backend/), not inside the backend's own build context, so they
+      # need an explicit mount rather than being COPY'd into the image —
+      # keeps curated benchmark data editable without a rebuild.
+      - ../datasets:/app/datasets:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/system/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      VITE_API_BASE_URL: http://localhost:8080/api/v1
+    ports:
+      - "5173:5173"
+
+volumes:
+  pgdata:

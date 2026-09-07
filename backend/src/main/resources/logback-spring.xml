@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!--
+        Structured JSON logs with correlation_id always present (see
+        CorrelationIdFilter, which populates MDC before any request logging
+        happens). mdcKeyName maps MDC's correlation_id into the JSON field
+        of the same name so log aggregation can join on it directly.
+    -->
+    <appender name="JSON_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <includeMdcKeyName>correlation_id</includeMdcKeyName>
+            <customFields>{"service":"job-agent-backend"}</customFields>
+            <timestampPattern>yyyy-MM-dd'T'HH:mm:ss.SSSXXX</timestampPattern>
+        </encoder>
+    </appender>
+
+    <springProfile name="local">
+        <!-- Human-readable console output for local dev; still carries
+             correlation_id via %X{correlation_id}. -->
+        <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder>
+                <pattern>%d{HH:mm:ss.SSS} [%X{correlation_id}] %-5level %logger{36} - %msg%n</pattern>
+            </encoder>
+        </appender>
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="!local">
+        <root level="INFO">
+            <appender-ref ref="JSON_CONSOLE"/>
+        </root>
+    </springProfile>
+</configuration>

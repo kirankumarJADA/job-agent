@@ -1,0 +1,53 @@
+spring:
+  application:
+    name: job-agent-backend
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/jobagent}
+    username: ${SPRING_DATASOURCE_USERNAME:jobagent}
+    password: ${SPRING_DATASOURCE_PASSWORD:jobagent_dev_password}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate   # schema owned by Flyway, never by Hibernate
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  data:
+    redis:
+      host: ${SPRING_REDIS_HOST:localhost}
+      port: ${SPRING_REDIS_PORT:6379}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      nim:
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+      gemini:
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+
+server:
+  port: 8080
+
+logging:
+  level:
+    root: INFO
