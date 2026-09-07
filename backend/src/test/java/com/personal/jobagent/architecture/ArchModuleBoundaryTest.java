@@ -50,7 +50,8 @@ class ArchModuleBoundaryTest {
                             BASE_PKG + ".jobs..",
                             BASE_PKG + ".benchmark..",
                             BASE_PKG + ".orchestrator..",
-                            BASE_PKG + ".audit.."
+                            BASE_PKG + ".audit..",
+                            BASE_PKG + ".sources.."
                     )
                     .as("llm module must not depend on other business modules directly — "
                             + "only common/events, or callers reaching INTO llm (e.g. benchmark per §C6)")
@@ -66,11 +67,6 @@ class ArchModuleBoundaryTest {
     @ArchTest
     static final ArchRule no_module_depends_directly_on_another_business_module =
             layeredArchitecture().consideringOnlyDependenciesInLayers()
-                    // Orchestrator doesn't exist yet (Phase 3+) — withOptionalLayers(true)
-                    // stops ArchUnit from treating a currently-empty layer as a violation.
-                    // Confirmed necessary by a real mvn verify run in P1-a: without this,
-                    // the rule fails with "Layer 'X' is empty" for whichever layers have
-                    // no classes yet, which is a false positive, not a real violation.
                     .withOptionalLayers(true)
                     .layer("Common").definedBy(BASE_PKG + ".common..")
                     .layer("Events").definedBy(BASE_PKG + ".events..")
@@ -80,6 +76,7 @@ class ArchModuleBoundaryTest {
                     .layer("Profile").definedBy(BASE_PKG + ".profile..")
                     .layer("Preferences").definedBy(BASE_PKG + ".preferences..")
                     .layer("Jobs").definedBy(BASE_PKG + ".jobs..")
+                    .layer("Sources").definedBy(BASE_PKG + ".sources..")
                     .layer("Benchmark").definedBy(BASE_PKG + ".benchmark..")
                     .layer("Orchestrator").definedBy(BASE_PKG + ".orchestrator..")
                     .layer("Llm").definedBy(BASE_PKG + ".llm..")

@@ -34,7 +34,7 @@ public class LlmPingController {
         LlmCompletionRequest request = LlmCompletionRequest.simple(
                 "ping-test", "ping", UuidV7.generate());
 
-        Set<String> forceSkip = forceFallback ? Set.of("nim") : Set.of();
+        Set<String> forceSkip = forceFallback ? Set.of("PRIMARY", "nim") : Set.of();
 
         ModelRouter.ExecutionResult result = modelRouter.execute(task, request, Duration.ofSeconds(10), forceSkip);
         return result.trace();

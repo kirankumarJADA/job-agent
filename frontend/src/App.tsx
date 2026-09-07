@@ -1,42 +1,56 @@
-import { useEffect, useState } from "react";
+import React from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { Navigation } from './components/Navigation';
+import { LoginModal } from './components/LoginModal';
 
-type HealthResponse = {
-  status: string;
-  timestamp: string;
-  components: Record<string, string>;
-};
+import { DashboardPage } from './pages/DashboardPage';
+import { JobsFeedPage } from './pages/JobsFeedPage';
+import { JobDetailPage } from './pages/JobDetailPage';
+import { ProfilePage } from './pages/ProfilePage';
+import { PreferencesPage } from './pages/PreferencesPage';
+import { ModelsPage } from './pages/ModelsPage';
+import { SourcesPage } from './pages/SourcesPage';
+import { LogsPage } from './pages/LogsPage';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080/api/v1";
+const AppLayout: React.FC = () => {
+  const { user, loading } = useAuth();
 
-export default function App() {
-  const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetch(`${API_BASE_URL}/system/health`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then(setHealth)
-      .catch((err) => setError(String(err)));
-  }, []);
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-slate-950 text-slate-400 font-mono text-sm">
+        Initializing Job Agent Session...
+      </div>
+    );
+  }
 
   return (
-    <main style={{ fontFamily: "system-ui", padding: "2rem" }}>
-      <h1>Job Agent — dev skeleton</h1>
-      <p>
-        This is the Phase 1 (P1-a) skeleton page. The real dashboard pages
-        (Jobs Feed, Profile, Preferences, Models/Benchmarks, ...) start in
-        P1-d onward.
-      </p>
-      <h2>Backend health check</h2>
-      {error && <p style={{ color: "crimson" }}>Error reaching backend: {error}</p>}
-      {health ? (
-        <pre>{JSON.stringify(health, null, 2)}</pre>
-      ) : (
-        !error && <p>Checking backend…</p>
-      )}
-    </main>
+    <div className="flex min-h-screen bg-slate-950 text-slate-100 antialiased">
+      {!user && <LoginModal />}
+      <Navigation />
+      <main className="flex-1 p-6 lg:p-8 overflow-y-auto max-h-screen">
+        <Routes>
+          <Route path="/" element={<DashboardPage />} />
+          <Route path="/jobs" element={<JobsFeedPage />} />
+          <Route path="/jobs/:id" element={<JobDetailPage />} />
+          <Route path="/profile" element={<ProfilePage />} />
+          <Route path="/preferences" element={<PreferencesPage />} />
+          <Route path="/models" element={<ModelsPage />} />
+          <Route path="/sources" element={<SourcesPage />} />
+          <Route path="/logs" element={<LogsPage />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </main>
+    </div>
+  );
+};
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <BrowserRouter>
+        <AppLayout />
+      </BrowserRouter>
+    </AuthProvider>
   );
 }

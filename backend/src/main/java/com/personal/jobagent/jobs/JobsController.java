@@ -25,9 +25,12 @@ public class JobsController {
             "DISCOVERED", "FILTERED_OUT", "ANALYSED", "SCORED", "DECIDED", "ARCHIVED", "PIPELINE_ERROR");
 
     private final JobRepository jobRepository;
+    private final JobSeedService jobSeedService;
 
-    public JobsController(JobRepository jobRepository) {
+    public JobsController(JobRepository jobRepository,
+                          @org.springframework.beans.factory.annotation.Autowired(required = false) JobSeedService jobSeedService) {
         this.jobRepository = jobRepository;
+        this.jobSeedService = jobSeedService;
     }
 
     @GetMapping
@@ -88,5 +91,14 @@ public class JobsController {
             return ResponseEntity.badRequest().body(error);
         }
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(Map.of("status", "RESOLUTION_PENDING"));
+    }
+
+    @PostMapping("/seed-uk")
+    public ResponseEntity<?> seedUkJobs() {
+        if (jobSeedService != null) {
+            int count = jobSeedService.seedRealUkJobs();
+            return ResponseEntity.ok(Map.of("status", "SEEDED", "count", count));
+        }
+        return ResponseEntity.ok(Map.of("status", "SEEDER_NOT_AVAILABLE"));
     }
 }
