@@ -129,6 +129,12 @@ export const JobDetailPage: React.FC = () => {
 
         {/* Right 1 Col: Intelligence, Scoring & Audit */}
         <div className="space-y-6">
+          {/* Cover Letter Subsystem */}
+          <CoverLetterSection jobId={job.id} />
+
+          {/* Application QA Subsystem */}
+          <ApplicationQASection jobId={job.id} />
+
           {/* Score Card */}
           <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60">
             <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 mb-4 flex items-center justify-between">
@@ -215,3 +221,188 @@ export const JobDetailPage: React.FC = () => {
     </div>
   );
 };
+
+const CoverLetterSection: React.FC<{ jobId: string }> = ({ jobId }) => {
+  const [coverLetters, setCoverLetters] = useState<import('../types').CoverLetter[]>([]);
+  const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchLetters = () => {
+    apiFetch<import('../types').CoverLetter[]>(`/cover-letters/job/${jobId}`)
+      .then(setCoverLetters)
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    fetchLetters();
+  }, [jobId]);
+
+  const handleGenerate = async () => {
+    setGenerating(true);
+    setError(null);
+    try {
+      await apiFetch('/cover-letters/generate', {
+        method: 'POST',
+        body: JSON.stringify({ jobId }),
+      });
+      fetchLetters();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Generation failed');
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const handleApproval = async (id: string, approved: boolean) => {
+    try {
+      await apiFetch(`/cover-letters/${id}/approval`, {
+        method: 'PUT',
+        body: JSON.stringify({ approved }),
+      });
+      fetchLetters();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Update failed');
+    }
+  };
+
+  const latest = coverLetters[0];
+
+  return (
+    <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
+          Cover Letter
+        </h2>
+        <span className="text-xs font-mono text-indigo-400">Feature 2</span>
+      </div>
+
+      {error && <div className="p-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs">{error}</div>}
+
+      {latest ? (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between text-xs">
+            <span className="font-medium text-white">{latest.title}</span>
+            <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${latest.is_approved ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
+              {latest.is_approved ? 'Approved' : 'Pending Review'}
+            </span>
+          </div>
+
+          <div className="max-h-48 overflow-y-auto p-3 rounded-lg bg-slate-900/80 border border-slate-800 text-xs text-slate-300 font-mono whitespace-pre-wrap leading-relaxed">
+            {latest.body_markdown}
+          </div>
+
+          <div className="flex items-center justify-between pt-2">
+            <button
+              onClick={() => handleApproval(latest.id, !latest.is_approved)}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-700 hover:bg-slate-600 text-white transition-colors"
+            >
+              {latest.is_approved ? 'Mark Unapproved' : 'Approve Letter'}
+            </button>
+            <button
+              onClick={handleGenerate}
+              disabled={generating}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors"
+            >
+              {generating ? 'Regenerating...' : 'Regenerate v' + (latest.version + 1)}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="text-center py-4 space-y-3">
+          <p className="text-xs text-slate-400">No cover letter generated yet for this job.</p>
+          <button
+            onClick={handleGenerate}
+            disabled={generating}
+            className="w-full py-2 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold disabled:opacity-50 transition-all shadow-md shadow-indigo-600/20"
+          >
+            {generating ? 'Synthesizing with Anti-Fabrication...' : 'Generate ATS Cover Letter'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const ApplicationQASection: React.FC<{ jobId: string }> = ({ jobId }) => {
+  const [answers, setAnswers] = useState<import('../types').ApplicationAnswer[]>([]);
+  const [questionText, setQuestionText] = useState('');
+  const [drafting, setDrafting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchAnswers = () => {
+    apiFetch<import('../types').ApplicationAnswer[]>(`/application-answers/job/${jobId}`)
+      .then(setAnswers)
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    fetchAnswers();
+  }, [jobId]);
+
+  const handleDraft = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!questionText.trim()) return;
+    setDrafting(true);
+    setError(null);
+    try {
+      await apiFetch('/application-answers/draft', {
+        method: 'POST',
+        body: JSON.stringify({ jobId, questionText }),
+      });
+      setQuestionText('');
+      fetchAnswers();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Drafting failed');
+    } finally {
+      setDrafting(false);
+    }
+  };
+
+  return (
+    <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
+          Application Q&A
+        </h2>
+        <span className="text-xs font-mono text-indigo-400">Feature 3</span>
+      </div>
+
+      {error && <div className="p-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs">{error}</div>}
+
+      <form onSubmit={handleDraft} className="space-y-2">
+        <input
+          type="text"
+          value={questionText}
+          onChange={(e) => setQuestionText(e.target.value)}
+          placeholder="e.g. Why do you want to work here?"
+          className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+        />
+        <button
+          type="submit"
+          disabled={drafting || !questionText.trim()}
+          className="w-full py-1.5 px-3 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-xs font-medium disabled:opacity-50 transition-colors"
+        >
+          {drafting ? 'Drafting from Verified Facts...' : 'Draft Grounded Answer'}
+        </button>
+      </form>
+
+      {answers.length > 0 && (
+        <div className="space-y-3 pt-2">
+          {answers.map((ans) => (
+            <div key={ans.id} className="p-3 rounded-lg bg-slate-900/80 border border-slate-800 space-y-1.5 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="font-medium text-slate-300 line-clamp-1">{ans.question_text}</span>
+                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${ans.status === 'ANSWERED' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
+                  {ans.status}
+                </span>
+              </div>
+              <p className="text-slate-400 leading-relaxed font-sans">{ans.answer_text}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+

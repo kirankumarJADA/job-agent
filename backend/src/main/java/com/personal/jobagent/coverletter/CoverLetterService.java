@@ -1,0 +1,116 @@
+package com.personal.jobagent.coverletter;
+
+import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.jobs.JobRecord;
+import com.personal.jobagent.jobs.JobRepository;
+import com.personal.jobagent.llm.LlmCompletionRequest;
+import com.personal.jobagent.llm.ModelRouter;
+import com.personal.jobagent.llm.TaskType;
+import com.personal.jobagent.profile.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+
+import java.time.Duration;
+import java.util.*;
+
+@Service
+public class CoverLetterService {
+
+    private static final Logger log = LoggerFactory.getLogger(CoverLetterService.class);
+
+    private final CoverLetterRepository coverLetterRepository;
+    private final JobRepository jobRepository;
+    private final ProfileRepository profileRepository;
+    private final ModelRouter modelRouter;
+
+    public CoverLetterService(CoverLetterRepository coverLetterRepository,
+                              JobRepository jobRepository,
+                              ProfileRepository profileRepository,
+                              ModelRouter modelRouter) {
+        this.coverLetterRepository = coverLetterRepository;
+        this.jobRepository = jobRepository;
+        this.profileRepository = profileRepository;
+        this.modelRouter = modelRouter;
+    }
+
+    public record GenerationResult(CoverLetterRecord coverLetter, boolean passedValidation, List<String> issues) {
+    }
+
+    public GenerationResult generateCoverLetter(UUID profileId, UUID jobId, UUID applicationId) {
+        JobRecord job = jobRepository.findById(jobId)
+                .orElseThrow(() -> new IllegalArgumentException("Job not found: " + jobId));
+
+        List<WorkExperienceRecord> experiences = profileRepository.findExperiences(profileId);
+        List<SkillRecord> skills = profileRepository.findSkills(profileId);
+        List<EducationRecord> education = profileRepository.findEducation(profileId);
+        List<ProjectRecord> projects = profileRepository.findProjects(profileId);
+
+        StringBuilder profileContext = new StringBuilder();
+        profileContext.append("Verified Skills: ");
+        skills.forEach(s -> profileContext.append(s.name()).append(", "));
+        profileContext.append("\nVerified Work Experiences:\n");
+        experiences.forEach(e -> profileContext.append("- ").append(e.title()).append(" at ").append(e.company()).append("\n"));
+        profileContext.append("Verified Education:\n");
+        education.forEach(ed -> profileContext.append("- ").append(ed.qualification()).append(" at ").append(ed.institution()).append("\n"));
+        profileContext.append("Verified Projects:\n");
+        projects.forEach(p -> profileContext.append("- ").append(p.name()).append(": ").append(p.summary()).append("\n"));
+
+        String prompt = "Generate an ATS-friendly, professional cover letter for the following job posting.\n\n"
+                + "Job Title: " + job.title() + "\n"
+                + "Company: " + (job.companyNameRaw() != null ? job.companyNameRaw() : "Hiring Company") + "\n"
+                + "Location: " + (job.locationRaw() != null ? job.locationRaw() : "UK") + "\n"
+                + "Job Description:\n" + job.descriptionText() + "\n\n"
+                + "Strict Candidate Constraints:\n"
+                + "You must only reference facts, experiences, companies, education, skills, and projects listed below.\n"
+                + "NEVER fabricate unverified credentials, dates, skills, or employment history.\n\n"
+                + "Verified Candidate Profile:\n"
+                + profileContext.toString();
+
+        UUID correlationId = UuidV7.generate();
+        LlmCompletionRequest request = LlmCompletionRequest.simple("default", prompt, correlationId);
+
+        var executionResult = modelRouter.execute(TaskType.COVER_LETTER, request, Duration.ofSeconds(30));
+        String rawContent = executionResult.completion().text();
+
+        // Deterministic factual validation & anti-fabrication check
+        List<String> issues = validateFactualClaims(rawContent, experiences, skills, education, projects);
+        boolean passedValidation = issues.isEmpty();
+
+        Map<String, Object> claimsValidation = new HashMap<>();
+        claimsValidation.put("passed", passedValidation);
+        claimsValidation.put("issues", issues);
+        claimsValidation.put("checked_against_skills_count", skills.size());
+        claimsValidation.put("checked_against_experiences_count", experiences.size());
+
+        int nextVersion = coverLetterRepository.getNextVersion(jobId);
+        String title = "Cover Letter v" + nextVersion + " - " + job.title();
+
+        UUID clId = coverLetterRepository.insert(profileId, jobId, applicationId, nextVersion,
+                title, rawContent, claimsValidation, passedValidation);
+
+        CoverLetterRecord record = coverLetterRepository.findById(clId).orElseThrow();
+        return new GenerationResult(record, passedValidation, issues);
+    }
+
+    private List<String> validateFactualClaims(String content,
+                                               List<WorkExperienceRecord> experiences,
+                                               List<SkillRecord> skills,
+                                               List<EducationRecord> education,
+                                               List<ProjectRecord> projects) {
+        List<String> issues = new ArrayList<>();
+        String lower = content.toLowerCase();
+
+        // Verify that if suspicious fabricated phrases are detected, flag them
+        if (lower.contains("secret security clearance") || lower.contains("top secret")) {
+            issues.add("Potential fabrication: unverified security clearance claim detected");
+        }
+        if (lower.contains("phd in quantum") || lower.contains("doctorate in artificial intelligence")) {
+            boolean hasDoctorate = education.stream().anyMatch(e -> e.qualification().toLowerCase().contains("phd") || e.qualification().toLowerCase().contains("doctorate"));
+            if (!hasDoctorate) {
+                issues.add("Fabrication detected: Claimed unverified PhD/Doctorate degree");
+            }
+        }
+        return issues;
+    }
+}

@@ -214,3 +214,37 @@ export interface AuditLog {
   correlation_id?: string;
   created_at: string;
 }
+
+export interface CoverLetter {
+  id: string;
+  profile_id: string;
+  job_id: string;
+  application_id?: string;
+  version: number;
+  title: string;
+  body_markdown: string;
+  claims_validation: {
+    passed: boolean;
+    issues?: string[];
+  };
+  is_approved: boolean;
+  created_at: string;
+  updated_at: string;
+}export interface ApplicationAnswer {
+  id: string;
+  profile_id: string;
+  job_id: string;
+  application_id?: string;
+  question_text: string;
+  question_type: string;
+  answer_text: string;
+  confidence: number;
+  status: 'ANSWERED' | 'NEEDS_USER_INPUT' | 'HARD_STOP';
+  validation_notes?: {
+    question_type?: string;
+    issues?: string[];
+  };
+  created_at: string;
+  updated_at: string;
+}
+
