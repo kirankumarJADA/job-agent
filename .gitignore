@@ -29,3 +29,9 @@ Thumbs.db
 
 # Local data / working files
 /data/
+
+# production-like local env (never commit)
+infra/.env.prod-like
+worker/node_modules/
+research/
+frontend/tsconfig.tsbuildinfo

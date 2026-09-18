@@ -6,7 +6,11 @@ import com.personal.jobagent.jobs.JobRepository;
 import com.personal.jobagent.llm.LlmCompletionRequest;
 import com.personal.jobagent.llm.ModelRouter;
 import com.personal.jobagent.llm.TaskType;
+import com.personal.jobagent.notifications.NotificationEvents;
+import com.personal.jobagent.notifications.NotificationService;
 import com.personal.jobagent.profile.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -16,19 +20,24 @@ import java.util.*;
 @Service
 public class ApplicationAnswerService {
 
+    private static final Logger log = LoggerFactory.getLogger(ApplicationAnswerService.class);
+
     private final ApplicationAnswerRepository answerRepository;
     private final JobRepository jobRepository;
     private final ProfileRepository profileRepository;
     private final ModelRouter modelRouter;
+    private final NotificationService notificationService;
 
     public ApplicationAnswerService(ApplicationAnswerRepository answerRepository,
                                   JobRepository jobRepository,
                                   ProfileRepository profileRepository,
-                                  ModelRouter modelRouter) {
+                                  ModelRouter modelRouter,
+                                  NotificationService notificationService) {
         this.answerRepository = answerRepository;
         this.jobRepository = jobRepository;
         this.profileRepository = profileRepository;
         this.modelRouter = modelRouter;
+        this.notificationService = notificationService;
     }
 
     public record AnswerResult(ApplicationAnswerRecord record, String outcome, List<String> issues) {
@@ -103,6 +112,34 @@ public class ApplicationAnswerService {
 
         UUID id = answerRepository.insert(profileId, jobId, applicationId, questionText, questionType, rawAnswer, confidence, status, validationNotes);
         ApplicationAnswerRecord record = answerRepository.findById(id).orElseThrow();
+
+        // Feature 8: notification fan-out. HARD_STOP / NEEDS_USER_INPUT get
+        // WARN severity via the severity override in the payload; the handler
+        // keys dedup on the answer id so replays collapse.
+        try {
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("job_id", jobId.toString());
+            payload.put("application_id", applicationId != null ? applicationId.toString() : "");
+            payload.put("answer_id", id.toString());
+            payload.put("job_title", job.title());
+            payload.put("company", job.companyNameRaw() != null ? job.companyNameRaw() : "");
+            payload.put("question_type", questionType);
+            payload.put("status", status);
+            if (status.equals("HARD_STOP")) {
+                payload.put("severity", "WARN");
+                payload.put("message", "Answer hard stop — possible fabricated claim detected");
+                payload.put("detail", "An open-ended answer was drafted but stopped for factual validation. Review before use.");
+            }
+            notificationService.emit(new NotificationService.NotificationCommand(
+                    NotificationEvents.APPLICATION_ANSWER_DRAFTED,
+                    "APPLICATION_ANSWER",
+                    id,
+                    payload,
+                    correlationId,
+                    null));
+        } catch (Exception e) {
+            log.warn("Failed to emit APPLICATION_ANSWER_DRAFTED event: {}", e.getMessage());
+        }
 
         return new AnswerResult(record, status, issues);
     }

@@ -6,6 +6,8 @@ import com.personal.jobagent.jobs.JobRepository;
 import com.personal.jobagent.llm.LlmCompletionRequest;
 import com.personal.jobagent.llm.ModelRouter;
 import com.personal.jobagent.llm.TaskType;
+import com.personal.jobagent.notifications.NotificationEvents;
+import com.personal.jobagent.notifications.NotificationService;
 import com.personal.jobagent.profile.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,15 +25,18 @@ public class CoverLetterService {
     private final JobRepository jobRepository;
     private final ProfileRepository profileRepository;
     private final ModelRouter modelRouter;
+    private final NotificationService notificationService;
 
     public CoverLetterService(CoverLetterRepository coverLetterRepository,
                               JobRepository jobRepository,
                               ProfileRepository profileRepository,
-                              ModelRouter modelRouter) {
+                              ModelRouter modelRouter,
+                              NotificationService notificationService) {
         this.coverLetterRepository = coverLetterRepository;
         this.jobRepository = jobRepository;
         this.profileRepository = profileRepository;
         this.modelRouter = modelRouter;
+        this.notificationService = notificationService;
     }
 
     public record GenerationResult(CoverLetterRecord coverLetter, boolean passedValidation, List<String> issues) {
@@ -88,6 +93,32 @@ public class CoverLetterService {
 
         UUID clId = coverLetterRepository.insert(profileId, jobId, applicationId, nextVersion,
                 title, rawContent, claimsValidation, passedValidation);
+
+        // Feature 8: fan out a notification for every generated cover letter.
+        // Emitted AFTER the row insert within the same service call so the
+        // outbox row can never reference a cover letter that doesn't exist;
+        // dedup keyed on the cover letter id itself (one notification per
+        // generated artifact, replay-safe).
+        try {
+            notificationService.emit(new NotificationService.NotificationCommand(
+                    NotificationEvents.COVER_LETTER_GENERATED,
+                    "COVER_LETTER",
+                    clId,
+                    Map.of(
+                            "job_id", jobId.toString(),
+                            "application_id", applicationId != null ? applicationId.toString() : "",
+                            "cover_letter_id", clId.toString(),
+                            "job_title", job.title(),
+                            "company", job.companyNameRaw() != null ? job.companyNameRaw() : "",
+                            "version", nextVersion,
+                            "passed_validation", passedValidation
+                    ),
+                    correlationId,
+                    null));
+        } catch (Exception e) {
+            // Notification emission must never fail the generation itself.
+            log.warn("Failed to emit COVER_LETTER_GENERATED event: {}", e.getMessage());
+        }
 
         CoverLetterRecord record = coverLetterRepository.findById(clId).orElseThrow();
         return new GenerationResult(record, passedValidation, issues);

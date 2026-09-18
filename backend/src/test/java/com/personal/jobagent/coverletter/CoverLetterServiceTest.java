@@ -25,6 +25,7 @@ class CoverLetterServiceTest {
     private JobRepository jobRepository;
     private ProfileRepository profileRepository;
     private ModelRouter modelRouter;
+    private com.personal.jobagent.notifications.NotificationService notificationService;
     private CoverLetterService coverLetterService;
 
     @BeforeEach
@@ -33,12 +34,14 @@ class CoverLetterServiceTest {
         jobRepository = Mockito.mock(JobRepository.class);
         profileRepository = Mockito.mock(ProfileRepository.class);
         modelRouter = Mockito.mock(ModelRouter.class);
+        notificationService = Mockito.mock(com.personal.jobagent.notifications.NotificationService.class);
 
         coverLetterService = new CoverLetterService(
                 coverLetterRepository,
                 jobRepository,
                 profileRepository,
-                modelRouter
+                modelRouter,
+                notificationService
         );
     }
 

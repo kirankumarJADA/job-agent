@@ -25,6 +25,7 @@ class ApplicationAnswerServiceTest {
     private JobRepository jobRepository;
     private ProfileRepository profileRepository;
     private ModelRouter modelRouter;
+    private com.personal.jobagent.notifications.NotificationService notificationService;
     private ApplicationAnswerService answerService;
 
     @BeforeEach
@@ -33,12 +34,14 @@ class ApplicationAnswerServiceTest {
         jobRepository = Mockito.mock(JobRepository.class);
         profileRepository = Mockito.mock(ProfileRepository.class);
         modelRouter = Mockito.mock(ModelRouter.class);
+        notificationService = Mockito.mock(com.personal.jobagent.notifications.NotificationService.class);
 
         answerService = new ApplicationAnswerService(
                 answerRepository,
                 jobRepository,
                 profileRepository,
-                modelRouter
+                modelRouter,
+                notificationService
         );
     }
 

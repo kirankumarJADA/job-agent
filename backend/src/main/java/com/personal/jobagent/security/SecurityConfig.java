@@ -11,11 +11,23 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
 import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
+import org.springframework.security.web.csrf.CsrfFilter;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 import java.util.List;
+
+/**
+ * Production hardening (deployment pass):
+ * - CSRF cookie gets SameSite/Secure from configuration (SameSite=None; Secure
+ *   in prod so the cross-origin Vercel SPA can read it; Lax default locally).
+ * - Worker -> backend event calls authenticate via WorkerEventTokenFilter
+ *   (no-op when app.worker-event-token is unset).
+ * - /api/v1/auth/login CSRF exemption: unchanged from the verified P1-b
+ *   decision (single-user personal tool; a pre-login request cannot present
+ *   a CSRF cookie anyway, so requiring one would only break login).
+ */
 
 /**
  * Real session auth + CSRF, replacing P1-a's permitAll placeholder. Built
@@ -46,6 +58,15 @@ public class SecurityConfig {
     @Value("${app.cors.allowed-origins:http://localhost:5173}")
     private List<String> allowedOrigins;
 
+    @Value("${app.csrf.cookie-same-site:Lax}")
+    private String csrfSameSite;
+
+    @Value("${app.csrf.cookie-secure:false}")
+    private boolean csrfSecure;
+
+    @Value("${app.worker-event-token:}")
+    private String workerEventToken;
+
     private final RestAuthenticationEntryPoint restAuthenticationEntryPoint;
 
     public SecurityConfig(RestAuthenticationEntryPoint restAuthenticationEntryPoint) {
@@ -54,13 +75,31 @@ public class SecurityConfig {
 
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        CookieCsrfTokenRepository csrfRepository = CookieCsrfTokenRepository.withHttpOnlyFalse();
+        csrfRepository.setCookieCustomizer(builder -> builder
+                .sameSite(csrfSameSite)
+                .secure(csrfSecure));
         http
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
-                .csrf(csrf -> csrf
-                        .csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse())
-                        .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler())
-                        .ignoringRequestMatchers("/api/v1/auth/login")
-                )
+                .csrf(csrf -> {
+                    var customizer = csrf
+                            .csrfTokenRepository(csrfRepository)
+                            .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler());
+                    if (workerEventToken == null || workerEventToken.isBlank()) {
+                        customizer.ignoringRequestMatchers("/api/v1/auth/login");
+                    } else {
+                        // Token mode: /automation/events is bearer-authenticated
+                        // (no cookies involved), so CSRF does not apply there.
+                        customizer.ignoringRequestMatchers("/api/v1/auth/login", WorkerEventTokenFilter.EVENTS_PATH);
+                    }
+                })
+                .addFilterBefore(new WorkerEventTokenFilter(workerEventToken), CsrfFilter.class)
+                // Feature 8 live-verification fix: without this filter the
+                // deferred CsrfToken is never materialized, so the XSRF-TOKEN
+                // cookie is never written and EVERY mutating SPA call 403s
+                // (reproduced via curl with a valid session). See
+                // CsrfCookieFilter's javadoc.
+                .addFilterAfter(new CsrfCookieFilter(), CsrfFilter.class)
                 .exceptionHandling(ex -> ex.authenticationEntryPoint(restAuthenticationEntryPoint))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(

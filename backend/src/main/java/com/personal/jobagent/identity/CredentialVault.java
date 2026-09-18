@@ -1,0 +1,3 @@
+package com.personal.jobagent.identity;
+import org.springframework.stereotype.Component; import java.time.*; import java.util.*; import java.util.concurrent.*;
+@Component public class CredentialVault { private record Secret(String value,Instant expiresAt){} private final Map<String,Secret> values=new ConcurrentHashMap<>(); public String store(String value,Duration ttl){if(value==null||value.isBlank())throw new IllegalArgumentException("empty secret");String ref="vault:"+UUID.randomUUID();values.put(ref,new Secret(value,Instant.now().plus(ttl)));return ref;} public String resolveOnce(String ref){Secret s=values.remove(ref);if(s==null||s.expiresAt().isBefore(Instant.now()))throw new IllegalStateException("credential reference unavailable");return s.value();} }

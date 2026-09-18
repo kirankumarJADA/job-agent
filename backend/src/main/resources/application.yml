@@ -21,6 +21,15 @@ spring:
     redis:
       host: ${SPRING_REDIS_HOST:localhost}
       port: ${SPRING_REDIS_PORT:6379}
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+app:
+  # Machine-to-machine token for worker -> backend event/claim calls.
+  # Blank (default) keeps the current local behavior: the endpoints require
+  # an authenticated browser session exactly as before. When set, POSTs to
+  # /api/v1/automation/events must present `Authorization: Bearer <token>`.
+  worker-event-token: ${WORKER_EVENT_TOKEN:}
 
 management:
   endpoints:
@@ -47,6 +56,7 @@ resilience4j:
 
 server:
   port: 8080
+  shutdown: graceful
 
 logging:
   level:

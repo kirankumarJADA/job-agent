@@ -159,10 +159,15 @@
 
   <dependencyManagement>
     <dependencies>
+      <!-- 1.21.3: 1.20.1's docker-java cannot negotiate with Docker Desktop
+           29's named pipe (empty /info response during engine init) —
+           Testcontainers strategy probing fails with BadRequestException
+           even though the engine is healthy (verified via docker info).
+           Bumped so ITs can run on this machine's Docker. -->
       <dependency>
         <groupId>org.testcontainers</groupId>
         <artifactId>testcontainers-bom</artifactId>
-        <version>1.20.1</version>
+        <version>1.21.3</version>
         <type>pom</type>
         <scope>import</scope>
       </dependency>

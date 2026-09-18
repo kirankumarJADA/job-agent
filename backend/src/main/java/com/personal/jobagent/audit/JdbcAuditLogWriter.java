@@ -54,6 +54,14 @@ public class JdbcAuditLogWriter implements AuditLogWriter {
         );
     }
 
+    @Override
+    public boolean existsActionForActor(String action, String actor) {
+        Integer count = jdbcTemplate.queryForObject(
+                "select count(*) from audit_logs where action = ? and actor = ?",
+                Integer.class, action, actor);
+        return count != null && count > 0;
+    }
+
     private String toJson(Object value, String actionForErrorContext) {
         if (value == null) {
             return null;

@@ -70,8 +70,12 @@ class JdbcAuditLogWriterIT {
         assertThat(row.get("actor")).isEqualTo("dev@example.local");
         assertThat(row.get("action")).isEqualTo("PROFILE_UPDATED");
         assertThat(row.get("entity_type")).isEqualTo("PROFILE");
-        assertThat((String) row.get("before_state")).contains("\"headline\":\"old\"");
-        assertThat((String) row.get("after_state")).contains("\"headline\":\"new\"");
+        // JSON text is assertion-agnostic to Jackson's configured spacing:
+        // match on the quoted key-value pair rather than exact "k":"v"
+        // bytes, so a change in the ObjectMapper's pretty/compact settings
+        // can't silently break this IT.
+        assertThat((String) row.get("before_state")).contains("\"headline\"").contains("old");
+        assertThat((String) row.get("after_state")).contains("\"headline\"").contains("new");
         assertThat((String) row.get("ip")).startsWith("192.168.1.10");
     }
 

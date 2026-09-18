@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { apiFetch } from '../api/client';
-import { JobDetailResponse } from '../types';
+import { JobDetailResponse, ResumeAtsAnalysis } from '../types';
 
 export const JobDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -129,6 +129,9 @@ export const JobDetailPage: React.FC = () => {
 
         {/* Right 1 Col: Intelligence, Scoring & Audit */}
         <div className="space-y-6">
+          {/* Tailored CV Subsystem: generated from the canonical Master Profile */}
+          <TailoredCvSection jobId={job.id} />
+
           {/* Cover Letter Subsystem */}
           <CoverLetterSection jobId={job.id} />
 
@@ -220,6 +223,23 @@ export const JobDetailPage: React.FC = () => {
       </div>
     </div>
   );
+};
+
+const TailoredCvSection: React.FC<{ jobId: string }> = ({ jobId }) => {
+  const [analysis, setAnalysis] = useState<ResumeAtsAnalysis | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const tailor = async () => {
+    setLoading(true); setError(null);
+    try { setAnalysis(await apiFetch<ResumeAtsAnalysis>('/resume-intelligence/tailor', { method: 'POST', body: JSON.stringify({ jobId }) })); }
+    catch (e) { setError(e instanceof Error ? e.message : 'Tailoring failed'); }
+    finally { setLoading(false); }
+  };
+  return <div className="p-6 rounded-xl bg-slate-800/60 border border-indigo-500/20 space-y-3">
+    <div className="flex items-center justify-between"><h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">Job-specific ATS CV</h2><span className="text-xs text-indigo-400">Master Profile → immutable snapshot</span></div>
+    {error && <div className="text-xs text-red-400">{error}</div>}
+    {analysis ? <><div className="grid grid-cols-2 gap-2 text-xs"><div className="text-slate-400">CV version <span className="block text-white font-mono">{analysis.cvVersionId}</span></div><div className="text-slate-400">Master revision <span className="block text-white">{analysis.profileRevision}</span></div><div className="text-slate-400">Evidence claims <span className="block text-emerald-400">{analysis.verifiedEvidence.length}</span></div><div className="text-slate-400">Gaps <span className="block text-amber-400">{analysis.gaps.length ? analysis.gaps.join(', ') : 'None detected'}</span></div></div><div className="space-y-2 text-xs"><div><span className="text-slate-500">Matched verified evidence</span><div className="flex flex-wrap gap-1 mt-1">{analysis.verifiedEvidence.map((item, index) => <span key={`${item.evidence_id}-${index}`} className="px-2 py-1 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">{item.claim}</span>)}</div></div><div className="p-2 rounded bg-slate-900 text-slate-300">ATS keyword coverage: <strong className="text-indigo-300">{String(analysis.atsReport.keyword_coverage ?? 0)}%</strong> <span className="text-slate-500">(heuristic, not a hiring guarantee)</span></div></div><pre className="max-h-48 overflow-auto p-3 rounded bg-slate-900 text-[11px] text-slate-300 whitespace-pre-wrap">{analysis.resumeMarkdown}</pre><div className="flex items-center justify-between pt-2 border-t border-slate-700"><span className="text-[11px] text-slate-500">Immutable PDF artifact · SHA-256 {analysis.contentSha256}</span><a href={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1'}/resume-intelligence/cv/${analysis.cvVersionId}/artifact`} target="_blank" rel="noreferrer" className="px-3 py-1.5 rounded bg-indigo-600 text-xs text-white">Download exact CV PDF</a></div></> : <><p className="text-xs text-slate-400">This never edits the Master Profile. It creates a distinct, provenance-linked CV for this job.</p><button onClick={tailor} disabled={loading} className="w-full py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white disabled:opacity-50">{loading ? 'Analysing verified evidence...' : 'Generate job-specific CV'}</button></>}
+  </div>;
 };
 
 const CoverLetterSection: React.FC<{ jobId: string }> = ({ jobId }) => {

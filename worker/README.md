@@ -1,33 +1,53 @@
-# worker/ — Automation Worker (Phase 6)
+# Automation Worker
 
-This directory is intentionally empty until Phase 6 (App Assistant). It is
-created now so the queue contract between the backend and the worker can be
-designed early without any implementation pressure.
+The worker is now the safe browser-execution boundary for declarative
+`InteractionPlan` messages. It contains no job-discovery or LLM business logic.
+Business code selects the exact job/application package; the worker validates
+that package and executes only the supplied plan.
 
-## Contract (designed now, implemented in P6)
+## Components
 
-- The backend's `automation` module publishes a **declarative
-  `InteractionPlan`** (a sequence of steps like `NAVIGATE`, `FILL_FIELD`,
-  `UPLOAD_FILE`, `CLICK`, `WAIT_FOR`, `SCREENSHOT`) onto a queue.
-- The worker is a **separate deployable with zero business logic**. It only
-  knows how to execute the steps in an `InteractionPlan` using Playwright,
-  and reports step-by-step results back (success, failure, screenshot,
-  captured page state) via events.
-- Any CAPTCHA or anti-bot challenge encountered by the worker is a **hard
-  stop**: the worker reports `BLOCKED_ANTI_BOT` and the pipeline routes to a
-  human-review notification. The worker never attempts to solve or bypass
-  challenges (see architecture doc §A3.9 / Compliance Policy Engine).
-- Worker language is decided in Phase 6 (default: Python). This is
-  irrelevant to Phase 1 — only the queue message contract matters now, and
-  that contract lives in `backend/src/main/java/com/personal/jobagent/automation/`
-  (interfaces + DTOs only, no worker code, until P6).
+- `src/plan.js` — canonical plan steps, deterministic selector allowlist,
+  package/job isolation validation, and `AUTO` / `REQUIRES_APPROVAL` /
+  `FORBIDDEN` policy gates.
+- `src/browser_worker.js` — Playwright Chromium executor with navigation,
+  fills, selects, radios, checkboxes, uploads, multi-step forms, retries,
+  session storage, screenshots, hard stops, durable step idempotency, and
+  crash/restart recovery.
+- `src/mailbox.js` — restricted mailbox adapter. It accepts only the expected
+  application id, trusted sender domain, and fresh messages, and extracts an
+  OTP/link without logging its value.
+- `src/store.js` — atomic JSON state store. Completed steps are skipped on
+  replay; stale `RUNNING` plans are marked recoverable; sessions are persisted
+  per application.
+- `src/mock_environment.js` — local mock employer and mailbox used by all E2E
+  tests. No real employer, mailbox, or application is accessed.
 
-## Why this is a separate deployable
+## Commands
 
-Keeping browser automation out of the backend process means:
-1. The backend never needs a browser runtime or its dependencies.
-2. A crash or hang in a Playwright session can't take down the API/dashboard.
-3. The worker can be scaled, restarted, or swapped independently.
+```bash
+npm install
+npx playwright install chromium
+npm test
+npm run e2e
+npm start -- --plan ./plan.json --state ./state.json --artifacts ./artifacts
+```
 
-Do not add implementation code here before Phase 6 — if you find yourself
-tempted to, that's a signal the phase boundary is being skipped.
+The Docker image uses the official Playwright Chromium image and runs as the
+non-root `pwuser`. Compose starts the worker only under the `worker` profile;
+without a plan it remains in safe idle mode.
+
+## Safety guarantees
+
+- CAPTCHA, Cloudflare, anti-bot, access-denied, and similar pages are hard
+  stops. The worker never attempts to solve or bypass them.
+- Real submission is forbidden by the policy step. The E2E uses only the mock
+  employer's submission endpoint.
+- Approval-required submission pauses before the click and resumes after an
+  explicit approval flag.
+- Credentials are used only for the local mock flow and are not logged.
+- OTPs, links, cookies, and session state are not emitted in event logs.
+- CV and cover-letter paths must carry the exact application job id; mismatch
+  is rejected before browser launch.
+- Duplicate plans and duplicate verification/submission are controlled by the
+  durable plan state and completed-step replay behavior.

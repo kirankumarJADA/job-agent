@@ -12,4 +12,13 @@ package com.personal.jobagent.audit;
 public interface AuditLogWriter {
 
     void write(AuditEntry entry);
+
+    /**
+     * Read helper: has this actor ever performed this action? Feature 8's
+     * auth notification path uses it to distinguish a first successful
+     * session (signup analogue) from subsequent ones. Implemented on the
+     * JDBC adapter (it already owns the template); must never be treated
+     * as part of the append-only contract — reads only.
+     */
+    boolean existsActionForActor(String action, String actor);
 }

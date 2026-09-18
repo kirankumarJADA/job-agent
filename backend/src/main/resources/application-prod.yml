@@ -1,0 +1,49 @@
+# Production profile (Render/Supabase/Upstash + Vercel frontend).
+# Fail-closed by design: SPRING_DATASOURCE_URL and APP_CORS_ALLOWED_ORIGINS
+# MUST be provided as environment variables — there are no localhost
+# fallbacks here, so a misconfigured deployment fails at startup instead of
+# silently pointing at localhost.
+spring:
+  datasource:
+    # Supabase: use the session pooler URL and append sslmode=require
+    # (or prefer-writer / transaction-pooler as appropriate). Example:
+    # jdbc:postgresql://aws-0-eu-west-2.pooler.supabase.com:5432/postgres?sslmode=require
+    url: ${SPRING_DATASOURCE_URL}
+    username: ${SPRING_DATASOURCE_USERNAME}
+    password: ${SPRING_DATASOURCE_PASSWORD}
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+  data:
+    redis:
+      # Upstash serves TLS on the same port. SPRING_REDIS_SSL=false exists
+      # ONLY for local production-like runs against a plain redis container;
+      # leave it unset (true) in real deployments.
+      host: ${SPRING_REDIS_HOST}
+      port: ${SPRING_REDIS_PORT:6379}
+      ssl:
+        enabled: ${SPRING_REDIS_SSL:true}
+
+server:
+  # Render terminates TLS and proxies via HTTP; trust X-Forwarded-* so
+  # secure-cookie and URL logic see the real scheme/host.
+  forward-headers-strategy: framework
+  servlet:
+    session:
+      cookie:
+        # Cross-origin Vercel -> Render requires SameSite=None, and browsers
+        # only accept that with Secure. Session cookie stays HttpOnly.
+        same-site: none
+        secure: true
+        http-only: true
+
+app:
+  # Comma-separated explicit origins (never "*"; credentials are allowed).
+  cors:
+    allowed-origins: ${APP_CORS_ALLOWED_ORIGINS}
+  csrf:
+    # Cross-site SPA: CSRF cookie must also be SameSite=None; Secure so JS
+    # can read it on the Vercel origin.
+    cookie-same-site: none
+    cookie-secure: true

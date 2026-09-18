@@ -4,317 +4,116 @@ import { Profile } from '../types';
 
 export const ProfilePage: React.FC = () => {
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [evidenceCount, setEvidenceCount] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [saveMsg, setSaveMsg] = useState<string | null>(null);
-
-  // Purge modal state
-  const [showPurgeModal, setShowPurgeModal] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [newEducation, setNewEducation] = useState({ institution: '', qualification: '', field: '', startYear: '', endYear: '', grade: '' });
+  const [newExperience, setNewExperience] = useState({ company: '', title: '', startMonth: '', endMonth: '', location: '', bullets: '' });
+  const [newProject, setNewProject] = useState({ name: '', summary: '', url: '' });
+  const [newSkill, setNewSkill] = useState({ name: '', category: '', mastery: '3', years: '' });
+  const [newCertification, setNewCertification] = useState({ name: '', issuer: '', issuedOn: '', credentialId: '' });
+  const [showPurge, setShowPurge] = useState(false);
   const [purgePassword, setPurgePassword] = useState('');
-  const [purging, setPurging] = useState(false);
-  const [purgeError, setPurgeError] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetchProfile();
-  }, []);
 
   const fetchProfile = async () => {
-    setLoading(true);
+    setLoading(true); setError(null);
     try {
-      const p = await apiFetch<Profile>('/profile');
-      setProfile(p);
-    } catch {
-      setProfile(null);
-    } finally {
-      setLoading(false);
-    }
+      const response = await apiFetch<any>('/profile');
+      setProfile(normalizeProfile(response.profile ?? response));
+      setEvidenceCount((response.evidence ?? []).length);
+    } catch (e) { setError(e instanceof Error ? e.message : 'Unable to load Master Profile'); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { fetchProfile(); }, []);
+
+  const saveProfile = async (event: React.FormEvent) => {
+    event.preventDefault(); if (!profile) return;
+    try {
+      const saved = await apiFetch<Profile>('/profile', { method: 'PUT', body: JSON.stringify({
+        headline: profile.headline, phone: profile.phone, location: profile.location,
+        professionalSummary: profile.professional_summary, links: profile.links ?? {},
+        workEligibility: profile.work_eligibility, careerGoals: profile.career_goals,
+      }) });
+      setProfile(normalizeProfile(saved)); setMessage('Master Profile saved. Future jobs will reuse this verified evidence.');
+    } catch (e) { setError(e instanceof Error ? e.message : 'Save failed'); }
   };
 
-  const handleSaveBasic = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!profile) return;
-    setSaving(true);
-    setSaveMsg(null);
-    try {
-      await apiFetch('/profile', {
-        method: 'PUT',
-        body: JSON.stringify({
-          headline: profile.headline,
-          phone: profile.phone,
-          location: profile.location,
-          workEligibility: profile.work_eligibility,
-          careerGoals: profile.career_goals,
-        }),
-      });
-      setSaveMsg('Profile saved successfully with audit log entry.');
-      fetchProfile();
-    } catch (err: unknown) {
-      setSaveMsg(err instanceof Error ? err.message : 'Save failed');
-    } finally {
-      setSaving(false);
-    }
+  const add = async (path: string, body: unknown, reset: () => void) => {
+    try { await apiFetch(path, { method: 'POST', body: JSON.stringify(body) }); reset(); await fetchProfile(); setMessage('Master evidence saved.'); }
+    catch (e) { setError(e instanceof Error ? e.message : 'Could not save evidence'); }
+  };
+  const update = async (path: string, id: string, body: unknown, reset: () => void) => {
+    try { await apiFetch(`${path}/${id}`, { method: 'PUT', body: JSON.stringify(body) }); reset(); await fetchProfile(); setMessage('Master evidence updated. Historical tailored CVs were not changed.'); }
+    catch (e) { setError(e instanceof Error ? e.message : 'Could not update evidence'); }
+  };
+  const remove = async (path: string, id: string) => {
+    try { await apiFetch(`${path}/${id}`, { method: 'DELETE' }); await fetchProfile(); setMessage('Master evidence removed. Historical tailored CVs were not changed.'); }
+    catch (e) { setError(e instanceof Error ? e.message : 'Could not remove evidence'); }
+  };
+  const completeSetup = async () => {
+    try { await apiFetch('/profile/complete', { method: 'POST', body: '{}' }); await fetchProfile(); setMessage('Master Profile setup is complete.'); }
+    catch (e) { setError(e instanceof Error ? e.message : 'Complete the required evidence first'); }
+  };
+  const purge = async (event: React.FormEvent) => {
+    event.preventDefault();
+    try { await apiFetch('/auth/purge-my-data', { method: 'POST', body: JSON.stringify({ confirmationPassword: purgePassword }) }); setShowPurge(false); setPurgePassword(''); await fetchProfile(); }
+    catch (e) { setError(e instanceof Error ? e.message : 'Purge failed'); }
   };
 
-  const handlePurge = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setPurging(true);
-    setPurgeError(null);
-    try {
-      await apiFetch('/auth/purge-my-data', {
-        method: 'POST',
-        body: JSON.stringify({ confirmationPassword: purgePassword }),
-      });
-      setShowPurgeModal(false);
-      setPurgePassword('');
-      fetchProfile();
-      alert('Your career data has been purged. An immutable audit row has been recorded.');
-    } catch (err: unknown) {
-      setPurgeError(err instanceof Error ? err.message : 'Purge failed');
-    } finally {
-      setPurging(false);
-    }
-  };
+  if (loading) return <div className="p-12 text-center text-slate-400 text-sm">Loading Master Profile...</div>;
+  if (!profile) return <div className="max-w-3xl mx-auto p-8 rounded-xl bg-slate-800 border border-slate-700 text-slate-300">No Master Profile exists yet. Ask the account owner to initialize setup.</div>;
 
-  if (loading) {
-    return <div className="p-12 text-center text-slate-400 text-sm">Loading career profile...</div>;
-  }
+  const p = profile;
+  return <div className="space-y-6 max-w-6xl mx-auto">
+    <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div><h1 className="text-2xl font-bold text-white">Master Profile / Master CV</h1><p className="text-sm text-slate-400">Enter career evidence once. Tailored CVs are immutable job-specific snapshots.</p><p className="text-xs text-emerald-400 mt-1">{evidenceCount} provenance-linked verified evidence claims</p></div>
+      <div className="flex items-center gap-2"><span className={`px-3 py-1 rounded-full text-xs font-bold ${p.setup_status === 'READY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>{p.setup_status === 'READY' ? 'SETUP COMPLETE' : 'SETUP INCOMPLETE'}</span><span className="text-xs text-slate-500">revision {p.master_revision}</span><button onClick={() => setShowPurge(true)} className="px-3 py-2 rounded-lg text-xs text-red-400 border border-red-500/20">Purge data</button></div>
+    </header>
+    {message && <div className="p-3 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs">{message}</div>}
+    {error && <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-300 text-xs">{error}</div>}
 
-  return (
-    <div className="space-y-8 max-w-4xl mx-auto">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">Career Profile Knowledge Base</h1>
-          <p className="text-sm text-slate-400">Master CV evidence atoms and eligibility records for automated tailoring</p>
-        </div>
-        <button
-          onClick={() => setShowPurgeModal(true)}
-          className="px-3.5 py-2 rounded-lg text-xs font-semibold bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 transition-colors"
-        >
-          🗑️ Purge My Career Data
-        </button>
-      </div>
+    <form onSubmit={saveProfile} className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-4">
+      <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">Canonical identity and summary</h2>
+      <div className="grid md:grid-cols-3 gap-3">{(['headline', 'location', 'phone'] as const).map(key => <label key={key} className="text-xs text-slate-400">{key}<input value={(p[key] as string) ?? ''} onChange={e => setProfile({ ...p, [key]: e.target.value })} className="mt-1 w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white" /></label>)}</div>
+      <label className="text-xs text-slate-400 block">Professional summary<textarea value={p.professional_summary ?? ''} onChange={e => setProfile({ ...p, professional_summary: e.target.value })} rows={3} className="mt-1 w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white" /></label>
+      <button className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold">Save Master Profile</button>
+    </form>
 
-      {saveMsg && (
-        <div className="p-3.5 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs font-medium">
-          {saveMsg}
-        </div>
-      )}
+    <EvidenceSection title="Education / MSc and degrees" items={p.education} fields={['institution', 'qualification', 'field', 'startYear', 'endYear', 'grade']} values={newEducation} setValues={setNewEducation} onAdd={() => add('/profile/education', { ...newEducation, startYear: newEducation.startYear ? Number(newEducation.startYear) : null, endYear: newEducation.endYear ? Number(newEducation.endYear) : null }, () => setNewEducation({ institution: '', qualification: '', field: '', startYear: '', endYear: '', grade: '' }))} onUpdate={(id, values, reset) => update('/profile/education', id, { ...values, startYear: values.startYear ? Number(values.startYear) : null, endYear: values.endYear ? Number(values.endYear) : null }, reset)} onDelete={id => remove('/profile/education', id)} />
+    <EvidenceSection title="Work experience" items={p.experiences} fields={['company', 'title', 'startMonth', 'endMonth', 'location', 'bullets']} values={newExperience} setValues={setNewExperience} onAdd={() => add('/profile/experiences', { ...newExperience, startMonth: newExperience.startMonth || null, endMonth: newExperience.endMonth || null, bullets: newExperience.bullets ? newExperience.bullets.split('\n').map(text => ({ text })) : [] }, () => setNewExperience({ company: '', title: '', startMonth: '', endMonth: '', location: '', bullets: '' }))} onUpdate={(id, values, reset) => update('/profile/experiences', id, { ...values, startMonth: values.startMonth || null, endMonth: values.endMonth || null, bullets: values.bullets ? values.bullets.split('\\n').map(text => ({ text })) : [] }, reset)} onDelete={id => remove('/profile/experiences', id)} />
+    <EvidenceSection title="Projects" items={p.projects} fields={['name', 'summary', 'url']} values={newProject} setValues={setNewProject} onAdd={() => add('/profile/projects', { ...newProject, bullets: [] }, () => setNewProject({ name: '', summary: '', url: '' }))} onUpdate={(id, values, reset) => update('/profile/projects', id, { ...values, bullets: [] }, reset)} onDelete={id => remove('/profile/projects', id)} />
+    <EvidenceSection title="Verified skills" items={p.skills} fields={['name', 'category', 'mastery', 'years']} values={newSkill} setValues={setNewSkill} onAdd={() => add('/profile/skills', { ...newSkill, mastery: Number(newSkill.mastery), years: newSkill.years ? Number(newSkill.years) : null }, () => setNewSkill({ name: '', category: '', mastery: '3', years: '' }))} onUpdate={(id, values, reset) => update('/profile/skills', id, { ...values, mastery: Number(values.mastery), years: values.years ? Number(values.years) : null }, reset)} onDelete={id => remove('/profile/skills', id)} />
+    <EvidenceSection title="Certifications" items={p.certifications} fields={['name', 'issuer', 'issuedOn', 'credentialId']} values={newCertification} setValues={setNewCertification} onAdd={() => add('/profile/certifications', newCertification, () => setNewCertification({ name: '', issuer: '', issuedOn: '', credentialId: '' }))} onUpdate={(id, values, reset) => update('/profile/certifications', id, values, reset)} onDelete={id => remove('/profile/certifications', id)} />
 
-      {/* Basic Profile & Work Eligibility */}
-      <form onSubmit={handleSaveBasic} className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-5">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
-          Core Identity &amp; Right to Work
-        </h2>
-
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1">Headline</label>
-            <input
-              type="text"
-              value={profile?.headline || ''}
-              onChange={(e) => setProfile(p => p ? { ...p, headline: e.target.value } : null)}
-              className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1">Location</label>
-            <input
-              type="text"
-              value={profile?.location || ''}
-              onChange={(e) => setProfile(p => p ? { ...p, location: e.target.value } : null)}
-              className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1">Phone</label>
-            <input
-              type="text"
-              value={profile?.phone || ''}
-              onChange={(e) => setProfile(p => p ? { ...p, phone: e.target.value } : null)}
-              className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
-          </div>
-        </div>
-
-        <div className="pt-3 border-t border-slate-700/60 grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="flex items-center gap-3 bg-slate-900/60 p-3 rounded-lg border border-slate-700/50">
-            <input
-              type="checkbox"
-              id="rtw"
-              checked={profile?.work_eligibility?.right_to_work_uk || false}
-              onChange={(e) =>
-                setProfile(p =>
-                  p
-                    ? {
-                        ...p,
-                        work_eligibility: {
-                          ...p.work_eligibility,
-                          right_to_work_uk: e.target.checked,
-                        },
-                      }
-                    : null
-                )
-              }
-              className="w-4 h-4 rounded bg-slate-800 border-slate-700 text-indigo-600 focus:ring-indigo-500"
-            />
-            <label htmlFor="rtw" className="text-xs text-slate-300 font-medium cursor-pointer">
-              Right to work in the UK without restriction
-            </label>
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1">Visa Requirement Status</label>
-            <select
-              value={profile?.work_eligibility?.visa_status || 'requires_sponsorship'}
-              onChange={(e) =>
-                setProfile(p =>
-                  p
-                    ? {
-                        ...p,
-                        work_eligibility: {
-                          ...p.work_eligibility,
-                          visa_status: e.target.value,
-                        },
-                      }
-                    : null
-                )
-              }
-              className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            >
-              <option value="requires_sponsorship">Requires Skilled Worker Sponsorship</option>
-              <option value="graduate_visa">Graduate Visa (Time-limited)</option>
-              <option value="settled_status">ILR / Settled Status</option>
-              <option value="british_citizen">British Citizen</option>
-            </select>
-          </div>
-        </div>
-
-        <button
-          type="submit"
-          disabled={saving}
-          className="px-5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold transition-all shadow-md disabled:opacity-50"
-        >
-          {saving ? 'Saving...' : 'Save Profile Changes'}
-        </button>
-      </form>
-
-      {/* Skills Section */}
-      <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-4">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
-            Skills &amp; Mastery Ratings
-          </h2>
-          <span className="text-xs text-slate-400">1–5 scale</span>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {profile?.skills && profile.skills.length > 0 ? (
-            profile.skills.map((skill) => (
-              <div key={skill.id} className="p-3 rounded-lg bg-slate-900/80 border border-slate-700/50 flex justify-between items-center">
-                <div>
-                  <span className="text-sm font-medium text-white block">{skill.name}</span>
-                  <span className="text-[11px] text-slate-400">{skill.category || 'General'}</span>
-                </div>
-                <div className="text-amber-400 text-xs tracking-widest font-mono">
-                  {'★'.repeat(skill.mastery)}{'☆'.repeat(5 - skill.mastery)}
-                </div>
-              </div>
-            ))
-          ) : (
-            <div className="col-span-3 text-center py-4 text-xs text-slate-500">
-              No skills listed yet. Add skills via the API or profile manager.
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Work Experiences Section */}
-      <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-4">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
-          Work Experience &amp; Evidence Atoms
-        </h2>
-
-        <div className="space-y-4">
-          {profile?.experiences && profile.experiences.length > 0 ? (
-            profile.experiences.map((exp) => (
-              <div key={exp.id} className="p-4 rounded-lg bg-slate-900/80 border border-slate-700/50 space-y-2">
-                <div className="flex justify-between items-start">
-                  <div>
-                    <h3 className="text-sm font-bold text-white">{exp.title}</h3>
-                    <p className="text-xs text-indigo-400 font-medium">{exp.company} • {exp.location || 'UK'}</p>
-                  </div>
-                  <span className="text-[11px] text-slate-400">
-                    {exp.start_month} – {exp.end_month || 'Present'}
-                  </span>
-                </div>
-                {exp.bullets && exp.bullets.length > 0 && (
-                  <ul className="list-disc list-inside text-xs text-slate-300 space-y-1 pl-1">
-                    {exp.bullets.map((b, idx) => (
-                      <li key={idx}>{b.text}</li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            ))
-          ) : (
-            <div className="text-center py-4 text-xs text-slate-500">
-              No work experiences added yet.
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Purge Confirmation Modal */}
-      {showPurgeModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
-          <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-red-500/30 p-6 shadow-2xl space-y-4">
-            <h3 className="text-lg font-bold text-red-400">Purge Career Data</h3>
-            <p className="text-xs text-slate-300 leading-relaxed">
-              This action will cascade-delete all work experiences, skills, education, projects, and preferences.
-              Your user account and audit history will be preserved.
-            </p>
-
-            {purgeError && (
-              <div className="p-2.5 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs">
-                {purgeError}
-              </div>
-            )}
-
-            <form onSubmit={handlePurge} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-400 mb-1">
-                  Enter Account Password to Confirm
-                </label>
-                <input
-                  type="password"
-                  required
-                  value={purgePassword}
-                  onChange={(e) => setPurgePassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full rounded-lg bg-slate-800 border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-red-500"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setShowPurgeModal(false)}
-                  className="px-4 py-2 rounded-lg text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={purging}
-                  className="px-4 py-2 rounded-lg text-xs font-semibold bg-red-600 hover:bg-red-500 text-white disabled:opacity-50"
-                >
-                  {purging ? 'Purging...' : 'Confirm Purge'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-    </div>
-  );
+    <div className="flex justify-end"><button onClick={completeSetup} className="px-5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold">Mark Master Profile complete</button></div>
+    {showPurge && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"><form onSubmit={purge} className="w-full max-w-md rounded-xl bg-slate-900 border border-red-500/30 p-6 space-y-4"><h2 className="text-lg font-bold text-red-400">Purge career data</h2><p className="text-xs text-slate-300">This removes the editable Master Profile. Historical tailored CV snapshots remain immutable.</p><input type="password" required value={purgePassword} onChange={e => setPurgePassword(e.target.value)} placeholder="Account password" className="w-full rounded-lg bg-slate-800 border border-slate-700 px-3 py-2 text-white" /><div className="flex justify-end gap-2"><button type="button" onClick={() => setShowPurge(false)} className="px-3 py-2 text-xs text-slate-300">Cancel</button><button className="px-3 py-2 rounded bg-red-600 text-xs text-white">Confirm purge</button></div></form></div>}
+  </div>;
 };
+
+function normalizeProfile(raw: any): Profile {
+  return {
+    ...raw,
+    professional_summary: raw.professional_summary ?? raw.professionalSummary ?? '',
+    master_revision: raw.master_revision ?? raw.masterRevision ?? 1,
+    setup_status: raw.setup_status ?? raw.setupStatus ?? 'INCOMPLETE',
+    work_eligibility: raw.work_eligibility ?? raw.workEligibility ?? {},
+    career_goals: raw.career_goals ?? raw.careerGoals ?? {},
+    experiences: raw.experiences ?? [],
+    education: raw.education ?? [],
+    projects: raw.projects ?? [],
+    skills: raw.skills ?? [],
+    certifications: raw.certifications ?? [],
+  } as Profile;
+}
+
+function EvidenceSection({ title, items, fields, values, setValues, onAdd, onUpdate, onDelete }: { title: string; items: any[]; fields: string[]; values: Record<string, string>; setValues: (v: any) => void; onAdd: () => void; onUpdate?: (id: string, values: Record<string, string>, reset: () => void) => void; onDelete?: (id: string) => void }) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const valueFor = (item: any, field: string) => {
+    const snake = field.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+    if (field === 'bullets') return (item.bullets ?? []).map((bullet: any) => bullet.text ?? '').join('\\n');
+    return String(item[field] ?? item[snake] ?? '');
+  };
+  const reset = () => { setEditingId(null); };
+  return <section className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-4"><div className="flex justify-between"><h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">{title}</h2><span className="text-xs text-slate-500">{items?.length ?? 0} reusable evidence records</span></div><div className="grid md:grid-cols-3 gap-2">{fields.map(field => <input key={field} placeholder={field} value={values[field] ?? ''} onChange={e => setValues({ ...values, [field]: e.target.value })} className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-white" />)}<button type="button" onClick={() => editingId && onUpdate ? onUpdate(editingId, values, reset) : onAdd()} className="rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-2 text-xs text-white">{editingId ? 'Save edit' : 'Add verified record'}</button>{editingId && <button type="button" onClick={reset} className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-400">Cancel</button>}</div><div className="grid md:grid-cols-2 gap-2">{(items ?? []).map((item: any) => <div key={item.id} className="p-3 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-300"><div className="font-semibold text-white">{item.name ?? item.title ?? item.qualification ?? item.company}</div><div>{item.summary ?? item.institution ?? item.issuer ?? item.category ?? ''}</div><div className="flex items-center justify-between mt-2"><span className="text-emerald-400 text-[10px]">USER_VERIFIED evidence</span><span className="flex gap-2"><button type="button" onClick={() => { setEditingId(item.id); setValues(Object.fromEntries(fields.map(field => [field, valueFor(item, field)]))); }} className="text-indigo-400 hover:text-indigo-300">Edit</button>{onDelete && <button type="button" onClick={() => onDelete(item.id)} className="text-red-400 hover:text-red-300">Delete</button>}</span></div></div>)}</div></section>;
+}

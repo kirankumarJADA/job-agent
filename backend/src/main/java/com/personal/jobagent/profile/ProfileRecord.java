@@ -10,6 +10,10 @@ public record ProfileRecord(
         String phone,
         String location,
         Map<String, Object> workEligibility,
-        Map<String, Object> careerGoals
+        Map<String, Object> careerGoals,
+        String professionalSummary,
+        Map<String, Object> links,
+        long masterRevision,
+        String setupStatus
 ) {
 }

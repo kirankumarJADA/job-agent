@@ -35,6 +35,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest
 @AutoConfigureMockMvc
 @Testcontainers
+// The two purge tests share state (the seeded profile): the wrong-password
+// test asserts data is KEPT, the correct-password test asserts it is
+// DELETED. Without a declared order JUnit's method order is deterministic
+// but arbitrary — and it chose the destructive test first, breaking the
+// keep-data assertion. Order is now explicit.
+@org.junit.jupiter.api.TestMethodOrder(org.junit.jupiter.api.MethodOrderer.OrderAnnotation.class)
 class AuthControllerIT {
 
     @Container
@@ -114,7 +120,11 @@ class AuthControllerIT {
     void logout_invalidatesSession() throws Exception {
         MockHttpSession session = loginAndGetSession();
 
-        mockMvc.perform(post("/api/v1/auth/logout").session(session))
+        // csrf(): mutating endpoints require the X-XSRF-TOKEN header (Feature
+        // 8 verification proved the repo writes it via CsrfCookieFilter live;
+        // MockMvc doesn't replay response cookies, so inject the token here).
+        mockMvc.perform(post("/api/v1/auth/logout").session(session)
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf()))
                 .andExpect(status().isNoContent());
 
         mockMvc.perform(get("/api/v1/auth/me").session(session))
@@ -122,6 +132,7 @@ class AuthControllerIT {
     }
 
     @Test
+    @org.junit.jupiter.api.Order(1)
     void purge_wrongConfirmationPassword_returns403AndKeepsData() throws Exception {
         MockHttpSession session = loginAndGetSession();
 
@@ -140,11 +151,13 @@ class AuthControllerIT {
     }
 
     @Test
+    @org.junit.jupiter.api.Order(2)
     void purge_correctConfirmation_deletesProfileButKeepsUser() throws Exception {
         MockHttpSession session = loginAndGetSession();
 
         mockMvc.perform(post("/api/v1/auth/purge-my-data")
                         .session(session)
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"confirmationPassword":"DevPassword123!"}

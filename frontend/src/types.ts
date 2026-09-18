@@ -113,6 +113,10 @@ export interface Profile {
   location?: string;
   work_eligibility: WorkEligibility;
   career_goals: { summary?: string; [key: string]: unknown };
+  professional_summary?: string;
+  links?: Record<string, unknown>;
+  master_revision: number;
+  setup_status: 'INCOMPLETE' | 'READY';
   experiences: WorkExperience[];
   skills: Skill[];
   education: Education[];
@@ -213,6 +217,27 @@ export interface AuditLog {
   ip?: string;
   correlation_id?: string;
   created_at: string;
+}
+
+export interface ResumeAtsAnalysis {
+  id: string;
+  profileId: string;
+  jobId: string;
+  applicationId?: string;
+  inputHash: string;
+  role: string;
+  domain: string;
+  requiredSkills: string[];
+  preferredSkills: string[];
+  normalizedSkills: Record<string, string>;
+  verifiedEvidence: Array<{ source_type: string; evidence_id: string; claim: string; evidence_status: string }>;
+  gaps: string[];
+  atsReport: Record<string, unknown>;
+  cvVersionId: string;
+  resumeMarkdown: string;
+  profileRevision: number;
+  profileSnapshotHash: string;
+  contentSha256: string;
 }
 
 export interface CoverLetter {

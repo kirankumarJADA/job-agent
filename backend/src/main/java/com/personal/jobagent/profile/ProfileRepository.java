@@ -46,7 +46,11 @@ public class ProfileRepository {
                 rs.getString("phone"),
                 rs.getString("location"),
                 JdbcConversions.readJsonMap(rs, "work_eligibility", objectMapper),
-                JdbcConversions.readJsonMap(rs, "career_goals", objectMapper)
+                JdbcConversions.readJsonMap(rs, "career_goals", objectMapper),
+                rs.getString("professional_summary"),
+                JdbcConversions.readJsonMap(rs, "links", objectMapper),
+                rs.getLong("master_revision"),
+                rs.getString("setup_status")
         );
     }
 
@@ -55,16 +59,54 @@ public class ProfileRepository {
                 .stream().findFirst();
     }
 
+    public Optional<ProfileRecord> findById(UUID profileId) {
+        return jdbcTemplate.query("select * from profiles where id = ?", profileRowMapper(), profileId)
+                .stream().findFirst();
+    }
+
+    public List<Map<String, Object>> findEvidence(UUID profileId) {
+        return jdbcTemplate.queryForList("""
+                select id, source_type, source_id, claim, evidence_status, claim_hash, created_at, updated_at
+                from profile_evidence where profile_id=? order by created_at, id
+                """, profileId);
+    }
+
+    public UUID createProfile(UUID userId, String headline, String phone, String location,
+                              Map<String, Object> workEligibility, Map<String, Object> careerGoals,
+                              String professionalSummary, Map<String, Object> links) {
+        UUID id = UuidV7.generate();
+        jdbcTemplate.update("""
+                insert into profiles (id, user_id, headline, phone, location, work_eligibility,
+                                      career_goals, professional_summary, links, master_revision, setup_status)
+                values (?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?::jsonb, 1, 'INCOMPLETE')
+                on conflict (user_id) do nothing
+                """, id, userId, headline, phone, location,
+                JdbcConversions.toJson(workEligibility == null ? Map.of() : workEligibility, objectMapper),
+                JdbcConversions.toJson(careerGoals == null ? Map.of() : careerGoals, objectMapper),
+                professionalSummary,
+                JdbcConversions.toJson(links == null ? Map.of() : links, objectMapper));
+        return findByUserId(userId).orElseThrow().id();
+    }
+
+    public void markSetupReady(UUID profileId) {
+        jdbcTemplate.update("update profiles set setup_status='READY', updated_at=now() where id=?", profileId);
+    }
+
     public void updateProfile(UUID profileId, String headline, String phone, String location,
-                               Map<String, Object> workEligibility, Map<String, Object> careerGoals) {
+                               Map<String, Object> workEligibility, Map<String, Object> careerGoals,
+                               String professionalSummary, Map<String, Object> links) {
         jdbcTemplate.update("""
                         update profiles set headline = ?, phone = ?, location = ?,
-                            work_eligibility = ?::jsonb, career_goals = ?::jsonb, updated_at = now()
+                            work_eligibility = ?::jsonb, career_goals = ?::jsonb,
+                            professional_summary = ?, links = ?::jsonb,
+                            master_revision = master_revision + 1, setup_status = 'INCOMPLETE', updated_at = now()
                         where id = ?
                         """,
                 headline, phone, location,
-                JdbcConversions.toJson(workEligibility, objectMapper),
-                JdbcConversions.toJson(careerGoals, objectMapper),
+                JdbcConversions.toJson(workEligibility == null ? Map.of() : workEligibility, objectMapper),
+                JdbcConversions.toJson(careerGoals == null ? Map.of() : careerGoals, objectMapper),
+                professionalSummary,
+                JdbcConversions.toJson(links == null ? Map.of() : links, objectMapper),
                 profileId);
     }
 
@@ -115,6 +157,16 @@ public class ProfileRepository {
         return id;
     }
 
+    public boolean updateExperience(UUID id, UUID profileId, String company, String title,
+                                    LocalDate startMonth, LocalDate endMonth, String location,
+                                    List<Map<String, Object>> bullets, int sortOrder) {
+        return jdbcTemplate.update("""
+                update work_experiences set company=?, title=?, start_month=?, end_month=?, location=?,
+                    bullets=?::jsonb, sort_order=? where id=? and profile_id=?
+                """, company, title, Date.valueOf(startMonth), endMonth == null ? null : Date.valueOf(endMonth),
+                location, JdbcConversions.toJson(bullets == null ? List.of() : bullets, objectMapper), sortOrder, id, profileId) > 0;
+    }
+
     public boolean deleteExperience(UUID id, UUID profileId) {
         return jdbcTemplate.update("delete from work_experiences where id = ? and profile_id = ?", id, profileId) > 0;
     }
@@ -142,6 +194,14 @@ public class ProfileRepository {
                         """,
                 id, profileId, institution, qualification, field, startYear, endYear, grade);
         return id;
+    }
+
+    public boolean updateEducation(UUID id, UUID profileId, String institution, String qualification,
+                                   String field, Integer startYear, Integer endYear, String grade) {
+        return jdbcTemplate.update("""
+                update education set institution=?, qualification=?, field=?, start_year=?, end_year=?, grade=?
+                where id=? and profile_id=?
+                """, institution, qualification, field, startYear, endYear, grade, id, profileId) > 0;
     }
 
     public boolean deleteEducation(UUID id, UUID profileId) {
@@ -198,6 +258,15 @@ public class ProfileRepository {
         return id;
     }
 
+    public boolean updateSkill(UUID id, UUID profileId, String name, String category, Integer mastery,
+                               BigDecimal years, UUID evidenceExperienceId) {
+        if (mastery != null && (mastery < 1 || mastery > 5)) throw new InvalidMasteryException(mastery);
+        return jdbcTemplate.update("""
+                update skills set name=?, category=?, mastery=?, years=?, evidence_experience_id=?
+                where id=? and profile_id=?
+                """, name, category, mastery, years, evidenceExperienceId, id, profileId) > 0;
+    }
+
     public boolean deleteSkill(UUID id, UUID profileId) {
         return jdbcTemplate.update("delete from skills where id = ? and profile_id = ?", id, profileId) > 0;
     }
@@ -227,6 +296,14 @@ public class ProfileRepository {
         return id;
     }
 
+    public boolean updateProject(UUID id, UUID profileId, String name, String summary, String url,
+                                 List<Map<String, Object>> bullets, int sortOrder) {
+        return jdbcTemplate.update("""
+                update projects set name=?, summary=?, url=?, bullets=?::jsonb, sort_order=?
+                where id=? and profile_id=?
+                """, name, summary, url, JdbcConversions.toJson(bullets == null ? List.of() : bullets, objectMapper), sortOrder, id, profileId) > 0;
+    }
+
     public boolean deleteProject(UUID id, UUID profileId) {
         return jdbcTemplate.update("delete from projects where id = ? and profile_id = ?", id, profileId) > 0;
     }
@@ -254,6 +331,14 @@ public class ProfileRepository {
                         """,
                 id, profileId, name, issuer, issuedOn != null ? Date.valueOf(issuedOn) : null, credentialId);
         return id;
+    }
+
+    public boolean updateCertification(UUID id, UUID profileId, String name, String issuer,
+                                       LocalDate issuedOn, String credentialId) {
+        return jdbcTemplate.update("""
+                update certifications set name=?, issuer=?, issued_on=?, credential_id=?
+                where id=? and profile_id=?
+                """, name, issuer, issuedOn == null ? null : Date.valueOf(issuedOn), credentialId, id, profileId) > 0;
     }
 
     public boolean deleteCertification(UUID id, UUID profileId) {

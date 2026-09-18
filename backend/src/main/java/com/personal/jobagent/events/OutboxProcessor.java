@@ -2,6 +2,8 @@ package com.personal.jobagent.events;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.notifications.NotificationRecord;
+import com.personal.jobagent.notifications.NotificationRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -41,11 +43,14 @@ public class OutboxProcessor {
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final EventPublisher eventPublisher;
+    private final NotificationRepository notificationRepository;
 
-    public OutboxProcessor(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper, EventPublisher eventPublisher) {
+    public OutboxProcessor(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper, EventPublisher eventPublisher,
+                           NotificationRepository notificationRepository) {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
         this.eventPublisher = eventPublisher;
+        this.notificationRepository = notificationRepository;
     }
 
     private record PendingRow(UUID id, String aggregateType, UUID aggregateId, String eventType,
@@ -107,21 +112,28 @@ public class OutboxProcessor {
 
         for (Map<String, Object> row : stuck) {
             UUID eventId = (UUID) row.get("id");
-            boolean alreadyNotified = jdbcTemplate.queryForObject(
-                    "select count(*) from notifications where category = 'OUTBOX_DLQ' and link = ?",
-                    Integer.class, eventId.toString()) > 0;
+            // Feature 8: DLQ notifications go through the same idempotent
+            // seam as everything else. dedup_key keyed on the failed event
+            // id replaces the old manual count(*)-then-insert check (racy
+            // under concurrent sweeps) with the partial UNIQUE index —
+            // exactly one DLQ notification per permanently-failed event,
+            // even if two sweeps race.
+            NotificationRecord dlqNotification = new NotificationRecord(
+                    UuidV7.generate(),
+                    "ERROR",
+                    "OUTBOX_DLQ",
+                    "Event failed permanently: " + row.get("event_type"),
+                    "Attempt count reached " + row.get("attempt_count") + ". Last error: " + row.get("last_error"),
+                    eventId.toString(),
+                    "outbox-dlq:" + eventId,
+                    java.util.Map.of("event_id", eventId.toString(),
+                            "event_type", String.valueOf(row.get("event_type"))),
+                    null, null, null, null);
 
-            if (!alreadyNotified) {
+            NotificationRecord stored = notificationRepository.insertIfAbsent(dlqNotification);
+            if (stored != null) {
                 log.error("Outbox event {} exceeded {} attempts, moving to DLQ. Last error: {}",
                         eventId, MAX_ATTEMPTS, row.get("last_error"));
-                jdbcTemplate.update("""
-                                insert into notifications (id, severity, category, title, body, link, created_at)
-                                values (?, 'ERROR', 'OUTBOX_DLQ', ?, ?, ?, now())
-                                """,
-                        UuidV7.generate(),
-                        "Event failed permanently: " + row.get("event_type"),
-                        "Attempt count reached " + row.get("attempt_count") + ". Last error: " + row.get("last_error"),
-                        eventId.toString());
             }
         }
     }

@@ -38,7 +38,40 @@ public class ProfileController {
     }
 
     public record ProfileUpdateRequest(String headline, String phone, String location,
-                                        Map<String, Object> workEligibility, Map<String, Object> careerGoals) {
+                                        Map<String, Object> workEligibility, Map<String, Object> careerGoals,
+                                        String professionalSummary, Map<String, Object> links) {
+    }
+
+    public record SetupRequest(String headline, String phone, String location,
+                               Map<String, Object> workEligibility, Map<String, Object> careerGoals,
+                               String professionalSummary, Map<String, Object> links) {
+    }
+
+    @PostMapping("/setup")
+    public ResponseEntity<?> setup(@RequestBody SetupRequest request, HttpServletRequest httpRequest) {
+        UUID userId = currentUserId();
+        UUID profileId = profileRepository.findByUserId(userId)
+                .map(ProfileRecord::id)
+                .orElseGet(() -> profileRepository.createProfile(userId, request.headline(), request.phone(), request.location(),
+                        request.workEligibility(), request.careerGoals(), request.professionalSummary(), request.links()));
+        if (profileRepository.findByUserId(userId).isPresent()) {
+            profileRepository.updateProfile(profileId, request.headline(), request.phone(), request.location(),
+                    request.workEligibility(), request.careerGoals(), request.professionalSummary(), request.links());
+        }
+        auditLogWriter.write(new AuditEntry(actorEmail(), "MASTER_PROFILE_SETUP_SAVED", "PROFILE", profileId,
+                Map.of(), Map.of("profile_id", profileId.toString()), httpRequest.getRemoteAddr(), UuidV7.generate()));
+        return ResponseEntity.ok(profileRepository.findByUserId(userId).orElseThrow());
+    }
+
+    @PostMapping("/complete")
+    public ResponseEntity<?> completeSetup(HttpServletRequest httpRequest) {
+        UUID profileId = currentProfileId();
+        List<String> missing = setupMissing(profileId);
+        if (!missing.isEmpty()) return ResponseEntity.badRequest().body(Map.of("setupStatus", "INCOMPLETE", "missing", missing));
+        profileRepository.markSetupReady(profileId);
+        auditLogWriter.write(new AuditEntry(actorEmail(), "MASTER_PROFILE_SETUP_COMPLETED", "PROFILE", profileId,
+                Map.of(), Map.of("setup_status", "READY"), httpRequest.getRemoteAddr(), UuidV7.generate()));
+        return ResponseEntity.ok(Map.of("setupStatus", "READY", "profile", profileRepository.findByUserId(currentUserId()).orElseThrow()));
     }
 
     @GetMapping
@@ -51,9 +84,22 @@ public class ProfileController {
                         "education", profileRepository.findEducation(profileId),
                         "projects", profileRepository.findProjects(profileId),
                         "certifications", profileRepository.findCertifications(profileId),
-                        "skills", profileRepository.findSkills(profileId)
+                        "skills", profileRepository.findSkills(profileId),
+                        "evidence", profileRepository.findEvidence(profileId),
+                        "masterCv", Map.of("kind", "MASTER", "canonical", true, "profileRevision", profile.masterRevision())
                 )))
                 .orElseGet(() -> notFound(httpRequest, "No profile exists yet for this account."));
+    }
+
+    @GetMapping("/master-cv")
+    public ResponseEntity<?> getMasterCv() {
+        UUID profileId = currentProfileId();
+        ProfileRecord profile = profileRepository.findById(profileId).orElseThrow();
+        return ResponseEntity.ok(Map.of("kind", "MASTER", "canonical", true, "profileRevision", profile.masterRevision(),
+                "profile", profile, "experiences", profileRepository.findExperiences(profileId),
+                "education", profileRepository.findEducation(profileId), "projects", profileRepository.findProjects(profileId),
+                "skills", profileRepository.findSkills(profileId), "certifications", profileRepository.findCertifications(profileId),
+                "evidence", profileRepository.findEvidence(profileId)));
     }
 
     @PutMapping
@@ -75,7 +121,7 @@ public class ProfileController {
 
         ProfileRecord before = existing.get();
         profileRepository.updateProfile(before.id(), request.headline(), request.phone(), request.location(),
-                request.workEligibility(), request.careerGoals());
+                request.workEligibility(), request.careerGoals(), request.professionalSummary(), request.links());
 
         auditLogWriter.write(new AuditEntry(actorEmail(), "PROFILE_UPDATED", "PROFILE", before.id(),
                 Map.of("headline", String.valueOf(before.headline())),
@@ -104,6 +150,13 @@ public class ProfileController {
         return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("id", id));
     }
 
+    @PutMapping("/experiences/{id}")
+    public ResponseEntity<?> updateExperience(@PathVariable UUID id, @RequestBody ExperienceRequest request) {
+        boolean updated = profileRepository.updateExperience(id, currentProfileId(), request.company(), request.title(),
+                request.startMonth(), request.endMonth(), request.location(), request.bullets(), request.sortOrder());
+        return updated ? ResponseEntity.ok(Map.of("id", id)) : ResponseEntity.notFound().build();
+    }
+
     @DeleteMapping("/experiences/{id}")
     public ResponseEntity<?> deleteExperience(@PathVariable UUID id) {
         boolean deleted = profileRepository.deleteExperience(id, currentProfileId());
@@ -126,6 +179,13 @@ public class ProfileController {
         UUID id = profileRepository.insertEducation(currentProfileId(), request.institution(),
                 request.qualification(), request.field(), request.startYear(), request.endYear(), request.grade());
         return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("id", id));
+    }
+
+    @PutMapping("/education/{id}")
+    public ResponseEntity<?> updateEducation(@PathVariable UUID id, @RequestBody EducationRequest request) {
+        boolean updated = profileRepository.updateEducation(id, currentProfileId(), request.institution(), request.qualification(),
+                request.field(), request.startYear(), request.endYear(), request.grade());
+        return updated ? ResponseEntity.ok(Map.of("id", id)) : ResponseEntity.notFound().build();
     }
 
     @DeleteMapping("/education/{id}")
@@ -152,6 +212,13 @@ public class ProfileController {
         return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("id", id));
     }
 
+    @PutMapping("/projects/{id}")
+    public ResponseEntity<?> updateProject(@PathVariable UUID id, @RequestBody ProjectRequest request) {
+        boolean updated = profileRepository.updateProject(id, currentProfileId(), request.name(), request.summary(),
+                request.url(), request.bullets(), request.sortOrder());
+        return updated ? ResponseEntity.ok(Map.of("id", id)) : ResponseEntity.notFound().build();
+    }
+
     @DeleteMapping("/projects/{id}")
     public ResponseEntity<?> deleteProject(@PathVariable UUID id) {
         boolean deleted = profileRepository.deleteProject(id, currentProfileId());
@@ -173,6 +240,13 @@ public class ProfileController {
         UUID id = profileRepository.insertCertification(currentProfileId(), request.name(), request.issuer(),
                 request.issuedOn(), request.credentialId());
         return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("id", id));
+    }
+
+    @PutMapping("/certifications/{id}")
+    public ResponseEntity<?> updateCertification(@PathVariable UUID id, @RequestBody CertificationRequest request) {
+        boolean updated = profileRepository.updateCertification(id, currentProfileId(), request.name(), request.issuer(),
+                request.issuedOn(), request.credentialId());
+        return updated ? ResponseEntity.ok(Map.of("id", id)) : ResponseEntity.notFound().build();
     }
 
     @DeleteMapping("/certifications/{id}")
@@ -207,6 +281,17 @@ public class ProfileController {
         }
     }
 
+    @PutMapping("/skills/{id}")
+    public ResponseEntity<?> updateSkill(@PathVariable UUID id, @RequestBody SkillRequest request, HttpServletRequest httpRequest) {
+        try {
+            boolean updated = profileRepository.updateSkill(id, currentProfileId(), request.name(), request.category(),
+                    request.mastery(), request.years(), request.evidenceExperienceId());
+            return updated ? ResponseEntity.ok(Map.of("id", id)) : ResponseEntity.notFound().build();
+        } catch (ProfileRepository.InvalidMasteryException e) {
+            return ResponseEntity.badRequest().body(ApiError.of(400, "Invalid mastery", e.getMessage(), httpRequest.getRequestURI(), correlationId()));
+        }
+    }
+
     @DeleteMapping("/skills/{id}")
     public ResponseEntity<?> deleteSkill(@PathVariable UUID id) {
         boolean deleted = profileRepository.deleteSkill(id, currentProfileId());
@@ -214,6 +299,17 @@ public class ProfileController {
     }
 
     // ---- shared helpers ----
+
+    private List<String> setupMissing(UUID profileId) {
+        List<String> missing = new java.util.ArrayList<>();
+        ProfileRecord profile = profileRepository.findByUserId(currentUserId()).orElseThrow();
+        if (profile.headline() == null || profile.headline().isBlank()) missing.add("headline");
+        if (profile.professionalSummary() == null || profile.professionalSummary().isBlank()) missing.add("professionalSummary");
+        if (profileRepository.findEducation(profileId).isEmpty()) missing.add("education");
+        if (profileRepository.findExperiences(profileId).isEmpty()) missing.add("workExperience");
+        if (profileRepository.findSkills(profileId).isEmpty()) missing.add("skills");
+        return missing;
+    }
 
     private ResponseEntity<?> notFound(HttpServletRequest httpRequest, String detail) {
         ApiError error = ApiError.of(404, "Not found", detail, httpRequest.getRequestURI(), correlationId());

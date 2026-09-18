@@ -4,11 +4,15 @@ import com.personal.jobagent.audit.AuditEntry;
 import com.personal.jobagent.audit.AuditLogWriter;
 import com.personal.jobagent.common.ApiError;
 import com.personal.jobagent.common.CorrelationIdFilter;
+import com.personal.jobagent.notifications.NotificationEvents;
+import com.personal.jobagent.notifications.NotificationService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
+
+import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -39,17 +43,20 @@ public class AuthController {
     private final AuditLogWriter auditLogWriter;
     private final org.springframework.security.crypto.password.PasswordEncoder passwordEncoder;
     private final PurgeService purgeService;
+    private final NotificationService notificationService;
 
     public AuthController(AuthenticationManager authenticationManager,
                            SecurityContextRepository securityContextRepository,
                            AuditLogWriter auditLogWriter,
                            org.springframework.security.crypto.password.PasswordEncoder passwordEncoder,
-                           PurgeService purgeService) {
+                           PurgeService purgeService,
+                           NotificationService notificationService) {
         this.authenticationManager = authenticationManager;
         this.securityContextRepository = securityContextRepository;
         this.auditLogWriter = auditLogWriter;
         this.passwordEncoder = passwordEncoder;
         this.purgeService = purgeService;
+        this.notificationService = notificationService;
     }
 
     public record LoginRequest(@NotBlank @Email String email, @NotBlank String password) {
@@ -76,7 +83,53 @@ public class AuthController {
 
             AppUserDetails principal = (AppUserDetails) authentication.getPrincipal();
 
+            // Feature 8: is this the FIRST successful session for the
+            // account? Must be computed BEFORE this login's own audit row is
+            // written (two statements down) — otherwise the lookup would
+            // always find this very login and every session would look
+            // non-first.
+            boolean firstSessionForAccount;
+            try {
+                firstSessionForAccount = !auditLogWriter.existsActionForActor("LOGIN_SUCCESS", request.email());
+            } catch (Exception lookupEx) {
+                firstSessionForAccount = false; // fail closed to the per-day key
+            }
+
             auditLogWriter.write(AuditEntry.simple(request.email(), "LOGIN_SUCCESS", ip, correlationId));
+
+            // Feature 8: signup/verification-cycle notifications. Phase 1's
+            // session flow has no separate signup vs login screens, so the
+            // FIRST successful session for an account is SIGNUP_COMPLETED
+            // (email-verification analogue: password proven), subsequent
+            // ones are VERIFICATION_COMPLETED. Per-account dedup: exactly
+            // one signup notification ever, one per calendar day per
+            // account for verification.
+            try {
+                String verificationEvent = firstSessionForAccount
+                        ? NotificationEvents.SIGNUP_COMPLETED
+                        : NotificationEvents.VERIFICATION_COMPLETED;
+                String dedup = firstSessionForAccount
+                        ? "signup-completed:" + request.email().toLowerCase()
+                        : "verification-completed:" + request.email().toLowerCase()
+                                + ":" + java.time.LocalDate.now();
+                notificationService.emit(new NotificationService.NotificationCommand(
+                        verificationEvent,
+                        "USER",
+                        principal.getUserId(),
+                        Map.of(
+                                "message", firstSessionForAccount
+                                        ? "Signup completed — welcome"
+                                        : "Session verified",
+                                "detail", firstSessionForAccount
+                                        ? "Account created and identity verified for " + request.email()
+                                        : "Identity re-verified for " + request.email(),
+                                "dedup_key", dedup
+                        ),
+                        correlationId,
+                        null));
+            } catch (Exception notifyEx) {
+                // notification must never fail the login itself
+            }
 
             return ResponseEntity.ok(new UserResponse(
                     principal.getUserId(), principal.getUsername(), principal.getDisplayName()));

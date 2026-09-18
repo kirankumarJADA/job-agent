@@ -1,9 +1,7 @@
 version: "3.9"
 
-# Phase 1 stack: postgres (system of record), redis (cache/locks, streams later),
-# backend (Spring Boot modular monolith), frontend (Vite dev server).
-# `worker/` stays out of this file until Phase 6 — it has zero business logic
-# and is not needed for Phase 1 read-side + LLM subsystem work.
+# Local stack: PostgreSQL and Redis system services, backend, frontend, and
+# an opt-in safe Playwright worker. The worker is idle until given an explicit plan.
 
 services:
   postgres:
@@ -88,5 +86,26 @@ services:
     ports:
       - "5173:5173"
 
+  # Safe browser worker. It starts in idle mode until an explicit plan file
+  # is supplied; no real employer/mailbox is accessed by default. Use the
+  # `worker` profile for local execution without changing the verified core
+  # stack's startup behavior.
+  worker:
+    profiles: ["worker"]
+    build:
+      context: ../worker
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      WORKER_STATE_PATH: /data/worker-state.json
+      WORKER_ARTIFACT_DIR: /data/artifacts
+      WORKER_EVENT_URL: http://backend:8080/api/v1/automation/events
+    volumes:
+      - worker-data:/data
+
 volumes:
   pgdata:
+  worker-data:

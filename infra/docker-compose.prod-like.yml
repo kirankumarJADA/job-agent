@@ -1,0 +1,43 @@
+# Production-like local stack. Uses the SAME configuration shape as the
+# hosted deployment (backend with SPRING_PROFILES_ACTIVE=prod, frontend as
+# the static nginx build, worker with a service token) against local
+# postgres/redis stand-ins. Hosted equivalents are documented in
+# docs/DEPLOYMENT.md (Supabase replaces postgres, Upstash replaces redis,
+# Render replaces the backend service, Vercel replaces the frontend).
+#
+# Required env vars before running (put them in infra/.env.prod-like, never
+# committed):
+#   SPRING_DATASOURCE_USERNAME   (e.g. jobagent)
+#   SPRING_DATASOURCE_PASSWORD   (any strong local value)
+#   SPRING_REDIS_HOST=redis
+#   SPRING_REDIS_SSL=false       (local stand-in only; hosted Upstash keeps TLS)
+#   APP_CORS_ALLOWED_ORIGINS=http://localhost:8081
+#   WORKER_EVENT_TOKEN=<any long random value>
+#
+# Usage:
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.prod-like.yml \
+#     --profile worker up -d --build
+services:
+  backend:
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/jobagent
+      SPRING_DATASOURCE_USERNAME: ${SPRING_DATASOURCE_USERNAME}
+      SPRING_DATASOURCE_PASSWORD: ${SPRING_DATASOURCE_PASSWORD}
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      SPRING_REDIS_SSL: "false"
+      APP_CORS_ALLOWED_ORIGINS: ${APP_CORS_ALLOWED_ORIGINS}
+      WORKER_EVENT_TOKEN: ${WORKER_EVENT_TOKEN}
+      NIM_BASE_URL: ${NIM_BASE_URL:-}
+      NIM_API_KEY: ${NIM_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  frontend:
+    build:
+      dockerfile: Dockerfile.prod
+    ports: ["8082:8080"]
+    environment: {}
+  worker:
+    environment:
+      WORKER_EVENT_URL: http://backend:8080/api/v1/automation/events
+      WORKER_EVENT_TOKEN: ${WORKER_EVENT_TOKEN}

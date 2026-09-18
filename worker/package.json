@@ -1,0 +1,15 @@
+{
+  "name": "personal-job-agent-worker",
+  "private": true,
+  "version": "0.2.0",
+  "description": "Safe declarative Playwright worker for local/mock job applications",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "e2e": "node test/e2e.test.js",
+    "start": "node src/worker.js"
+  },
+  "dependencies": {
+    "@playwright/test": "^1.63.0"
+  }
+}

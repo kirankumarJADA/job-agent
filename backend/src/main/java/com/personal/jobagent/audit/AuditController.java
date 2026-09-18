@@ -10,8 +10,14 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Audit Controller: surfaces immutable audit logs and outbox DLQ notifications
- * for the frontend Logs & Audit page.
+ * Audit Controller: surfaces the immutable audit log for the frontend
+ * Logs & Audit page.
+ *
+ * (The /notifications read surface moved to the notifications module's
+ * NotificationApiController in Feature 8 — richer rows: dedup_key,
+ * metadata, job/application correlation, read-state — and the old
+ * duplicate GET /api/v1/notifications mapping here collided with it at
+ * context startup. LogsPage now consumes the new endpoint.)
  */
 @RestController
 @RequestMapping("/api/v1")
@@ -36,13 +42,4 @@ public class AuditController {
                 """, Math.min(limit, 100));
     }
 
-    @GetMapping("/notifications")
-    public List<Map<String, Object>> listNotifications(@RequestParam(defaultValue = "50") int limit) {
-        return jdbcTemplate.queryForList("""
-                select id, severity, category, title, body, link, read_at, created_at
-                from notifications
-                order by created_at desc
-                limit ?
-                """, Math.min(limit, 100));
-    }
 }

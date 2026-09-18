@@ -1,6 +1,7 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { NotificationBell } from './NotificationBell';
 
 export const Navigation: React.FC = () => {
   const { user, logout } = useAuth();
@@ -54,13 +55,16 @@ export const Navigation: React.FC = () => {
               <p className="text-xs font-semibold text-white truncate">{user.displayName}</p>
               <p className="text-[11px] text-slate-400 truncate">{user.email}</p>
             </div>
-            <button
-              onClick={logout}
-              title="Sign Out"
-              className="p-1.5 rounded-md hover:bg-slate-800 text-slate-400 hover:text-red-400 transition-colors"
-            >
-              🚪
-            </button>
+            <div className="flex items-center gap-1">
+              <NotificationBell />
+              <button
+                onClick={logout}
+                title="Sign Out"
+                className="p-1.5 rounded-md hover:bg-slate-800 text-slate-400 hover:text-red-400 transition-colors"
+              >
+                🚪
+              </button>
+            </div>
           </div>
         </div>
       )}
