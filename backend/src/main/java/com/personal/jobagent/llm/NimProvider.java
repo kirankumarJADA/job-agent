@@ -30,6 +30,7 @@ public class NimProvider implements LlmProvider {
 
     private final HttpClient httpClient = HttpClient.newHttpClient();
     private final ObjectMapper objectMapper;
+    private final NimModelRegistry registry;
 
     @Value("${NIM_BASE_URL:}")
     private String baseUrl;
@@ -37,8 +38,9 @@ public class NimProvider implements LlmProvider {
     @Value("${NIM_API_KEY:}")
     private String apiKey;
 
-    public NimProvider(ObjectMapper objectMapper) {
+    public NimProvider(ObjectMapper objectMapper, NimModelRegistry registry) {
         this.objectMapper = objectMapper;
+        this.registry = registry;
     }
 
     @Override
@@ -48,9 +50,7 @@ public class NimProvider implements LlmProvider {
 
     @Override
     public Set<String> supportedModels() {
-        // Placeholder — real model identifiers are an open item per
-        // PHASE1-BLUEPRINT.md (no real NIM access during this build pass).
-        return Set.of("nim-placeholder-model");
+        return registry.eligibleModelIds();
     }
 
     @Override
@@ -62,7 +62,10 @@ public class NimProvider implements LlmProvider {
     @CircuitBreaker(name = "nim", fallbackMethod = "completeFallback")
     public LlmCompletion complete(LlmCompletionRequest request, Duration timeout) throws LlmProviderException {
         if (!isHealthy()) {
-            throw new LlmProviderException("NIM provider not configured (NIM_BASE_URL/NIM_API_KEY missing)");
+            throw new LlmProviderException("NIM provider not configured (NIM_API_KEY missing)");
+        }
+        if (!supportedModels().contains(request.modelKey())) {
+            throw new LlmProviderException("NIM model is not confirmed free and available: " + request.modelKey());
         }
         long start = System.currentTimeMillis();
         try {
