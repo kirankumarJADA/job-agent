@@ -19,14 +19,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Executes the real guarded strategy against disposable Postgres for each
- * bootstrap state. The production condition is reproduced with the exact
- * object kind that the previous relation-only inspector missed: a
- * supabase_admin-owned bootstrap FUNCTION in public with no
- * flyway_schema_history — invisible to pg_class, visible to Flyway's
- * emptiness check via pg_proc.
+ * bootstrap state, reproducing the exact production condition from Render:
+ * no flyway_schema_history, public.rls_auto_enable() (the documented
+ * Supabase RLS bootstrap routine, guides/database/postgres/event-triggers)
+ * with its ensure_rls ddl_command_end event trigger, and no application
+ * tables. That state must classify PLATFORM_BOOTSTRAP_ONLY and baseline at
+ * version 0 before migrating the full chain.
  *
- * Verifies classification, selected action, baseline version 0, V001
- * execution, full V001..V019 chain, users table, final schema version 019.
+ * Also proves the matcher is structural, not name-based: a same-named
+ * routine without the documented signature/trigger configuration fails
+ * closed, as does any unrelated postgres-owned routine.
  *
  * Testcontainers is used by default. When Testcontainers cannot reach a
  * Docker environment, an externally managed database can be supplied via
@@ -77,21 +79,49 @@ class FlywayBootstrapRecoveryStrategyIT {
     }
 
     private void resetSchema() {
+        // Event triggers live outside public (pg_event_trigger) and would
+        // dangle after drop schema cascade, so remove them first.
+        jdbc.execute("drop event trigger if exists ensure_rls");
         jdbc.execute("drop schema public cascade");
         jdbc.execute("create schema public");
-        // Recreate the roles used to own platform-style fixture objects when
-        // the connected role has permission to do so (supabase_admin on real
-        // Supabase). Best-effort: local fixtures may already have them.
-        try {
-            jdbc.execute("do $$ begin\n"
-                    + "  if not exists (select from pg_roles where rolname = 'supabase_admin') then\n"
-                    + "    create role supabase_admin nologin;\n"
-                    + "  end if;\n"
-                    + "end $$;");
-        } catch (RuntimeException ignored) {
-            // Role creation not permitted: fixtures then use plain postgres
-            // ownership, which the type/relation fixtures do not rely on.
-        }
+    }
+
+    /** Verbatim from Supabase docs (guides/database/postgres/event-triggers). */
+    private void createDocumentedRlsBootstrap() {
+        jdbc.execute("""
+                CREATE OR REPLACE FUNCTION rls_auto_enable()
+                RETURNS EVENT_TRIGGER
+                LANGUAGE plpgsql
+                SECURITY DEFINER
+                SET search_path = pg_catalog
+                AS $fn$
+                DECLARE
+                cmd record;
+                BEGIN
+                FOR cmd IN
+                SELECT *
+                FROM pg_event_trigger_ddl_commands()
+                WHERE command_tag IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO')
+                AND object_type IN ('table','partitioned table')
+                LOOP
+                IF cmd.schema_name IS NOT NULL AND cmd.schema_name IN ('public')
+                   AND cmd.schema_name NOT IN ('pg_catalog','information_schema')
+                   AND cmd.schema_name NOT LIKE 'pg_toast%'
+                   AND cmd.schema_name NOT LIKE 'pg_temp%' THEN
+                BEGIN
+                EXECUTE format('alter table if exists %s enable row level security', cmd.object_identity);
+                EXCEPTION
+                WHEN OTHERS THEN
+                RAISE;
+                END;
+                END IF;
+                END LOOP;
+                END;
+                $fn$
+                """);
+        jdbc.execute("CREATE EVENT TRIGGER ensure_rls ON ddl_command_end "
+                + "WHEN TAG IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO') "
+                + "EXECUTE FUNCTION rls_auto_enable()");
     }
 
     private void assertFullyMigrated() {
@@ -109,18 +139,11 @@ class FlywayBootstrapRecoveryStrategyIT {
 
     @Test
     @Order(1)
-    void productionReproductionSupabaseOwnedFunctionInPublicWithoutHistoryBaselinesAtZeroAndMigratesFully() {
+    void productionReproductionSupabaseRlsBootstrapRoutineAndTriggerBaselinesAtZeroAndMigratesFully() {
         resetSchema();
-        // Exact production condition: the object Flyway sees but a
-        // relation-only inspector does not — a supabase_admin-owned function.
-        jdbc.execute("create function public.platform_bootstrap() returns void "
-                + "language plpgsql as $$ begin end $$");
-        try {
-            jdbc.execute("alter function public.platform_bootstrap() owner to supabase_admin");
-        } catch (RuntimeException ownerFailure) {
-            // Role ownership unavailable (e.g. hosted role restrictions):
-            // the function alone still reproduces the pg_proc blind spot.
-        }
+        // Exact production state: documented bootstrap routine + its
+        // ensure_rls event trigger, no application objects, no history.
+        createDocumentedRlsBootstrap();
 
         strategy.migrate(newFlyway());
 
@@ -147,21 +170,87 @@ class FlywayBootstrapRecoveryStrategyIT {
 
     @Test
     @Order(3)
-    void extensionOwnedRelationWithoutHistoryAlsoBaselinesAtZero() {
+    void sameNameButWrongSignatureWithoutTriggerFailsClosed() {
         resetSchema();
-        jdbc.execute("create table public.spatial_ref_sys (srid integer)");
+        // Same routine name, none of the documented structural
+        // characteristics: wrong return type, wrong language, no SECURITY
+        // DEFINER, no search_path, and no ensure_rls event trigger.
+        jdbc.execute("create function public.rls_auto_enable() returns int language sql "
+                + "as $$ select 1 $$");
 
-        strategy.migrate(newFlyway());
-
-        Integer baselineVersion = jdbc.queryForObject(
-                "select version from public.flyway_schema_history where type = 'BASELINE'",
-                Integer.class);
-        assertThat(baselineVersion).isEqualTo(0);
-        assertFullyMigrated();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> strategy.migrate(newFlyway()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Refusing Flyway bootstrap recovery");
+        Boolean fnExists = jdbc.queryForObject(
+                "select to_regprocedure('public.rls_auto_enable()') is not null", Boolean.class);
+        assertThat(fnExists).isTrue();
+        Boolean historyExists = jdbc.queryForObject(
+                "select to_regclass('public.flyway_schema_history') is not null", Boolean.class);
+        assertThat(historyExists).isFalse();
     }
 
     @Test
     @Order(4)
+    void sameSignatureButMissingEnsureRlsTriggerFailsClosed() {
+        resetSchema();
+        // Structurally correct routine, but no ensure_rls event trigger:
+        // trigger linkage is mandatory for platform classification.
+        jdbc.execute("""
+                CREATE OR REPLACE FUNCTION rls_auto_enable()
+                RETURNS EVENT_TRIGGER
+                LANGUAGE plpgsql
+                SECURITY DEFINER
+                SET search_path = pg_catalog
+                AS $fn$ BEGIN END; $fn$
+                """);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> strategy.migrate(newFlyway()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Refusing Flyway bootstrap recovery");
+        Boolean historyExists = jdbc.queryForObject(
+                "select to_regclass('public.flyway_schema_history') is not null", Boolean.class);
+        assertThat(historyExists).isFalse();
+    }
+
+    @Test
+    @Order(5)
+    void unrelatedPostgresOwnedRoutineFailsClosed() {
+        resetSchema();
+        jdbc.execute("create function public.operator_installed() returns void "
+                + "language plpgsql as $$ begin end $$");
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> strategy.migrate(newFlyway()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Refusing Flyway bootstrap recovery");
+
+        Boolean fnExists = jdbc.queryForObject(
+                "select to_regprocedure('public.operator_installed()') is not null", Boolean.class);
+        assertThat(fnExists).isTrue();
+        Boolean historyExists = jdbc.queryForObject(
+                "select to_regclass('public.flyway_schema_history') is not null", Boolean.class);
+        assertThat(historyExists).isFalse();
+    }
+
+    @Test
+    @Order(6)
+    void unexpectedApplicationTableWithoutHistoryFailsClosed() {
+        resetSchema();
+        jdbc.execute("create table public.customer_data (id integer)");
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> strategy.migrate(newFlyway()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Refusing Flyway bootstrap recovery");
+
+        Boolean customerExists = jdbc.queryForObject(
+                "select to_regclass('public.customer_data') is not null", Boolean.class);
+        assertThat(customerExists).isTrue();
+        Boolean historyExists = jdbc.queryForObject(
+                "select to_regclass('public.flyway_schema_history') is not null", Boolean.class);
+        assertThat(historyExists).isFalse();
+    }
+
+    @Test
+    @Order(7)
     void invalidLoneBaselineHistoryIsRecoveredWithFullChain() {
         resetSchema();
         jdbc.execute("""
@@ -187,47 +276,7 @@ class FlywayBootstrapRecoveryStrategyIT {
     }
 
     @Test
-    @Order(5)
-    void unexpectedApplicationTableWithoutHistoryFailsClosed() {
-        resetSchema();
-        jdbc.execute("create table public.customer_data (id integer)");
-
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> strategy.migrate(newFlyway()))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Refusing Flyway bootstrap recovery");
-
-        // The unexpected table must not have been modified or removed.
-        Boolean customerExists = jdbc.queryForObject(
-                "select to_regclass('public.customer_data') is not null", Boolean.class);
-        assertThat(customerExists).isTrue();
-        Boolean historyExists = jdbc.queryForObject(
-                "select to_regclass('public.flyway_schema_history') is not null", Boolean.class);
-        assertThat(historyExists).isFalse();
-    }
-
-    @Test
-    @Order(6)
-    void unexpectedApplicationFunctionWithoutHistoryFailsClosed() {
-        resetSchema();
-        // Same object kind as the platform fixture but owned by the operator
-        // role: must fail closed, never be silently dropped or baselined.
-        jdbc.execute("create function public.operator_installed() returns void "
-                + "language plpgsql as $$ begin end $$");
-
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> strategy.migrate(newFlyway()))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Refusing Flyway bootstrap recovery");
-
-        Boolean fnExists = jdbc.queryForObject(
-                "select to_regprocedure('public.operator_installed()') is not null", Boolean.class);
-        assertThat(fnExists).isTrue();
-        Boolean historyExists = jdbc.queryForObject(
-                "select to_regclass('public.flyway_schema_history') is not null", Boolean.class);
-        assertThat(historyExists).isFalse();
-    }
-
-    @Test
-    @Order(7)
+    @Order(8)
     void alreadyMigratedDatabaseIsLeftIntact() {
         // Build a fully migrated state, snapshot the history, run the
         // strategy again, and prove nothing changed.
