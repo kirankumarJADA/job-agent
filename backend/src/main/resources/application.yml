@@ -18,25 +18,11 @@ spring:
     # Always execute V001 first on a clean database; baseline-on-migrate can
     # incorrectly skip V001 when only an empty Flyway history table exists.
     baseline-on-migrate: false
-    # Recover only the known failed-new-database state: a lone Flyway
-    # baseline row at version 1 with no application users table. This drops
-    # metadata only; Flyway then creates its history table and applies V001
-    # through the latest migration. Populated or partially migrated schemas
-    # are left untouched and fail closed for DBA review.
-    init-sqls:
-      - |
-        DO $$
-        DECLARE history_rows integer; baseline_rows integer;
-        BEGIN
-          IF to_regclass('public.flyway_schema_history') IS NOT NULL
-             AND to_regclass('public.users') IS NULL THEN
-            EXECUTE 'SELECT count(*), count(*) FILTER (WHERE type = ''BASELINE'') FROM public.flyway_schema_history'
-              INTO history_rows, baseline_rows;
-            IF history_rows = 1 AND baseline_rows = 1 THEN
-              EXECUTE 'DROP TABLE public.flyway_schema_history';
-            END IF;
-          END IF;
-        END $$;
+    # The guarded FlywayMigrationStrategy baselines only an empty or
+    # extension-only bootstrap schema at version 0, allowing V001 to run.
+    # It also recovers the known lone-invalid-baseline state. Unexpected
+    # populated schemas fail closed.
+    baseline-version: 0
 
   data:
     redis:

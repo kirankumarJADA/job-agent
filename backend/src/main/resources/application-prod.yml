@@ -14,10 +14,12 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
-    # Apply the complete versioned chain on an empty database. Baseline-on-migrate
-    # would mark V001 as applied on a non-empty-but-uninitialized database,
-    # causing V002 to run without the users table.
+    # The guarded FlywayMigrationStrategy baselines only an empty or
+    # extension-only bootstrap schema at version 0, allowing V001 to run.
+    # It also recovers the known lone-invalid-baseline state. Unexpected
+    # populated schemas fail closed.
     baseline-on-migrate: false
+    baseline-version: 0
   data:
     redis:
       # Upstash serves TLS on the same port. SPRING_REDIS_SSL=false exists
