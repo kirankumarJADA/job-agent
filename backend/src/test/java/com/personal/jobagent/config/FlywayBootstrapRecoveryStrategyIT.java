@@ -277,6 +277,39 @@ class FlywayBootstrapRecoveryStrategyIT {
 
     @Test
     @Order(8)
+    void recoveredBaselineAtZeroStateIsIdempotentlyRecognizedAsMigrated() {
+        // Reproduce the exact current Render state: the guarded recovery
+        // produced one successful version-0 baseline followed by the
+        // complete successful V001..V019 chain and the application schema,
+        // then Render restarted the container against the same database.
+        // The strategy must classify MIGRATED and execute plain migrate()
+        // with zero history changes on every subsequent startup.
+        resetSchema();
+        createDocumentedRlsBootstrap();
+        strategy.migrate(newFlyway()); // first startup: baseline 0 + full chain
+        assertFullyMigrated();
+        Integer baselineRows = jdbc.queryForObject(
+                "select count(*) from public.flyway_schema_history where type = 'BASELINE'", Integer.class);
+        assertThat(baselineRows).isEqualTo(1);
+
+        List<String> before = jdbc.queryForList(
+                "select installed_rank || ':' || version || ':' || type || ':' || success "
+                        + "from public.flyway_schema_history order by installed_rank", String.class);
+        assertThat(before).hasSize(20);
+
+        // Second and third startups: MIGRATED -> plain migrate(), no changes.
+        strategy.migrate(newFlyway());
+        strategy.migrate(newFlyway());
+
+        List<String> after = jdbc.queryForList(
+                "select installed_rank || ':' || version || ':' || type || ':' || success "
+                        + "from public.flyway_schema_history order by installed_rank", String.class);
+        assertThat(after).isEqualTo(before);
+        assertFullyMigrated();
+    }
+
+    @Test
+    @Order(9)
     void alreadyMigratedDatabaseIsLeftIntact() {
         // Build a fully migrated state, snapshot the history, run the
         // strategy again, and prove nothing changed.

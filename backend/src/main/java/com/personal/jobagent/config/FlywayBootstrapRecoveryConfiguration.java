@@ -8,12 +8,17 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+
 import javax.sql.DataSource;
 import java.sql.Array;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Configuration
 public class FlywayBootstrapRecoveryConfiguration {
@@ -49,9 +54,12 @@ public class FlywayBootstrapRecoveryConfiguration {
             FlywayBootstrapRecoveryPolicy.Classification classification =
                     FlywayBootstrapRecoveryPolicy.classify(state);
             FlywayBootstrapRecoveryPolicy.Action action = FlywayBootstrapRecoveryPolicy.decide(state);
-            log.info("Flyway bootstrap diagnosis: historyTableExists={}, applicationTablesPresent={}, "
-                            + "platformObjectsPresent={}, classification={}, selectedAction={}",
-                    state.historyExists(),
+            log.info("Flyway bootstrap diagnosis: historyTableExists={}, historyRows={}, successfulRows={}, "
+                            + "failedRows={}, baselineRows={}, appliedMigrations={}, expectedMigrations={}, "
+                            + "applicationTablesPresent={}, platformObjectsPresent={}, classification={}, selectedAction={}",
+                    state.historyExists(), state.historyRows(), state.successfulRows(), state.failedRows(),
+                    state.baselineRows(), state.appliedMigrationVersions().size(),
+                    state.expectedMigrationVersions().size(),
                     !state.applicationObjects().isEmpty() || state.usersExists(),
                     !state.platformObjects().isEmpty(), classification, action);
             log.info("Flyway bootstrap detected objects (kind schema.name [owner, extension, classification"
@@ -80,19 +88,39 @@ public class FlywayBootstrapRecoveryConfiguration {
         int historyRows = 0;
         int successfulRows = 0;
         int baselineRows = 0;
+        int failedRows = 0;
+        boolean versionZeroBaselinePresent = false;
+        List<Integer> appliedMigrationVersions = List.of();
         if (historyExists) {
             // Rows left behind by a failed migration carry success = false and
-            // are not part of a healthy history; only successful rows count.
+            // are never part of a healthy history; only successful rows count.
             List<Integer> counts = jdbc.queryForObject("""
                     select count(*)::int,
                            count(*) filter (where success)::int,
-                           count(*) filter (where type = 'BASELINE' and success)::int
+                           count(*) filter (where type = 'BASELINE' and success)::int,
+                           count(*) filter (where not success)::int,
+                           count(*) filter (where type = 'BASELINE' and success and version = '0')::int
                     from public.flyway_schema_history
                     """, (rs, rowNum) -> List.of(
-                    rs.getInt(1), rs.getInt(2), rs.getInt(3)));
+                    rs.getInt(1), rs.getInt(2), rs.getInt(3), rs.getInt(4), rs.getInt(5)));
             historyRows = counts.get(0);
             successfulRows = counts.get(1);
             baselineRows = counts.get(2);
+            failedRows = counts.get(3);
+            versionZeroBaselinePresent = counts.get(4) > 0;
+            // Successful migration versions in application order; the policy
+            // verifies the chain is an unbroken V001.. prefix of the scripts
+            // shipped with this build. Non-numeric versions break the chain
+            // and fail closed.
+            appliedMigrationVersions = jdbc.queryForList(
+                    "select version from public.flyway_schema_history "
+                            + "where success and type <> 'BASELINE' and version is not null "
+                            + "order by installed_rank", String.class).stream()
+                    .map(v -> {
+                        try { return Integer.parseInt(v); }
+                        catch (NumberFormatException e) { return -1; }
+                    })
+                    .toList();
         }
         boolean usersExists = Boolean.TRUE.equals(jdbc.queryForObject(
                 "select to_regclass('public.users') is not null", Boolean.class));
@@ -220,7 +248,35 @@ public class FlywayBootstrapRecoveryConfiguration {
         }
         return new FlywayBootstrapRecoveryPolicy.SchemaState(
                 historyExists, historyRows, successfulRows, baselineRows, usersExists,
-                applicationObjects, platformObjects, details);
+                applicationObjects, platformObjects, details, failedRows,
+                versionZeroBaselinePresent, appliedMigrationVersions, expectedMigrationVersions());
+    }
+
+    /**
+     * Versions of the migration scripts shipped with this build, derived from
+     * the classpath so the policy can verify the applied chain is complete
+     * relative to what this jar can actually run. Resolution failure yields an
+     * empty list, which makes the chain check fail closed.
+     */
+    private static final Pattern MIGRATION_FILE = Pattern.compile("V(\\d+)__.*\\.sql");
+
+    private List<Integer> expectedMigrationVersions() {
+        try {
+            Resource[] resources = new PathMatchingResourcePatternResolver()
+                    .getResources("classpath*:db/migration/V*.sql");
+            return java.util.Arrays.stream(resources)
+                    .map(r -> {
+                        Matcher m = MIGRATION_FILE.matcher(r.getFilename() == null ? "" : r.getFilename());
+                        return m.matches() ? Integer.parseInt(m.group(1)) : -1;
+                    })
+                    .filter(v -> v > 0)
+                    .distinct()
+                    .sorted()
+                    .toList();
+        } catch (Exception e) {
+            log.warn("Unable to enumerate classpath migrations for chain verification", e);
+            return List.of();
+        }
     }
 
     private void dropHistoryTable() {
