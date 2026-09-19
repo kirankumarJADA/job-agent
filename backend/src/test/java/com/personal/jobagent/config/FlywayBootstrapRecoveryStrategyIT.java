@@ -19,14 +19,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Executes the real guarded strategy against disposable Postgres for each
- * bootstrap state, including the exact production condition: no
- * flyway_schema_history, non-empty public schema, extension-owned platform
- * object only. Verifies the baseline row at version 0 and that V001..V019
- * all execute (final schema version 019).
+ * bootstrap state. The production condition is reproduced with the exact
+ * object kind that the previous relation-only inspector missed: a
+ * supabase_admin-owned bootstrap FUNCTION in public with no
+ * flyway_schema_history — invisible to pg_class, visible to Flyway's
+ * emptiness check via pg_proc.
  *
- * The Flyway instance is built the same way production configures it
- * (locations classpath:db/migration, baseline-on-migrate false, baseline
- * version 0) so the strategy exercises the real migrate/baseline calls.
+ * Verifies classification, selected action, baseline version 0, V001
+ * execution, full V001..V019 chain, users table, final schema version 019.
  *
  * Testcontainers is used by default. When Testcontainers cannot reach a
  * Docker environment, an externally managed database can be supplied via
@@ -79,6 +79,19 @@ class FlywayBootstrapRecoveryStrategyIT {
     private void resetSchema() {
         jdbc.execute("drop schema public cascade");
         jdbc.execute("create schema public");
+        // Recreate the roles used to own platform-style fixture objects when
+        // the connected role has permission to do so (supabase_admin on real
+        // Supabase). Best-effort: local fixtures may already have them.
+        try {
+            jdbc.execute("do $$ begin\n"
+                    + "  if not exists (select from pg_roles where rolname = 'supabase_admin') then\n"
+                    + "    create role supabase_admin nologin;\n"
+                    + "  end if;\n"
+                    + "end $$;");
+        } catch (RuntimeException ignored) {
+            // Role creation not permitted: fixtures then use plain postgres
+            // ownership, which the type/relation fixtures do not rely on.
+        }
     }
 
     private void assertFullyMigrated() {
@@ -96,11 +109,18 @@ class FlywayBootstrapRecoveryStrategyIT {
 
     @Test
     @Order(1)
-    void productionConditionNoHistoryNonEmptyPublicPlatformObjectOnlyBaselinesAtZeroAndMigratesFully() {
+    void productionReproductionSupabaseOwnedFunctionInPublicWithoutHistoryBaselinesAtZeroAndMigratesFully() {
         resetSchema();
-        // Exact production condition: extension-owned platform object in
-        // public, no flyway_schema_history.
-        jdbc.execute("create table public.spatial_ref_sys (srid integer)");
+        // Exact production condition: the object Flyway sees but a
+        // relation-only inspector does not — a supabase_admin-owned function.
+        jdbc.execute("create function public.platform_bootstrap() returns void "
+                + "language plpgsql as $$ begin end $$");
+        try {
+            jdbc.execute("alter function public.platform_bootstrap() owner to supabase_admin");
+        } catch (RuntimeException ownerFailure) {
+            // Role ownership unavailable (e.g. hosted role restrictions):
+            // the function alone still reproduces the pg_proc blind spot.
+        }
 
         strategy.migrate(newFlyway());
 
@@ -127,6 +147,21 @@ class FlywayBootstrapRecoveryStrategyIT {
 
     @Test
     @Order(3)
+    void extensionOwnedRelationWithoutHistoryAlsoBaselinesAtZero() {
+        resetSchema();
+        jdbc.execute("create table public.spatial_ref_sys (srid integer)");
+
+        strategy.migrate(newFlyway());
+
+        Integer baselineVersion = jdbc.queryForObject(
+                "select version from public.flyway_schema_history where type = 'BASELINE'",
+                Integer.class);
+        assertThat(baselineVersion).isEqualTo(0);
+        assertFullyMigrated();
+    }
+
+    @Test
+    @Order(4)
     void invalidLoneBaselineHistoryIsRecoveredWithFullChain() {
         resetSchema();
         jdbc.execute("""
@@ -152,7 +187,7 @@ class FlywayBootstrapRecoveryStrategyIT {
     }
 
     @Test
-    @Order(4)
+    @Order(5)
     void unexpectedApplicationTableWithoutHistoryFailsClosed() {
         resetSchema();
         jdbc.execute("create table public.customer_data (id integer)");
@@ -171,7 +206,28 @@ class FlywayBootstrapRecoveryStrategyIT {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
+    void unexpectedApplicationFunctionWithoutHistoryFailsClosed() {
+        resetSchema();
+        // Same object kind as the platform fixture but owned by the operator
+        // role: must fail closed, never be silently dropped or baselined.
+        jdbc.execute("create function public.operator_installed() returns void "
+                + "language plpgsql as $$ begin end $$");
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> strategy.migrate(newFlyway()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Refusing Flyway bootstrap recovery");
+
+        Boolean fnExists = jdbc.queryForObject(
+                "select to_regprocedure('public.operator_installed()') is not null", Boolean.class);
+        assertThat(fnExists).isTrue();
+        Boolean historyExists = jdbc.queryForObject(
+                "select to_regclass('public.flyway_schema_history') is not null", Boolean.class);
+        assertThat(historyExists).isFalse();
+    }
+
+    @Test
+    @Order(7)
     void alreadyMigratedDatabaseIsLeftIntact() {
         // Build a fully migrated state, snapshot the history, run the
         // strategy again, and prove nothing changed.

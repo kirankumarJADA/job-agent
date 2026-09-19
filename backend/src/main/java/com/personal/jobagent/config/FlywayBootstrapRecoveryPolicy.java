@@ -1,5 +1,6 @@
 package com.personal.jobagent.config;
 
+import java.util.List;
 import java.util.Set;
 
 public final class FlywayBootstrapRecoveryPolicy {
@@ -36,10 +37,12 @@ public final class FlywayBootstrapRecoveryPolicy {
     );
 
     public record SchemaState(boolean historyExists, int historyRows, int successfulRows, int baselineRows,
-                              boolean usersExists, Set<String> applicationObjects, Set<String> platformObjects) {
+                              boolean usersExists, Set<String> applicationObjects, Set<String> platformObjects,
+                              List<String> objectDetails) {
         public SchemaState {
             applicationObjects = applicationObjects == null ? Set.of() : Set.copyOf(applicationObjects);
             platformObjects = platformObjects == null ? Set.of() : Set.copyOf(platformObjects);
+            objectDetails = objectDetails == null ? List.of() : List.copyOf(objectDetails);
         }
     }
 

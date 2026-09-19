@@ -9,6 +9,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import javax.sql.DataSource;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -24,9 +25,20 @@ public class FlywayBootstrapRecoveryConfiguration {
     }
 
     /**
-     * Runs in place of the default Flyway migration call. Inspects the public
-     * schema, classifies it, and only then migrates/baselines/fails closed.
-     * Object *names* are logged (no credentials, no row contents).
+     * Supabase platform roles. Objects owned by these roles in public on a
+     * never-migrated project are platform bootstrap artifacts, not user data.
+     * The user's own admin role ("postgres") is deliberately NOT in this set:
+     * anything created by the operator fails closed.
+     */
+    private static final String PLATFORM_OWNER_PREFIX = "supabase_";
+
+    /**
+     * Runs in place of the default Flyway migration call. Enumerates every
+     * object Flyway itself considers when deciding schema emptiness
+     * (relations, types, routines — see PostgreSQLSchema.empty()), logs a
+     * safe diagnosis, and only then migrates/baselines/fails closed.
+     * Object names, kinds and owners are logged; never credentials or row
+     * contents.
      */
     @Bean
     FlywayMigrationStrategy guardedFlywayMigrationStrategy() {
@@ -36,11 +48,12 @@ public class FlywayBootstrapRecoveryConfiguration {
                     FlywayBootstrapRecoveryPolicy.classify(state);
             FlywayBootstrapRecoveryPolicy.Action action = FlywayBootstrapRecoveryPolicy.decide(state);
             log.info("Flyway bootstrap diagnosis: historyTableExists={}, applicationTablesPresent={}, "
-                            + "platformObjectsPresent={}, classification={}, selectedAction={}, "
-                            + "applicationObjectNames={}, platformObjectNames={}",
-                    state.historyExists(), !state.applicationObjects().isEmpty() || state.usersExists(),
-                    !state.platformObjects().isEmpty(), classification, action,
-                    state.applicationObjects(), state.platformObjects());
+                            + "platformObjectsPresent={}, classification={}, selectedAction={}",
+                    state.historyExists(),
+                    !state.applicationObjects().isEmpty() || state.usersExists(),
+                    !state.platformObjects().isEmpty(), classification, action);
+            log.info("Flyway bootstrap detected objects (kind schema.name [owner, extension]): {}",
+                    state.objectDetails());
             switch (action) {
                 case MIGRATE -> flyway.migrate();
                 case BASELINE_AT_ZERO_THEN_MIGRATE -> {
@@ -81,35 +94,74 @@ public class FlywayBootstrapRecoveryConfiguration {
         }
         boolean usersExists = Boolean.TRUE.equals(jdbc.queryForObject(
                 "select to_regclass('public.users') is not null", Boolean.class));
+
+        // Mirrors Flyway 10.10.0 PostgreSQLSchema.empty() exactly: relations
+        // (r/v/S/t), types (typcategory NOT IN ('A','C')) and routines, each
+        // minus extension-owned rows. Any object set Flyway would call
+        // non-empty must be visible here so FRESH always agrees with Flyway.
+        record CatalogObject(String kind, String qualified, boolean extensionOwned,
+                             String extensionName, String owner) {}
+        List<CatalogObject> objects = jdbc.query("""
+                select kind, qualified, extension_owned, ext_name, owner from (
+                  select 'RELATION/' || case c.relkind
+                           when 'r' then 'TABLE' when 'v' then 'VIEW'
+                           when 'S' then 'SEQUENCE' when 't' then 'TOAST_TABLE'
+                           else c.relkind::text end as kind,
+                         n.nspname || '.' || c.relname as qualified,
+                         (d.objid is not null) as extension_owned,
+                         e.extname as ext_name,
+                         ro.rolname as owner
+                  from pg_catalog.pg_class c
+                  join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+                  left join pg_catalog.pg_depend d on d.objid = c.oid and d.deptype = 'e'
+                  left join pg_catalog.pg_extension e on e.oid = d.refobjid
+                  left join pg_catalog.pg_roles ro on ro.oid = c.relowner
+                  where n.nspname = 'public' and c.relkind in ('r','v','S','t')
+                    -- Flyway's own metadata table is not schema content: its
+                    -- emptiness check only runs when the history table is absent.
+                    and c.relname <> 'flyway_schema_history'
+                  union all
+                  select 'TYPE',
+                         n.nspname || '.' || t.typname,
+                         (d.objid is not null), e.extname, ro.rolname
+                  from pg_catalog.pg_type t
+                  join pg_catalog.pg_namespace n on n.oid = t.typnamespace
+                  left join pg_catalog.pg_depend d on d.objid = t.oid and d.deptype = 'e'
+                  left join pg_catalog.pg_extension e on e.oid = d.refobjid
+                  left join pg_catalog.pg_roles ro on ro.oid = t.typowner
+                  where n.nspname = 'public' and t.typcategory not in ('A','C')
+                  union all
+                  select 'ROUTINE',
+                         n.nspname || '.' || p.proname,
+                         (d.objid is not null), e.extname, ro.rolname
+                  from pg_catalog.pg_proc p
+                  join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+                  left join pg_catalog.pg_depend d on d.objid = p.oid and d.deptype = 'e'
+                  left join pg_catalog.pg_extension e on e.oid = d.refobjid
+                  left join pg_catalog.pg_roles ro on ro.oid = p.proowner
+                  where n.nspname = 'public'
+                ) q
+                order by qualified
+                """, (rs, rowNum) -> new CatalogObject(
+                rs.getString(1), rs.getString(2), rs.getBoolean(3),
+                rs.getString(4), rs.getString(5)));
+
         Set<String> platformObjects = new LinkedHashSet<>();
         Set<String> applicationObjects = new LinkedHashSet<>();
-        jdbc.query("""
-                select n.nspname || '.' || c.relname,
-                       exists (
-                         select 1
-                         from pg_depend d
-                         join pg_extension e on e.oid = d.refobjid
-                         where d.classid = 'pg_class'::regclass
-                           and d.objid = c.oid
-                           and d.deptype = 'e'
-                       ) as extension_owned
-                from pg_class c
-                join pg_namespace n on n.oid = c.relnamespace
-                where n.nspname = 'public'
-                  and c.relkind in ('r','p','v','m','f','S','c')
-                  and c.relname <> 'flyway_schema_history'
-                order by 1
-                """, rs -> {
-            String qualified = rs.getString(1);
-            if (rs.getBoolean(2) || FlywayBootstrapRecoveryPolicy.isKnownPostgisObject(qualified)) {
-                platformObjects.add(qualified);
-            } else {
-                applicationObjects.add(qualified);
-            }
-        });
+        List<String> details = new ArrayList<>();
+        for (CatalogObject object : objects) {
+            boolean platform = object.extensionOwned()
+                    || FlywayBootstrapRecoveryPolicy.isKnownPostgisObject(object.qualified())
+                    || (object.owner() != null && object.owner().startsWith(PLATFORM_OWNER_PREFIX));
+            (platform ? platformObjects : applicationObjects).add(object.qualified());
+            details.add(object.kind() + " " + object.qualified()
+                    + " [owner=" + object.owner()
+                    + (object.extensionOwned() ? ", extension=" + object.extensionName() : "")
+                    + (platform ? ", PLATFORM" : ", APPLICATION") + "]");
+        }
         return new FlywayBootstrapRecoveryPolicy.SchemaState(
-                historyExists, historyRows, successfulRows, baselineRows, usersExists, applicationObjects,
-                platformObjects);
+                historyExists, historyRows, successfulRows, baselineRows, usersExists,
+                applicationObjects, platformObjects, details);
     }
 
     private void dropHistoryTable() {
