@@ -7,13 +7,27 @@ public final class FlywayBootstrapRecoveryPolicy {
 
     public enum Action {
         MIGRATE,
-        BASELINE_ZERO_THEN_MIGRATE,
-        DROP_HISTORY_BASELINE_ZERO_THEN_MIGRATE,
+        BASELINE_AT_ZERO_THEN_MIGRATE,
+        DROP_HISTORY_BASELINE_AT_ZERO_THEN_MIGRATE,
         FAIL_CLOSED
     }
 
-    /** Objects allowed before the application has ever migrated. */
-    private static final Set<String> KNOWN_BOOTSTRAP_OBJECTS = Set.of(
+    /** Human-facing classification of the inspected schema state. */
+    public enum Classification {
+        FRESH,
+        PLATFORM_BOOTSTRAP_ONLY,
+        INVALID_BASELINE,
+        MIGRATED,
+        UNEXPECTED
+    }
+
+    /**
+     * Objects supplied by the PostGIS extension that may live in public yet
+     * lack a pg_depend extension row (e.g. after pg_dump/restore). Only these
+     * legacy names are tolerated; anything else is treated as application
+     * data and fails closed.
+     */
+    private static final Set<String> KNOWN_POSTGIS_OBJECTS = Set.of(
             "public.spatial_ref_sys",
             "public.geography_columns",
             "public.geometry_columns",
@@ -22,39 +36,43 @@ public final class FlywayBootstrapRecoveryPolicy {
     );
 
     public record SchemaState(boolean historyExists, int historyRows, int successfulRows, int baselineRows,
-                              boolean usersExists, Set<String> nonExtensionObjects) {
+                              boolean usersExists, Set<String> applicationObjects, Set<String> platformObjects) {
         public SchemaState {
-            nonExtensionObjects = nonExtensionObjects == null ? Set.of() : Set.copyOf(nonExtensionObjects);
-        }
-
-        public boolean physicallyEmpty() {
-            return nonExtensionObjects.isEmpty() && !usersExists;
-        }
-
-        public boolean knownBootstrapOnly() {
-            return !usersExists && nonExtensionObjects.stream().allMatch(KNOWN_BOOTSTRAP_OBJECTS::contains);
+            applicationObjects = applicationObjects == null ? Set.of() : Set.copyOf(applicationObjects);
+            platformObjects = platformObjects == null ? Set.of() : Set.copyOf(platformObjects);
         }
     }
 
-    public static Action decide(SchemaState state) {
+    public static Classification classify(SchemaState state) {
         if (state.historyExists()) {
             if (state.historyRows() == 1 && state.successfulRows() == 1 && state.baselineRows() == 1
-                    && state.knownBootstrapOnly()) {
-                return Action.DROP_HISTORY_BASELINE_ZERO_THEN_MIGRATE;
+                    && !state.usersExists() && state.applicationObjects().isEmpty()) {
+                return Classification.INVALID_BASELINE;
             }
             if (state.successfulRows() > 0 && state.baselineRows() == 0) {
-                return Action.MIGRATE;
+                return Classification.MIGRATED;
             }
-            return Action.FAIL_CLOSED;
+            return Classification.UNEXPECTED;
         }
+        if (state.usersExists() || !state.applicationObjects().isEmpty()) {
+            return Classification.UNEXPECTED;
+        }
+        return state.platformObjects().isEmpty() ? Classification.FRESH : Classification.PLATFORM_BOOTSTRAP_ONLY;
+    }
 
-        if (state.physicallyEmpty()) {
-            return Action.MIGRATE;
-        }
-        if (state.knownBootstrapOnly()) {
-            // Version 0 is not a fake application baseline: V001 still runs.
-            return Action.BASELINE_ZERO_THEN_MIGRATE;
-        }
-        return Action.FAIL_CLOSED;
+    public static Action decide(SchemaState state) {
+        return switch (classify(state)) {
+            case FRESH -> Action.MIGRATE;
+            // Version 0 is not a fake application baseline: Flyway applies
+            // every version > 0, so the complete V001 -> latest chain runs.
+            case PLATFORM_BOOTSTRAP_ONLY -> Action.BASELINE_AT_ZERO_THEN_MIGRATE;
+            case INVALID_BASELINE -> Action.DROP_HISTORY_BASELINE_AT_ZERO_THEN_MIGRATE;
+            case MIGRATED -> Action.MIGRATE;
+            case UNEXPECTED -> Action.FAIL_CLOSED;
+        };
+    }
+
+    public static boolean isKnownPostgisObject(String qualifiedName) {
+        return KNOWN_POSTGIS_OBJECTS.contains(qualifiedName);
     }
 }
