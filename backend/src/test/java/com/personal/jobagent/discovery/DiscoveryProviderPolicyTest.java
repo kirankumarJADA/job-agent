@@ -1,0 +1,3 @@
+package com.personal.jobagent.discovery;
+import org.junit.jupiter.api.Test;import org.springframework.mock.env.MockEnvironment;import static org.assertj.core.api.Assertions.assertThat;
+class DiscoveryProviderPolicyTest {@Test void secondaryProviderIsUnconfiguredWithoutCredential(){var p=new FirecrawlProvider(new MockEnvironment());assertThat(p.enabled()).isFalse();assertThat(p.state()).isEqualTo(ScraperProvider.ProviderState.UNCONFIGURED);assertThat(p.role()).isEqualTo(ScraperProvider.ProviderRole.SECONDARY);}@Test void crawl4aiIsOptional(){var p=new Crawl4AiProvider(new com.fasterxml.jackson.databind.ObjectMapper(),new MockEnvironment());assertThat(p.enabled()).isFalse();assertThat(p.state()).isEqualTo(ScraperProvider.ProviderState.UNCONFIGURED);}}

@@ -15,7 +15,9 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
-    baseline-on-migrate: true
+    # Always execute V001 first on a clean database; baseline-on-migrate can
+    # incorrectly skip V001 when only an empty Flyway history table exists.
+    baseline-on-migrate: false
 
   data:
     redis:
@@ -25,6 +27,10 @@ spring:
     timeout-per-shutdown-phase: 30s
 
 app:
+  discovery:
+    comparison-conflict-threshold: ${DISCOVERY_COMPARISON_CONFLICT_THRESHOLD:0.20}
+    primary-confidence-threshold: ${DISCOVERY_PRIMARY_CONFIDENCE_THRESHOLD:0.60}
+    secondary-priority: ${DISCOVERY_SECONDARY_PRIORITY:firecrawl,apify,browserless,scraperapi,scrapingbee}
   # Machine-to-machine token for worker -> backend event/claim calls.
   # Blank (default) keeps the current local behavior: the endpoints require
   # an authenticated browser session exactly as before. When set, POSTs to

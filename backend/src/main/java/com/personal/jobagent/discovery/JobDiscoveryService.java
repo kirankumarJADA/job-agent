@@ -66,6 +66,7 @@ public class JobDiscoveryService {
             if (contentHash.equals(prevHash)) {
                 // Stale / identical job seen again: update last_seen_at
                 jdbcTemplate.update("update jobs set last_seen_at = now() where id = ?", existingId);
+                recordObservation(existingId, cmd, contentHash);
                 return new IngestResult(existingId, "TOUCHED", dedupKey, contentHash);
             } else {
                 // Repost or content updated
@@ -73,6 +74,7 @@ public class JobDiscoveryService {
                         update jobs set content_hash = ?, repost_count = repost_count + 1, last_seen_at = now()
                         where id = ?
                         """, contentHash, existingId);
+                recordObservation(existingId, cmd, contentHash);
                 return new IngestResult(existingId, "UPDATED", dedupKey, contentHash);
             }
         }
@@ -95,7 +97,16 @@ public class JobDiscoveryService {
                 cmd.descriptionText(), skillsArray, cmd.applicationUrl(), cmd.canonicalUrl(),
                 contentHash);
 
+        recordObservation(id, cmd, contentHash);
         return new IngestResult(id, "INSERTED", dedupKey, contentHash);
+    }
+
+    private void recordObservation(UUID jobId, IngestJobCommand cmd, String contentHash) {
+        try {
+            jdbcTemplate.update("insert into job_source_observations(id,job_id,source_type,provider,source_url,external_job_id,content_hash,extraction_hash,extraction_confidence,last_seen_at) values(?,?,?,?,?,?,?,?,?,now()) on conflict(provider,source_url,external_job_id) do update set job_id=excluded.job_id,last_seen_at=now(),content_hash=excluded.content_hash", UuidV7.generate(), jobId, "JOB_SOURCE", "job-source:" + cmd.sourceId(), cmd.canonicalUrl(), cmd.externalId() == null ? "" : cmd.externalId(), contentHash, contentHash, 1.0);
+        } catch (RuntimeException ignored) {
+            log.debug("Source observation persistence unavailable during discovery ingest");
+        }
     }
 
     @Scheduled(cron = "0 0 * * * *") // hourly scheduled refresh for source health and stale jobs

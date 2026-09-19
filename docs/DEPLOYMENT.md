@@ -31,8 +31,49 @@ bytea) — no persistent disk is required on any host.
 3. Convert to JDBC form (the backend appends the SSL mode):
    `jdbc:postgresql://aws-0-<region>.pooler.supabase.com:5432/postgres`
 4. Record: `SPRING_DATASOURCE_URL`, username (`postgres.<ref>`), password.
-5. Flyway migrations run automatically on backend start
-   (`baseline-on-migrate: true`); no manual SQL step.
+5. Flyway migrations run automatically on backend start with
+   `baseline-on-migrate: false`, so a clean database executes the complete
+   `V001 -> V019` chain in order. Do not use baseline-on-migrate for a new
+   Job Agent database: it can mark V001 as applied while leaving `users`
+   absent, causing V002 to fail.
+
+### Recovering a failed new database baseline
+
+Only use this recovery on the newly-created Job Agent database that failed
+while creating a Flyway baseline, after confirming it contains no application
+tables or user data. The application never creates tables manually. First
+inspect the state with read-only queries:
+
+```sql
+select version, type, success from public.flyway_schema_history order by installed_rank;
+select to_regclass('public.users') as users_table;
+```
+
+If the only Flyway history row is the failed/empty baseline at version `1`
+and `public.users` is null, remove only the Flyway metadata table, then restart
+Render with the updated production image:
+
+```sql
+do $$
+declare
+  history_rows integer;
+  baseline_rows integer;
+begin
+  select count(*), count(*) filter (where type = 'BASELINE')
+    into history_rows, baseline_rows
+    from public.flyway_schema_history;
+  if to_regclass('public.users') is null and history_rows = 1 and baseline_rows = 1 then
+    drop table public.flyway_schema_history;
+  else
+    raise exception 'Refusing automatic recovery: database is not an empty baseline-only Job Agent database';
+  end if;
+end $$;
+```
+
+Flyway will then create its history table and apply `V001` through the latest
+migration. Do not run this on a database with existing application tables or
+user data; stop and perform a DBA-reviewed recovery instead. No tables are
+manually created and no unrelated database is touched.
 
 FREE-TIER: Supabase pauses after ~1 week of inactivity on the free plan.
 

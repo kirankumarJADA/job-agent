@@ -11,9 +11,14 @@ import org.springframework.web.bind.annotation.*;
 public class DiscoveryController {
 
     private final JobDiscoveryService discoveryService;
+    private final DiscoveryOrchestrator orchestrator;
+    private final LinkedInDiscoveryService linkedInDiscovery;
 
-    public DiscoveryController(JobDiscoveryService discoveryService) {
+    public DiscoveryController(JobDiscoveryService discoveryService, DiscoveryOrchestrator orchestrator,
+                               LinkedInDiscoveryService linkedInDiscovery) {
         this.discoveryService = discoveryService;
+        this.orchestrator = orchestrator;
+        this.linkedInDiscovery = linkedInDiscovery;
     }
 
     @PostMapping("/ingest")
@@ -24,6 +29,22 @@ public class DiscoveryController {
 
         JobDiscoveryService.IngestResult result = discoveryService.ingestJob(cmd);
         return ResponseEntity.status(HttpStatus.CREATED).body(result);
+    }
+
+    @PostMapping("/run")
+    public ResponseEntity<?> run(@RequestParam java.util.UUID sourceId, @RequestParam String sourceType, @RequestParam String url) {
+        return ResponseEntity.ok(orchestrator.discover(sourceId, sourceType, url));
+    }
+
+    @PostMapping("/linkedin/search")
+    public ResponseEntity<?> linkedinSearch(@RequestParam java.util.UUID sourceId,
+                                             @RequestParam String keywords,
+                                             @RequestParam(defaultValue = "") String location,
+                                             @RequestParam(defaultValue = "") String remoteType,
+                                             @RequestParam(defaultValue = "0") int page,
+                                             @RequestParam(defaultValue = "25") int pageSize) {
+        return ResponseEntity.ok(linkedInDiscovery.search(sourceId,
+                new LinkedInDiscoveryService.SearchRequest(keywords, location, remoteType, page, pageSize)));
     }
 
     @PostMapping("/maintenance")

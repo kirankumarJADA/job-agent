@@ -57,9 +57,29 @@ services:
       SPRING_REDIS_HOST: redis
       SPRING_REDIS_PORT: 6379
       # LLM provider keys are supplied via .env at repo root (never committed).
-      NIM_BASE_URL: ${NIM_BASE_URL:-}
+      NIM_BASE_URL: ${NIM_BASE_URL:-https://integrate.api.nvidia.com}
       NIM_API_KEY: ${NIM_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      CRAWL4AI_BASE_URL: ${CRAWL4AI_BASE_URL:-}
+      CRAWL4AI_API_TOKEN: ${CRAWL4AI_API_TOKEN:-}
+      FIRECRAWL_BASE_URL: ${FIRECRAWL_BASE_URL:-https://api.firecrawl.dev/v2}
+      FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
+      APIFY_BASE_URL: ${APIFY_BASE_URL:-https://api.apify.com/v2}
+      APIFY_API_TOKEN: ${APIFY_API_TOKEN:-}
+      APIFY_ACTOR_ID: ${APIFY_ACTOR_ID:-}
+      APIFY_TASK_ID: ${APIFY_TASK_ID:-}
+      BROWSERLESS_BASE_URL: ${BROWSERLESS_BASE_URL:-https://production-sfo.browserless.io/content}
+      BROWSERLESS_API_TOKEN: ${BROWSERLESS_API_TOKEN:-}
+      SCRAPERAPI_BASE_URL: ${SCRAPERAPI_BASE_URL:-https://api.scraperapi.com/}
+      SCRAPERAPI_API_KEY: ${SCRAPERAPI_API_KEY:-}
+      SCRAPINGBEE_BASE_URL: ${SCRAPINGBEE_BASE_URL:-https://app.scrapingbee.com/api/v1}
+      SCRAPINGBEE_API_KEY: ${SCRAPINGBEE_API_KEY:-}
+      LINKEDIN_SEARCH_URL: ${LINKEDIN_SEARCH_URL:-https://www.linkedin.com/jobs/search/}
+      DISCOVERY_SECONDARY_PRIORITY: ${DISCOVERY_SECONDARY_PRIORITY:-firecrawl,apify,browserless,scraperapi,scrapingbee}
+      DISCOVERY_HTTP_TIMEOUT_MS: ${DISCOVERY_HTTP_TIMEOUT_MS:-15000}
+      DISCOVERY_HTTP_RETRIES: ${DISCOVERY_HTTP_RETRIES:-2}
+      DISCOVERY_MAX_PAGES: ${DISCOVERY_MAX_PAGES:-5}
+      DISCOVERY_ROBOTS_REQUIRED: ${DISCOVERY_ROBOTS_REQUIRED:-true}
     ports:
       - "8080:8080"
     volumes:
