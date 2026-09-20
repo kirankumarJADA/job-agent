@@ -35,6 +35,14 @@ spring:
         # Canonical Spring Boot env name wins; retain the existing hosted
         # alias for Render compatibility.
         enabled: ${SPRING_DATA_REDIS_SSL_ENABLED:${SPRING_REDIS_SSL:false}}
+      # Bound the Lettuce client so a slow or hung external Redis fails fast
+      # instead of blocking for the 60s client default. These must stay below
+      # the post-startup diagnostic's pooled budget (3s) so the diagnostic
+      # reports the client's own failure rather than its own budget firing.
+      # Override with SPRING_DATA_REDIS_TIMEOUT / SPRING_DATA_REDIS_CONNECT_TIMEOUT
+      # if a slower endpoint ever requires it.
+      timeout: ${SPRING_DATA_REDIS_TIMEOUT:2000ms}
+      connect-timeout: ${SPRING_DATA_REDIS_CONNECT_TIMEOUT:2s}
   lifecycle:
     timeout-per-shutdown-phase: 30s
 

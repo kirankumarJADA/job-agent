@@ -46,6 +46,26 @@ class RedisTlsBindingTest {
                 .run(this::assertTlsAndCredentials);
     }
 
+    @Test
+    void lettuceClientTimeoutsAreBoundedBelowDiagnosticBudget() {
+        // The post-startup diagnostic budgets 3s for the pooled phase; the
+        // Lettuce client itself must fail faster than that so the diagnostic
+        // reports the client's own error instead of its own budget firing.
+        redisConfigurationContext()
+                .withPropertyValues(
+                        "SPRING_REDIS_HOST=upstash.example",
+                        "SPRING_REDIS_PORT=6379",
+                        "SPRING_REDIS_PASSWORD=token-not-logged",
+                        "SPRING_REDIS_SSL=true")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    LettuceConnectionFactory factory = context.getBean(LettuceConnectionFactory.class);
+                    assertThat(factory.getTimeout())
+                            .isLessThan(java.time.Duration.ofSeconds(3).toMillis());
+                    assertThat(factory.getTimeout()).isGreaterThan(0);
+                });
+    }
+
     private ApplicationContextRunner redisConfigurationContext() {
         return redisContext().withInitializer(new ConfigDataApplicationContextInitializer());
     }

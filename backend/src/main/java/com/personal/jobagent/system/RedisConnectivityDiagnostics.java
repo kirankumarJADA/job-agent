@@ -23,6 +23,7 @@ import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -44,9 +45,10 @@ import java.util.concurrent.TimeoutException;
  *   dns        -> resolve the configured host (A/AAAA counts)
  *   tcp        -> plain TCP connect against each resolved address (v4 first)
  *   tls        -> TLS handshake with SNI against the first reachable address
- *   pooledInfo -> INFO through the shared RedisConnectionFactory; the same
- *                 probe Spring Boot's RedisHealthIndicator performs, covering
- *                 DNS/TCP/TLS/auth through the real client
+ *   pooledInfo -> pooled round-trip through the shared RedisConnectionFactory
+ *                 (the same probe Spring Boot's RedisHealthIndicator uses),
+ *                 with sub-phases acquire (pool wait + connect + AUTH), info
+ *                 (command round-trip), and release (connection close)
  * </pre>
  *
  * <p>Each phase has a strict timeout. The diagnostic never blocks startup and
@@ -238,22 +240,103 @@ public class RedisConnectivityDiagnostics {
             phases.add(Phase.skipped("tls"));
         }
 
-        // ---- Phase 4: pooled INFO (same probe as the Actuator indicator) --
+        // ---- Phase 4: pooled INFO through the real client ----------------
+        // Sub-phases make the historical 3000ms TimeoutException attributable:
+        // acquire covers pool wait + connection establishment + AUTH (Lettuce
+        // authenticates while establishing the native connection), info is the
+        // command round-trip, release is the connection close. The whole
+        // section stays bounded by pooledInfoTimeout; on timeout the abandoned
+        // probe closes its own connection in its finally.
         long t3 = System.nanoTime();
+        List<Phase> pooled = Collections.synchronizedList(new ArrayList<>());
         try {
-            bounded(pooledInfoTimeout, () -> {
-                try (RedisConnection connection = connectionFactory.getConnection()) {
-                    if (connection.serverCommands().info() == null) {
-                        throw new IllegalStateException("Redis INFO returned no response");
-                    }
-                    return true;
-                }
-            });
-            phases.add(Phase.ok("pooledInfo", elapsed(t3), null));
+            bounded(pooledInfoTimeout, () -> pooledProbe(pooled));
+            phases.add(Phase.ok("pooledInfo", elapsed(t3), renderSubPhases(pooled)));
             return up(s, phases);
         } catch (Exception failure) {
-            phases.add(Phase.fail("pooledInfo", elapsed(t3), simpleName(failure)));
+            boolean probeTimedOut = failure instanceof TimeoutException
+                    || failure instanceof SocketTimeoutException;
+            if (probeTimedOut) {
+                if (pooled.isEmpty()) {
+                    pooled.add(Phase.fail("acquire", elapsed(t3), "timeout"));
+                } else if (!hasPhaseNamed(pooled, "info")) {
+                    pooled.add(Phase.fail("info", elapsed(t3), "timeout"));
+                }
+            }
+            phases.add(Phase.fail("pooledInfo", elapsed(t3), renderSubPhases(pooled)));
             return down(s, phases, errorCategory(failure));
+        }
+    }
+
+    /**
+     * One full pooled round-trip. Runs on a probe-executor thread under the
+     * caller's overall budget; records each sub-phase into {@code pooled} as
+     * it completes so a timeout reveals exactly where the probe was stuck.
+     */
+    private boolean pooledProbe(List<Phase> pooled) throws Exception {
+        long acquireStart = System.nanoTime();
+        RedisConnection connection = null;
+        try {
+            connection = connectionFactory.getConnection();
+            pooled.add(Phase.ok("acquire", elapsed(acquireStart), null));
+        } catch (Exception failure) {
+            pooled.add(Phase.fail("acquire", elapsed(acquireStart), simpleName(failure)));
+            throw failure;
+        }
+        long infoStart = System.nanoTime();
+        try {
+            if (connection.serverCommands().info() == null) {
+                pooled.add(Phase.fail("info", elapsed(infoStart), "empty-response"));
+                throw new IllegalStateException("Redis INFO returned no response");
+            }
+            pooled.add(Phase.ok("info", elapsed(infoStart), null));
+        } catch (Exception failure) {
+            if (hasPhaseNamed(pooled, "acquire") && !hasPhaseNamed(pooled, "info")) {
+                pooled.add(Phase.fail("info", elapsed(infoStart), simpleName(failure)));
+            }
+            throw failure;
+        } finally {
+            if (connection != null) {
+                long releaseStart = System.nanoTime();
+                closeConnectionQuietly(connection);
+                pooled.add(Phase.ok("release", elapsed(releaseStart), null));
+            }
+        }
+        return true;
+    }
+
+    private static boolean hasPhaseNamed(List<Phase> phases, String name) {
+        synchronized (phases) {
+            for (Phase phase : phases) {
+                if (name.equals(phase.name())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static String renderSubPhases(List<Phase> phases) {
+        synchronized (phases) {
+            StringBuilder rendered = new StringBuilder();
+            for (Phase phase : phases) {
+                if (rendered.length() > 0) {
+                    rendered.append(',');
+                }
+                rendered.append(phase.render());
+            }
+            return rendered.toString();
+        }
+    }
+
+    private static void closeConnectionQuietly(RedisConnection connection) {
+        if (connection == null) {
+            return;
+        }
+        try {
+            connection.close();
+        } catch (Exception ignored) {
+            // Best-effort release of a probe connection.
         }
     }
 

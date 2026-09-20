@@ -34,6 +34,11 @@ spring:
         # Canonical Spring Boot env name wins; retain SPRING_REDIS_SSL
         # because it is the current Render variable.
         enabled: ${SPRING_DATA_REDIS_SSL_ENABLED:${SPRING_REDIS_SSL:true}}
+      # Same rationale as application.yml: bound the Lettuce client below the
+      # post-startup diagnostic's pooled budget so a slow external Redis fails
+      # with the client's own error instead of the probe's budget firing.
+      timeout: ${SPRING_DATA_REDIS_TIMEOUT:2000ms}
+      connect-timeout: ${SPRING_DATA_REDIS_CONNECT_TIMEOUT:2s}
 
 management:
   endpoint:

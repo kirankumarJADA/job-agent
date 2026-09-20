@@ -211,6 +211,88 @@ class RedisConnectivityDiagnosticsTest {
     }
 
     @Test
+    void pooledSubPhasesAreRecordedOnSuccess() throws Exception {
+        RedisProperties properties = properties("upstash.example", 6379, true, "token");
+        RedisConnectionFactory factory = factoryWithInfo();
+        FakeHooks hooks = FakeHooks.healthy(1);
+
+        var diagnostic = new RedisConnectivityDiagnostics(properties, factory).diagnose(hooks, POOLED);
+
+        assertThat(diagnostic.result()).isEqualTo("UP");
+        assertThat(diagnostic.phases())
+                .contains("pooledInfo:OK")
+                .contains("acquire:OK").contains("info:OK").contains("release:OK");
+    }
+
+    @Test
+    void acquireFailureIsRecordedAsAcquireSubPhaseWithAuthCategory() throws Exception {
+        RedisProperties properties = properties("upstash.example", 6379, true, "token");
+        RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
+        io.lettuce.core.RedisCommandExecutionException noauth =
+                new io.lettuce.core.RedisCommandExecutionException(
+                        "NOAUTH Authentication required. See https://upstash.com/docs/redis/troubleshooting/no_auth");
+        when(factory.getConnection()).thenThrow(
+                new org.springframework.data.redis.RedisConnectionFailureException(
+                        "Unable to connect to Redis",
+                        new io.lettuce.core.RedisConnectionException(
+                                "Unable to connect to upstash.example/<unresolved>:6379", noauth)));
+        FakeHooks hooks = FakeHooks.healthy(1);
+
+        var diagnostic = new RedisConnectivityDiagnostics(properties, factory).diagnose(hooks, POOLED);
+
+        assertThat(diagnostic.result()).isEqualTo("DOWN");
+        assertThat(diagnostic.errorCategory()).isEqualTo("AUTHENTICATION");
+        assertThat(diagnostic.phases())
+                .contains("pooledInfo:FAIL").contains("acquire:FAIL");
+        assertThat(diagnostic.phases()).doesNotContain("info:OK");
+    }
+
+    @Test
+    void infoTimeoutIsRecordedAsInfoSubPhaseAndConnectionStillReleased() throws Exception {
+        RedisProperties properties = properties("hanginginfo.example", 6379, true, "token");
+        RedisConnection connection = mock(RedisConnection.class);
+        RedisServerCommands serverCommands = mock(RedisServerCommands.class);
+        when(connection.serverCommands()).thenReturn(serverCommands);
+        when(serverCommands.info()).thenAnswer(invocation -> {
+            Thread.sleep(1_000);
+            return new java.util.Properties();
+        });
+        RedisConnectionFactory factory = factory(connection);
+        FakeHooks hooks = FakeHooks.healthy(1);
+
+        var diagnostic = new RedisConnectivityDiagnostics(properties, factory)
+                .diagnose(hooks, Duration.ofMillis(150));
+
+        assertThat(diagnostic.result()).isEqualTo("DOWN");
+        assertThat(diagnostic.errorCategory()).isEqualTo("TIMEOUT");
+        assertThat(diagnostic.phases()).contains("pooledInfo:FAIL").contains("acquire:OK");
+        // CompletableFuture cancellation does not interrupt the abandoned probe
+        // thread; it must still release the connection from its own finally.
+        verify(connection, org.mockito.Mockito.timeout(5_000).atLeastOnce()).close();
+    }
+
+    @Test
+    void acquireTimeoutIsRecordedAsAcquireSubPhase() throws Exception {
+        RedisProperties properties = properties("hangingacquire.example", 6379, true, "token");
+        RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
+        CountDownLatch entered = new CountDownLatch(1);
+        when(factory.getConnection()).thenAnswer(invocation -> {
+            entered.countDown();
+            Thread.sleep(10_000);
+            return mock(RedisConnection.class);
+        });
+        FakeHooks hooks = FakeHooks.healthy(1);
+
+        var diagnostic = new RedisConnectivityDiagnostics(properties, factory)
+                .diagnose(hooks, Duration.ofMillis(150));
+
+        assertThat(diagnostic.result()).isEqualTo("DOWN");
+        assertThat(diagnostic.errorCategory()).isEqualTo("TIMEOUT");
+        assertThat(diagnostic.phases()).contains("pooledInfo:FAIL").contains("acquire:FAIL").contains("[timeout]");
+        assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
+    }
+
+    @Test
     void overallCapIsReportedAsDiagnosticTimeoutNotNetworkTimeout() throws Exception {
         RedisProperties properties = properties("hanging.example", 6379, true, "token");
         RedisConnectionFactory factory = factoryWithInfo();
