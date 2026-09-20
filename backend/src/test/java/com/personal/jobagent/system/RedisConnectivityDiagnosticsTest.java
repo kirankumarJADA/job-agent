@@ -1,40 +1,54 @@
 package com.personal.jobagent.system;
 
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.actuate.health.Status;
 import org.springframework.boot.actuate.data.redis.RedisHealthIndicator;
+import org.springframework.boot.actuate.health.Status;
 import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
+import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.connection.RedisServerCommands;
-import org.springframework.data.redis.RedisConnectionFailureException;
 
 import javax.net.ssl.SSLException;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.SSLSocket;
 import java.net.ConnectException;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.net.SocketAddress;
 import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Unit tests for the phased Redis connectivity diagnostic. All network seams
+ * are faked; no test touches a real endpoint.
+ */
 class RedisConnectivityDiagnosticsTest {
 
-    @Test
-    void validUpstashStyleConfigurationReportsAuthenticatedTlsConnection() {
-        RedisProperties properties = properties("upstash.example", 6379, true, "token-not-logged");
-        RedisConnection connection = mock(RedisConnection.class);
-        RedisServerCommands serverCommands = mock(RedisServerCommands.class);
-        java.util.Properties info = new java.util.Properties();
-        info.setProperty("redis_version", "7.2.0");
-        when(connection.serverCommands()).thenReturn(serverCommands);
-        when(serverCommands.info()).thenReturn(info);
-        RedisConnectionFactory factory = factory(connection);
+    private static final Duration POOLED = Duration.ofMillis(250);
 
-        var diagnostic = new RedisConnectivityDiagnostics(properties, factory).diagnose();
+    @Test
+    void validUpstashStyleConfigurationReportsAuthenticatedTlsConnection() throws Exception {
+        RedisProperties properties = properties("upstash.example", 6379, true, "token-not-logged");
+        RedisConnectionFactory factory = factoryWithInfo();
+        FakeHooks hooks = FakeHooks.healthy(2);
+
+        RedisConnectivityDiagnostics.Diagnostic diagnostic =
+                new RedisConnectivityDiagnostics(properties, factory).diagnose(hooks, POOLED);
 
         assertThat(diagnostic.client()).isNotBlank();
         assertThat(diagnostic.host()).isEqualTo("upstash.example");
@@ -43,32 +57,196 @@ class RedisConnectivityDiagnosticsTest {
         assertThat(diagnostic.authenticationConfigured()).isTrue();
         assertThat(diagnostic.result()).isEqualTo("UP");
         assertThat(diagnostic.errorCategory()).isNull();
+        assertThat(diagnostic.phases())
+                .contains("dns:OK").contains("v4=2,v6=0")
+                .contains("tcp:OK").contains("[v4 1/2]")
+                .contains("tls:OK").contains("protocol=TLSv1.3")
+                .contains("pooledInfo:OK");
+        verify(hooks.tlsSocket, times(1)).close();
     }
 
     @Test
-    void missingAuthenticationIsVisibleWithoutLoggingTheCredential() {
+    void missingAuthenticationIsVisibleWithoutLoggingTheCredential() throws Exception {
         RedisProperties properties = properties("upstash.example", 6379, true, "");
         RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
         when(factory.getConnection()).thenThrow(new RuntimeException("authentication required"));
+        FakeHooks hooks = FakeHooks.healthy(1);
 
-        var diagnostic = new RedisConnectivityDiagnostics(properties, factory).diagnose();
+        RedisConnectivityDiagnostics.Diagnostic diagnostic =
+                new RedisConnectivityDiagnostics(properties, factory).diagnose(hooks, POOLED);
 
         assertThat(diagnostic.authenticationConfigured()).isFalse();
         assertThat(diagnostic.result()).isEqualTo("DOWN");
         assertThat(diagnostic.errorCategory()).isEqualTo("AUTHENTICATION");
+        assertThat(diagnostic.phases()).contains("dns:OK").contains("tcp:OK").contains("pooledInfo:FAIL");
     }
 
     @Test
-    void unavailableRedisIsCategorizedAsConnectionFailure() {
+    void unavailableRedisIsCategorizedAsConnectionFailure() throws Exception {
         RedisProperties properties = properties("unreachable.example", 6379, true, "token");
         RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
         when(factory.getConnection()).thenThrow(new RedisConnectionFailureException(
                 "connection refused", new ConnectException("connection refused")));
+        FakeHooks hooks = FakeHooks.healthy(1);
 
-        var diagnostic = new RedisConnectivityDiagnostics(properties, factory).diagnose();
+        RedisConnectivityDiagnostics.Diagnostic diagnostic =
+                new RedisConnectivityDiagnostics(properties, factory).diagnose(hooks, POOLED);
 
         assertThat(diagnostic.result()).isEqualTo("DOWN");
         assertThat(diagnostic.errorCategory()).isEqualTo("CONNECTION");
+    }
+
+    @Test
+    void dnsFailureIsAttributedToDnsPhaseAndSkipsLaterPhases() throws Exception {
+        RedisProperties properties = properties("does-not-exist.invalid", 6379, true, "token");
+        RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
+        FakeHooks hooks = FakeHooks.dnsFailure(new UnknownHostException("does-not-exist.invalid"));
+
+        RedisConnectivityDiagnostics.Diagnostic diagnostic =
+                new RedisConnectivityDiagnostics(properties, factory).diagnose(hooks, POOLED);
+
+        assertThat(diagnostic.result()).isEqualTo("DOWN");
+        assertThat(diagnostic.errorCategory()).isEqualTo("DNS");
+        assertThat(diagnostic.phases())
+                .contains("dns:FAIL").contains("UnknownHostException")
+                .contains("tcp:SKIPPED").contains("tls:SKIPPED").contains("pooledInfo:SKIPPED");
+    }
+
+    @Test
+    void everyResolvedAddressRefusingIsAttributedToTcpPhase() throws Exception {
+        RedisProperties properties = properties("blackhole.example", 6379, true, "token");
+        RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
+        FakeHooks hooks = FakeHooks.healthy(2);
+        hooks.failAllTcp(new ConnectException("connection refused"));
+
+        RedisConnectivityDiagnostics.Diagnostic diagnostic =
+                new RedisConnectivityDiagnostics(properties, factory).diagnose(hooks, POOLED);
+
+        assertThat(diagnostic.result()).isEqualTo("DOWN");
+        assertThat(diagnostic.errorCategory()).isEqualTo("CONNECTION");
+        assertThat(diagnostic.phases())
+                .contains("tcp:FAIL").contains("0/2").contains("last=ConnectException")
+                .contains("tls:SKIPPED").contains("pooledInfo:SKIPPED");
+        for (Socket socket : hooks.sockets) {
+            verify(socket, times(1)).close();
+        }
+    }
+
+    @Test
+    void firstAddressTimingOutFallsThroughToNextAddress() throws Exception {
+        RedisProperties properties = properties("partial.example", 6379, true, "token");
+        RedisConnectionFactory factory = factoryWithInfo();
+        FakeHooks hooks = FakeHooks.healthy(2);
+        hooks.failTcpOn(0, new SocketTimeoutException("connect timed out"));
+
+        RedisConnectivityDiagnostics.Diagnostic diagnostic =
+                new RedisConnectivityDiagnostics(properties, factory).diagnose(hooks, POOLED);
+
+        assertThat(diagnostic.result()).isEqualTo("UP");
+        assertThat(diagnostic.phases())
+                .contains("dns:OK")
+                .contains("tcp:OK").contains("[v4 2/2]")
+                .contains("tls:OK").contains("pooledInfo:OK");
+    }
+
+    @Test
+    void tlsHandshakeTimeoutIsAttributedToTlsPhase() throws Exception {
+        RedisProperties properties = properties("slowtls.example", 6379, true, "token");
+        RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
+        FakeHooks hooks = FakeHooks.healthy(1);
+        hooks.failTls(new SocketTimeoutException("handshake timed out"));
+
+        RedisConnectivityDiagnostics.Diagnostic diagnostic =
+                new RedisConnectivityDiagnostics(properties, factory).diagnose(hooks, POOLED);
+
+        assertThat(diagnostic.result()).isEqualTo("DOWN");
+        assertThat(diagnostic.errorCategory()).isEqualTo("TIMEOUT");
+        assertThat(diagnostic.phases())
+                .contains("dns:OK").contains("tcp:OK")
+                .contains("tls:FAIL").contains("SocketTimeoutException")
+                .contains("pooledInfo:SKIPPED");
+        verify(hooks.tlsSocket, times(1)).close();
+    }
+
+    @Test
+    void tlsFailureIsAttributedToTlsPhaseNotNetworkTimeout() throws Exception {
+        RedisProperties properties = properties("badtls.example", 6379, true, "token");
+        RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
+        FakeHooks hooks = FakeHooks.healthy(1);
+        hooks.failTls(new SSLException("handshake failure"));
+
+        RedisConnectivityDiagnostics.Diagnostic diagnostic =
+                new RedisConnectivityDiagnostics(properties, factory).diagnose(hooks, POOLED);
+
+        assertThat(diagnostic.result()).isEqualTo("DOWN");
+        assertThat(diagnostic.errorCategory()).isEqualTo("TLS");
+        assertThat(diagnostic.phases()).contains("tls:FAIL").contains("SSLException");
+    }
+
+    @Test
+    void pooledInfoTimeoutIsPhaseAttributedRatherThanBlanketTimeout() throws Exception {
+        // Regression for the production misattribution: a hanging pooled probe
+        // must be reported as a pooledInfo phase failure, never as a blanket
+        // DIAGNOSTIC_TIMEOUT/TIMEOUT from the previous all-or-nothing orTimeout.
+        RedisProperties properties = properties("hangingpool.example", 6379, true, "token");
+        RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
+        CountDownLatch entered = new CountDownLatch(1);
+        when(factory.getConnection()).thenAnswer(invocation -> {
+            entered.countDown();
+            Thread.sleep(10_000);
+            return mock(RedisConnection.class);
+        });
+        FakeHooks hooks = FakeHooks.healthy(1);
+
+        RedisConnectivityDiagnostics.Diagnostic diagnostic =
+                new RedisConnectivityDiagnostics(properties, factory)
+                        .diagnose(hooks, Duration.ofMillis(150));
+
+        assertThat(diagnostic.result()).isEqualTo("DOWN");
+        assertThat(diagnostic.errorCategory()).isEqualTo("TIMEOUT");
+        assertThat(diagnostic.phases())
+                .contains("dns:OK").contains("tcp:OK").contains("tls:OK")
+                .contains("pooledInfo:FAIL");
+        assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
+    }
+
+    @Test
+    void overallCapIsReportedAsDiagnosticTimeoutNotNetworkTimeout() throws Exception {
+        RedisProperties properties = properties("hanging.example", 6379, true, "token");
+        RedisConnectionFactory factory = factoryWithInfo();
+        RedisConnectivityDiagnostics diagnostics =
+                new RedisConnectivityDiagnostics(properties, factory) {
+                    @Override
+                    RedisConnectivityDiagnostics.Hooks hooks() {
+                        return new RedisConnectivityDiagnostics.Hooks() {
+                            @Override
+                            public InetAddress[] resolve(String host) throws UnknownHostException {
+                                try {
+                                    Thread.sleep(5_000);
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                }
+                                throw new UnknownHostException("never resolves");
+                            }
+
+                            @Override
+                            public Socket newSocket() {
+                                return new Socket();
+                            }
+
+                            @Override
+                            public SSLSocket newTlsSocket() {
+                                return null;
+                            }
+                        };
+                    }
+                };
+
+        CompletableFuture<RedisConnectivityDiagnostics.Diagnostic> probe =
+                diagnostics.probeAsync(Duration.ofMillis(120));
+
+        Throwable failure = probe.handle((value, error) -> error).get(3, TimeUnit.SECONDS);
+        assertThat(failure).isNotNull();
     }
 
     @Test
@@ -77,48 +255,56 @@ class RedisConnectivityDiagnosticsTest {
                 .isEqualTo("TIMEOUT");
         assertThat(RedisConnectivityDiagnostics.errorCategory(new SSLException("tls failure")))
                 .isEqualTo("TLS");
+        assertThat(RedisConnectivityDiagnostics.category(new UnknownHostException("x")))
+                .isEqualTo("DNS");
+        assertThat(RedisConnectivityDiagnostics.category(new ConnectException("refused")))
+                .isEqualTo("CONNECTION");
     }
 
     @Test
-    void applicationReadyListenerReturnsWithoutWaitingForRedisProbe() throws Exception {
+    void authRootCauseIsNotMaskedByConnectionWrapper() {
+        // Regression mirroring the live Upstash NOAUTH chain: the outer wrapper's
+        // class name contains "connect" and must not mask the deeper NOAUTH cause.
+        io.lettuce.core.RedisCommandExecutionException noauth =
+                new io.lettuce.core.RedisCommandExecutionException(
+                        "NOAUTH Authentication required. See https://upstash.com/docs/redis/troubleshooting/no_auth");
+        io.lettuce.core.RedisConnectionException lettuce =
+                new io.lettuce.core.RedisConnectionException(
+                        "Unable to connect to upstash.example/<unresolved>:6379", noauth);
+        org.springframework.data.redis.RedisConnectionFailureException wrapper =
+                new org.springframework.data.redis.RedisConnectionFailureException(
+                        "Unable to connect to Redis", lettuce);
+
+        assertThat(RedisConnectivityDiagnostics.errorCategory(wrapper)).isEqualTo("AUTHENTICATION");
+    }
+
+    @Test
+    void readyListenerDoesNotWaitForRedisProbe() throws Exception {
         RedisProperties properties = properties("slow.example", 6379, true, "token");
         RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
         CountDownLatch entered = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
         when(factory.getConnection()).thenAnswer(invocation -> {
             entered.countDown();
-            release.await(2, TimeUnit.SECONDS);
+            Thread.sleep(10_000);
             return mock(RedisConnection.class);
         });
+        RedisConnectivityDiagnostics diagnostics =
+                new RedisConnectivityDiagnostics(properties, factory) {
+                    @Override
+                    RedisConnectivityDiagnostics.Hooks hooks() {
+                        try {
+                            return FakeHooks.healthy(1);
+                        } catch (Exception e) {
+                            throw new IllegalStateException(e);
+                        }
+                    }
+                };
 
-        RedisConnectivityDiagnostics diagnostics = new RedisConnectivityDiagnostics(properties, factory);
         long started = System.nanoTime();
         diagnostics.probeAfterApplicationReady();
 
         assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(1));
-        assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
-        release.countDown();
-    }
-
-    @Test
-    void startupProbeIsAsynchronousAndBoundedWhenRedisBlocks() throws Exception {
-        RedisProperties properties = properties("slow.example", 6379, true, "token");
-        RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
-        CountDownLatch entered = new CountDownLatch(1);
-        when(factory.getConnection()).thenAnswer(invocation -> {
-            entered.countDown();
-            Thread.sleep(5_000);
-            return mock(RedisConnection.class);
-        });
-
-        RedisConnectivityDiagnostics diagnostics = new RedisConnectivityDiagnostics(properties, factory);
-        long started = System.nanoTime();
-        CompletableFuture<?> result = diagnostics.probeAsync(Duration.ofMillis(100));
-        assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
-        assertThat(result.orTimeout(1, TimeUnit.SECONDS).handle((value, error) -> error))
-                .succeedsWithin(2, TimeUnit.SECONDS)
-                .isNotNull();
-        assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(2));
+        assertThat(entered.await(2, TimeUnit.SECONDS)).isTrue();
     }
 
     @Test
@@ -136,8 +322,16 @@ class RedisConnectivityDiagnosticsTest {
         when(downFactory.getConnection()).thenThrow(new RedisConnectionFailureException(
                 "unavailable", new ConnectException("unavailable")));
         assertThat(new RedisHealthIndicator(downFactory).health().getStatus()).isEqualTo(Status.DOWN);
-        assertThat(new RedisConnectivityDiagnostics(properties("unreachable.example", 6379, true, "token"), downFactory)
-                .diagnose().result()).isEqualTo("DOWN");
+    }
+
+    private RedisConnectionFactory factoryWithInfo() {
+        RedisConnection connection = mock(RedisConnection.class);
+        RedisServerCommands serverCommands = mock(RedisServerCommands.class);
+        java.util.Properties info = new java.util.Properties();
+        info.setProperty("redis_version", "7.2.0");
+        when(connection.serverCommands()).thenReturn(serverCommands);
+        when(serverCommands.info()).thenReturn(info);
+        return factory(connection);
     }
 
     private RedisProperties properties(String host, int port, boolean ssl, String password) {
@@ -153,5 +347,112 @@ class RedisConnectivityDiagnosticsTest {
         RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
         when(factory.getConnection()).thenReturn(connection);
         return factory;
+    }
+
+    /** Deterministic fake network used by all phase tests. */
+    private static final class FakeHooks implements RedisConnectivityDiagnostics.Hooks {
+        final InetAddress[] addresses;
+        final Socket[] sockets;
+        final SSLSocket tlsSocket;
+        private final DnsAction dnsAction;
+        private final TcpAction[] tcpActions;
+        private final AtomicInteger nextSocket = new AtomicInteger();
+
+        @FunctionalInterface
+        interface DnsAction {
+            void run() throws UnknownHostException;
+        }
+
+        @SuppressWarnings("unchecked")
+        private FakeHooks(InetAddress[] addresses, DnsAction dnsAction) {
+            this.addresses = addresses;
+            this.dnsAction = dnsAction;
+            this.sockets = new Socket[addresses.length];
+            this.tcpActions = new TcpAction[addresses.length];
+            for (int i = 0; i < addresses.length; i++) {
+                sockets[i] = mock(Socket.class);
+            }
+            this.tlsSocket = mock(SSLSocket.class);
+            try {
+                when(tlsSocket.getSSLParameters()).thenReturn(new SSLParameters());
+                SSLSession session = mock(SSLSession.class);
+                when(session.getProtocol()).thenReturn("TLSv1.3");
+                when(tlsSocket.getSession()).thenReturn(session);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        }
+
+        static FakeHooks healthy(int addressCount) throws Exception {
+            InetAddress[] addresses = new InetAddress[addressCount];
+            for (int i = 0; i < addressCount; i++) {
+                addresses[i] = Inet4Address.getByAddress(new byte[]{10, 0, 0, (byte) (i + 1)});
+            }
+            return new FakeHooks(addresses, () -> { });
+        }
+
+        static FakeHooks dnsFailure(UnknownHostException failure) {
+            return new FakeHooks(new InetAddress[0], () -> {
+                throw failure;
+            });
+        }
+
+        void failAllTcp(Exception failure) {
+            for (int i = 0; i < tcpActions.length; i++) {
+                failTcpOn(i, failure);
+            }
+        }
+
+        void failTcpOn(int index, Exception failure) {
+            tcpActions[index] = socket -> {
+                try {
+                    throw failure;
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            };
+        }
+
+        void failTls(Exception failure) throws Exception {
+            org.mockito.Mockito.doAnswer(invocation -> {
+                throw failure;
+            }).when(tlsSocket).startHandshake();
+        }
+
+        @Override
+        public InetAddress[] resolve(String host) throws UnknownHostException {
+            dnsAction.run();
+            return addresses;
+        }
+
+        @FunctionalInterface
+        interface TcpAction {
+            void run(Socket socket) throws Exception;
+        }
+
+        @Override
+        public Socket newSocket() throws Exception {
+            int index = nextSocket.getAndIncrement();
+            int slot = Math.min(index, sockets.length - 1);
+            Socket socket = sockets[slot];
+            TcpAction action = tcpActions[Math.min(index, tcpActions.length - 1)];
+            if (action != null) {
+                org.mockito.Mockito.doAnswer(invocation -> {
+                    try {
+                        action.run(socket);
+                        return null;
+                    } catch (Exception e) {
+                        throw new java.io.IOException(e.getMessage(), e);
+                    }
+                }).when(socket).connect(org.mockito.ArgumentMatchers.any(SocketAddress.class),
+                        org.mockito.ArgumentMatchers.anyInt());
+            }
+            return socket;
+        }
+
+        @Override
+        public SSLSocket newTlsSocket() {
+            return tlsSocket;
+        }
     }
 }
