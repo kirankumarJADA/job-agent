@@ -18,6 +18,8 @@ class ActuatorHealthConfigurationTest {
                 .isEqualTo("always");
         assertThat(properties.getProperty("management.endpoint.health.show-details"))
                 .isEqualTo("never");
+        assertThat(properties.getProperty("spring.data.redis.password"))
+                .contains("SPRING_REDIS_PASSWORD");
     }
 
     @Test
@@ -28,6 +30,8 @@ class ActuatorHealthConfigurationTest {
                 .isEqualTo("always");
         assertThat(properties.getProperty("management.endpoint.health.show-details"))
                 .isEqualTo("never");
+        assertThat(properties.getProperty("spring.data.redis.password"))
+                .contains("SPRING_REDIS_PASSWORD");
     }
 
     private Properties load(String resource) {

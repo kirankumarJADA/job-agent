@@ -27,6 +27,9 @@ spring:
       # leave it unset (true) in real deployments.
       host: ${SPRING_REDIS_HOST}
       port: ${SPRING_REDIS_PORT:6379}
+      # Upstash exposes its database token as the Redis password. Render
+      # must provide SPRING_REDIS_PASSWORD; no credential is hardcoded.
+      password: ${SPRING_REDIS_PASSWORD:${SPRING_DATA_REDIS_PASSWORD:}}
       ssl:
         enabled: ${SPRING_REDIS_SSL:true}
 

@@ -81,7 +81,9 @@ FREE-TIER: Supabase pauses after ~1 week of inactivity on the free plan.
 
 1. Create a Redis database (any region near the Render backend).
 2. Record host + port (6379). TLS is always on; the backend enables it via
-   `spring.data.redis.ssl.enabled=true` in the prod profile.
+   `spring.data.redis.ssl.enabled=true` in the prod profile. Set
+   `SPRING_REDIS_PASSWORD` to the Upstash database token; Upstash uses that
+   token as the Redis password for TCP clients. The token is never logged.
 3. No code uses Redis at runtime today (events go through Postgres outbox);
    it is health-checked by actuator. Any in-memory Redis compatible with TLS
    works.
@@ -96,7 +98,7 @@ FREE-TIER: Upstash free tier is pay-per-command with a daily cap.
    - `SPRING_PROFILES_ACTIVE=prod`
    - `SPRING_DATASOURCE_URL` (from Supabase, step 1)
    - `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD`
-   - `SPRING_REDIS_HOST`, `SPRING_REDIS_PORT=6379`
+   - `SPRING_REDIS_HOST`, `SPRING_REDIS_PORT=6379`, `SPRING_REDIS_PASSWORD`
    - `APP_CORS_ALLOWED_ORIGINS=https://<app>.vercel.app`
    - `WORKER_EVENT_TOKEN=<openssl rand -hex 32>`
    - Optional LLM: `NIM_BASE_URL`, `NIM_API_KEY`, `GEMINI_API_KEY`

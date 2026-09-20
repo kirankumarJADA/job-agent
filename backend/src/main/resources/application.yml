@@ -28,6 +28,9 @@ spring:
     redis:
       host: ${SPRING_REDIS_HOST:localhost}
       port: ${SPRING_REDIS_PORT:6379}
+      # Upstash's token is the Redis password. Keep the standard Spring
+      # property fallback available while supporting the hosted env name.
+      password: ${SPRING_REDIS_PASSWORD:${SPRING_DATA_REDIS_PASSWORD:}}
   lifecycle:
     timeout-per-shutdown-phase: 30s
 
