@@ -10,11 +10,16 @@ import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.stereotype.Component;
 
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.RedisURI;
+import io.lettuce.core.api.StatefulRedisConnection;
+
 import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import java.io.Closeable;
+import java.nio.charset.StandardCharsets;
 import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -32,6 +37,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 
 /**
  * Safe post-startup diagnostic for the Redis health contributor. The Actuator
@@ -95,10 +102,11 @@ public class RedisConnectivityDiagnostics {
                 // The overall cap fired. Do NOT claim a network TIMEOUT here:
                 // the failing phase was not identified, so label it explicitly.
                 log.info("Redis connectivity diagnosis: client={}, host={}, port={}, sslEnabled={}, "
-                                + "authenticationConfigured={}, healthProbe=INFO, result=DOWN, "
+                                + "authenticationConfigured={}, passwordLength={}, passwordSha256Prefix={}, "
+                                + "healthProbe=INFO, effectiveClient={}, result=DOWN, "
                                 + "errorCategory=DIAGNOSTIC_TIMEOUT, phases={}",
                         client(), host(), port(), sslEnabled(), authenticationConfigured(),
-                        failureName(failure));
+                        passwordLength(), passwordSha256Prefix(), effectiveClientDetails(), failureName(failure));
                 return;
             }
             logDiagnostic(diagnostic);
@@ -113,10 +121,11 @@ public class RedisConnectivityDiagnostics {
 
     private void logDiagnostic(Diagnostic diagnostic) {
         log.info("Redis connectivity diagnosis: client={}, host={}, port={}, sslEnabled={}, "
-                        + "authenticationConfigured={}, healthProbe=INFO, result={}, errorCategory={}, phases={}",
+                        + "authenticationConfigured={}, passwordLength={}, passwordSha256Prefix={}, "
+                        + "healthProbe=INFO, effectiveClient={}, result={}, errorCategory={}, phases={}",
                 diagnostic.client(), diagnostic.host(), diagnostic.port(), diagnostic.sslEnabled(),
-                diagnostic.authenticationConfigured(), diagnostic.result(),
-                diagnostic.errorCategory(), diagnostic.phases());
+                diagnostic.authenticationConfigured(), passwordLength(), passwordSha256Prefix(),
+                effectiveClientDetails(), diagnostic.result(), diagnostic.errorCategory(), diagnostic.phases());
     }
 
     Diagnostic diagnose() {
@@ -264,7 +273,44 @@ public class RedisConnectivityDiagnostics {
                 }
             }
             phases.add(Phase.fail("pooledInfo", elapsed(t3), renderSubPhases(pooled)));
+            long rawStart = System.nanoTime();
+            try {
+                String rawDetail = bounded(pooledInfoTimeout, () -> rawLettuceProbe(s));
+                phases.add(Phase.ok("rawLettuce", elapsed(rawStart), rawDetail));
+            } catch (Exception rawFailure) {
+                phases.add(Phase.fail("rawLettuce", elapsed(rawStart),
+                        errorCategory(rawFailure) + ":" + simpleName(rawFailure)));
+            }
             return down(s, phases, errorCategory(failure));
+        }
+    }
+
+    /**
+     * Direct Lettuce comparison probe. It uses the effective endpoint, TLS
+     * setting and password from the same factory as the Spring probe, but does
+     * not use Spring Data's shared-connection lock/future.
+     */
+    private String rawLettuceProbe(ConnectionSettings settings) {
+        RedisURI.Builder builder = RedisURI.builder()
+                .withHost(settings.host())
+                .withPort(settings.port())
+                .withSsl(settings.sslEnabled())
+                .withVerifyPeer(settings.sslEnabled());
+        String password = effectivePassword();
+        if (hasText(password)) {
+            builder.withPassword(password);
+        }
+        RedisClient client = RedisClient.create(builder.build());
+        StatefulRedisConnection<String, String> connection = null;
+        try {
+            connection = client.connect();
+            String response = connection.sync().ping();
+            return "ping=" + (response == null ? "empty" : "OK");
+        } finally {
+            if (connection != null) {
+                connection.close();
+            }
+            client.shutdown();
         }
     }
 
@@ -363,6 +409,52 @@ public class RedisConnectivityDiagnostics {
     private boolean authenticationConfigured() { return effectiveSettings().authenticationConfigured(); }
     private String client() { return effectiveSettings().client(); }
 
+    private String effectiveClientDetails() {
+        if (!(connectionFactory instanceof LettuceConnectionFactory lettuce)) {
+            return "factory=" + connectionFactory.getClass().getSimpleName();
+        }
+        var options = lettuce.getClientConfiguration().getClientOptions();
+        String optionsSummary = options.map(value -> "commandTimeout=" + lettuce.getTimeout()
+                        + "ms,connectTimeout=" + value.getSocketOptions().getConnectTimeout().toMillis()
+                        + "ms,applyConnectionTimeout=" + value.getTimeoutOptions().isApplyConnectionTimeout())
+                .orElse("options=unavailable");
+        String resolver = lettuce.getClientConfiguration().getClientResources()
+                .map(resources -> resources.dnsResolver().getClass().getSimpleName())
+                .orElse("resources=unavailable");
+        return "shareNativeConnection=" + lettuce.getShareNativeConnection()
+                + "," + optionsSummary + ",dnsResolver=" + resolver;
+    }
+
+    private String effectivePassword() {
+        if (connectionFactory instanceof LettuceConnectionFactory lettuce) {
+            return lettuce.getPassword();
+        }
+        return properties.getPassword();
+    }
+
+    private int passwordLength() {
+        String password = effectivePassword();
+        return password == null ? 0 : password.length();
+    }
+
+    private String passwordSha256Prefix() {
+        String password = effectivePassword();
+        if (!hasText(password)) {
+            return "none";
+        }
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(password.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder();
+            for (int i = 0; i < 4; i++) {
+                hex.append(String.format("%02x", digest[i]));
+            }
+            return hex.toString();
+        } catch (NoSuchAlgorithmException impossible) {
+            return "unavailable";
+        }
+    }
+
     private static boolean hasText(String value) {
         return value != null && !value.isBlank();
     }
@@ -445,7 +537,7 @@ public class RedisConnectivityDiagnostics {
                 s.authenticationConfigured(), "DOWN", category, render(phases));
     }
 
-    private static final List<String> PHASE_ORDER = List.of("dns", "tcp", "tls", "pooledInfo");
+    private static final List<String> PHASE_ORDER = List.of("dns", "tcp", "tls", "pooledInfo", "rawLettuce");
 
     private static void markRemainingSkipped(List<Phase> phases) {
         String last = phases.isEmpty() ? null : phases.get(phases.size() - 1).name();

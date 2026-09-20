@@ -6,6 +6,8 @@ import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.test.context.ConfigDataApplicationContextInitializer;
 import org.springframework.boot.test.context.assertj.AssertableApplicationContext;
+import io.lettuce.core.resource.DefaultClientResources;
+import io.lettuce.core.resource.DnsResolvers;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -44,6 +46,35 @@ class RedisTlsBindingTest {
                         "SPRING_REDIS_PASSWORD=token-not-logged",
                         "SPRING_REDIS_SSL=true")
                 .run(this::assertTlsAndCredentials);
+    }
+
+    @Test
+    void autoConfiguredFactoryUsesJvmDnsResolver() {
+        redisContext()
+                .withUserConfiguration(com.personal.jobagent.config.RedisLettuceConfiguration.class)
+                .withPropertyValues("spring.data.redis.host=upstash.example")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    LettuceConnectionFactory factory = context.getBean(LettuceConnectionFactory.class);
+                    assertThat(factory.getClientConfiguration().getClientResources())
+                            .get()
+                            .extracting(resources -> resources.dnsResolver())
+                            .isSameAs(DnsResolvers.JVM_DEFAULT);
+                });
+    }
+
+    @Test
+    void redisCustomizerUsesJvmDnsResolverForFactoryConnections() {
+        DefaultClientResources.Builder builder = DefaultClientResources.builder();
+        new com.personal.jobagent.config.RedisLettuceConfiguration()
+                .redisJvmDnsResolver()
+                .customize(builder);
+        DefaultClientResources resources = builder.build();
+        try {
+            assertThat(resources.dnsResolver()).isSameAs(DnsResolvers.JVM_DEFAULT);
+        } finally {
+            resources.shutdown();
+        }
     }
 
     @Test
