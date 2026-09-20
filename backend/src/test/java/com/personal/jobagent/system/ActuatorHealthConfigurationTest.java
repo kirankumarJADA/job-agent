@@ -20,6 +20,8 @@ class ActuatorHealthConfigurationTest {
                 .isEqualTo("never");
         assertThat(properties.getProperty("spring.data.redis.password"))
                 .contains("SPRING_REDIS_PASSWORD");
+        assertThat(properties.getProperty("spring.data.redis.ssl.enabled"))
+                .contains("SPRING_REDIS_SSL");
     }
 
     @Test
@@ -32,6 +34,8 @@ class ActuatorHealthConfigurationTest {
                 .isEqualTo("never");
         assertThat(properties.getProperty("spring.data.redis.password"))
                 .contains("SPRING_REDIS_PASSWORD");
+        assertThat(properties.getProperty("spring.data.redis.ssl.enabled"))
+                .contains("SPRING_REDIS_SSL");
     }
 
     private Properties load(String resource) {

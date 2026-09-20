@@ -31,7 +31,9 @@ spring:
       # must provide SPRING_REDIS_PASSWORD; no credential is hardcoded.
       password: ${SPRING_REDIS_PASSWORD:${SPRING_DATA_REDIS_PASSWORD:}}
       ssl:
-        enabled: ${SPRING_REDIS_SSL:true}
+        # Canonical Spring Boot env name wins; retain SPRING_REDIS_SSL
+        # because it is the current Render variable.
+        enabled: ${SPRING_DATA_REDIS_SSL_ENABLED:${SPRING_REDIS_SSL:true}}
 
 management:
   endpoint:
