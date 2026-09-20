@@ -12,6 +12,10 @@ import org.springframework.data.redis.RedisConnectionFailureException;
 import javax.net.ssl.SSLException;
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
+import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -73,6 +77,48 @@ class RedisConnectivityDiagnosticsTest {
                 .isEqualTo("TIMEOUT");
         assertThat(RedisConnectivityDiagnostics.errorCategory(new SSLException("tls failure")))
                 .isEqualTo("TLS");
+    }
+
+    @Test
+    void applicationReadyListenerReturnsWithoutWaitingForRedisProbe() throws Exception {
+        RedisProperties properties = properties("slow.example", 6379, true, "token");
+        RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(factory.getConnection()).thenAnswer(invocation -> {
+            entered.countDown();
+            release.await(2, TimeUnit.SECONDS);
+            return mock(RedisConnection.class);
+        });
+
+        RedisConnectivityDiagnostics diagnostics = new RedisConnectivityDiagnostics(properties, factory);
+        long started = System.nanoTime();
+        diagnostics.probeAfterApplicationReady();
+
+        assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(1));
+        assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
+        release.countDown();
+    }
+
+    @Test
+    void startupProbeIsAsynchronousAndBoundedWhenRedisBlocks() throws Exception {
+        RedisProperties properties = properties("slow.example", 6379, true, "token");
+        RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
+        CountDownLatch entered = new CountDownLatch(1);
+        when(factory.getConnection()).thenAnswer(invocation -> {
+            entered.countDown();
+            Thread.sleep(5_000);
+            return mock(RedisConnection.class);
+        });
+
+        RedisConnectivityDiagnostics diagnostics = new RedisConnectivityDiagnostics(properties, factory);
+        long started = System.nanoTime();
+        CompletableFuture<?> result = diagnostics.probeAsync(Duration.ofMillis(100));
+        assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
+        assertThat(result.orTimeout(1, TimeUnit.SECONDS).handle((value, error) -> error))
+                .succeedsWithin(2, TimeUnit.SECONDS)
+                .isNotNull();
+        assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(2));
     }
 
     @Test

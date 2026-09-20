@@ -1,19 +1,26 @@
 package com.personal.jobagent.system;
 
-import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
 /**
- * Safe startup diagnostic for the Redis health contributor. The actuator
- * indicator remains enabled and authoritative; this component only makes
- * configuration mismatches (especially missing Upstash authentication)
- * visible in logs without logging secrets or exception messages.
+ * Safe post-startup diagnostic for the Redis health contributor. The Actuator
+ * indicator remains enabled and authoritative. The probe is asynchronous so
+ * an external Redis outage cannot prevent Tomcat from binding its port.
  */
 @Component
 public class RedisConnectivityDiagnostics {
@@ -21,6 +28,11 @@ public class RedisConnectivityDiagnostics {
 
     private final RedisProperties properties;
     private final RedisConnectionFactory connectionFactory;
+    private final ExecutorService probeExecutor = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "redis-connectivity-diagnostic");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     public RedisConnectivityDiagnostics(RedisProperties properties,
                                        RedisConnectionFactory connectionFactory) {
@@ -28,13 +40,42 @@ public class RedisConnectivityDiagnostics {
         this.connectionFactory = connectionFactory;
     }
 
-    @PostConstruct
-    void logStartupConnectivity() {
-        Diagnostic diagnostic = diagnose();
-        log.info("Redis connectivity diagnosis: client={}, host={}, port={}, sslEnabled={}, "
-                        + "authenticationConfigured={}, healthProbe=INFO, result={}, errorCategory={}",
-                diagnostic.client(), diagnostic.host(), diagnostic.port(), diagnostic.sslEnabled(),
-                diagnostic.authenticationConfigured(), diagnostic.result(), diagnostic.errorCategory());
+    static final Duration PROBE_TIMEOUT = Duration.ofSeconds(3);
+
+    @EventListener(ApplicationReadyEvent.class)
+    void probeAfterApplicationReady() {
+        probeAsync(PROBE_TIMEOUT)
+                .whenComplete((diagnostic, failure) -> {
+                    if (failure != null) {
+                        ConnectionSettings settings = effectiveSettings();
+                        log.info("Redis connectivity diagnosis: client={}, host={}, port={}, sslEnabled={}, "
+                                        + "authenticationConfigured={}, healthProbe=INFO, result=DOWN, errorCategory=TIMEOUT",
+                                settings.client(), settings.host(), settings.port(), settings.sslEnabled(),
+                                settings.authenticationConfigured());
+                        return;
+                    }
+                    log.info("Redis connectivity diagnosis: client={}, host={}, port={}, sslEnabled={}, "
+                                    + "authenticationConfigured={}, healthProbe=INFO, result={}, errorCategory={}",
+                            diagnostic.client(), diagnostic.host(), diagnostic.port(), diagnostic.sslEnabled(),
+                            diagnostic.authenticationConfigured(), diagnostic.result(), diagnostic.errorCategory());
+                });
+    }
+
+    CompletableFuture<Diagnostic> probeAsync(Duration timeout) {
+        CompletableFuture<Diagnostic> probe = CompletableFuture
+                .supplyAsync(this::diagnose, probeExecutor)
+                .orTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        // This is a one-shot startup diagnostic. Interrupt and release the
+        // dedicated daemon executor on both success and timeout; a failed
+        // external endpoint must not leave a connection task or executor
+        // alive for the lifetime of the application.
+        probe.whenComplete((ignored, failure) -> probeExecutor.shutdownNow());
+        return probe;
+    }
+
+    @PreDestroy
+    void stopProbeExecutor() {
+        probeExecutor.shutdownNow();
     }
 
     Diagnostic diagnose() {
