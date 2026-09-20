@@ -30,6 +30,14 @@ spring:
       ssl:
         enabled: ${SPRING_REDIS_SSL:true}
 
+management:
+  endpoint:
+    health:
+      # Components are names/statuses only; details and exception messages
+      # remain hidden from the unauthenticated Render health probe.
+      show-components: always
+      show-details: never
+
 server:
   # Render terminates TLS and proxies via HTTP; trust X-Forwarded-* so
   # secure-cookie and URL logic see the real scheme/host.
