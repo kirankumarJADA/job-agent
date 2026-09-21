@@ -15,7 +15,14 @@ import io.lettuce.core.protocol.ProtocolVersion;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisURI;
 import io.lettuce.core.api.StatefulRedisConnection;
+import io.lettuce.core.event.Event;
+import io.lettuce.core.event.command.CommandBaseEvent;
+import io.lettuce.core.resource.DefaultClientResources;
 import io.lettuce.core.resource.DnsResolvers;
+import io.lettuce.core.resource.NettyCustomizer;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.handler.ssl.SslHandler;
 
 import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SSLParameters;
@@ -33,6 +40,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
@@ -335,17 +343,30 @@ public class RedisConnectivityDiagnostics {
                 // AUTH is deliberately issued as a separate command below so
                 // connect, AUTH, and PING can be distinguished.
                 .build();
-        RedisClient client = RedisClient.create(uri);
-        client.setOptions(ClientOptions.builder().protocolVersion(ProtocolVersion.RESP2).build());
         StatefulRedisConnection<String, String> connection = null;
         List<String> phases = new ArrayList<>();
+        List<String> lifecycleEvents = new CopyOnWriteArrayList<>();
+        long lifecycleStarted = System.nanoTime();
+        // Match the application's effective resolver. Using Lettuce's default
+        // unresolved Netty resolver here would test a different path than the
+        // Spring factory and could falsely attribute a resolver failure to the
+        // protocol handshake.
+        DefaultClientResources resources = DefaultClientResources.builder()
+                .dnsResolver(DnsResolvers.JVM_DEFAULT)
+                .nettyCustomizer(lifecycleNettyCustomizer(lifecycleEvents))
+                .build();
+        RedisClient client = RedisClient.create(resources, uri);
+        client.setOptions(ClientOptions.builder().protocolVersion(ProtocolVersion.RESP2).build());
+        var eventSubscription = resources.eventBus().get()
+                .subscribe(event -> lifecycleEvents.add(renderLifecycleEvent(event,
+                        elapsed(lifecycleStarted))));
         try {
             long started = System.nanoTime();
             try {
                 connection = bounded(RAW_PHASE_TIMEOUT, client::connect);
                 phases.add(mode + ".connect:OK/" + elapsed(started) + "ms");
             } catch (Exception failure) {
-                throw new RawPhaseException(mode + ".connect", failure);
+                throw new RawPhaseException(mode + ".connect", failure, lifecycleEvents);
             }
 
             StatefulRedisConnection<String, String> rawConnection = connection;
@@ -358,7 +379,7 @@ public class RedisConnectivityDiagnostics {
                     phases.add(mode + ".auth:OK/" + elapsed(started) + "ms[response="
                             + (authResponse == null ? "empty" : "received") + "]");
                 } catch (Exception failure) {
-                    throw new RawPhaseException(mode + ".auth", failure);
+                    throw new RawPhaseException(mode + ".auth", failure, lifecycleEvents);
                 }
             } else {
                 phases.add(mode + ".auth:SKIPPED");
@@ -370,7 +391,7 @@ public class RedisConnectivityDiagnostics {
                 phases.add(mode + ".ping:OK/" + elapsed(started) + "ms[response="
                         + (pingResponse == null ? "empty" : "received") + "]");
             } catch (Exception failure) {
-                throw new RawPhaseException(mode + ".ping", failure);
+                throw new RawPhaseException(mode + ".ping", failure, lifecycleEvents);
             }
             return String.join(",", phases);
         } catch (RawPhaseException failure) {
@@ -379,7 +400,9 @@ public class RedisConnectivityDiagnostics {
             if (connection != null) {
                 connection.close();
             }
+            eventSubscription.dispose();
             client.shutdown();
+            resources.shutdown();
         }
     }
 
@@ -665,17 +688,57 @@ public class RedisConnectivityDiagnostics {
 
     private static final class RawPhaseException extends Exception {
         private final String phase;
+        private final List<String> lifecycleEvents;
 
-        private RawPhaseException(String phase, Throwable cause) {
+        private RawPhaseException(String phase, Throwable cause, List<String> lifecycleEvents) {
             super(cause);
             this.phase = phase;
+            this.lifecycleEvents = List.copyOf(lifecycleEvents);
         }
+    }
+
+    private static NettyCustomizer lifecycleNettyCustomizer(List<String> lifecycleEvents) {
+        return new NettyCustomizer() {
+            @Override
+            public void afterChannelInitialized(io.netty.channel.Channel channel) {
+                channel.pipeline().addFirst("redisDiagnosticLifecycle", new ChannelInboundHandlerAdapter() {
+                    @Override
+                    public void channelActive(ChannelHandlerContext context) throws Exception {
+                        lifecycleEvents.add("channelActive");
+                        context.fireChannelActive();
+                    }
+
+                    @Override
+                    public void exceptionCaught(ChannelHandlerContext context, Throwable cause) throws Exception {
+                        lifecycleEvents.add("nettyException:" + errorCategory(cause));
+                        context.fireExceptionCaught(cause);
+                    }
+                });
+                SslHandler sslHandler = channel.pipeline().get(SslHandler.class);
+                if (sslHandler != null) {
+                    sslHandler.handshakeFuture().addListener(future -> lifecycleEvents.add(
+                            future.isSuccess() ? "sslHandshakeComplete" : "sslHandshakeFailed:" + errorCategory(future.cause())));
+                }
+            }
+        };
+    }
+
+    private static String renderLifecycleEvent(Event event, long elapsedMillis) {
+        String name = event.getClass().getSimpleName();
+        if (event instanceof CommandBaseEvent commandEvent && commandEvent.getCommand() != null
+                && commandEvent.getCommand().getType() != null) {
+            name += ":" + commandEvent.getCommand().getType().name();
+        }
+        return name + "/" + elapsedMillis + "ms";
     }
 
     private static String rawFailureDetail(Throwable failure) {
         if (failure instanceof RawPhaseException phaseFailure) {
             Throwable cause = phaseFailure.getCause() == null ? phaseFailure : phaseFailure.getCause();
-            return "phase=" + phaseFailure.phase + ":" + errorCategory(cause) + ":" + simpleName(cause);
+            String events = phaseFailure.lifecycleEvents.isEmpty()
+                    ? "none" : String.join(",", phaseFailure.lifecycleEvents);
+            return "phase=" + phaseFailure.phase + ":" + errorCategory(cause) + ":" + simpleName(cause)
+                    + "[lifecycleEvents=" + events + "]";
         }
         return errorCategory(failure) + ":" + simpleName(failure);
     }
