@@ -10,9 +10,12 @@ import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.stereotype.Component;
 
+import io.lettuce.core.ClientOptions;
+import io.lettuce.core.protocol.ProtocolVersion;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisURI;
 import io.lettuce.core.api.StatefulRedisConnection;
+import io.lettuce.core.resource.DnsResolvers;
 
 import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SSLParameters;
@@ -71,6 +74,8 @@ public class RedisConnectivityDiagnostics {
     static final Duration TCP_TIMEOUT = Duration.ofSeconds(2);
     static final Duration TLS_TIMEOUT = Duration.ofSeconds(3);
     static final Duration POOLED_INFO_TIMEOUT = Duration.ofSeconds(3);
+    static final Duration RAW_PHASE_TIMEOUT = Duration.ofSeconds(2);
+    static final Duration RAW_TOTAL_TIMEOUT = Duration.ofSeconds(7);
 
     private final RedisProperties properties;
     private final RedisConnectionFactory connectionFactory;
@@ -275,11 +280,11 @@ public class RedisConnectivityDiagnostics {
             phases.add(Phase.fail("pooledInfo", elapsed(t3), renderSubPhases(pooled)));
             long rawStart = System.nanoTime();
             try {
-                String rawDetail = bounded(pooledInfoTimeout, () -> rawLettuceProbe(s));
+                String rawDetail = bounded(RAW_TOTAL_TIMEOUT, () -> rawLettuceProbe(s));
                 phases.add(Phase.ok("rawLettuce", elapsed(rawStart), rawDetail));
             } catch (Exception rawFailure) {
                 phases.add(Phase.fail("rawLettuce", elapsed(rawStart),
-                        errorCategory(rawFailure) + ":" + simpleName(rawFailure)));
+                        rawFailureDetail(rawFailure)));
             }
             return down(s, phases, errorCategory(failure));
         }
@@ -290,22 +295,86 @@ public class RedisConnectivityDiagnostics {
      * setting and password from the same factory as the Spring probe, but does
      * not use Spring Data's shared-connection lock/future.
      */
-    private String rawLettuceProbe(ConnectionSettings settings) {
-        RedisURI.Builder builder = RedisURI.builder()
+    private String rawLettuceProbe(ConnectionSettings settings) throws Exception {
+        String password = effectivePassword();
+        if (!hasText(password)) {
+            return rawLettuceAuthMode(settings, "password-only", null, null);
+        }
+        // Test both representations used by Redis clients. Spring's standalone
+        // configuration commonly emits password-only AUTH; an explicit default
+        // user exercises the ACL form used by Redis 6+/Upstash.
+        List<String> results = new ArrayList<>();
+        RawPhaseException firstFailure = null;
+        try {
+            results.add(rawLettuceAuthMode(settings, "explicit-default", "default", password));
+        } catch (RawPhaseException failure) {
+            firstFailure = failure;
+            results.add("explicit-default.FAIL[" + rawFailureDetail(failure) + "]");
+        }
+        try {
+            results.add(rawLettuceAuthMode(settings, "password-only", null, password));
+        } catch (RawPhaseException failure) {
+            if (firstFailure == null) {
+                firstFailure = failure;
+            }
+            results.add("password-only.FAIL[" + rawFailureDetail(failure) + "]");
+        }
+        if (firstFailure != null && results.stream().noneMatch(value -> value.contains(":OK"))) {
+            throw firstFailure;
+        }
+        return String.join(";", results);
+    }
+
+    private String rawLettuceAuthMode(ConnectionSettings settings, String mode,
+                                      String username, String password) throws Exception {
+        RedisURI uri = RedisURI.builder()
                 .withHost(settings.host())
                 .withPort(settings.port())
                 .withSsl(settings.sslEnabled())
-                .withVerifyPeer(settings.sslEnabled());
-        String password = effectivePassword();
-        if (hasText(password)) {
-            builder.withPassword(password);
-        }
-        RedisClient client = RedisClient.create(builder.build());
+                .withVerifyPeer(settings.sslEnabled())
+                // AUTH is deliberately issued as a separate command below so
+                // connect, AUTH, and PING can be distinguished.
+                .build();
+        RedisClient client = RedisClient.create(uri);
+        client.setOptions(ClientOptions.builder().protocolVersion(ProtocolVersion.RESP2).build());
         StatefulRedisConnection<String, String> connection = null;
+        List<String> phases = new ArrayList<>();
         try {
-            connection = client.connect();
-            String response = connection.sync().ping();
-            return "ping=" + (response == null ? "empty" : "OK");
+            long started = System.nanoTime();
+            try {
+                connection = bounded(RAW_PHASE_TIMEOUT, client::connect);
+                phases.add(mode + ".connect:OK/" + elapsed(started) + "ms");
+            } catch (Exception failure) {
+                throw new RawPhaseException(mode + ".connect", failure);
+            }
+
+            StatefulRedisConnection<String, String> rawConnection = connection;
+            if (hasText(password)) {
+                started = System.nanoTime();
+                try {
+                    String authResponse = bounded(RAW_PHASE_TIMEOUT, () -> username == null
+                            ? rawConnection.sync().auth(password)
+                            : rawConnection.sync().auth(username, password));
+                    phases.add(mode + ".auth:OK/" + elapsed(started) + "ms[response="
+                            + (authResponse == null ? "empty" : "received") + "]");
+                } catch (Exception failure) {
+                    throw new RawPhaseException(mode + ".auth", failure);
+                }
+            } else {
+                phases.add(mode + ".auth:SKIPPED");
+            }
+
+            started = System.nanoTime();
+            try {
+                String pingResponse = bounded(RAW_PHASE_TIMEOUT, () -> rawConnection.sync().ping());
+                phases.add(mode + ".ping:OK/" + elapsed(started) + "ms[response="
+                        + (pingResponse == null ? "empty" : "received") + "]");
+            } catch (Exception failure) {
+                throw new RawPhaseException(mode + ".ping", failure);
+            }
+            return String.join(",", phases);
+        } catch (RawPhaseException failure) {
+            throw failure;
         } finally {
             if (connection != null) {
                 connection.close();
@@ -419,7 +488,12 @@ public class RedisConnectivityDiagnostics {
                         + "ms,applyConnectionTimeout=" + value.getTimeoutOptions().isApplyConnectionTimeout())
                 .orElse("options=unavailable");
         String resolver = lettuce.getClientConfiguration().getClientResources()
-                .map(resources -> resources.dnsResolver().getClass().getSimpleName())
+                .map(resources -> {
+                    if (resources.dnsResolver() instanceof DnsResolvers dnsResolver) {
+                        return dnsResolver.name();
+                    }
+                    return resources.dnsResolver().getClass().getName();
+                })
                 .orElse("resources=unavailable");
         return "shareNativeConnection=" + lettuce.getShareNativeConnection()
                 + "," + optionsSummary + ",dnsResolver=" + resolver;
@@ -587,6 +661,23 @@ public class RedisConnectivityDiagnostics {
 
     private static long elapsed(long startedAtNanos) {
         return (System.nanoTime() - startedAtNanos) / 1_000_000;
+    }
+
+    private static final class RawPhaseException extends Exception {
+        private final String phase;
+
+        private RawPhaseException(String phase, Throwable cause) {
+            super(cause);
+            this.phase = phase;
+        }
+    }
+
+    private static String rawFailureDetail(Throwable failure) {
+        if (failure instanceof RawPhaseException phaseFailure) {
+            Throwable cause = phaseFailure.getCause() == null ? phaseFailure : phaseFailure.getCause();
+            return "phase=" + phaseFailure.phase + ":" + errorCategory(cause) + ":" + simpleName(cause);
+        }
+        return errorCategory(failure) + ":" + simpleName(failure);
     }
 
     private static String simpleName(Throwable failure) {
