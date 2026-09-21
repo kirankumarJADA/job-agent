@@ -11,15 +11,20 @@ import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactor
 import org.springframework.stereotype.Component;
 
 import io.lettuce.core.ClientOptions;
+import io.lettuce.core.ConnectionFuture;
 import io.lettuce.core.protocol.ProtocolVersion;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisURI;
 import io.lettuce.core.api.StatefulRedisConnection;
+import io.lettuce.core.codec.StringCodec;
 import io.lettuce.core.event.Event;
 import io.lettuce.core.event.command.CommandBaseEvent;
 import io.lettuce.core.resource.DefaultClientResources;
 import io.lettuce.core.resource.DnsResolvers;
 import io.lettuce.core.resource.NettyCustomizer;
+import io.netty.bootstrap.Bootstrap;
+import io.netty.bootstrap.ChannelFactory;
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.handler.ssl.SslHandler;
@@ -34,6 +39,7 @@ import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketAddress;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.time.Duration;
@@ -353,19 +359,31 @@ public class RedisConnectivityDiagnostics {
         // protocol handshake.
         DefaultClientResources resources = DefaultClientResources.builder()
                 .dnsResolver(DnsResolvers.JVM_DEFAULT)
-                .nettyCustomizer(lifecycleNettyCustomizer(lifecycleEvents))
+                .nettyCustomizer(lifecycleNettyCustomizer(lifecycleEvents, lifecycleStarted))
                 .build();
         RedisClient client = RedisClient.create(resources, uri);
         client.setOptions(ClientOptions.builder().protocolVersion(ProtocolVersion.RESP2).build());
+        lifecycleEvents.add("uri=" + describeUri(uri) + ",resolver=JVM_DEFAULT");
         var eventSubscription = resources.eventBus().get()
                 .subscribe(event -> lifecycleEvents.add(renderLifecycleEvent(event,
                         elapsed(lifecycleStarted))));
         try {
             long started = System.nanoTime();
+            ConnectionFuture<StatefulRedisConnection<String, String>> connectionFuture = null;
             try {
-                connection = bounded(RAW_PHASE_TIMEOUT, client::connect);
+                connectionFuture = client.connectAsync(StringCodec.UTF8, uri);
+                lifecycleEvents.add("connectionFutureCreated/" + elapsed(lifecycleStarted) + "ms");
+                connectionFuture.whenComplete((value, failure) -> lifecycleEvents.add(
+                        failure == null
+                                ? "connectionFutureCompleted/" + elapsed(lifecycleStarted) + "ms"
+                                : "connectionFutureFailed/" + elapsed(lifecycleStarted) + "ms[" + errorCategory(failure) + "]"));
+                ConnectionFuture<StatefulRedisConnection<String, String>> future = connectionFuture;
+                connection = bounded(RAW_PHASE_TIMEOUT, future::get);
                 phases.add(mode + ".connect:OK/" + elapsed(started) + "ms");
             } catch (Exception failure) {
+                if (connectionFuture != null) {
+                    connectionFuture.cancel(true);
+                }
                 throw new RawPhaseException(mode + ".connect", failure, lifecycleEvents);
             }
 
@@ -697,30 +715,101 @@ public class RedisConnectivityDiagnostics {
         }
     }
 
-    private static NettyCustomizer lifecycleNettyCustomizer(List<String> lifecycleEvents) {
+    private static NettyCustomizer lifecycleNettyCustomizer(List<String> lifecycleEvents, long lifecycleStarted) {
         return new NettyCustomizer() {
             @Override
-            public void afterChannelInitialized(io.netty.channel.Channel channel) {
+            public void afterBootstrapInitialized(Bootstrap bootstrap) {
+                markLifecycle(lifecycleEvents, lifecycleStarted, "bootstrapPrepared/" + safeAddress(bootstrap.config().remoteAddress())
+                        + ",options=" + bootstrap.config().options().keySet());
+                ChannelFactory<? extends Channel> originalFactory = bootstrap.config().channelFactory();
+                if (originalFactory != null) {
+                    bootstrap.channelFactory(() -> {
+                        Channel channel = originalFactory.newChannel();
+                        markLifecycle(lifecycleEvents, lifecycleStarted, "channelCreated/" + addressSummary(channel));
+                        channel.closeFuture().addListener(future -> markLifecycle(lifecycleEvents, lifecycleStarted,
+                                "channelCloseFuture"));
+                        return channel;
+                    });
+                }
+            }
+
+            @Override
+            public void afterChannelInitialized(Channel channel) {
+                markLifecycle(lifecycleEvents, lifecycleStarted, "channelInitialized/" + addressSummary(channel));
                 channel.pipeline().addFirst("redisDiagnosticLifecycle", new ChannelInboundHandlerAdapter() {
                     @Override
+                    public void channelRegistered(ChannelHandlerContext context) throws Exception {
+                        markLifecycle(lifecycleEvents, lifecycleStarted, "channelRegistered/" + addressSummary(context.channel()));
+                        context.fireChannelRegistered();
+                    }
+
+                    @Override
                     public void channelActive(ChannelHandlerContext context) throws Exception {
-                        lifecycleEvents.add("channelActive");
+                        markLifecycle(lifecycleEvents, lifecycleStarted, "channelActive/" + addressSummary(context.channel()));
+                        attachSslObservation(context.channel(), lifecycleEvents, lifecycleStarted);
                         context.fireChannelActive();
                     }
 
                     @Override
+                    public void channelInactive(ChannelHandlerContext context) throws Exception {
+                        markLifecycle(lifecycleEvents, lifecycleStarted, "channelInactive/" + addressSummary(context.channel()));
+                        context.fireChannelInactive();
+                    }
+
+                    @Override
                     public void exceptionCaught(ChannelHandlerContext context, Throwable cause) throws Exception {
-                        lifecycleEvents.add("nettyException:" + errorCategory(cause));
+                        markLifecycle(lifecycleEvents, lifecycleStarted, "nettyException:" + errorCategory(cause));
                         context.fireExceptionCaught(cause);
                     }
                 });
-                SslHandler sslHandler = channel.pipeline().get(SslHandler.class);
-                if (sslHandler != null) {
-                    sslHandler.handshakeFuture().addListener(future -> lifecycleEvents.add(
-                            future.isSuccess() ? "sslHandshakeComplete" : "sslHandshakeFailed:" + errorCategory(future.cause())));
-                }
+                channel.eventLoop().execute(() -> {
+                    if (channel.pipeline().get(SslHandler.class) != null) {
+                        markLifecycle(lifecycleEvents, lifecycleStarted, "sslHandlerInstalled");
+                        attachSslObservation(channel, lifecycleEvents, lifecycleStarted);
+                    }
+                    if (channel.pipeline().get(io.lettuce.core.protocol.RedisHandshakeHandler.class) != null) {
+                        markLifecycle(lifecycleEvents, lifecycleStarted, "redisHandshakeHandlerInstalled");
+                    }
+                });
             }
         };
+    }
+
+    private static void attachSslObservation(Channel channel, List<String> events, long lifecycleStarted) {
+        SslHandler sslHandler = channel.pipeline().get(SslHandler.class);
+        if (sslHandler == null) {
+            return;
+        }
+        markLifecycle(events, lifecycleStarted, "sslHandshakeStarted");
+        sslHandler.handshakeFuture().addListener(future -> markLifecycle(events, lifecycleStarted,
+                future.isSuccess()
+                        ? "sslHandshakeComplete"
+                        : "sslHandshakeFailed:" + errorCategory(future.cause())));
+    }
+
+    static String describeUri(RedisURI uri) {
+        String scheme = uri.isSsl() ? "rediss" : "redis";
+        String protocol = "RESP2";
+        return "scheme=" + scheme + ",host=" + uri.getHost() + ",port=" + uri.getPort()
+                + ",ssl=" + uri.isSsl() + ",protocol=" + protocol;
+    }
+
+    private static void markLifecycle(List<String> events, long started, String event) {
+        events.add(event + "/" + elapsed(started) + "ms");
+    }
+
+    private static String addressSummary(Channel channel) {
+        return "remote=" + safeAddress(channel.remoteAddress()) + ",local=" + safeAddress(channel.localAddress());
+    }
+
+    private static String safeAddress(SocketAddress address) {
+        if (address == null) {
+            return "none";
+        }
+        if (address instanceof InetSocketAddress inet) {
+            return inet.getHostString() + ":" + inet.getPort();
+        }
+        return address.getClass().getSimpleName();
     }
 
     private static String renderLifecycleEvent(Event event, long elapsedMillis) {

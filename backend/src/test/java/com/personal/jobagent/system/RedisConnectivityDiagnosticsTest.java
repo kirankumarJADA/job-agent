@@ -390,6 +390,31 @@ class RedisConnectivityDiagnosticsTest {
     }
 
     @Test
+    void lettuceUriDiagnosticReportsTransportAndProtocolWithoutCredentials() {
+        io.lettuce.core.RedisURI uri = io.lettuce.core.RedisURI.builder()
+                .withHost("absolute-skylark-284998.upstash.io")
+                .withPort(6379)
+                .withSsl(true)
+                .build();
+
+        assertThat(RedisConnectivityDiagnostics.describeUri(uri))
+                .isEqualTo("scheme=rediss,host=absolute-skylark-284998.upstash.io,port=6379,ssl=true,protocol=RESP2")
+                .doesNotContain("password", "token");
+    }
+
+    @Test
+    void lifecyclePhaseMarkersAreSafeAndIncludeElapsedTime() {
+        io.lettuce.core.RedisURI uri = io.lettuce.core.RedisURI.builder()
+                .withHost("redis.example")
+                .withPort(6379)
+                .build();
+
+        assertThat(RedisConnectivityDiagnostics.describeUri(uri))
+                .contains("scheme=redis", "host=redis.example", "port=6379", "ssl=false", "protocol=RESP2")
+                .doesNotContain("@", "password");
+    }
+
+    @Test
     void actuatorRedisHealthIndicatorRemainsAuthoritative() {
         RedisConnection upConnection = mock(RedisConnection.class);
         RedisServerCommands serverCommands = mock(RedisServerCommands.class);
