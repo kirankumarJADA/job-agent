@@ -48,6 +48,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -88,7 +89,8 @@ public class RedisConnectivityDiagnostics {
     static final Duration TLS_TIMEOUT = Duration.ofSeconds(3);
     static final Duration POOLED_INFO_TIMEOUT = Duration.ofSeconds(3);
     static final Duration RAW_PHASE_TIMEOUT = Duration.ofSeconds(2);
-    static final Duration RAW_TOTAL_TIMEOUT = Duration.ofSeconds(7);
+    static final Duration RAW_TOTAL_TIMEOUT = Duration.ofSeconds(10);
+    static final Duration LATE_EVENT_GRACE = Duration.ofMillis(1500);
 
     private final RedisProperties properties;
     private final RedisConnectionFactory connectionFactory;
@@ -366,19 +368,27 @@ public class RedisConnectivityDiagnostics {
         try {
             long started = System.nanoTime();
             ConnectionFuture<StatefulRedisConnection<String, String>> connectionFuture = null;
+            CountDownLatch connectionTerminal = new CountDownLatch(1);
             try {
                 connectionFuture = client.connectAsync(StringCodec.UTF8, uri);
                 lifecycleEvents.add("connectionFutureCreated/" + elapsed(lifecycleStarted) + "ms");
-                connectionFuture.whenComplete((value, failure) -> lifecycleEvents.add(
-                        failure == null
-                                ? "connectionFutureCompleted/" + elapsed(lifecycleStarted) + "ms"
-                                : "connectionFutureFailed/" + elapsed(lifecycleStarted) + "ms[" + errorCategory(failure) + "]"));
+                connectionFuture.whenComplete((value, failure) -> {
+                    lifecycleEvents.add(failure == null
+                            ? "connectionFutureCompleted/" + elapsed(lifecycleStarted) + "ms"
+                            : "connectionFutureFailed/" + elapsed(lifecycleStarted) + "ms[" + errorCategory(failure) + "]");
+                    connectionTerminal.countDown();
+                });
                 ConnectionFuture<StatefulRedisConnection<String, String>> future = connectionFuture;
                 connection = bounded(RAW_PHASE_TIMEOUT, future::get);
                 phases.add(mode + ".connect:OK/" + elapsed(started) + "ms");
             } catch (Exception failure) {
                 if (connectionFuture != null) {
                     connectionFuture.cancel(true);
+                    // A timeout only means our observation budget expired. The
+                    // Netty/Lettuce callbacks may still be completing on their
+                    // event loop, so retain the live collector for one bounded
+                    // grace window before rendering the failure trail.
+                    awaitLateLifecycleEvents(connectionTerminal, lifecycleEvents, LATE_EVENT_GRACE);
                 }
                 throw new RawPhaseException(mode + ".connect", failure, lifecycleEvents);
             }
@@ -700,14 +710,29 @@ public class RedisConnectivityDiagnostics {
         return (System.nanoTime() - startedAtNanos) / 1_000_000;
     }
 
+    static void awaitLateLifecycleEvents(CountDownLatch terminal,
+                                          List<String> lifecycleEvents,
+                                          Duration grace) {
+        long started = System.nanoTime();
+        try {
+            terminal.await(grace.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            lifecycleEvents.add("lateEventGraceInterrupted/" + elapsed(started) + "ms");
+            return;
+        }
+        lifecycleEvents.add("lateEventGraceComplete/" + elapsed(started) + "ms");
+    }
+
     private static final class RawPhaseException extends Exception {
         private final String phase;
+        /** Deliberately live until the bounded late-event grace has completed. */
         private final List<String> lifecycleEvents;
 
         private RawPhaseException(String phase, Throwable cause, List<String> lifecycleEvents) {
             super(cause);
             this.phase = phase;
-            this.lifecycleEvents = List.copyOf(lifecycleEvents);
+            this.lifecycleEvents = lifecycleEvents;
         }
     }
 

@@ -293,6 +293,44 @@ class RedisConnectivityDiagnosticsTest {
     }
 
     @Test
+    void lateCallbackArrivingDuringGraceWindowIsCaptured() throws Exception {
+        CountDownLatch terminal = new CountDownLatch(1);
+        java.util.List<String> events = new java.util.concurrent.CopyOnWriteArrayList<>();
+        Thread callback = new Thread(() -> {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            events.add("connectionFutureCompleted");
+            terminal.countDown();
+        });
+        callback.start();
+
+        RedisConnectivityDiagnostics.awaitLateLifecycleEvents(
+                terminal, events, Duration.ofMillis(1500));
+
+        assertThat(events).contains("connectionFutureCompleted")
+                .anyMatch(event -> event.startsWith("lateEventGraceComplete/"));
+        callback.join(500);
+        assertThat(callback.isAlive()).isFalse();
+    }
+
+    @Test
+    void lateEventGraceNeverExceeds1500Milliseconds() {
+        CountDownLatch terminal = new CountDownLatch(1);
+        java.util.List<String> events = new java.util.concurrent.CopyOnWriteArrayList<>();
+        long started = System.nanoTime();
+
+        RedisConnectivityDiagnostics.awaitLateLifecycleEvents(
+                terminal, events, RedisConnectivityDiagnostics.LATE_EVENT_GRACE);
+
+        long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+        assertThat(elapsedMillis).isLessThan(1800);
+        assertThat(events).anyMatch(event -> event.startsWith("lateEventGraceComplete/"));
+    }
+
+    @Test
     void overallCapIsReportedAsDiagnosticTimeoutNotNetworkTimeout() throws Exception {
         RedisProperties properties = properties("hanging.example", 6379, true, "token");
         RedisConnectionFactory factory = factoryWithInfo();
