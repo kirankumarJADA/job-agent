@@ -23,7 +23,6 @@ import io.lettuce.core.resource.DefaultClientResources;
 import io.lettuce.core.resource.DnsResolvers;
 import io.lettuce.core.resource.NettyCustomizer;
 import io.netty.bootstrap.Bootstrap;
-import io.netty.bootstrap.ChannelFactory;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
@@ -312,7 +311,7 @@ public class RedisConnectivityDiagnostics {
     private String rawLettuceProbe(ConnectionSettings settings) throws Exception {
         String password = effectivePassword();
         if (!hasText(password)) {
-            return rawLettuceAuthMode(settings, "password-only", null, null);
+            return rawLettuceAuthMode(settings, "password-only", null, null, false);
         }
         // Test both representations used by Redis clients. Spring's standalone
         // configuration commonly emits password-only AUTH; an explicit default
@@ -320,13 +319,13 @@ public class RedisConnectivityDiagnostics {
         List<String> results = new ArrayList<>();
         RawPhaseException firstFailure = null;
         try {
-            results.add(rawLettuceAuthMode(settings, "explicit-default", "default", password));
+            results.add(rawLettuceAuthMode(settings, "explicit-default", "default", password, false));
         } catch (RawPhaseException failure) {
             firstFailure = failure;
             results.add("explicit-default.FAIL[" + rawFailureDetail(failure) + "]");
         }
         try {
-            results.add(rawLettuceAuthMode(settings, "password-only", null, password));
+            results.add(rawLettuceAuthMode(settings, "password-only", null, password, false));
         } catch (RawPhaseException failure) {
             if (firstFailure == null) {
                 firstFailure = failure;
@@ -340,7 +339,7 @@ public class RedisConnectivityDiagnostics {
     }
 
     private String rawLettuceAuthMode(ConnectionSettings settings, String mode,
-                                      String username, String password) throws Exception {
+                                      String username, String password, boolean plain) throws Exception {
         RedisURI uri = RedisURI.builder()
                 .withHost(settings.host())
                 .withPort(settings.port())
@@ -357,13 +356,10 @@ public class RedisConnectivityDiagnostics {
         // unresolved Netty resolver here would test a different path than the
         // Spring factory and could falsely attribute a resolver failure to the
         // protocol handshake.
-        DefaultClientResources resources = DefaultClientResources.builder()
-                .dnsResolver(DnsResolvers.JVM_DEFAULT)
-                .nettyCustomizer(lifecycleNettyCustomizer(lifecycleEvents, lifecycleStarted))
-                .build();
+        DefaultClientResources resources = probeClientResources(!plain, lifecycleEvents, lifecycleStarted);
         RedisClient client = RedisClient.create(resources, uri);
         client.setOptions(ClientOptions.builder().protocolVersion(ProtocolVersion.RESP2).build());
-        lifecycleEvents.add("uri=" + describeUri(uri) + ",resolver=JVM_DEFAULT");
+        lifecycleEvents.add("uri=" + describeUri(uri) + ",resolver=JVM_DEFAULT,instrumented=" + !plain);
         var eventSubscription = resources.eventBus().get()
                 .subscribe(event -> lifecycleEvents.add(renderLifecycleEvent(event,
                         elapsed(lifecycleStarted))));
@@ -721,16 +717,16 @@ public class RedisConnectivityDiagnostics {
             public void afterBootstrapInitialized(Bootstrap bootstrap) {
                 markLifecycle(lifecycleEvents, lifecycleStarted, "bootstrapPrepared/" + safeAddress(bootstrap.config().remoteAddress())
                         + ",options=" + bootstrap.config().options().keySet());
-                ChannelFactory<? extends Channel> originalFactory = bootstrap.config().channelFactory();
-                if (originalFactory != null) {
-                    bootstrap.channelFactory(() -> {
-                        Channel channel = originalFactory.newChannel();
-                        markLifecycle(lifecycleEvents, lifecycleStarted, "channelCreated/" + addressSummary(channel));
-                        channel.closeFuture().addListener(future -> markLifecycle(lifecycleEvents, lifecycleStarted,
-                                "channelCloseFuture"));
-                        return channel;
-                    });
-                }
+                // Deliberately NO channelFactory decoration here: Lettuce's
+                // ConnectionBuilder.configureBootstrap has already set the
+                // channel class, and Bootstrap.channelFactory(...) in Netty
+                // 4.1.113 throws IllegalStateException("channelFactory set
+                // already") for a re-set on BOTH overloads. An A/B experiment
+                // against a real Redis proved the decoration broke every
+                // instrumented connect attempt while plain Lettuce succeeded.
+                // Channel creation is still observable via
+                // afterChannelInitialized below (it fires immediately after
+                // Lettuce's ChannelInitializer.initChannel).
             }
 
             @Override
@@ -785,6 +781,24 @@ public class RedisConnectivityDiagnostics {
                 future.isSuccess()
                         ? "sslHandshakeComplete"
                         : "sslHandshakeFailed:" + errorCategory(future.cause())));
+    }
+
+    /**
+     * Builds the exact {@link ClientResources} used by the instrumented raw
+     * probe. Exposed for A/B regression tests: {@code instrument=false}
+     * produces resolver-only resources with no lifecycle NettyCustomizer, so
+     * tests can construct the identical client minus instrumentation and
+     * prove the customizer cannot alter channel initialization.
+     */
+    static DefaultClientResources probeClientResources(boolean instrument,
+                                                       List<String> lifecycleEvents,
+                                                       long lifecycleStartedNanos) {
+        DefaultClientResources.Builder builder = DefaultClientResources.builder()
+                .dnsResolver(DnsResolvers.JVM_DEFAULT);
+        if (instrument) {
+            builder.nettyCustomizer(lifecycleNettyCustomizer(lifecycleEvents, lifecycleStartedNanos));
+        }
+        return builder.build();
     }
 
     static String describeUri(RedisURI uri) {
