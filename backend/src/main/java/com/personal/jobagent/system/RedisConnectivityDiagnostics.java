@@ -313,7 +313,7 @@ public class RedisConnectivityDiagnostics {
      * setting and password from the same factory as the Spring probe, but does
      * not use Spring Data's shared-connection lock/future.
      */
-    private String rawLettuceProbe(ConnectionSettings settings) throws Exception {
+    String rawLettuceProbe(ConnectionSettings settings) throws Exception {
         String password = effectivePassword();
         if (!hasText(password)) {
             return rawLettuceAuthMode(settings, "password-only", null, null, false);
@@ -338,7 +338,9 @@ public class RedisConnectivityDiagnostics {
             results.add("password-only.FAIL[" + rawFailureDetail(failure) + "]");
         }
         if (firstFailure != null && results.stream().noneMatch(value -> value.contains(":OK"))) {
-            throw firstFailure;
+            // Both modes were attempted; preserve both independent outcomes
+            // instead of surfacing only the first credential-less failure.
+            throw new MultiModeFailure(firstFailure, String.join(";", results));
         }
         return String.join(";", results);
     }
@@ -419,7 +421,8 @@ public class RedisConnectivityDiagnostics {
                     phases.add(mode + ".auth:OK/" + elapsed(started) + "ms[response="
                             + (authResponse == null ? "empty" : "received") + "]");
                 } catch (Exception failure) {
-                    throw new RawPhaseException(mode + ".auth", failure, lifecycleEvents);
+                    throw new RawPhaseException(mode + ".auth", failure, lifecycleEvents,
+                            "not-applicable", String.join(",", phases));
                 }
             } else {
                 phases.add(mode + ".auth:SKIPPED");
@@ -431,7 +434,8 @@ public class RedisConnectivityDiagnostics {
                 phases.add(mode + ".ping:OK/" + elapsed(started) + "ms[response="
                         + (pingResponse == null ? "empty" : "received") + "]");
             } catch (Exception failure) {
-                throw new RawPhaseException(mode + ".ping", failure, lifecycleEvents);
+                throw new RawPhaseException(mode + ".ping", failure, lifecycleEvents,
+                        "not-applicable", String.join(",", phases));
             }
             return String.join(",", phases);
         } catch (RawPhaseException failure) {
@@ -518,7 +522,7 @@ public class RedisConnectivityDiagnostics {
         }
     }
 
-    private ConnectionSettings effectiveSettings() {
+    ConnectionSettings effectiveSettings() {
         String host = properties.getHost();
         int port = properties.getPort();
         boolean sslEnabled = properties.getSsl().isEnabled();
@@ -755,17 +759,33 @@ public class RedisConnectivityDiagnostics {
         /** Deliberately live until the bounded late-event grace has completed. */
         private final List<String> lifecycleEvents;
         private final String eventualResult;
+        private final String phaseTrail;
 
         private RawPhaseException(String phase, Throwable cause, List<String> lifecycleEvents,
                                   String eventualResult) {
+            this(phase, cause, lifecycleEvents, eventualResult, "");
+        }
+
+        private RawPhaseException(String phase, Throwable cause, List<String> lifecycleEvents,
+                                  String eventualResult, String phaseTrail) {
             super(cause);
             this.phase = phase;
             this.lifecycleEvents = lifecycleEvents;
             this.eventualResult = eventualResult;
+            this.phaseTrail = phaseTrail;
         }
 
         private RawPhaseException(String phase, Throwable cause, List<String> lifecycleEvents) {
             this(phase, cause, lifecycleEvents, "not-applicable");
+        }
+    }
+
+    private static final class MultiModeFailure extends Exception {
+        private final String modeResults;
+
+        private MultiModeFailure(Throwable cause, String modeResults) {
+            super(cause);
+            this.modeResults = modeResults;
         }
     }
 
@@ -951,13 +971,19 @@ public class RedisConnectivityDiagnostics {
         return sanitized.length() > 240 ? sanitized.substring(0, 240) + "..." : sanitized;
     }
 
-    private static String rawFailureDetail(Throwable failure) {
+    static String rawFailureDetail(Throwable failure) {
+        if (failure instanceof MultiModeFailure modeFailure) {
+            return "modeResults=" + modeFailure.modeResults;
+        }
         if (failure instanceof RawPhaseException phaseFailure) {
             Throwable cause = phaseFailure.getCause() == null ? phaseFailure : phaseFailure.getCause();
             String events = phaseFailure.lifecycleEvents.isEmpty()
                     ? "none" : String.join(",", phaseFailure.lifecycleEvents);
             return "phase=" + phaseFailure.phase + ":" + errorCategory(cause) + ":" + simpleName(cause)
-                    + "[eventualResult=" + phaseFailure.eventualResult + ",lifecycleEvents=" + events + "]";
+                    + "[causeChain=" + safeCauseChain(cause, null)
+                    + ",eventualResult=" + phaseFailure.eventualResult
+                    + (phaseFailure.phaseTrail.isBlank() ? "" : ",completed=" + phaseFailure.phaseTrail)
+                    + ",lifecycleEvents=" + events + "]";
         }
         return errorCategory(failure) + ":" + simpleName(failure);
     }
@@ -1050,7 +1076,7 @@ public class RedisConnectivityDiagnostics {
                       String errorCategory, String phases) {
     }
 
-    private record ConnectionSettings(String client, String host, int port,
+    record ConnectionSettings(String client, String host, int port,
                                       boolean sslEnabled, boolean authenticationConfigured) {
     }
 }

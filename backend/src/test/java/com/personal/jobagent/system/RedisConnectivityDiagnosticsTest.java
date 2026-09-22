@@ -1,5 +1,6 @@
 package com.personal.jobagent.system;
 
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.actuate.data.redis.RedisHealthIndicator;
 import org.springframework.boot.actuate.health.Status;
@@ -8,6 +9,7 @@ import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.connection.RedisServerCommands;
+import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLParameters;
@@ -410,6 +412,33 @@ class RedisConnectivityDiagnosticsTest {
         assertThat(RedisConnectivityDiagnostics.errorCategory(
                 new java.util.concurrent.CancellationException("observer cancelled")))
                 .isEqualTo("FUTURE_CANCELLED");
+    }
+
+    @Test
+    void credentiallessFailureDoesNotPreventPasswordOnlyModeFromRunning() throws Exception {
+        Assumptions.assumeTrue(RedisLettuceAbExperimentTest.redisAvailable());
+        LettuceConnectionFactory factory = mock(LettuceConnectionFactory.class);
+        when(factory.getHostName()).thenReturn("127.0.0.1");
+        when(factory.getPort()).thenReturn(6379);
+        when(factory.isUseSsl()).thenReturn(false);
+        when(factory.getPassword()).thenReturn("deliberately-wrong-password");
+        RedisProperties properties = properties("127.0.0.1", 6379, false,
+                "deliberately-wrong-password");
+        RedisConnectivityDiagnostics diagnostics =
+                new RedisConnectivityDiagnostics(properties, factory);
+
+        String detail;
+        try {
+            detail = diagnostics.rawLettuceProbe(diagnostics.effectiveSettings());
+        } catch (Exception failure) {
+            detail = RedisConnectivityDiagnostics.rawFailureDetail(failure);
+        }
+
+        // The credential-less mode may fail while password-only succeeds, or
+        // both may fail depending on the local Redis fixture. Either way both
+        // independent mode labels must be present in the final diagnostic.
+        assertThat(detail).contains("explicit-default")
+                .contains("password-only");
     }
 
     @Test
