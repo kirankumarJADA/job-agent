@@ -539,6 +539,28 @@ class RedisConnectivityDiagnosticsTest {
     }
 
     @Test
+    void authenticatedLettuceUrisCarryCredentialsWithoutExposingThemInDescriptions() {
+        RedisConnectivityDiagnostics.ConnectionSettings settings =
+                new RedisConnectivityDiagnostics.ConnectionSettings(
+                        "Lettuce", "upstash.example", 6379, true, true);
+        String password = "configured-password-not-logged";
+
+        io.lettuce.core.RedisURI passwordOnly =
+                RedisConnectivityDiagnostics.authenticatedUri(settings, null, password);
+        io.lettuce.core.RedisURI explicitDefault =
+                RedisConnectivityDiagnostics.authenticatedUri(settings, "default", password);
+
+        assertThat(passwordOnly.getUsername()).isNull();
+        assertThat(passwordOnly.getPassword()).isNotNull().hasSize(password.length());
+        assertThat(explicitDefault.getUsername()).isEqualTo("default");
+        assertThat(explicitDefault.getPassword()).isNotNull().hasSize(password.length());
+        assertThat(RedisConnectivityDiagnostics.describeUri(passwordOnly))
+                .doesNotContain(password, "configured-password");
+        assertThat(RedisConnectivityDiagnostics.describeUri(explicitDefault))
+                .doesNotContain(password, "configured-password");
+    }
+
+    @Test
     void lettuceUriDiagnosticReportsTransportAndProtocolWithoutCredentials() {
         io.lettuce.core.RedisURI uri = io.lettuce.core.RedisURI.builder()
                 .withHost("absolute-skylark-284998.upstash.io")

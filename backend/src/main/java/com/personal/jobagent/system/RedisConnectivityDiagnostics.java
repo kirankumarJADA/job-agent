@@ -347,14 +347,12 @@ public class RedisConnectivityDiagnostics {
 
     private String rawLettuceAuthMode(ConnectionSettings settings, String mode,
                                       String username, String password, boolean plain) throws Exception {
-        RedisURI uri = RedisURI.builder()
-                .withHost(settings.host())
-                .withPort(settings.port())
-                .withSsl(settings.sslEnabled())
-                .withVerifyPeer(settings.sslEnabled())
-                // AUTH is deliberately issued as a separate command below so
-                // connect, AUTH, and PING can be distinguished.
-                .build();
+        // Credentials must be part of Lettuce's URI so its connection
+        // initializer sends AUTH before its first handshake PING. Keeping the
+        // password only in this diagnostic and issuing AUTH afterward is too
+        // late: Upstash rejects that credential-less initialization with
+        // NOAUTH and the ConnectionFuture never reaches the explicit command.
+        RedisURI uri = authenticatedUri(settings, username, password);
         StatefulRedisConnection<String, String> connection = null;
         List<String> phases = new ArrayList<>();
         List<String> lifecycleEvents = new CopyOnWriteArrayList<>();
@@ -900,6 +898,22 @@ public class RedisConnectivityDiagnostics {
         if (instrument) {
             builder.nettyCustomizer(lifecycleNettyCustomizer(lifecycleEvents, lifecycleStartedNanos,
                     lifecycleChannel));
+        }
+        return builder.build();
+    }
+
+    static RedisURI authenticatedUri(ConnectionSettings settings, String username, String password) {
+        RedisURI.Builder builder = RedisURI.builder()
+                .withHost(settings.host())
+                .withPort(settings.port())
+                .withSsl(settings.sslEnabled())
+                .withVerifyPeer(settings.sslEnabled());
+        if (hasText(password)) {
+            if (username == null) {
+                builder.withPassword(password.toCharArray());
+            } else {
+                builder.withAuthentication(username, password.toCharArray());
+            }
         }
         return builder.build();
     }
