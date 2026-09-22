@@ -353,6 +353,66 @@ class RedisConnectivityDiagnosticsTest {
     }
 
     @Test
+    void observationTimeoutDoesNotCancelUnderlyingConnectionFuture() throws Exception {
+        io.lettuce.core.ConnectionFuture<String> future = mock(io.lettuce.core.ConnectionFuture.class);
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(future.get()).thenAnswer(invocation -> {
+            entered.countDown();
+            release.await();
+            return "late";
+        });
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                        RedisConnectivityDiagnostics.observeConnectionFuture(
+                                future, Duration.ofMillis(50)))
+                .isInstanceOf(java.util.concurrent.TimeoutException.class);
+        assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
+        verify(future, org.mockito.Mockito.never()).cancel(org.mockito.ArgumentMatchers.anyBoolean());
+        release.countDown();
+    }
+
+    @Test
+    void lateUnderlyingFailureIsReportedByTheFutureRatherThanDiagnosticCancellation() throws Exception {
+        io.lettuce.core.ConnectionFuture<String> future = mock(io.lettuce.core.ConnectionFuture.class);
+        CountDownLatch terminal = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<Throwable> observed =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        when(future.get()).thenAnswer(invocation -> {
+            terminal.await();
+            throw new java.util.concurrent.ExecutionException(
+                    new io.lettuce.core.RedisConnectionException("real handshake failure"));
+        });
+
+        Thread completer = new Thread(() -> {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            observed.set(new io.lettuce.core.RedisConnectionException("real handshake failure"));
+            terminal.countDown();
+        });
+        completer.start();
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                        RedisConnectivityDiagnostics.observeConnectionFuture(
+                                future, Duration.ofMillis(25)))
+                .isInstanceOf(java.util.concurrent.TimeoutException.class);
+        assertThat(terminal.await(1, TimeUnit.SECONDS)).isTrue();
+        assertThat(observed.get()).isInstanceOf(io.lettuce.core.RedisConnectionException.class);
+        verify(future, org.mockito.Mockito.never()).cancel(org.mockito.ArgumentMatchers.anyBoolean());
+        completer.join(500);
+    }
+
+    @Test
+    void cancellationIsNotReportedAsGenericClientServerError() {
+        assertThat(RedisConnectivityDiagnostics.errorCategory(
+                new java.util.concurrent.CancellationException("observer cancelled")))
+                .isEqualTo("FUTURE_CANCELLED");
+    }
+
+    @Test
     void overallCapIsReportedAsDiagnosticTimeoutNotNetworkTimeout() throws Exception {
         RedisProperties properties = properties("hanging.example", 6379, true, "token");
         RedisConnectionFactory factory = factoryWithInfo();

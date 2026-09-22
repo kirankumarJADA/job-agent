@@ -48,6 +48,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -372,13 +373,18 @@ public class RedisConnectivityDiagnostics {
             long started = System.nanoTime();
             ConnectionFuture<StatefulRedisConnection<String, String>> connectionFuture = null;
             CountDownLatch connectionTerminal = new CountDownLatch(1);
+            AtomicReference<Throwable> terminalFailure = new AtomicReference<>();
+            AtomicReference<String> terminalResult = new AtomicReference<>("pending");
             try {
                 connectionFuture = client.connectAsync(StringCodec.UTF8, uri);
                 lifecycleEvents.add("connectionFutureCreated/" + elapsed(lifecycleStarted) + "ms");
                 connectionFuture.whenComplete((value, failure) -> {
                     if (failure == null) {
+                        terminalResult.set("completed");
                         lifecycleEvents.add("connectionFutureCompleted/" + elapsed(lifecycleStarted) + "ms");
                     } else {
+                        terminalFailure.set(failure);
+                        terminalResult.set("failed");
                         lifecycleEvents.add("connectionFutureFailed/" + elapsed(lifecycleStarted) + "ms["
                                 + errorCategory(failure) + "]");
                         lifecycleEvents.add("connectionFutureFailureChain="
@@ -387,18 +393,20 @@ public class RedisConnectivityDiagnostics {
                     connectionTerminal.countDown();
                 });
                 ConnectionFuture<StatefulRedisConnection<String, String>> future = connectionFuture;
-                connection = bounded(RAW_PHASE_TIMEOUT, future::get);
+                connection = observeConnectionFuture(future, RAW_PHASE_TIMEOUT);
                 phases.add(mode + ".connect:OK/" + elapsed(started) + "ms");
             } catch (Exception failure) {
                 if (connectionFuture != null) {
-                    connectionFuture.cancel(true);
-                    // A timeout only means our observation budget expired. The
-                    // Netty/Lettuce callbacks may still be completing on their
-                    // event loop, so retain the live collector for one bounded
-                    // grace window before rendering the failure trail.
+                    // Never cancel Lettuce's future here. This timeout belongs
+                    // only to the diagnostic observer; cancelling the underlying
+                    // future would turn a real late handshake result into our
+                    // own CancellationException.
                     awaitLateLifecycleEvents(connectionTerminal, lifecycleEvents, LATE_EVENT_GRACE);
                 }
-                throw new RawPhaseException(mode + ".connect", failure, lifecycleEvents);
+                Throwable eventualFailure = terminalFailure.get();
+                throw new RawPhaseException(mode + ".connect",
+                        eventualFailure == null ? failure : eventualFailure,
+                        lifecycleEvents, terminalResult.get());
             }
 
             StatefulRedisConnection<String, String> rawConnection = connection;
@@ -636,6 +644,9 @@ public class RedisConnectivityDiagnostics {
             if (type.contains("ssl") || type.contains("tls") || type.contains("certificate")) {
                 return "TLS";
             }
+            if (current instanceof CancellationException) {
+                return "FUTURE_CANCELLED";
+            }
             if (current instanceof TimeoutException || current instanceof SocketTimeoutException
                     || type.contains("timeout") || message.contains("timed out")
                     || message.contains("timeout")) {
@@ -718,6 +729,13 @@ public class RedisConnectivityDiagnostics {
         return (System.nanoTime() - startedAtNanos) / 1_000_000;
     }
 
+    static <T> T observeConnectionFuture(ConnectionFuture<T> future, Duration timeout) throws Exception {
+        // bounded() may cancel its private waiting task on timeout, but this
+        // task only calls Future.get(); it never owns or cancels the Lettuce
+        // ConnectionFuture itself.
+        return bounded(timeout, future::get);
+    }
+
     static void awaitLateLifecycleEvents(CountDownLatch terminal,
                                           List<String> lifecycleEvents,
                                           Duration grace) {
@@ -736,11 +754,18 @@ public class RedisConnectivityDiagnostics {
         private final String phase;
         /** Deliberately live until the bounded late-event grace has completed. */
         private final List<String> lifecycleEvents;
+        private final String eventualResult;
 
-        private RawPhaseException(String phase, Throwable cause, List<String> lifecycleEvents) {
+        private RawPhaseException(String phase, Throwable cause, List<String> lifecycleEvents,
+                                  String eventualResult) {
             super(cause);
             this.phase = phase;
             this.lifecycleEvents = lifecycleEvents;
+            this.eventualResult = eventualResult;
+        }
+
+        private RawPhaseException(String phase, Throwable cause, List<String> lifecycleEvents) {
+            this(phase, cause, lifecycleEvents, "not-applicable");
         }
     }
 
@@ -932,7 +957,7 @@ public class RedisConnectivityDiagnostics {
             String events = phaseFailure.lifecycleEvents.isEmpty()
                     ? "none" : String.join(",", phaseFailure.lifecycleEvents);
             return "phase=" + phaseFailure.phase + ":" + errorCategory(cause) + ":" + simpleName(cause)
-                    + "[lifecycleEvents=" + events + "]";
+                    + "[eventualResult=" + phaseFailure.eventualResult + ",lifecycleEvents=" + events + "]";
         }
         return errorCategory(failure) + ":" + simpleName(failure);
     }
