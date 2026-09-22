@@ -63,7 +63,7 @@ class RedisConnectivityDiagnosticsTest {
                 .contains("dns:OK").contains("v4=2,v6=0")
                 .contains("tcp:OK").contains("[v4 1/2]")
                 .contains("tls:OK").contains("protocol=TLSv1.3")
-                .contains("pooledInfo:OK");
+                .contains("springSharedNativeInfo:OK");
         verify(hooks.tlsSocket, times(1)).close();
     }
 
@@ -80,7 +80,7 @@ class RedisConnectivityDiagnosticsTest {
         assertThat(diagnostic.authenticationConfigured()).isFalse();
         assertThat(diagnostic.result()).isEqualTo("DOWN");
         assertThat(diagnostic.errorCategory()).isEqualTo("AUTHENTICATION");
-        assertThat(diagnostic.phases()).contains("dns:OK").contains("tcp:OK").contains("pooledInfo:FAIL");
+        assertThat(diagnostic.phases()).contains("dns:OK").contains("tcp:OK").contains("springSharedNativeInfo:FAIL");
     }
 
     @Test
@@ -111,7 +111,7 @@ class RedisConnectivityDiagnosticsTest {
         assertThat(diagnostic.errorCategory()).isEqualTo("DNS");
         assertThat(diagnostic.phases())
                 .contains("dns:FAIL").contains("UnknownHostException")
-                .contains("tcp:SKIPPED").contains("tls:SKIPPED").contains("pooledInfo:SKIPPED");
+                .contains("tcp:SKIPPED").contains("tls:SKIPPED").contains("springSharedNativeInfo:SKIPPED");
     }
 
     @Test
@@ -128,7 +128,7 @@ class RedisConnectivityDiagnosticsTest {
         assertThat(diagnostic.errorCategory()).isEqualTo("CONNECTION");
         assertThat(diagnostic.phases())
                 .contains("tcp:FAIL").contains("0/2").contains("last=ConnectException")
-                .contains("tls:SKIPPED").contains("pooledInfo:SKIPPED");
+                .contains("tls:SKIPPED").contains("springSharedNativeInfo:SKIPPED");
         for (Socket socket : hooks.sockets) {
             verify(socket, times(1)).close();
         }
@@ -148,7 +148,7 @@ class RedisConnectivityDiagnosticsTest {
         assertThat(diagnostic.phases())
                 .contains("dns:OK")
                 .contains("tcp:OK").contains("[v4 2/2]")
-                .contains("tls:OK").contains("pooledInfo:OK");
+                .contains("tls:OK").contains("springSharedNativeInfo:OK");
     }
 
     @Test
@@ -166,7 +166,7 @@ class RedisConnectivityDiagnosticsTest {
         assertThat(diagnostic.phases())
                 .contains("dns:OK").contains("tcp:OK")
                 .contains("tls:FAIL").contains("SocketTimeoutException")
-                .contains("pooledInfo:SKIPPED");
+                .contains("springSharedNativeInfo:SKIPPED");
         verify(hooks.tlsSocket, times(1)).close();
     }
 
@@ -186,18 +186,14 @@ class RedisConnectivityDiagnosticsTest {
     }
 
     @Test
-    void pooledInfoTimeoutIsPhaseAttributedRatherThanBlanketTimeout() throws Exception {
-        // Regression for the production misattribution: a hanging pooled probe
-        // must be reported as a pooledInfo phase failure, never as a blanket
+    void springSharedNativeInfoTimeoutIsPhaseAttributedRatherThanBlanketTimeout() throws Exception {
+        // Regression for the production misattribution: a hanging shared-native probe
+        // must be reported as a springSharedNativeInfo phase failure, never as a blanket
         // DIAGNOSTIC_TIMEOUT/TIMEOUT from the previous all-or-nothing orTimeout.
         RedisProperties properties = properties("hangingpool.example", 6379, true, "token");
         RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
-        CountDownLatch entered = new CountDownLatch(1);
-        when(factory.getConnection()).thenAnswer(invocation -> {
-            entered.countDown();
-            Thread.sleep(10_000);
-            return mock(RedisConnection.class);
-        });
+        when(factory.getConnection()).thenThrow(new RedisConnectionFailureException(
+                "factory timeout", new SocketTimeoutException("factory timeout")));
         FakeHooks hooks = FakeHooks.healthy(1);
 
         RedisConnectivityDiagnostics.Diagnostic diagnostic =
@@ -208,12 +204,36 @@ class RedisConnectivityDiagnosticsTest {
         assertThat(diagnostic.errorCategory()).isEqualTo("TIMEOUT");
         assertThat(diagnostic.phases())
                 .contains("dns:OK").contains("tcp:OK").contains("tls:OK")
-                .contains("pooledInfo:FAIL");
-        assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
+                .contains("springSharedNativeInfo:FAIL");
     }
 
     @Test
-    void pooledSubPhasesAreRecordedOnSuccess() throws Exception {
+    void lateSpringFactoryOperationIsRetainedAndReleasedAfterObservationTimeout() throws Exception {
+        RedisProperties properties = properties("slow-factory.example", 6379, false, "token");
+        RedisConnection connection = mock(RedisConnection.class);
+        RedisServerCommands serverCommands = mock(RedisServerCommands.class);
+        when(connection.serverCommands()).thenReturn(serverCommands);
+        when(serverCommands.info()).thenReturn(new java.util.Properties());
+        RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
+        CountDownLatch entered = new CountDownLatch(1);
+        when(factory.getConnection()).thenAnswer(invocation -> {
+            entered.countDown();
+            Thread.sleep(100);
+            return connection;
+        });
+        FakeHooks hooks = FakeHooks.healthy(1);
+
+        RedisConnectivityDiagnostics.Diagnostic diagnostic =
+                new RedisConnectivityDiagnostics(properties, factory).diagnose(hooks, Duration.ofMillis(25));
+
+        assertThat(diagnostic.phases()).contains("springSharedNativeInfo:FAIL")
+                .contains("observationTimeout,inFlight=true,completionTracked=true");
+        assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
+        verify(connection, org.mockito.Mockito.timeout(2_000)).close();
+    }
+
+    @Test
+    void springFactorySubPhasesAreRecordedOnSuccess() throws Exception {
         RedisProperties properties = properties("upstash.example", 6379, true, "token");
         RedisConnectionFactory factory = factoryWithInfo();
         FakeHooks hooks = FakeHooks.healthy(1);
@@ -222,8 +242,8 @@ class RedisConnectivityDiagnosticsTest {
 
         assertThat(diagnostic.result()).isEqualTo("UP");
         assertThat(diagnostic.phases())
-                .contains("pooledInfo:OK")
-                .contains("acquire:OK").contains("info:OK").contains("release:OK");
+                .contains("springSharedNativeInfo:OK")
+                .contains("factoryAcquire:OK").contains("factoryInfo:OK").contains("factoryRelease:OK");
     }
 
     @Test
@@ -245,8 +265,8 @@ class RedisConnectivityDiagnosticsTest {
         assertThat(diagnostic.result()).isEqualTo("DOWN");
         assertThat(diagnostic.errorCategory()).isEqualTo("AUTHENTICATION");
         assertThat(diagnostic.phases())
-                .contains("pooledInfo:FAIL").contains("acquire:FAIL");
-        assertThat(diagnostic.phases()).doesNotContain("info:OK");
+                .contains("springSharedNativeInfo:FAIL").contains("factoryAcquire:FAIL");
+        assertThat(diagnostic.phases()).doesNotContain("factoryInfo:OK");
     }
 
     @Test
@@ -255,10 +275,8 @@ class RedisConnectivityDiagnosticsTest {
         RedisConnection connection = mock(RedisConnection.class);
         RedisServerCommands serverCommands = mock(RedisServerCommands.class);
         when(connection.serverCommands()).thenReturn(serverCommands);
-        when(serverCommands.info()).thenAnswer(invocation -> {
-            Thread.sleep(1_000);
-            return new java.util.Properties();
-        });
+        when(serverCommands.info()).thenThrow(new RuntimeException(
+                new SocketTimeoutException("INFO timed out")));
         RedisConnectionFactory factory = factory(connection);
         FakeHooks hooks = FakeHooks.healthy(1);
 
@@ -267,9 +285,8 @@ class RedisConnectivityDiagnosticsTest {
 
         assertThat(diagnostic.result()).isEqualTo("DOWN");
         assertThat(diagnostic.errorCategory()).isEqualTo("TIMEOUT");
-        assertThat(diagnostic.phases()).contains("pooledInfo:FAIL").contains("acquire:OK");
-        // CompletableFuture cancellation does not interrupt the abandoned probe
-        // thread; it must still release the connection from its own finally.
+        assertThat(diagnostic.phases()).contains("springSharedNativeInfo:FAIL").contains("factoryAcquire:OK");
+        // The Spring factory path releases the wrapper even when INFO fails.
         verify(connection, org.mockito.Mockito.timeout(5_000).atLeastOnce()).close();
     }
 
@@ -277,12 +294,8 @@ class RedisConnectivityDiagnosticsTest {
     void acquireTimeoutIsRecordedAsAcquireSubPhase() throws Exception {
         RedisProperties properties = properties("hangingacquire.example", 6379, true, "token");
         RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
-        CountDownLatch entered = new CountDownLatch(1);
-        when(factory.getConnection()).thenAnswer(invocation -> {
-            entered.countDown();
-            Thread.sleep(10_000);
-            return mock(RedisConnection.class);
-        });
+        when(factory.getConnection()).thenThrow(new RedisConnectionFailureException(
+                "factory timeout", new SocketTimeoutException("factory timeout")));
         FakeHooks hooks = FakeHooks.healthy(1);
 
         var diagnostic = new RedisConnectivityDiagnostics(properties, factory)
@@ -290,8 +303,7 @@ class RedisConnectivityDiagnosticsTest {
 
         assertThat(diagnostic.result()).isEqualTo("DOWN");
         assertThat(diagnostic.errorCategory()).isEqualTo("TIMEOUT");
-        assertThat(diagnostic.phases()).contains("pooledInfo:FAIL").contains("acquire:FAIL").contains("[timeout]");
-        assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
+        assertThat(diagnostic.phases()).contains("springSharedNativeInfo:FAIL").contains("factoryAcquire:FAIL");
     }
 
     @Test
@@ -437,8 +449,48 @@ class RedisConnectivityDiagnosticsTest {
         // The credential-less mode may fail while password-only succeeds, or
         // both may fail depending on the local Redis fixture. Either way both
         // independent mode labels must be present in the final diagnostic.
-        assertThat(detail).contains("explicit-default")
-                .contains("password-only");
+        assertThat(detail).contains("spring-equivalent")
+                .contains("raw-resp2")
+                .contains("raw-auto-2s");
+    }
+
+    @Test
+    void authenticatedProtocolComparisonRunsAllThreeModesAgainstDisposableRedis() throws Exception {
+        Assumptions.assumeTrue(redisProtocolFixtureAvailable(),
+                "disposable authenticated Redis fixture is not running");
+        LettuceConnectionFactory factory = mock(LettuceConnectionFactory.class);
+        when(factory.getHostName()).thenReturn("127.0.0.1");
+        when(factory.getPort()).thenReturn(6380);
+        when(factory.isUseSsl()).thenReturn(false);
+        when(factory.getPassword()).thenReturn("test-pass");
+        RedisProperties properties = properties("127.0.0.1", 6380, false, "test-pass");
+        RedisConnectivityDiagnostics diagnostics =
+                new RedisConnectivityDiagnostics(properties, factory);
+
+        String detail = diagnostics.rawLettuceProbe(diagnostics.effectiveSettings());
+
+        assertThat(detail).contains("spring-equivalent")
+                .contains("spring-equivalent.connect:OK")
+                .contains("spring-equivalent.auth:OK")
+                .contains("spring-equivalent.ping:OK")
+                .contains("raw-resp2.connect:OK")
+                .contains("raw-resp2.auth:OK")
+                .contains("raw-resp2.ping:OK")
+                .contains("raw-auto-2s.connect:OK")
+                .contains("raw-auto-2s.auth:OK")
+                .contains("raw-auto-2s.ping:OK")
+                .contains("protocol=AUTO")
+                .contains("protocol=RESP2")
+                .contains("uriTimeout=2000ms");
+    }
+
+    private static boolean redisProtocolFixtureAvailable() {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress("127.0.0.1", 6380), 1000);
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     @Test
@@ -476,8 +528,9 @@ class RedisConnectivityDiagnosticsTest {
         CompletableFuture<RedisConnectivityDiagnostics.Diagnostic> probe =
                 diagnostics.probeAsync(Duration.ofMillis(120));
 
-        Throwable failure = probe.handle((value, error) -> error).get(3, TimeUnit.SECONDS);
-        assertThat(failure).isNotNull();
+        RedisConnectivityDiagnostics.Diagnostic diagnostic = probe.get(3, TimeUnit.SECONDS);
+        assertThat(diagnostic.result()).isEqualTo("DOWN");
+        assertThat(diagnostic.errorCategory()).isEqualTo("TIMEOUT");
     }
 
     @Test
@@ -569,7 +622,7 @@ class RedisConnectivityDiagnosticsTest {
                 .build();
 
         assertThat(RedisConnectivityDiagnostics.describeUri(uri))
-                .isEqualTo("scheme=rediss,host=absolute-skylark-284998.upstash.io,port=6379,ssl=true,protocol=RESP2")
+                .isEqualTo("scheme=rediss,host=absolute-skylark-284998.upstash.io,port=6379,ssl=true,protocol=RESP2,uriTimeout=60000ms")
                 .doesNotContain("password", "token");
     }
 

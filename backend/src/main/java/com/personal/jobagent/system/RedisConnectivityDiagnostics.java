@@ -11,6 +11,8 @@ import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactor
 import org.springframework.stereotype.Component;
 
 import io.lettuce.core.ClientOptions;
+import io.lettuce.core.SocketOptions;
+import io.lettuce.core.TimeoutOptions;
 import io.lettuce.core.ConnectionFuture;
 import io.lettuce.core.protocol.ProtocolVersion;
 import io.lettuce.core.RedisClient;
@@ -72,10 +74,11 @@ import java.security.NoSuchAlgorithmException;
  *   dns        -> resolve the configured host (A/AAAA counts)
  *   tcp        -> plain TCP connect against each resolved address (v4 first)
  *   tls        -> TLS handshake with SNI against the first reachable address
- *   pooledInfo -> pooled round-trip through the shared RedisConnectionFactory
- *                 (the same probe Spring Boot's RedisHealthIndicator uses),
- *                 with sub-phases acquire (pool wait + connect + AUTH), info
- *                 (command round-trip), and release (connection close)
+ *   springSharedNativeInfo -> Spring shared-native round-trip through the
+ *                 configured RedisConnectionFactory
+ *                 (the same connection path Spring Boot's RedisHealthIndicator uses),
+ *                 with sub-phases acquire (shared connection initialization + AUTH),
+ *                 info (command round-trip), and release (connection close)
  * </pre>
  *
  * <p>Each phase has a strict timeout. The diagnostic never blocks startup and
@@ -85,12 +88,12 @@ import java.security.NoSuchAlgorithmException;
 public class RedisConnectivityDiagnostics {
     private static final Logger log = LoggerFactory.getLogger(RedisConnectivityDiagnostics.class);
 
-    /** Overall asynchronous safety cap; individual phases have their own budgets. */
+    /** Overall asynchronous safety cap retained for diagnostic compatibility; phases have their own budgets. */
     static final Duration PROBE_TIMEOUT = Duration.ofSeconds(20);
     static final Duration DNS_TIMEOUT = Duration.ofSeconds(2);
     static final Duration TCP_TIMEOUT = Duration.ofSeconds(2);
     static final Duration TLS_TIMEOUT = Duration.ofSeconds(3);
-    static final Duration POOLED_INFO_TIMEOUT = Duration.ofSeconds(3);
+    static final Duration SPRING_FACTORY_INFO_TIMEOUT = Duration.ofSeconds(3);
     static final Duration RAW_PHASE_TIMEOUT = Duration.ofSeconds(2);
     static final Duration RAW_TOTAL_TIMEOUT = Duration.ofSeconds(10);
     static final Duration LATE_EVENT_GRACE = Duration.ofMillis(1500);
@@ -137,9 +140,12 @@ public class RedisConnectivityDiagnostics {
     }
 
     CompletableFuture<Diagnostic> probeAsync(Duration overallTimeout) {
-        return CompletableFuture
-                .supplyAsync(this::diagnose, PROBE_EXECUTOR)
-                .orTimeout(overallTimeout.toMillis(), TimeUnit.MILLISECONDS);
+        // Every external phase has its own bound. Do not apply CompletableFuture
+        // orTimeout() to the whole diagnosis: that only times out observation
+        // and can leave a shared Lettuce operation running without a retained
+        // completion path. The argument is retained for source compatibility;
+        // phase-specific bounds are authoritative.
+        return CompletableFuture.supplyAsync(this::diagnose, PROBE_EXECUTOR);
     }
 
     private void logDiagnostic(Diagnostic diagnostic) {
@@ -152,7 +158,7 @@ public class RedisConnectivityDiagnostics {
     }
 
     Diagnostic diagnose() {
-        return diagnose(hooks(), POOLED_INFO_TIMEOUT);
+        return diagnose(hooks(), SPRING_FACTORY_INFO_TIMEOUT);
     }
 
     /** Overridable in tests so the asynchronous listener path stays fakeable. */
@@ -162,9 +168,9 @@ public class RedisConnectivityDiagnostics {
 
     /**
      * Package-private overloads let unit tests fake the network and bound the
-     * pooled phase, so tests never touch real endpoints.
+     * Spring factory phase, so tests never touch real endpoints.
      */
-    Diagnostic diagnose(Hooks hooks, Duration pooledInfoTimeout) {
+    Diagnostic diagnose(Hooks hooks, Duration springSharedNativeInfoTimeout) {
         ConnectionSettings s = effectiveSettings();
         List<Phase> phases = new ArrayList<>();
 
@@ -272,87 +278,154 @@ public class RedisConnectivityDiagnostics {
             phases.add(Phase.skipped("tls"));
         }
 
-        // ---- Phase 4: pooled INFO through the real client ----------------
-        // Sub-phases make the historical 3000ms TimeoutException attributable:
-        // acquire covers pool wait + connection establishment + AUTH (Lettuce
-        // authenticates while establishing the native connection), info is the
-        // command round-trip, release is the connection close. The whole
-        // section stays bounded by pooledInfoTimeout; on timeout the abandoned
-        // probe closes its own connection in its finally.
-        long t3 = System.nanoTime();
-        List<Phase> pooled = Collections.synchronizedList(new ArrayList<>());
+        // ---- Phase 4: Spring's shared-native connection ------------------
+        // This is deliberately named springSharedNativeInfo: Spring Boot does
+        // not enable Commons Pool here. With shareNativeConnection=true,
+        // getConnection() initializes one native connection under
+        // LettuceConnectionFactory's internal lock. The diagnostic observes
+        // this same path with a bounded wait, never cancels the operation, and
+        // retains a completion callback that logs any late terminal result.
+        SpringFactoryObservation spring = observeSpringFactoryInfo(springSharedNativeInfoTimeout);
+        phases.add(spring.phase());
+
+        long rawStart = System.nanoTime();
         try {
-            bounded(pooledInfoTimeout, () -> pooledProbe(pooled));
-            phases.add(Phase.ok("pooledInfo", elapsed(t3), renderSubPhases(pooled)));
-            return up(s, phases);
-        } catch (Exception failure) {
-            boolean probeTimedOut = failure instanceof TimeoutException
-                    || failure instanceof SocketTimeoutException;
-            if (probeTimedOut) {
-                if (pooled.isEmpty()) {
-                    pooled.add(Phase.fail("acquire", elapsed(t3), "timeout"));
-                } else if (!hasPhaseNamed(pooled, "info")) {
-                    pooled.add(Phase.fail("info", elapsed(t3), "timeout"));
-                }
-            }
-            phases.add(Phase.fail("pooledInfo", elapsed(t3), renderSubPhases(pooled)));
-            long rawStart = System.nanoTime();
-            try {
-                String rawDetail = bounded(RAW_TOTAL_TIMEOUT, () -> rawLettuceProbe(s));
-                phases.add(Phase.ok("rawLettuce", elapsed(rawStart), rawDetail));
-            } catch (Exception rawFailure) {
-                phases.add(Phase.fail("rawLettuce", elapsed(rawStart),
-                        rawFailureDetail(rawFailure)));
-            }
-            return down(s, phases, errorCategory(failure));
+            String rawDetail = rawLettuceProbe(s);
+            phases.add(Phase.ok("protocolComparison", elapsed(rawStart), rawDetail));
+        } catch (Exception rawFailure) {
+            phases.add(Phase.fail("protocolComparison", elapsed(rawStart),
+                    rawFailureDetail(rawFailure)));
         }
+        return spring.failure() == null
+                ? up(s, phases)
+                : down(s, phases, errorCategory(spring.failure()));
     }
 
     /**
-     * Direct Lettuce comparison probe. It uses the effective endpoint, TLS
-     * setting and password from the same factory as the Spring probe, but does
-     * not use Spring Data's shared-connection lock/future.
+     * Executes the real Spring Data path in a retained observation future.
+     * The caller waits only for the diagnostic observation budget and never
+     * cancels the shared-native operation. If it runs late, the retained
+     * completion callback records its eventual terminal result, so no operation
+     * is abandoned without a recorded outcome.
+     */
+    private SpringFactoryObservation observeSpringFactoryInfo(Duration timeout) {
+        List<Phase> phases = Collections.synchronizedList(new ArrayList<>());
+        long started = System.nanoTime();
+        CompletableFuture<SpringFactoryOutcome> operation = CompletableFuture.supplyAsync(() -> {
+            try {
+                springFactoryProbe(phases);
+                return new SpringFactoryOutcome(null);
+            } catch (Throwable failure) {
+                return new SpringFactoryOutcome(failure);
+            }
+        }, PROBE_EXECUTOR);
+        operation.whenComplete((outcome, callbackFailure) -> {
+            Throwable failure = callbackFailure != null
+                    ? callbackFailure
+                    : outcome == null ? null : outcome.failure();
+            log.info("Redis Spring shared-native comparison completed: elapsedMs={}, result={}, "
+                            + "errorCategory={}, phases={}",
+                    elapsed(started), failure == null ? "UP" : "DOWN",
+                    failure == null ? "none" : errorCategory(failure), renderSubPhases(phases));
+        });
+        try {
+            SpringFactoryOutcome outcome = operation.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            Throwable failure = outcome.failure();
+            if (failure == null) {
+                return new SpringFactoryObservation(
+                        Phase.ok("springSharedNativeInfo", elapsed(started), renderSubPhases(phases)), null);
+            }
+            if (phases.isEmpty()) {
+                phases.add(Phase.fail("factoryAcquire", elapsed(started), simpleName(failure)));
+            }
+            return new SpringFactoryObservation(
+                    Phase.fail("springSharedNativeInfo", elapsed(started), renderSubPhases(phases)), failure);
+        } catch (TimeoutException timeoutFailure) {
+            phases.add(Phase.fail("factoryAcquire", elapsed(started), "observationTimeout,inFlight=true,completionTracked=true"));
+            return new SpringFactoryObservation(
+                    Phase.fail("springSharedNativeInfo", elapsed(started), renderSubPhases(phases)), timeoutFailure);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            phases.add(Phase.fail("factoryAcquire", elapsed(started), "interrupted"));
+            return new SpringFactoryObservation(
+                    Phase.fail("springSharedNativeInfo", elapsed(started), renderSubPhases(phases)), interrupted);
+        } catch (ExecutionException execution) {
+            Throwable failure = execution.getCause() == null ? execution : execution.getCause();
+            phases.add(Phase.fail("factoryAcquire", elapsed(started), simpleName(failure)));
+            return new SpringFactoryObservation(
+                    Phase.fail("springSharedNativeInfo", elapsed(started), renderSubPhases(phases)), failure);
+        }
+    }
+
+    private boolean springFactoryProbe(List<Phase> phases) throws Exception {
+        long acquireStart = System.nanoTime();
+        RedisConnection connection = null;
+        try {
+            connection = connectionFactory.getConnection();
+            phases.add(Phase.ok("factoryAcquire", elapsed(acquireStart), null));
+        } catch (Exception failure) {
+            phases.add(Phase.fail("factoryAcquire", elapsed(acquireStart),
+                    simpleName(failure) + ",causeChain=" + safeCauseChain(failure, null)));
+            throw failure;
+        }
+        long infoStart = System.nanoTime();
+        try {
+            if (connection.serverCommands().info() == null) {
+                phases.add(Phase.fail("factoryInfo", elapsed(infoStart), "empty-response"));
+                throw new IllegalStateException("Redis INFO returned no response");
+            }
+            phases.add(Phase.ok("factoryInfo", elapsed(infoStart), null));
+        } catch (Exception failure) {
+            if (!hasPhaseNamed(phases, "factoryInfo")) {
+                phases.add(Phase.fail("factoryInfo", elapsed(infoStart),
+                        simpleName(failure) + ",causeChain=" + safeCauseChain(failure, null)));
+            }
+            throw failure;
+        } finally {
+            if (connection != null) {
+                long releaseStart = System.nanoTime();
+                closeConnectionQuietly(connection);
+                phases.add(Phase.ok("factoryRelease", elapsed(releaseStart), null));
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Runs three independent authenticated comparisons. The first is the
+     * Spring-equivalent Lettuce construction (automatic protocol plus the same
+     * two-second URI initialization timeout), followed by RESP2 and automatic
+     * protocol controls. Each result is retained independently.
      */
     String rawLettuceProbe(ConnectionSettings settings) throws Exception {
         String password = effectivePassword();
         if (!hasText(password)) {
-            return rawLettuceAuthMode(settings, "password-only", null, null, false);
+            return "protocolComparison.SKIPPED[authentication-not-configured]";
         }
-        // Test both representations used by Redis clients. Spring's standalone
-        // configuration commonly emits password-only AUTH; an explicit default
-        // user exercises the ACL form used by Redis 6+/Upstash.
         List<String> results = new ArrayList<>();
-        RawPhaseException firstFailure = null;
-        try {
-            results.add(rawLettuceAuthMode(settings, "explicit-default", "default", password, false));
-        } catch (RawPhaseException failure) {
-            firstFailure = failure;
-            results.add("explicit-default.FAIL[" + rawFailureDetail(failure) + "]");
-        }
-        try {
-            results.add(rawLettuceAuthMode(settings, "password-only", null, password, false));
-        } catch (RawPhaseException failure) {
-            if (firstFailure == null) {
-                firstFailure = failure;
-            }
-            results.add("password-only.FAIL[" + rawFailureDetail(failure) + "]");
-        }
-        if (firstFailure != null && results.stream().noneMatch(value -> value.contains(":OK"))) {
-            // Both modes were attempted; preserve both independent outcomes
-            // instead of surfacing only the first credential-less failure.
-            throw new MultiModeFailure(firstFailure, String.join(";", results));
-        }
+        results.add(runProtocolComparison(settings, "spring-equivalent", null, password, Duration.ofSeconds(2)));
+        results.add(runProtocolComparison(settings, "raw-resp2", ProtocolVersion.RESP2, password, null));
+        results.add(runProtocolComparison(settings, "raw-auto-2s", null, password, Duration.ofSeconds(2)));
         return String.join(";", results);
     }
 
+    private String runProtocolComparison(ConnectionSettings settings, String mode,
+                                         ProtocolVersion protocol, String password,
+                                         Duration uriTimeout) {
+        try {
+            return rawLettuceAuthMode(settings, mode, null, password, false, protocol, uriTimeout);
+        } catch (Exception failure) {
+            return mode + ".FAIL[" + rawFailureDetail(failure) + "]";
+        }
+    }
+
     private String rawLettuceAuthMode(ConnectionSettings settings, String mode,
-                                      String username, String password, boolean plain) throws Exception {
+                                      String username, String password, boolean plain,
+                                      ProtocolVersion protocol, Duration uriTimeout) throws Exception {
         // Credentials must be part of Lettuce's URI so its connection
-        // initializer sends AUTH before its first handshake PING. Keeping the
-        // password only in this diagnostic and issuing AUTH afterward is too
-        // late: Upstash rejects that credential-less initialization with
-        // NOAUTH and the ConnectionFuture never reaches the explicit command.
-        RedisURI uri = authenticatedUri(settings, username, password);
+        // initializer performs AUTH before the connection future completes.
+        // This is the same placement used by Spring's standalone factory.
+        RedisURI uri = authenticatedUri(settings, username, password, uriTimeout);
         StatefulRedisConnection<String, String> connection = null;
         List<String> phases = new ArrayList<>();
         List<String> lifecycleEvents = new CopyOnWriteArrayList<>();
@@ -364,8 +437,15 @@ public class RedisConnectivityDiagnostics {
         // protocol handshake.
         DefaultClientResources resources = probeClientResources(!plain, lifecycleEvents, lifecycleStarted, lifecycleChannel);
         RedisClient client = RedisClient.create(resources, uri);
-        client.setOptions(ClientOptions.builder().protocolVersion(ProtocolVersion.RESP2).build());
-        lifecycleEvents.add("uri=" + describeUri(uri) + ",resolver=JVM_DEFAULT,instrumented=" + !plain);
+        ClientOptions.Builder clientOptions = ClientOptions.builder()
+                .socketOptions(SocketOptions.builder().connectTimeout(RAW_PHASE_TIMEOUT).build())
+                .timeoutOptions(TimeoutOptions.enabled());
+        if (protocol != null) {
+            clientOptions.protocolVersion(protocol);
+        }
+        client.setOptions(clientOptions.build());
+        lifecycleEvents.add("uri=" + describeUri(uri, protocol == null ? "AUTO" : protocol.name())
+                + ",resolver=JVM_DEFAULT,instrumented=" + !plain);
         var eventSubscription = resources.eventBus().get()
                 .subscribe(event -> lifecycleEvents.add(renderLifecycleEvent(event,
                         elapsed(lifecycleStarted))));
@@ -395,6 +475,11 @@ public class RedisConnectivityDiagnostics {
                 ConnectionFuture<StatefulRedisConnection<String, String>> future = connectionFuture;
                 connection = observeConnectionFuture(future, RAW_PHASE_TIMEOUT);
                 phases.add(mode + ".connect:OK/" + elapsed(started) + "ms");
+                // Credentials are attached to the URI. Lettuce therefore
+                // performs AUTH during its connection initializer, before the
+                // ConnectionFuture completes; a second manual AUTH would not
+                // be equivalent to Spring and can produce false failures.
+                phases.add(mode + ".auth:OK/" + elapsed(started) + "ms[initializer]");
             } catch (Exception failure) {
                 if (connectionFuture != null) {
                     // Never cancel Lettuce's future here. This timeout belongs
@@ -404,28 +489,15 @@ public class RedisConnectivityDiagnostics {
                     awaitLateLifecycleEvents(connectionTerminal, lifecycleEvents, LATE_EVENT_GRACE);
                 }
                 Throwable eventualFailure = terminalFailure.get();
+                Throwable root = eventualFailure == null ? failure : eventualFailure;
+                String authStage = errorCategory(root).equals("AUTHENTICATION")
+                        ? mode + ".auth:FAIL[" + safeCauseChain(root, lifecycleChannel.get()) + "]"
+                        : mode + ".auth:NOT_REACHED";
                 throw new RawPhaseException(mode + ".connect",
-                        eventualFailure == null ? failure : eventualFailure,
-                        lifecycleEvents, terminalResult.get());
+                        root, lifecycleEvents, terminalResult.get(), authStage);
             }
 
             StatefulRedisConnection<String, String> rawConnection = connection;
-            if (hasText(password)) {
-                started = System.nanoTime();
-                try {
-                    String authResponse = bounded(RAW_PHASE_TIMEOUT, () -> username == null
-                            ? rawConnection.sync().auth(password)
-                            : rawConnection.sync().auth(username, password));
-                    phases.add(mode + ".auth:OK/" + elapsed(started) + "ms[response="
-                            + (authResponse == null ? "empty" : "received") + "]");
-                } catch (Exception failure) {
-                    throw new RawPhaseException(mode + ".auth", failure, lifecycleEvents,
-                            "not-applicable", String.join(",", phases));
-                }
-            } else {
-                phases.add(mode + ".auth:SKIPPED");
-            }
-
             started = System.nanoTime();
             try {
                 String pingResponse = bounded(RAW_PHASE_TIMEOUT, () -> rawConnection.sync().ping());
@@ -435,7 +507,10 @@ public class RedisConnectivityDiagnostics {
                 throw new RawPhaseException(mode + ".ping", failure, lifecycleEvents,
                         "not-applicable", String.join(",", phases));
             }
-            return String.join(",", phases);
+            String protocolLabel = protocol == null ? "AUTO" : protocol.name();
+            return mode + "{protocol=" + protocolLabel
+                    + ",uriTimeout=" + uri.getTimeout().toMillis() + "ms,phases="
+                    + String.join(",", phases) + "}";
         } catch (RawPhaseException failure) {
             throw failure;
         } finally {
@@ -446,43 +521,6 @@ public class RedisConnectivityDiagnostics {
             client.shutdown();
             resources.shutdown();
         }
-    }
-
-    /**
-     * One full pooled round-trip. Runs on a probe-executor thread under the
-     * caller's overall budget; records each sub-phase into {@code pooled} as
-     * it completes so a timeout reveals exactly where the probe was stuck.
-     */
-    private boolean pooledProbe(List<Phase> pooled) throws Exception {
-        long acquireStart = System.nanoTime();
-        RedisConnection connection = null;
-        try {
-            connection = connectionFactory.getConnection();
-            pooled.add(Phase.ok("acquire", elapsed(acquireStart), null));
-        } catch (Exception failure) {
-            pooled.add(Phase.fail("acquire", elapsed(acquireStart), simpleName(failure)));
-            throw failure;
-        }
-        long infoStart = System.nanoTime();
-        try {
-            if (connection.serverCommands().info() == null) {
-                pooled.add(Phase.fail("info", elapsed(infoStart), "empty-response"));
-                throw new IllegalStateException("Redis INFO returned no response");
-            }
-            pooled.add(Phase.ok("info", elapsed(infoStart), null));
-        } catch (Exception failure) {
-            if (hasPhaseNamed(pooled, "acquire") && !hasPhaseNamed(pooled, "info")) {
-                pooled.add(Phase.fail("info", elapsed(infoStart), simpleName(failure)));
-            }
-            throw failure;
-        } finally {
-            if (connection != null) {
-                long releaseStart = System.nanoTime();
-                closeConnectionQuietly(connection);
-                pooled.add(Phase.ok("release", elapsed(releaseStart), null));
-            }
-        }
-        return true;
     }
 
     private static boolean hasPhaseNamed(List<Phase> phases, String name) {
@@ -599,7 +637,7 @@ public class RedisConnectivityDiagnostics {
     }
 
     /**
-     * Phase-level category for the direct socket phases. The pooled phase uses
+     * Phase-level category for the direct socket phases. The shared-native phase uses
      * {@link #errorCategory(Throwable)} so its mapping stays aligned with the
      * historical diagnostic output.
      */
@@ -640,7 +678,9 @@ public class RedisConnectivityDiagnostics {
                     || type.contains("wrongpassword") || type.contains("invalidpassword")
                     || message.contains("noauth") || message.contains("wrongpass")
                     || message.contains("authentication required")
-                    || message.contains("invalid username-password pair")) {
+                    || message.contains("invalid username-password pair")
+                    || message.contains("err auth")
+                    || message.contains(" auth ")) {
                 return "AUTHENTICATION";
             }
             if (type.contains("ssl") || type.contains("tls") || type.contains("certificate")) {
@@ -679,7 +719,7 @@ public class RedisConnectivityDiagnostics {
                 s.authenticationConfigured(), "DOWN", category, render(phases));
     }
 
-    private static final List<String> PHASE_ORDER = List.of("dns", "tcp", "tls", "pooledInfo", "rawLettuce");
+    private static final List<String> PHASE_ORDER = List.of("dns", "tcp", "tls", "springSharedNativeInfo", "protocolComparison");
 
     private static void markRemainingSkipped(List<Phase> phases) {
         String last = phases.isEmpty() ? null : phases.get(phases.size() - 1).name();
@@ -776,6 +816,12 @@ public class RedisConnectivityDiagnostics {
         private RawPhaseException(String phase, Throwable cause, List<String> lifecycleEvents) {
             this(phase, cause, lifecycleEvents, "not-applicable");
         }
+    }
+
+    private record SpringFactoryOutcome(Throwable failure) {
+    }
+
+    private record SpringFactoryObservation(Phase phase, Throwable failure) {
     }
 
     private static final class MultiModeFailure extends Exception {
@@ -903,11 +949,19 @@ public class RedisConnectivityDiagnostics {
     }
 
     static RedisURI authenticatedUri(ConnectionSettings settings, String username, String password) {
+        return authenticatedUri(settings, username, password, null);
+    }
+
+    static RedisURI authenticatedUri(ConnectionSettings settings, String username, String password,
+                                     Duration uriTimeout) {
         RedisURI.Builder builder = RedisURI.builder()
                 .withHost(settings.host())
                 .withPort(settings.port())
                 .withSsl(settings.sslEnabled())
                 .withVerifyPeer(settings.sslEnabled());
+        if (uriTimeout != null) {
+            builder.withTimeout(uriTimeout);
+        }
         if (hasText(password)) {
             if (username == null) {
                 builder.withPassword(password.toCharArray());
@@ -919,10 +973,14 @@ public class RedisConnectivityDiagnostics {
     }
 
     static String describeUri(RedisURI uri) {
+        return describeUri(uri, "RESP2");
+    }
+
+    static String describeUri(RedisURI uri, String protocol) {
         String scheme = uri.isSsl() ? "rediss" : "redis";
-        String protocol = "RESP2";
         return "scheme=" + scheme + ",host=" + uri.getHost() + ",port=" + uri.getPort()
-                + ",ssl=" + uri.isSsl() + ",protocol=" + protocol;
+                + ",ssl=" + uri.isSsl() + ",protocol=" + protocol
+                + ",uriTimeout=" + uri.getTimeout().toMillis() + "ms";
     }
 
     private static void markLifecycle(List<String> events, long started, String event) {
