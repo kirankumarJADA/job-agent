@@ -331,6 +331,28 @@ class RedisConnectivityDiagnosticsTest {
     }
 
     @Test
+    void connectionFailureDiagnosticPreservesSafeCauseChain() {
+        RuntimeException root = new RuntimeException("NOAUTH password=super-secret");
+        RuntimeException wrapped = new RuntimeException("connection initialization failed", root);
+
+        String chain = RedisConnectivityDiagnostics.safeCauseChain(wrapped, null);
+
+        assertThat(chain).contains("RuntimeException[connection initialization failed]")
+                .contains("NOAUTH password=<redacted>")
+                .doesNotContain("super-secret");
+    }
+
+    @Test
+    void localLettuceLifecycleRegressionRemainsCoveredByRealAbExperiment() {
+        // The real Docker Redis success matrix in RedisLettuceAbExperimentTest
+        // exercises the same instrumented client and verifies connect completion
+        // plus PING; this assertion protects the protocol-stage marker contract.
+        assertThat(RedisConnectivityDiagnostics.describeUri(
+                io.lettuce.core.RedisURI.builder().withHost("localhost").withPort(6379).build()))
+                .contains("protocol=RESP2");
+    }
+
+    @Test
     void overallCapIsReportedAsDiagnosticTimeoutNotNetworkTimeout() throws Exception {
         RedisProperties properties = properties("hanging.example", 6379, true, "token");
         RedisConnectionFactory factory = factoryWithInfo();

@@ -25,6 +25,7 @@ import io.lettuce.core.resource.NettyCustomizer;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.handler.ssl.SslHandler;
 
@@ -54,6 +55,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 
@@ -353,12 +355,13 @@ public class RedisConnectivityDiagnostics {
         StatefulRedisConnection<String, String> connection = null;
         List<String> phases = new ArrayList<>();
         List<String> lifecycleEvents = new CopyOnWriteArrayList<>();
+        AtomicReference<Channel> lifecycleChannel = new AtomicReference<>();
         long lifecycleStarted = System.nanoTime();
         // Match the application's effective resolver. Using Lettuce's default
         // unresolved Netty resolver here would test a different path than the
         // Spring factory and could falsely attribute a resolver failure to the
         // protocol handshake.
-        DefaultClientResources resources = probeClientResources(!plain, lifecycleEvents, lifecycleStarted);
+        DefaultClientResources resources = probeClientResources(!plain, lifecycleEvents, lifecycleStarted, lifecycleChannel);
         RedisClient client = RedisClient.create(resources, uri);
         client.setOptions(ClientOptions.builder().protocolVersion(ProtocolVersion.RESP2).build());
         lifecycleEvents.add("uri=" + describeUri(uri) + ",resolver=JVM_DEFAULT,instrumented=" + !plain);
@@ -373,9 +376,14 @@ public class RedisConnectivityDiagnostics {
                 connectionFuture = client.connectAsync(StringCodec.UTF8, uri);
                 lifecycleEvents.add("connectionFutureCreated/" + elapsed(lifecycleStarted) + "ms");
                 connectionFuture.whenComplete((value, failure) -> {
-                    lifecycleEvents.add(failure == null
-                            ? "connectionFutureCompleted/" + elapsed(lifecycleStarted) + "ms"
-                            : "connectionFutureFailed/" + elapsed(lifecycleStarted) + "ms[" + errorCategory(failure) + "]");
+                    if (failure == null) {
+                        lifecycleEvents.add("connectionFutureCompleted/" + elapsed(lifecycleStarted) + "ms");
+                    } else {
+                        lifecycleEvents.add("connectionFutureFailed/" + elapsed(lifecycleStarted) + "ms["
+                                + errorCategory(failure) + "]");
+                        lifecycleEvents.add("connectionFutureFailureChain="
+                                + safeCauseChain(failure, lifecycleChannel.get()));
+                    }
                     connectionTerminal.countDown();
                 });
                 ConnectionFuture<StatefulRedisConnection<String, String>> future = connectionFuture;
@@ -736,7 +744,9 @@ public class RedisConnectivityDiagnostics {
         }
     }
 
-    private static NettyCustomizer lifecycleNettyCustomizer(List<String> lifecycleEvents, long lifecycleStarted) {
+    private static NettyCustomizer lifecycleNettyCustomizer(List<String> lifecycleEvents,
+                                                              long lifecycleStarted,
+                                                              AtomicReference<Channel> lifecycleChannel) {
         return new NettyCustomizer() {
             @Override
             public void afterBootstrapInitialized(Bootstrap bootstrap) {
@@ -756,8 +766,9 @@ public class RedisConnectivityDiagnostics {
 
             @Override
             public void afterChannelInitialized(Channel channel) {
+                lifecycleChannel.set(channel);
                 markLifecycle(lifecycleEvents, lifecycleStarted, "channelInitialized/" + addressSummary(channel));
-                channel.pipeline().addFirst("redisDiagnosticLifecycle", new ChannelInboundHandlerAdapter() {
+                channel.pipeline().addFirst("redisDiagnosticLifecycle", new ChannelDuplexHandler() {
                     @Override
                     public void channelRegistered(ChannelHandlerContext context) throws Exception {
                         markLifecycle(lifecycleEvents, lifecycleStarted, "channelRegistered/" + addressSummary(context.channel()));
@@ -778,8 +789,21 @@ public class RedisConnectivityDiagnostics {
                     }
 
                     @Override
+                    public void write(ChannelHandlerContext context, Object message,
+                                      io.netty.channel.ChannelPromise promise) throws Exception {
+                        if (message instanceof io.lettuce.core.protocol.RedisCommand<?, ?, ?> command
+                                && command.getType() != null) {
+                            markLifecycle(lifecycleEvents, lifecycleStarted,
+                                    "protocolCommandSent:" + command.getType().name());
+                        }
+                        context.write(message, promise);
+                    }
+
+                    @Override
                     public void exceptionCaught(ChannelHandlerContext context, Throwable cause) throws Exception {
                         markLifecycle(lifecycleEvents, lifecycleStarted, "nettyException:" + errorCategory(cause));
+                        markLifecycle(lifecycleEvents, lifecycleStarted,
+                                "nettyExceptionChain=" + safeCauseChain(cause, context.channel()));
                         context.fireExceptionCaught(cause);
                     }
                 });
@@ -818,10 +842,19 @@ public class RedisConnectivityDiagnostics {
     static DefaultClientResources probeClientResources(boolean instrument,
                                                        List<String> lifecycleEvents,
                                                        long lifecycleStartedNanos) {
+        return probeClientResources(instrument, lifecycleEvents, lifecycleStartedNanos,
+                new AtomicReference<>());
+    }
+
+    static DefaultClientResources probeClientResources(boolean instrument,
+                                                       List<String> lifecycleEvents,
+                                                       long lifecycleStartedNanos,
+                                                       AtomicReference<Channel> lifecycleChannel) {
         DefaultClientResources.Builder builder = DefaultClientResources.builder()
                 .dnsResolver(DnsResolvers.JVM_DEFAULT);
         if (instrument) {
-            builder.nettyCustomizer(lifecycleNettyCustomizer(lifecycleEvents, lifecycleStartedNanos));
+            builder.nettyCustomizer(lifecycleNettyCustomizer(lifecycleEvents, lifecycleStartedNanos,
+                    lifecycleChannel));
         }
         return builder.build();
     }
@@ -858,6 +891,39 @@ public class RedisConnectivityDiagnostics {
             name += ":" + commandEvent.getCommand().getType().name();
         }
         return name + "/" + elapsedMillis + "ms";
+    }
+
+    static String safeCauseChain(Throwable failure, Channel channel) {
+        StringBuilder chain = new StringBuilder();
+        Throwable current = failure;
+        int depth = 0;
+        while (current != null && depth++ < 8) {
+            if (chain.length() > 0) {
+                chain.append("<-");
+            }
+            chain.append(current.getClass().getSimpleName());
+            String message = current.getMessage();
+            if (message != null && !message.isBlank()) {
+                chain.append('[').append(sanitizeDiagnosticMessage(message)).append(']');
+            }
+            current = current.getCause();
+        }
+        if (channel != null) {
+            Throwable initFailure = channel.attr(io.lettuce.core.ConnectionBuilder.INIT_FAILURE).get();
+            if (initFailure != null) {
+                chain.append(",INIT_FAILURE=").append(initFailure.getClass().getSimpleName())
+                        .append('[').append(sanitizeDiagnosticMessage(initFailure.getMessage())).append(']');
+            }
+            Object handshakeHandler = channel.pipeline().get(io.lettuce.core.protocol.RedisHandshakeHandler.class);
+            chain.append(",handshakeHandler=").append(handshakeHandler == null ? "absent" : "present");
+        }
+        return chain.toString();
+    }
+
+    private static String sanitizeDiagnosticMessage(String message) {
+        String sanitized = message.replaceAll("(?i)(password|token|secret|authorization)\\s*[=:]\\s*[^,;\\s]+",
+                "$1=<redacted>");
+        return sanitized.length() > 240 ? sanitized.substring(0, 240) + "..." : sanitized;
     }
 
     private static String rawFailureDetail(Throwable failure) {
