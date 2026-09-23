@@ -3,6 +3,9 @@ package com.personal.jobagent.system;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.actuate.data.redis.RedisHealthIndicator;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.boot.actuate.health.Status;
 import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
 import org.springframework.data.redis.RedisConnectionFailureException;
@@ -42,6 +45,31 @@ import static org.mockito.Mockito.when;
 class RedisConnectivityDiagnosticsTest {
 
     private static final Duration POOLED = Duration.ofMillis(250);
+
+    @Test
+    void springInstantiatesDiagnosticsThroughItsAutowiredConfigurationConstructor() {
+        new org.springframework.boot.test.context.runner.ApplicationContextRunner()
+                .withUserConfiguration(RedisDiagnosticsBeanConfiguration.class)
+                .withPropertyValues("app.redis.connection-initialization-timeout=10s")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(RedisConnectivityDiagnostics.class);
+                });
+    }
+
+    @TestConfiguration(proxyBeanMethods = false)
+    @Import(RedisConnectivityDiagnostics.class)
+    static class RedisDiagnosticsBeanConfiguration {
+        @Bean
+        RedisProperties redisProperties() {
+            return new RedisProperties();
+        }
+
+        @Bean
+        RedisConnectionFactory redisConnectionFactory() {
+            return mock(RedisConnectionFactory.class);
+        }
+    }
 
     @Test
     void validUpstashStyleConfigurationReportsAuthenticatedTlsConnection() throws Exception {

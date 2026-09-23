@@ -4,6 +4,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
 import org.springframework.boot.convert.DurationStyle;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
@@ -123,6 +124,7 @@ public class RedisConnectivityDiagnostics {
         this(properties, connectionFactory, Duration.ofSeconds(10));
     }
 
+    @Autowired
     public RedisConnectivityDiagnostics(
             RedisProperties properties,
             RedisConnectionFactory connectionFactory,
