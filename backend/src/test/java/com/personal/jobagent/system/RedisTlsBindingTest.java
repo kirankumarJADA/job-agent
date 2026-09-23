@@ -9,8 +9,14 @@ import org.springframework.boot.test.context.ConfigDataApplicationContextInitial
 import org.springframework.boot.test.context.assertj.AssertableApplicationContext;
 import io.lettuce.core.resource.DefaultClientResources;
 import io.lettuce.core.resource.DnsResolvers;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import com.personal.jobagent.config.RedisLettuceConfiguration.InitializationTimeoutLettuceConnectionFactory;
 
@@ -124,8 +130,25 @@ class RedisTlsBindingTest {
                     InitializationTimeoutLettuceConnectionFactory customFactory =
                             (InitializationTimeoutLettuceConnectionFactory) factory;
                     assertThat(customFactory.getInitializationTimeout()).isEqualTo(Duration.ofSeconds(10));
+                    // The Lettuce handshake budget is read from the client's RedisURI
+                    // (ConnectionBuilder.apply -> RedisHandshakeHandler.initializeTimeout);
+                    // the custom factory must raise THAT value.
+                    io.lettuce.core.RedisURI uri = (io.lettuce.core.RedisURI)
+                            new org.springframework.beans.DirectFieldAccessor(factory.getNativeClient())
+                                    .getPropertyValue("redisURI");
+                    // Lettuce copies RedisURI.getTimeout() into ConnectionBuilder.timeout
+                    // (ConnectionBuilder.apply) and that value becomes
+                    // RedisHandshakeHandler.initializeTimeout, i.e. the bound reported as
+                    // "Connection initialization timed out after N second(s)". So this URI
+                    // timeout IS the connection initialization timeout.
+                    assertThat(uri.getTimeout()).isEqualTo(Duration.ofSeconds(10));
+                    // The client default timeout stays at the command budget: it feeds
+                    // the per-command expiry writer, so it must NOT be loosened.
                     assertThat(factory.getNativeClient().getDefaultTimeout())
-                            .isEqualTo(Duration.ofSeconds(10));
+                            .isEqualTo(Duration.ofSeconds(2));
+                    assertThat(factory.getClientConfiguration().getClientOptions()).get()
+                            .extracting(options -> options.getTimeoutOptions().isApplyConnectionTimeout())
+                            .isEqualTo(true);
                     assertThat(factory.getTimeout()).isEqualTo(Duration.ofSeconds(2).toMillis());
                     assertThat(factory.getClientConfiguration().getCommandTimeout())
                             .isEqualTo(Duration.ofSeconds(2));
@@ -136,6 +159,99 @@ class RedisTlsBindingTest {
                     assertThat(factory.getPassword()).isEqualTo("token-not-logged");
                     assertThat(factory.getShareNativeConnection()).isTrue();
                 });
+    }
+
+    @Test
+    void initializationTimeoutPropertyDrivesHandshakeBudgetNotCommandTimeout() {
+        redisContext()
+                .withUserConfiguration(com.personal.jobagent.config.RedisLettuceConfiguration.class)
+                .withPropertyValues(
+                        "spring.data.redis.host=upstash.example",
+                        "spring.data.redis.port=6379",
+                        "spring.data.redis.password=token-not-logged",
+                        "spring.data.redis.timeout=2s",
+                        "spring.data.redis.connect-timeout=2s",
+                        "app.redis.connection-initialization-timeout=25s")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    LettuceConnectionFactory factory = context.getBean(LettuceConnectionFactory.class);
+                    io.lettuce.core.RedisURI uri = (io.lettuce.core.RedisURI)
+                            new org.springframework.beans.DirectFieldAccessor(factory.getNativeClient())
+                                    .getPropertyValue("redisURI");
+                    // Handshake budget follows the initialization timeout property.
+                    assertThat(uri.getTimeout()).isEqualTo(Duration.ofSeconds(25));
+                    // Command budget stays exactly the configured command timeout.
+                    assertThat(factory.getNativeClient().getDefaultTimeout())
+                            .isEqualTo(Duration.ofSeconds(2));
+                    assertThat(factory.getTimeout()).isEqualTo(Duration.ofSeconds(2).toMillis());
+                });
+    }
+
+    @Test
+    void handshakeFailureIsBoundedByInitializationTimeoutNotCommandTimeout() throws Exception {
+        // Reproduces the production failure mode against a listener that accepts
+        // TCP and then stays silent: Lettuce completes TCP connect and channel
+        // registration, so the only remaining bound is
+        // RedisHandshakeHandler.initializeTimeout (<- RedisURI.getTimeout()).
+        // Lettuce's synchronous connect() waits on the connection future without
+        // applying the command timeout, so the reported budget must be the
+        // configured initialization timeout (1s here), never the 2s command timeout.
+        List<Socket> held = new CopyOnWriteArrayList<>();
+        try (ServerSocket silent = new ServerSocket(0, 4, InetAddress.getLoopbackAddress())) {
+            Thread acceptor = new Thread(() -> {
+                while (!silent.isClosed()) {
+                    try {
+                        held.add(silent.accept());
+                    } catch (Exception ignored) {
+                        return;
+                    }
+                }
+            }, "silent-redis-acceptor");
+            acceptor.setDaemon(true);
+            acceptor.start();
+
+            redisContext()
+                    .withUserConfiguration(com.personal.jobagent.config.RedisLettuceConfiguration.class)
+                    .withPropertyValues(
+                            "spring.data.redis.host=127.0.0.1",
+                            "spring.data.redis.port=" + silent.getLocalPort(),
+                            "spring.data.redis.timeout=2s",
+                            "spring.data.redis.connect-timeout=2s",
+                            "app.redis.connection-initialization-timeout=1s")
+                    .run(context -> {
+                        assertThat(context).hasNotFailed();
+                        LettuceConnectionFactory factory = context.getBean(LettuceConnectionFactory.class);
+                        Throwable failure = catchThrowable(factory::getConnection);
+                        assertThat(failure).isNotNull();
+                        assertThat(causeMessages(failure))
+                                .anySatisfy(message -> assertThat(message)
+                                        .contains("Connection initialization timed out after 1 second(s)"));
+                        assertThat(causeMessages(failure))
+                                .noneSatisfy(message -> assertThat(message)
+                                        .contains("Connection initialization timed out after 2 second(s)"));
+                    });
+        } finally {
+            held.forEach(socket -> {
+                try {
+                    socket.close();
+                } catch (Exception ignored) {
+                    // Test cleanup only.
+                }
+            });
+        }
+    }
+
+    private static List<String> causeMessages(Throwable failure) {
+        List<String> messages = new ArrayList<>();
+        for (Throwable current = failure; current != null; current = current.getCause()) {
+            if (current.getMessage() != null) {
+                messages.add(current.getMessage());
+            }
+            if (current.getCause() == current) {
+                break;
+            }
+        }
+        return messages;
     }
 
     @Test

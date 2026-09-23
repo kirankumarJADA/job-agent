@@ -1,9 +1,11 @@
 package com.personal.jobagent.config;
 
 import io.lettuce.core.ClientOptions;
+import io.lettuce.core.RedisURI;
 import io.lettuce.core.SocketOptions;
 import io.lettuce.core.TimeoutOptions;
 import io.lettuce.core.resource.ClientResources;
+import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
 import org.springframework.boot.autoconfigure.data.redis.ClientResourcesBuilderCustomizer;
 import org.springframework.boot.convert.DurationStyle;
@@ -80,12 +82,14 @@ public class RedisLettuceConfiguration {
     }
 
     /**
-     * Spring Data Redis uses the command timeout as Lettuce's client default
-     * timeout. Lettuce then also uses that default for the initial Redis
-     * handshake, which couples a 2-second command budget to a cold TLS
-     * connection. Override only the client default used by the synchronous
-     * shared-native connection; LettuceConnection still receives the original
-     * command timeout from the factory configuration.
+     * Lettuce sources the connection-initialization (handshake) budget from
+     * {@code RedisURI.getTimeout()} via {@code ConnectionBuilder.apply} into
+     * {@code RedisHandshakeHandler.initializeTimeout}. Spring Data Redis bakes
+     * the command timeout into that URI when it builds the client, which
+     * couples a 2-second command budget to a cold TLS handshake. Raise only
+     * the URI budget here; the client default timeout captured at construction
+     * (the command timeout) continues to bound per-command expiry, and Spring
+     * Data enforces the command timeout independently via LettuceConnection.
      */
     public static final class InitializationTimeoutLettuceConnectionFactory extends LettuceConnectionFactory {
         private final Duration initializationTimeout;
@@ -101,7 +105,13 @@ public class RedisLettuceConfiguration {
         @Override
         protected io.lettuce.core.AbstractRedisClient createClient() {
             io.lettuce.core.AbstractRedisClient client = super.createClient();
-            client.setDefaultTimeout(initializationTimeout);
+            if (client instanceof io.lettuce.core.RedisClient redisClient) {
+                // Same field access Spring Data itself uses in
+                // StandaloneConnectionProvider's redisURISupplier.
+                RedisURI uri = (RedisURI) new DirectFieldAccessor(redisClient)
+                        .getPropertyValue("redisURI");
+                uri.setTimeout(initializationTimeout);
+            }
             return client;
         }
 
