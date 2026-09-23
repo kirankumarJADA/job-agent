@@ -481,6 +481,7 @@ class RedisConnectivityDiagnosticsTest {
                 .contains("raw-auto-2s.ping:OK")
                 .contains("protocol=AUTO")
                 .contains("protocol=RESP2")
+                .contains("uriTimeout=10000ms")
                 .contains("uriTimeout=2000ms");
     }
 

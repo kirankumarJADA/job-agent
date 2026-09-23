@@ -3,6 +3,8 @@ package com.personal.jobagent.system;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
+import org.springframework.boot.convert.DurationStyle;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.data.redis.connection.RedisConnection;
@@ -100,6 +102,7 @@ public class RedisConnectivityDiagnostics {
 
     private final RedisProperties properties;
     private final RedisConnectionFactory connectionFactory;
+    private final Duration springConnectionInitializationTimeout;
 
     /**
      * Dedicated daemon pool for probe work. Deliberately NOT the common ForkJoin
@@ -117,8 +120,22 @@ public class RedisConnectivityDiagnostics {
 
     public RedisConnectivityDiagnostics(RedisProperties properties,
                                         RedisConnectionFactory connectionFactory) {
+        this(properties, connectionFactory, Duration.ofSeconds(10));
+    }
+
+    public RedisConnectivityDiagnostics(
+            RedisProperties properties,
+            RedisConnectionFactory connectionFactory,
+            @Value("${app.redis.connection-initialization-timeout:10s}") String initializationTimeout) {
+        this(properties, connectionFactory, DurationStyle.detectAndParse(initializationTimeout));
+    }
+
+    private RedisConnectivityDiagnostics(RedisProperties properties,
+                                         RedisConnectionFactory connectionFactory,
+                                         Duration initializationTimeout) {
         this.properties = properties;
         this.connectionFactory = connectionFactory;
+        this.springConnectionInitializationTimeout = initializationTimeout;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -403,7 +420,8 @@ public class RedisConnectivityDiagnostics {
             return "protocolComparison.SKIPPED[authentication-not-configured]";
         }
         List<String> results = new ArrayList<>();
-        results.add(runProtocolComparison(settings, "spring-equivalent", null, password, Duration.ofSeconds(2)));
+        results.add(runProtocolComparison(settings, "spring-equivalent", null, password,
+                springConnectionInitializationTimeout));
         results.add(runProtocolComparison(settings, "raw-resp2", ProtocolVersion.RESP2, password, null));
         results.add(runProtocolComparison(settings, "raw-auto-2s", null, password, Duration.ofSeconds(2)));
         return String.join(";", results);

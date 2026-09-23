@@ -47,6 +47,10 @@ spring:
     timeout-per-shutdown-phase: 30s
 
 app:
+  redis:
+    # Cold TLS handshakes can exceed the command timeout. This only bounds
+    # Lettuce connection initialization; command execution remains 2s.
+    connection-initialization-timeout: ${APP_REDIS_CONNECTION_INITIALIZATION_TIMEOUT:10s}
   discovery:
     comparison-conflict-threshold: ${DISCOVERY_COMPARISON_CONFLICT_THRESHOLD:0.20}
     primary-confidence-threshold: ${DISCOVERY_PRIMARY_CONFIDENCE_THRESHOLD:0.60}

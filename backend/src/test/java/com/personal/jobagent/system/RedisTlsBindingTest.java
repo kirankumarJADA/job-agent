@@ -12,6 +12,9 @@ import io.lettuce.core.resource.DnsResolvers;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
+import com.personal.jobagent.config.RedisLettuceConfiguration.InitializationTimeoutLettuceConnectionFactory;
+
+import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -88,7 +91,64 @@ class RedisTlsBindingTest {
                         "spring.data.redis.host=127.0.0.1",
                         "spring.data.redis.port=6379",
                         "spring.data.redis.timeout=2s",
-                        "spring.data.redis.connect-timeout=2s")
+                        "spring.data.redis.connect-timeout=2s",
+                        "app.redis.connection-initialization-timeout=10s")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    LettuceConnectionFactory factory = context.getBean(LettuceConnectionFactory.class);
+                    assertThat(factory.getShareNativeConnection()).isTrue();
+                    try (var connection = factory.getConnection()) {
+                        assertThat(connection.ping()).isEqualTo("PONG");
+                    } finally {
+                        factory.destroy();
+                    }
+                });
+    }
+
+    @Test
+    void customFactorySeparatesInitializationTimeoutFromCommandTimeout() {
+        redisContext()
+                .withUserConfiguration(com.personal.jobagent.config.RedisLettuceConfiguration.class)
+                .withPropertyValues(
+                        "spring.data.redis.host=upstash.example",
+                        "spring.data.redis.port=6379",
+                        "spring.data.redis.password=token-not-logged",
+                        "spring.data.redis.ssl.enabled=true",
+                        "spring.data.redis.timeout=2s",
+                        "spring.data.redis.connect-timeout=2s",
+                        "app.redis.connection-initialization-timeout=10s")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    LettuceConnectionFactory factory = context.getBean(LettuceConnectionFactory.class);
+                    assertThat(factory).isInstanceOf(InitializationTimeoutLettuceConnectionFactory.class);
+                    InitializationTimeoutLettuceConnectionFactory customFactory =
+                            (InitializationTimeoutLettuceConnectionFactory) factory;
+                    assertThat(customFactory.getInitializationTimeout()).isEqualTo(Duration.ofSeconds(10));
+                    assertThat(factory.getNativeClient().getDefaultTimeout())
+                            .isEqualTo(Duration.ofSeconds(10));
+                    assertThat(factory.getTimeout()).isEqualTo(Duration.ofSeconds(2).toMillis());
+                    assertThat(factory.getClientConfiguration().getCommandTimeout())
+                            .isEqualTo(Duration.ofSeconds(2));
+                    assertThat(factory.getClientConfiguration().getClientOptions()).get()
+                            .extracting(io.lettuce.core.ClientOptions::getConfiguredProtocolVersion)
+                            .isNull();
+                    assertThat(factory.isUseSsl()).isTrue();
+                    assertThat(factory.getPassword()).isEqualTo("token-not-logged");
+                    assertThat(factory.getShareNativeConnection()).isTrue();
+                });
+    }
+
+    @Test
+    void customFactoryAcquiresAndPingsAgainstLocalRedis() {
+        Assumptions.assumeTrue(localRedisAvailable(), "local Docker Redis is not reachable");
+        redisContext()
+                .withUserConfiguration(com.personal.jobagent.config.RedisLettuceConfiguration.class)
+                .withPropertyValues(
+                        "spring.data.redis.host=127.0.0.1",
+                        "spring.data.redis.port=6379",
+                        "spring.data.redis.timeout=2s",
+                        "spring.data.redis.connect-timeout=2s",
+                        "app.redis.connection-initialization-timeout=10s")
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     LettuceConnectionFactory factory = context.getBean(LettuceConnectionFactory.class);
