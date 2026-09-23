@@ -3,6 +3,7 @@ package com.personal.jobagent.application;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.audit.AuditEntry;
 import com.personal.jobagent.audit.AuditLogWriter;
+import com.personal.jobagent.common.JdbcConversions;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.notifications.NotificationEvents;
 import com.personal.jobagent.notifications.NotificationService;
@@ -50,6 +51,20 @@ public class ApplicationStatusService {
         return new TransitionResult(applicationId,current,target,true,false);
     }
     public Optional<Map<String,Object>> find(UUID id) { return db.query("select id,job_id,status,mode,created_at,updated_at from applications where id=?",(rs,n)->Map.of("id",rs.getObject("id"),"jobId",rs.getObject("job_id"),"status",rs.getString("status"),"mode",rs.getString("mode"),"createdAt",rs.getTimestamp("created_at").toInstant(),"updatedAt",rs.getTimestamp("updated_at").toInstant()),id).stream().findFirst(); }
-    public List<Map<String,Object>> timeline(UUID id) { return db.queryForList("select id,type,payload,actor,occurred_at from application_events where application_id=? order by occurred_at,id",id); }
+    // application_events.payload is jsonb: queryForList handed the driver's PGobject to Jackson,
+    // which rendered it as {"type":"jsonb","value":"..."} instead of the event payload itself.
+    // Cast to text and parse it back into JSON at the JDBC boundary.
+    public List<Map<String,Object>> timeline(UUID id) {
+        return db.query("select id,type,payload::text as payload,actor,occurred_at from application_events where application_id=? order by occurred_at,id",
+                (rs,n) -> {
+                    Map<String,Object> row=new LinkedHashMap<>();
+                    row.put("id",rs.getObject("id"));
+                    row.put("type",rs.getString("type"));
+                    row.put("payload",JdbcConversions.readJson(rs,"payload",json));
+                    row.put("actor",rs.getString("actor"));
+                    row.put("occurred_at",rs.getObject("occurred_at"));
+                    return row;
+                }, id);
+    }
     private String notificationEvent(String target) { return switch(target) { case "APPLICATION_SUBMITTED" -> NotificationEvents.APPLICATION_SUBMITTED; case "CONFIRMATION_RECEIVED" -> NotificationEvents.CONFIRMATION_EMAIL_RECEIVED; case "RECRUITER_CONTACT" -> NotificationEvents.RECRUITER_REPLY; case "INTERVIEW" -> NotificationEvents.INTERVIEW_INVITATION; case "ASSESSMENT" -> NotificationEvents.ASSESSMENT_RECEIVED; case "REJECTED" -> NotificationEvents.REJECTION_RECEIVED; case "OFFER" -> NotificationEvents.OFFER_RECEIVED; default -> null; }; }
 }

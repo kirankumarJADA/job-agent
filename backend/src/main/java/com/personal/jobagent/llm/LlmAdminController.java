@@ -1,5 +1,6 @@
 package com.personal.jobagent.llm;
 
+import com.personal.jobagent.common.JdbcConversions;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
 
@@ -28,13 +29,16 @@ public class LlmAdminController {
     }
     @GetMapping("/models/nim/registry")
     public List<Map<String,Object>> nimRegistry() { return nimModelRegistry.registryRows(); }
-    @GetMapping("/routing") public List<Map<String,Object>> listRouting() { return jdbcTemplate.queryForList("select * from routing_policies order by task_type"); }
+    // routing_policies.fallback_model_ids is uuid[]: raw rows would hand pgjdbc's PgArray to
+    // Jackson, which bean-serialises it (getResultSet() -> live JDBC ResultSet) and fails the
+    // response with a JsonMappingException. jsonSafeRows converts arrays into plain Lists.
+    @GetMapping("/routing") public List<Map<String,Object>> listRouting() { return JdbcConversions.jsonSafeRows(jdbcTemplate.queryForList("select * from routing_policies order by task_type")); }
     public record RoutingUpdateRequest(UUID primaryModelId, List<UUID> fallbackModelIds, String rationale) {}
     @PutMapping("/routing/{taskType}")
     public Map<String,Object> updateRouting(@PathVariable TaskType taskType, @RequestBody RoutingUpdateRequest request) {
         UUID[] fallbacks = request.fallbackModelIds() == null ? new UUID[0] : request.fallbackModelIds().toArray(new UUID[0]);
         jdbcTemplate.execute((java.sql.Connection conn) -> { try (var ps=conn.prepareStatement("insert into routing_policies(task_type,primary_model_id,fallback_model_ids,basis,rationale,updated_at) values(?,?,?,'MANUAL',?,now()) on conflict(task_type) do update set primary_model_id=excluded.primary_model_id,fallback_model_ids=excluded.fallback_model_ids,basis='MANUAL',rationale=excluded.rationale,updated_at=now()")) { ps.setString(1,taskType.name()); ps.setObject(2,request.primaryModelId()); ps.setArray(3,conn.createArrayOf("uuid",fallbacks)); ps.setString(4,request.rationale()); return ps.executeUpdate(); } });
-        return jdbcTemplate.queryForMap("select * from routing_policies where task_type=?", taskType.name());
+        return JdbcConversions.jsonSafeRow(jdbcTemplate.queryForMap("select * from routing_policies where task_type=?", taskType.name()));
     }
     @GetMapping("/llm-calls/stats")
     public List<Map<String,Object>> llmCallStats(@RequestParam(required=false) TaskType taskType) {

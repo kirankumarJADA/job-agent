@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.personal.jobagent.ats.AtsAdapter;
 import com.personal.jobagent.ats.AtsAdapterRegistry;
+import com.personal.jobagent.common.JdbcConversions;
 import com.personal.jobagent.coverletter.CoverLetterService;
 import com.personal.jobagent.jobs.JobRepository;
 import com.personal.jobagent.qa.ApplicationAnswerService;
@@ -17,6 +18,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -195,7 +197,9 @@ public class McpController {
         return db.queryForList("select id,job_id,status,mode,created_at,updated_at from applications where id=?",id).stream().findFirst().map(x->Map.of("application",x)).orElseThrow(()->new McpException(-32602,"Application not found: "+id));
     }
     private Object toolGetApplicationStatus(JsonNode args) { UUID id=requiredUuid(args,"application_id"); return db.queryForList("select id,status,updated_at from applications where id=?",id).stream().findFirst().orElseThrow(()->new McpException(-32602,"Application not found: "+id)); }
-    private Object toolGetApplicationTimeline(JsonNode args) { UUID id=requiredUuid(args,"application_id"); return Map.of("items",db.queryForList("select id,type,payload,actor,occurred_at from application_events where application_id=? order by occurred_at,id",id)); }
+    // payload is jsonb: queryForList handed the driver's PGobject to Jackson, which rendered it
+    // as {"type":"jsonb","value":"..."} instead of the event payload itself.
+    private Object toolGetApplicationTimeline(JsonNode args) { UUID id=requiredUuid(args,"application_id"); return Map.of("items",db.query("select id,type,payload::text as payload,actor,occurred_at from application_events where application_id=? order by occurred_at,id",(rs,n)->{ Map<String,Object> row=new LinkedHashMap<>(); row.put("id",rs.getObject("id")); row.put("type",rs.getString("type")); row.put("payload",JdbcConversions.readJson(rs,"payload",objectMapper)); row.put("actor",rs.getString("actor")); row.put("occurred_at",rs.getObject("occurred_at")); return row; },id)); }
     private Object toolListEmails(JsonNode args) { if(args.has("application_id")){UUID id=requiredUuid(args,"application_id");return Map.of("items",db.queryForList("select id,message_id,from_address,subject,received_at,application_id,classification,classification_confidence from emails where application_id=? order by received_at desc limit 100",id));} return Map.of("items",db.queryForList("select id,message_id,from_address,subject,received_at,application_id,classification,classification_confidence from emails order by received_at desc limit 100")); }
     private Object toolGetAutomationStatus(JsonNode args) { if(args.has("plan_id")){UUID id=requiredUuid(args,"plan_id");return db.queryForList("select id,application_id,status,submit_approved,heartbeat_at,updated_at from automation_plans where id=?",id).stream().findFirst().orElseThrow(()->new McpException(-32602,"Automation plan not found: "+id));} return Map.of("items",db.queryForList("select id,application_id,status,submit_approved,heartbeat_at,updated_at from automation_plans order by updated_at desc limit 100")); }
     private Object toolGetMetrics() { return Map.of("applications",db.queryForObject("select count(*) from applications",Long.class),"emails",db.queryForObject("select count(*) from emails",Long.class),"automation_plans",db.queryForObject("select count(*) from automation_plans",Long.class),"worker_events",db.queryForObject("select count(*) from worker_events",Long.class),"notifications",db.queryForObject("select count(*) from notifications",Long.class)); }

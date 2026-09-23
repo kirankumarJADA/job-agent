@@ -1,5 +1,6 @@
 package com.personal.jobagent.benchmark;
 
+import com.personal.jobagent.common.JdbcConversions;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -84,6 +85,9 @@ public class PromotionService {
                 taskType, bestModelId, runId,
                 "Promoted from run " + runId + " with mean score " + meanScore + " over " + caseCount + " cases");
 
-        return jdbcTemplate.queryForMap("select * from routing_policies where task_type = ?", taskType);
+        // fallback_model_ids is uuid[]; jsonSafeRow converts the driver's PgArray into a plain
+        // List so the promote response can actually be rendered by Jackson.
+        return JdbcConversions.jsonSafeRow(
+                jdbcTemplate.queryForMap("select * from routing_policies where task_type = ?", taskType));
     }
 }
