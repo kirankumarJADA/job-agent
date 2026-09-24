@@ -6,6 +6,7 @@ import com.personal.jobagent.ats.AtsAdapterRegistry;
 import com.personal.jobagent.coverletter.CoverLetterService;
 import com.personal.jobagent.jobs.JobRepository;
 import com.personal.jobagent.qa.ApplicationAnswerService;
+import com.personal.jobagent.security.OwnerContext;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -39,17 +40,23 @@ class McpControllerTimelineJsonTest {
     private static final UUID APPLICATION_ID = UUID.fromString("99999999-9999-9999-9999-999999999999");
     private static final String PAYLOAD = "{\"event_key\":\"APPLICATION_SUBMITTED\",\"from\":\"APPLICATION_STARTED\"}";
 
+    private static final UUID PROFILE_ID = UUID.fromString("66666666-6666-6666-6666-666666666666");
+
     private ObjectMapper objectMapper;
     private McpController controller;
 
     @BeforeEach
     void setUp() {
         objectMapper = new ObjectMapper();
+        OwnerContext ownerContext = Mockito.mock(OwnerContext.class);
+        // The timeline tool resolves the caller's profile before reading anything.
+        Mockito.when(ownerContext.profileIdOrNull()).thenReturn(PROFILE_ID);
         controller = new McpController(Mockito.mock(JobRepository.class),
                 Mockito.mock(CoverLetterService.class),
                 Mockito.mock(ApplicationAnswerService.class),
                 Mockito.mock(AtsAdapterRegistry.class),
-                objectMapper);
+                objectMapper,
+                ownerContext);
     }
 
     @Test
@@ -63,7 +70,8 @@ class McpControllerTimelineJsonTest {
         when(rs.getString("actor")).thenReturn("SYSTEM");
         when(rs.getObject("occurred_at")).thenReturn(Timestamp.from(Instant.parse("2026-09-23T09:00:00Z")));
 
-        when(db.query(anyString(), Mockito.<RowMapper<Map<String, Object>>>any(), Mockito.<Object>any()))
+        when(db.query(anyString(), Mockito.<RowMapper<Map<String, Object>>>any(),
+                org.mockito.ArgumentMatchers.<Object>any(), org.mockito.ArgumentMatchers.<Object>any()))
                 .thenAnswer(invocation -> {
                     RowMapper<Map<String, Object>> rowMapper = invocation.getArgument(1);
                     List<Map<String, Object>> mapped = new ArrayList<>();

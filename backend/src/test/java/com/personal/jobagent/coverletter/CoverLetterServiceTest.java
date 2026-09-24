@@ -75,7 +75,7 @@ class CoverLetterServiceTest {
                 new ProjectRecord(UuidV7.generate(), profileId, "Payment Gateway", "A toy high throughput gateway", "https://github.com", List.of(), 1)
         ));
 
-        when(coverLetterRepository.getNextVersion(jobId)).thenReturn(1);
+        when(coverLetterRepository.getNextVersion(eq(jobId), eq(profileId))).thenReturn(1);
         when(coverLetterRepository.insert(eq(profileId), eq(jobId), any(), eq(1), anyString(), anyString(), anyMap(), anyBoolean()))
                 .thenReturn(coverLetterId);
 
@@ -119,7 +119,7 @@ class CoverLetterServiceTest {
         when(profileRepository.findEducation(profileId)).thenReturn(List.of());
         when(profileRepository.findProjects(profileId)).thenReturn(List.of());
 
-        when(coverLetterRepository.getNextVersion(jobId)).thenReturn(1);
+        when(coverLetterRepository.getNextVersion(eq(jobId), eq(profileId))).thenReturn(1);
         when(coverLetterRepository.insert(eq(profileId), eq(jobId), any(), eq(1), anyString(), anyString(), anyMap(), anyBoolean()))
                 .thenReturn(coverLetterId);
 

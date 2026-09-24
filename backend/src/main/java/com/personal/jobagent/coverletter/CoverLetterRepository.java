@@ -44,18 +44,51 @@ public class CoverLetterRepository {
                 .stream().findFirst();
     }
 
+    /**
+     * Ownership-scoped read. Cover letters hang off {@code profiles.profile_id},
+     * so filtering by the caller's profile id is what stops one account reading
+     * another's letter (which contains tailored resume content).
+     *
+     * <p>An id belonging to someone else simply does not match, so the caller
+     * sees a plain 404 — the same response as a non-existent id, which avoids
+     * confirming that the id exists at all.
+     */
+    public Optional<CoverLetterRecord> findByIdForProfile(UUID id, UUID profileId) {
+        return jdbcTemplate.query(
+                        "select * from cover_letters where id = ? and profile_id = ?", rowMapper(), id, profileId)
+                .stream().findFirst();
+    }
+
     public List<CoverLetterRecord> findByJobId(UUID jobId) {
         return jdbcTemplate.query("select * from cover_letters where job_id = ? order by version desc", rowMapper(), jobId);
     }
 
-    public Optional<CoverLetterRecord> findLatestByJobId(UUID jobId) {
-        return jdbcTemplate.query("select * from cover_letters where job_id = ? order by version desc limit 1", rowMapper(), jobId)
+    /** Ownership-scoped variant of {@link #findByJobId(UUID)}. */
+    public List<CoverLetterRecord> findByJobIdForProfile(UUID jobId, UUID profileId) {
+        return jdbcTemplate.query(
+                "select * from cover_letters where job_id = ? and profile_id = ? order by version desc",
+                rowMapper(), jobId, profileId);
+    }
+
+    public Optional<CoverLetterRecord> findLatestByJobIdForProfile(UUID jobId, UUID profileId) {
+        return jdbcTemplate.query(
+                        "select * from cover_letters where job_id = ? and profile_id = ? order by version desc limit 1",
+                        rowMapper(), jobId, profileId)
                 .stream().findFirst();
     }
 
-    public int getNextVersion(UUID jobId) {
+    /**
+     * Next version number for this profile's letters on this job.
+     *
+     * <p>Scoped by profile because {@code cover_letters} carries
+     * {@code unique(job_id, version)}: a global counter would hand a second
+     * account a version number already taken by the first, turning generation
+     * into a constraint violation.
+     */
+    public int getNextVersion(UUID jobId, UUID profileId) {
         Integer max = jdbcTemplate.queryForObject(
-                "select coalesce(max(version), 0) from cover_letters where job_id = ?", Integer.class, jobId);
+                "select coalesce(max(version), 0) from cover_letters where job_id = ? and profile_id = ?",
+                Integer.class, jobId, profileId);
         return (max != null ? max : 0) + 1;
     }
 
@@ -73,5 +106,18 @@ public class CoverLetterRepository {
 
     public void setApproved(UUID id, boolean approved) {
         jdbcTemplate.update("update cover_letters set is_approved = ?, updated_at = now() where id = ?", approved, id);
+    }
+
+    /**
+     * Ownership-scoped approval update. The {@code profile_id} predicate is the
+     * authorization check: a letter owned by another account is not updated,
+     * and the caller gets the same 404 as for an unknown id.
+     *
+     * @return true when a row the caller owns was updated
+     */
+    public boolean setApprovedForProfile(UUID id, boolean approved, UUID profileId) {
+        return jdbcTemplate.update(
+                "update cover_letters set is_approved = ?, updated_at = now() where id = ? and profile_id = ?",
+                approved, id, profileId) > 0;
     }
 }

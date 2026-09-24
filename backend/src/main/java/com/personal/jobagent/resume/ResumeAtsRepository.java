@@ -31,7 +31,13 @@ public class ResumeAtsRepository {
     @Transactional
     public ResumeAtsAnalysis insert(ResumeAtsAnalysis a, String title, boolean approved) {
         if (a.applicationId() != null) {
-            UUID applicationJob = jdbc.query("select job_id from applications where id=?", (rs, n) -> (UUID) rs.getObject(1), a.applicationId())
+            // The application id arrives from the request body, so the
+            // existence check must be scoped to the caller's own profile: a
+            // foreign id takes the same "Application not found" path as a
+            // missing one, and can never be claimed (or have cv_version_id
+            // written onto it) by another account.
+            UUID applicationJob = jdbc.query("select job_id from applications where id=? and profile_id=?",
+                            (rs, n) -> (UUID) rs.getObject(1), a.applicationId(), a.profileId())
                     .stream().findFirst().orElseThrow(() -> new IllegalArgumentException("Application not found: " + a.applicationId()));
             if (!a.jobId().equals(applicationJob)) {
                 throw new IllegalArgumentException("Application/job mismatch: tailored CV cannot cross job boundaries");
@@ -68,7 +74,10 @@ public class ResumeAtsRepository {
                 json(a.gaps()), json(a.atsReport()), cvId, a.profileRevision(), a.profileSnapshotHash());
         linkClaims(cvId, a);
         if (a.applicationId() != null) {
-            jdbc.update("update applications set cv_version_id=?, updated_at=now() where id=? and job_id=?", cvId, a.applicationId(), a.jobId());
+            // Ownership was proven above; profile_id stays in the predicate as
+            // defense in depth.
+            jdbc.update("update applications set cv_version_id=?, updated_at=now() where id=? and job_id=? and profile_id=?",
+                    cvId, a.applicationId(), a.jobId(), a.profileId());
         }
         return aWithCv(a, cvId);
     }

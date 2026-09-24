@@ -4,6 +4,7 @@ import com.personal.jobagent.common.ApiError;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.notifications.NotificationEvents;
 import com.personal.jobagent.notifications.NotificationService;
+import com.personal.jobagent.security.OwnerContext;
 import org.slf4j.MDC;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -69,13 +70,16 @@ public class PipelineNotificationController {
     private final NotificationService notificationService;
     private final JdbcTemplate jdbcTemplate;
     private final TransactionTemplate transactionTemplate;
+    private final OwnerContext ownerContext;
 
     public PipelineNotificationController(NotificationService notificationService,
                                           JdbcTemplate jdbcTemplate,
-                                          PlatformTransactionManager transactionManager) {
+                                          PlatformTransactionManager transactionManager,
+                                          OwnerContext ownerContext) {
         this.notificationService = notificationService;
         this.jdbcTemplate = jdbcTemplate;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
+        this.ownerContext = ownerContext;
     }
 
     public record PipelineEventRequest(
@@ -115,9 +119,18 @@ public class PipelineNotificationController {
             return ResponseEntity.badRequest().body(ApiError.of(400, "Unknown job",
                     "jobId does not reference an existing job", uri, correlation));
         }
-        if (applicationId != null && !applicationExists(applicationId)) {
-            return ResponseEntity.badRequest().body(ApiError.of(400, "Unknown application",
-                    "applicationId does not reference an existing application", uri, correlation));
+        // An application reference must be the caller's own. This endpoint
+        // previously accepted any existing application id, so any authenticated
+        // account could emit lifecycle events against another candidate's
+        // application — including REJECTED / OFFER, which the notification
+        // fan-out turns into rows and the status machine honours. A foreign id is
+        // answered as not found, matching the rest of the API.
+        if (applicationId != null
+                && ownerContext.ownerOfApplication(applicationId)
+                        .filter(owner -> owner.equals(ownerContext.profileIdOrNull()))
+                        .isEmpty()) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ApiError.of(404, "Not found",
+                    "No application with that id", uri, correlation));
         }
         if (applicationId != null && jobId == null) {
             jobId = jdbcTemplate.queryForObject(
@@ -135,6 +148,11 @@ public class PipelineNotificationController {
 
         Map<String, Object> payload = new HashMap<>();
         payload.put("job_id", jobId.toString());
+        // Explicit owner: some of these events aggregate on the shared JOB, so
+        // the fan-out has no application to derive the recipient from and would
+        // otherwise file the notification as an unseen system notice.
+        UUID ownerProfileId = ownerContext.profileIdOrNull();
+        putIfNotNull(payload, "profile_id", ownerProfileId == null ? null : ownerProfileId.toString());
         if (applicationId != null) {
             payload.put("application_id", applicationId.toString());
         }
@@ -203,12 +221,6 @@ public class PipelineNotificationController {
     private boolean jobExists(UUID jobId) {
         Integer count = jdbcTemplate.queryForObject(
                 "select count(*) from jobs where id = ?", Integer.class, jobId);
-        return count != null && count > 0;
-    }
-
-    private boolean applicationExists(UUID applicationId) {
-        Integer count = jdbcTemplate.queryForObject(
-                "select count(*) from applications where id = ?", Integer.class, applicationId);
         return count != null && count > 0;
     }
 

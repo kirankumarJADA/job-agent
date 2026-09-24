@@ -89,6 +89,28 @@ class NotificationsIT {
         return applicationId;
     }
 
+    /**
+     * A real owner for the ownership-scoped surfaces (V022). Notifications are
+     * read per profile now, and a notification with no owner is deliberately
+     * invisible to every user — so any test exercising the read side needs an
+     * account to read it as.
+     */
+    private UUID insertOwnerProfile() {
+        UUID userId = UuidV7.generate();
+        UUID profileId = UuidV7.generate();
+        jdbcTemplate.update("""
+                insert into users (id, email, password_hash, display_name)
+                values (?, ?, null, 'Notifications IT user')
+                """, userId, "notifications-it-" + userId + "@example.test");
+        jdbcTemplate.update("insert into profiles (id, user_id) values (?, ?)", profileId, userId);
+        return profileId;
+    }
+
+    /** Mirrors NotificationService.ownerScopedDedupKey: keys are namespaced per owner. */
+    private static String ownerScopedKey(String dedupKey, UUID profileId) {
+        return dedupKey + ":p:" + profileId;
+    }
+
     private int countNotifications(String dedupKey) {
         Integer count = jdbcTemplate.queryForObject(
                 "select count(*) from notifications where dedup_key = ?", Integer.class, dedupKey);
@@ -235,7 +257,7 @@ class NotificationsIT {
         // The handler ignores unknown types (supports() gate). The admin
         // controller must reject them with 400 — a caller typing a wrong
         // event name must not get a silent 202.
-        assertThat(notificationRepository.countUnread()).isGreaterThanOrEqualTo(0);
+        assertThat(notificationRepository.countUnread(insertOwnerProfile())).isGreaterThanOrEqualTo(0);
         // (full MockMvc coverage in NotificationsControllerIT)
     }
 
@@ -245,7 +267,7 @@ class NotificationsIT {
         NotificationRecord record = new NotificationRecord(
                 UuidV7.generate(), "INFO", "TEST", "t", "b", null,
                 "malformed-test:" + jobId,
-                Map.of("ok", 1), jobId, null, null, null);
+                Map.of("ok", 1), jobId, null, null, null, null);
         NotificationRecord stored = notificationRepository.insertIfAbsent(record);
         assertThat(stored).isNotNull();
         // Insert again — conflict path returns null without throwing.
@@ -255,25 +277,35 @@ class NotificationsIT {
     @Test
     void readStateEndpointsMarkSingleAndAll() {
         UUID jobId = insertJob("Snyk");
-        String key = "read-state-test:" + jobId;
+        UUID profileId = insertOwnerProfile();
+        // The notification is attributed to a real owner, because read state is
+        // only reachable per profile now.
+        String key = ownerScopedKey("read-state-test:" + jobId, profileId);
         transactionTemplate().execute(tx -> notificationService.emit(
                 new NotificationService.NotificationCommand(
                         NotificationEvents.VERIFICATION_COMPLETED, "JOB", jobId,
-                        Map.of("job_id", jobId.toString(), "dedup_key", key),
+                        Map.of("job_id", jobId.toString(), "dedup_key", "read-state-test:" + jobId,
+                               "profile_id", profileId.toString()),
                         UuidV7.generate(), null)));
         awaitNotificationRow(key);
 
         UUID id = jdbcTemplate.queryForObject(
                 "select id from notifications where dedup_key = ?", UUID.class, key);
 
-        boolean changed = notificationRepository.markRead(id);
+        // A different account cannot mark it read, nor see it.
+        UUID stranger = insertOwnerProfile();
+        assertThat(notificationRepository.markRead(stranger, id)).isFalse();
+        assertThat(notificationRepository.findById(stranger, id)).isEmpty();
+        assertThat(notificationRepository.countUnread(stranger)).isZero();
+
+        boolean changed = notificationRepository.markRead(profileId, id);
         assertThat(changed).isTrue();
         // second time is a no-op (idempotent read marking)
-        assertThat(notificationRepository.markRead(id)).isFalse();
+        assertThat(notificationRepository.markRead(profileId, id)).isFalse();
 
-        long unreadBefore = notificationRepository.countUnread();
-        notificationRepository.markAllRead();
-        assertThat(notificationRepository.countUnread()).isZero();
+        long unreadBefore = notificationRepository.countUnread(profileId);
+        notificationRepository.markAllRead(profileId);
+        assertThat(notificationRepository.countUnread(profileId)).isZero();
         assertThat(unreadBefore).isGreaterThanOrEqualTo(0);
     }
 

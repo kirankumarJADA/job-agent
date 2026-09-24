@@ -2,6 +2,7 @@ package com.personal.jobagent.notifications;
 
 import com.personal.jobagent.events.Envelope;
 import com.personal.jobagent.events.EventHandler;
+import com.personal.jobagent.security.OwnerContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -34,9 +35,11 @@ public class NotificationEventHandler implements EventHandler {
     private static final Logger log = LoggerFactory.getLogger(NotificationEventHandler.class);
 
     private final NotificationService notificationService;
+    private final OwnerContext ownerContext;
 
-    public NotificationEventHandler(NotificationService notificationService) {
+    public NotificationEventHandler(NotificationService notificationService, OwnerContext ownerContext) {
         this.notificationService = notificationService;
+        this.ownerContext = ownerContext;
     }
 
     @Override
@@ -114,7 +117,8 @@ public class NotificationEventHandler implements EventHandler {
                 title,
                 body,
                 link,
-                payload
+                payload,
+                resolveOwnerProfileId(envelope, payload, applicationId)
         );
 
         try {
@@ -125,6 +129,46 @@ public class NotificationEventHandler implements EventHandler {
             log.error("Notification delivery failed for event {}: {}", envelope.id(), e.getMessage());
             throw new IllegalStateException("Notification delivery failed for event " + envelope.id(), e);
         }
+    }
+
+    /**
+     * Who owns the notification being fanned out.
+     *
+     * <p>This runs in the outbox dispatcher thread, where there is no
+     * SecurityContext, so ownership is derived from the event itself — in order
+     * of decreasing certainty:
+     *
+     * <ol>
+     *   <li>an explicit {@code profile_id} in the payload, when the producer
+     *       knows the owner directly;</li>
+     *   <li>the owner of the correlated application — exact, because
+     *       {@code applications.profile_id} is written by the authenticated
+     *       request that created it;</li>
+     *   <li>the profile of a {@code USER} aggregate id, which is how the sign-in
+     *       and signup notifications carry the account they refer to.</li>
+     * </ol>
+     *
+     * <p>Null is a legitimate and deliberate outcome (an outbox dead-letter, a
+     * discovery notice for the shared catalogue): such a notification belongs to
+     * no user and is stored with a null owner, which no user-facing query will
+     * ever return. It is never the caller's profile "by default" — inventing an
+     * owner would put another account's notification in the wrong bell.
+     */
+    private java.util.UUID resolveOwnerProfileId(Envelope envelope, Map<String, Object> payload, java.util.UUID applicationId) {
+        java.util.UUID fromPayload = uuid(payload.get("profile_id"));
+        if (fromPayload != null) {
+            return fromPayload;
+        }
+        if (applicationId != null) {
+            java.util.Optional<java.util.UUID> owner = ownerContext.ownerOfApplication(applicationId);
+            if (owner.isPresent()) {
+                return owner.get();
+            }
+        }
+        if ("USER".equals(envelope.aggregateType())) {
+            return ownerContext.ownerOfUserId(envelope.aggregateId()).orElse(null);
+        }
+        return null;
     }
 
     // ── mapping ──────────────────────────────────────────────────────

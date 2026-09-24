@@ -65,6 +65,24 @@ app:
   redis:
     # Separate cold TLS connection initialization from command execution.
     connection-initialization-timeout: ${APP_REDIS_CONNECTION_INITIALIZATION_TIMEOUT:10s}
+  # Firebase Admin credentials. No committed defaults: a production deploy
+  # without them starts normally but answers Firebase sign-in with 503 and an
+  # explicit "missing: FIREBASE_..." message, instead of appearing to work.
+  #
+  #   FIREBASE_PROJECT_ID   — Firebase/GCP project id
+  #   FIREBASE_CLIENT_EMAIL — service-account client email
+  #   FIREBASE_PRIVATE_KEY  — service-account private key (PEM; \n accepted)
+  firebase:
+    project-id: ${FIREBASE_PROJECT_ID:}
+    client-email: ${FIREBASE_CLIENT_EMAIL:}
+    private-key: ${FIREBASE_PRIVATE_KEY:}
+  auth:
+    # Production MUST gate new registrations. The critical case is the one
+    # where APP_REGISTRATION_INVITE_CODE was never set: registration is then
+    # refused outright, never opened. Signing in to an existing account is
+    # unaffected. See RegistrationGate.
+    require-invite-code: ${APP_REQUIRE_INVITE_CODE:true}
+    registration-invite-code: ${APP_REGISTRATION_INVITE_CODE:}
   # Comma-separated explicit origins (never "*"; credentials are allowed).
   cors:
     allowed-origins: ${APP_CORS_ALLOWED_ORIGINS}

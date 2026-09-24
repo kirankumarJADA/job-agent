@@ -1,8 +1,9 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { AuthProvider, useAuth } from './context/AuthContext';
+import { BrowserRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom';
+
+import { AuthProvider } from './context/AuthContext';
 import { Navigation } from './components/Navigation';
-import { LoginModal } from './components/LoginModal';
+import { ProtectedRoute, PublicOnlyRoute } from './components/RouteGuards';
 
 import { DashboardPage } from './pages/DashboardPage';
 import { JobsFeedPage } from './pages/JobsFeedPage';
@@ -13,43 +14,83 @@ import { ModelsPage } from './pages/ModelsPage';
 import { SourcesPage } from './pages/SourcesPage';
 import { LogsPage } from './pages/LogsPage';
 
-const AppLayout: React.FC = () => {
-  const { user, loading } = useAuth();
+import { LoginPage } from './pages/LoginPage';
+import { SignUpPage } from './pages/SignUpPage';
+import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-slate-950 text-slate-400 font-mono text-sm">
-        Initializing Job Agent Session...
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex min-h-screen bg-slate-950 text-slate-100 antialiased">
-      {!user && <LoginModal />}
-      <Navigation />
-      <main className="flex-1 p-6 lg:p-8 overflow-y-auto max-h-screen">
-        <Routes>
-          <Route path="/" element={<DashboardPage />} />
-          <Route path="/jobs" element={<JobsFeedPage />} />
-          <Route path="/jobs/:id" element={<JobDetailPage />} />
-          <Route path="/profile" element={<ProfilePage />} />
-          <Route path="/preferences" element={<PreferencesPage />} />
-          <Route path="/models" element={<ModelsPage />} />
-          <Route path="/sources" element={<SourcesPage />} />
-          <Route path="/logs" element={<LogsPage />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </main>
-    </div>
-  );
-};
+/**
+ * The authenticated application shell: sidebar plus content area. Rendered only
+ * for a signed-in user (see the guard on the layout route below), so the
+ * previous "blocking login modal over the whole app" arrangement is gone —
+ * signing in is now a route, which is also what makes /login linkable and
+ * bookmarkable.
+ */
+const AppShell: React.FC = () => (
+  <div className="flex min-h-screen bg-slate-950 text-slate-100 antialiased">
+    <Navigation />
+    <main className="flex-1 p-6 lg:p-8 overflow-y-auto max-h-screen">
+      <Outlet />
+    </main>
+  </div>
+);
 
 export default function App() {
   return (
     <AuthProvider>
       <BrowserRouter>
-        <AppLayout />
+        <Routes>
+          {/*
+            Public auth routes. PublicOnlyRoute keeps signed-in users out of
+            them, so /login is not a dead end once you have an account.
+          */}
+          <Route
+            path="/login"
+            element={
+              <PublicOnlyRoute>
+                <LoginPage />
+              </PublicOnlyRoute>
+            }
+          />
+          <Route
+            path="/signup"
+            element={
+              <PublicOnlyRoute>
+                <SignUpPage />
+              </PublicOnlyRoute>
+            }
+          />
+          <Route
+            path="/forgot-password"
+            element={
+              <PublicOnlyRoute>
+                <ForgotPasswordPage />
+              </PublicOnlyRoute>
+            }
+          />
+
+          {/*
+            Everything else requires a session. The pathless layout route wraps
+            the whole authenticated area, so protection is applied once rather
+            than repeated on each page.
+          */}
+          <Route
+            element={
+              <ProtectedRoute>
+                <AppShell />
+              </ProtectedRoute>
+            }
+          >
+            <Route path="/" element={<DashboardPage />} />
+            <Route path="/jobs" element={<JobsFeedPage />} />
+            <Route path="/jobs/:id" element={<JobDetailPage />} />
+            <Route path="/profile" element={<ProfilePage />} />
+            <Route path="/preferences" element={<PreferencesPage />} />
+            <Route path="/models" element={<ModelsPage />} />
+            <Route path="/sources" element={<SourcesPage />} />
+            <Route path="/logs" element={<LogsPage />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Route>
+        </Routes>
       </BrowserRouter>
     </AuthProvider>
   );

@@ -97,12 +97,13 @@ public class NotificationService {
                 delivery.title(),
                 delivery.body(),
                 delivery.link(),
-                delivery.dedupKey(),
+                ownerScopedDedupKey(delivery.dedupKey(), delivery.profileId()),
                 meta,
                 delivery.jobId(),
                 delivery.applicationId(),
                 null,
-                null
+                null,
+                delivery.profileId()
         );
 
         NotificationRecord stored = repository.insertIfAbsent(record);
@@ -133,6 +134,25 @@ public class NotificationService {
         return stored;
     }
 
+    /**
+     * Namespaces a business dedup key by its owner.
+     *
+     * <p>V007's dedup index is global over {@code dedup_key}, but the keys are
+     * derived from business aggregates that are not user-specific — a job id,
+     * most obviously. Without the owner suffix, the first candidate matched
+     * against a shared job posting would create the row and every other
+     * candidate's JOB_MATCHED would be discarded as a "replay", silently. With
+     * it, each owner gets exactly one row per occurrence, which is what the
+     * idempotency contract was always meant to mean. System notifications (no
+     * owner) keep the bare key so ops-level dedup is unchanged.
+     */
+    static String ownerScopedDedupKey(String dedupKey, UUID profileId) {
+        if (dedupKey == null || profileId == null) {
+            return dedupKey;
+        }
+        return dedupKey + ":p:" + profileId;
+    }
+
     /** Fan-out request as derived by the handler from a delivered Envelope. */
     public record Delivery(
             UUID eventId,
@@ -146,7 +166,8 @@ public class NotificationService {
             String title,
             String body,
             String link,
-            Map<String, Object> metadata
+            Map<String, Object> metadata,
+            UUID profileId
     ) {
     }
 

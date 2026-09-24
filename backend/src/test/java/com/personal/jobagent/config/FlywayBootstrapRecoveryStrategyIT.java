@@ -39,7 +39,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class FlywayBootstrapRecoveryStrategyIT {
 
-    static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
+    // Connect as postgres, as on a real Supabase project: the database owner
+    // is the postgres role, the documented rls_auto_enable bootstrap routine
+    // is owned by it, and every migration object is created by it. With the
+    // Testcontainers default user the routine's SECURITY DEFINER alter-table
+    // statements fail with "permission denied for schema public", which is a
+    // container artifact, not a production condition.
+    static final PostgreSQLContainer<?> postgres =
+            new PostgreSQLContainer<>("postgres:16").withUsername("postgres");
 
     static {
         if (System.getProperty("flyway.it.jdbcUrl") == null) {
@@ -119,19 +126,73 @@ class FlywayBootstrapRecoveryStrategyIT {
                 END;
                 $fn$
                 """);
+        // The guarded strategy classifies the routine as the Supabase platform
+        // bootstrap artifact only when it is owned by the postgres role —
+        // that is who owns it on a real Supabase project. The container
+        // superuser is whoever Testcontainers created, so create the postgres
+        // role (idempotent) and transfer ownership to reproduce the
+        // production condition exactly.
+        jdbc.execute("do $$ begin "
+                + "if not exists (select 1 from pg_roles where rolname = 'postgres') then "
+                + "create role postgres; end if; end $$");
+        jdbc.execute("alter function public.rls_auto_enable() owner to postgres");
         jdbc.execute("CREATE EVENT TRIGGER ensure_rls ON ddl_command_end "
                 + "WHEN TAG IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO') "
                 + "EXECUTE FUNCTION rls_auto_enable()");
+    }
+
+    /**
+     * The number of versioned migrations shipped with this build, from the
+     * classpath — the same source the guarded strategy itself verifies
+     * against. Asserting a hardcoded count here went stale the moment V020+
+     * were added; deriving it keeps the test's meaning ("the full shipped
+     * chain applied") independent of how long the chain is.
+     */
+    private static int expectedMigrationCount() {
+        try {
+            try (var stream = java.util.Arrays.stream(
+                    new org.springframework.core.io.support.PathMatchingResourcePatternResolver()
+                            .getResources("classpath*:db/migration/V*.sql"))) {
+                return (int) stream
+                        .filter(r -> r.getFilename() != null
+                                && r.getFilename().matches("V\\d+__.*\\.sql"))
+                        .count();
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to enumerate classpath migrations", e);
+        }
+    }
+
+    private static String expectedMaxVersion() {
+        try {
+            try (var stream = java.util.Arrays.stream(
+                    new org.springframework.core.io.support.PathMatchingResourcePatternResolver()
+                            .getResources("classpath*:db/migration/V*.sql"))) {
+                int max = stream
+                        .mapToInt(r -> {
+                            var name = r.getFilename() == null ? "" : r.getFilename();
+                            var matcher = java.util.regex.Pattern
+                                    .compile("V(\\d+)__.*\\.sql").matcher(name);
+                            return matcher.matches() ? Integer.parseInt(matcher.group(1)) : -1;
+                        })
+                        .filter(v -> v > 0)
+                        .max()
+                        .orElseThrow(() -> new IllegalStateException("No versioned migrations on the classpath"));
+                return "%03d".formatted(max);
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to enumerate classpath migrations", e);
+        }
     }
 
     private void assertFullyMigrated() {
         Integer migrationCount = jdbc.queryForObject(
                 "select count(*) from public.flyway_schema_history where success and type <> 'BASELINE'",
                 Integer.class);
-        assertThat(migrationCount).isEqualTo(19);
+        assertThat(migrationCount).isEqualTo(expectedMigrationCount());
         String current = jdbc.queryForObject(
                 "select max(version) from public.flyway_schema_history where success", String.class);
-        assertThat(current).isEqualTo("019");
+        assertThat(current).isEqualTo(expectedMaxVersion());
         Boolean usersExists = jdbc.queryForObject(
                 "select to_regclass('public.users') is not null", Boolean.class);
         assertThat(usersExists).isTrue();
@@ -295,7 +356,8 @@ class FlywayBootstrapRecoveryStrategyIT {
         List<String> before = jdbc.queryForList(
                 "select installed_rank || ':' || version || ':' || type || ':' || success "
                         + "from public.flyway_schema_history order by installed_rank", String.class);
-        assertThat(before).hasSize(20);
+        // One version-0 baseline followed by the complete shipped chain.
+        assertThat(before).hasSize(expectedMigrationCount() + 1);
 
         // Second and third startups: MIGRATED -> plain migrate(), no changes.
         strategy.migrate(newFlyway());
@@ -317,7 +379,7 @@ class FlywayBootstrapRecoveryStrategyIT {
         strategy.migrate(newFlyway());
         List<String> before = jdbc.queryForList(
                 "select version from public.flyway_schema_history order by installed_rank", String.class);
-        assertThat(before.size()).isEqualTo(19);
+        assertThat(before.size()).isEqualTo(expectedMigrationCount());
         strategy.migrate(newFlyway());
         List<String> after = jdbc.queryForList(
                 "select version from public.flyway_schema_history order by installed_rank", String.class);

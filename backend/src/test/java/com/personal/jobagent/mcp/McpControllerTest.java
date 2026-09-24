@@ -8,6 +8,7 @@ import com.personal.jobagent.ats.AtsKind;
 import com.personal.jobagent.coverletter.CoverLetterService;
 import com.personal.jobagent.jobs.JobRepository;
 import com.personal.jobagent.qa.ApplicationAnswerService;
+import com.personal.jobagent.security.OwnerContext;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -29,6 +30,7 @@ class McpControllerTest {
     private ApplicationAnswerService answerService;
     private AtsAdapterRegistry atsAdapterRegistry;
     private ObjectMapper objectMapper;
+    private OwnerContext ownerContext;
 
     @BeforeEach
     void setUp() {
@@ -37,8 +39,28 @@ class McpControllerTest {
         answerService = Mockito.mock(ApplicationAnswerService.class);
         atsAdapterRegistry = Mockito.mock(AtsAdapterRegistry.class);
         objectMapper = new ObjectMapper();
+        ownerContext = Mockito.mock(OwnerContext.class);
         controller = new McpController(jobRepository, coverLetterService, answerService,
-                atsAdapterRegistry, objectMapper);
+                atsAdapterRegistry, objectMapper, ownerContext);
+    }
+
+    @Test
+    void profileScopedToolsAreRefusedForAnAccountWithoutAProfile() {
+        // No profile resolves: the tool must refuse rather than act unscoped.
+        Mockito.when(ownerContext.profileIdOrNull()).thenReturn(null);
+
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("jsonrpc", "2.0");
+        body.put("id", "req-np");
+        body.put("method", "tools/call");
+        ObjectNode params = body.putObject("params");
+        params.put("name", "list_applications");
+        params.putObject("arguments");
+
+        ResponseEntity<?> response = controller.dispatch(body, null);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().toString()).contains("No profile exists");
     }
 
     @Test

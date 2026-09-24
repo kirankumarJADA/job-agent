@@ -40,17 +40,35 @@ public class ApplicationAnswerController {
     public record DraftAnswerRequest(UUID jobId, UUID applicationId, String questionText) {}
     public record UpdateAnswerRequest(String status, String answerText) {}
 
+    /**
+     * Lists the caller's own drafted answers for a job.
+     *
+     * <p>Scoped by the caller's profile: previously every account's answers for
+     * the job were returned together. An account with no profile has no answers,
+     * so it gets an empty list rather than a server error.
+     */
     @GetMapping("/job/{jobId}")
     public List<ApplicationAnswerRecord> listByJob(@PathVariable UUID jobId) {
-        return answerRepository.findByJobId(jobId);
+        UUID profileId = currentProfileIdOrNull();
+        if (profileId == null) {
+            return List.of();
+        }
+        return answerRepository.findByJobIdForProfile(jobId, profileId);
     }
 
+    /**
+     * Reads one answer, only if the caller owns it. Another account's answer is
+     * indistinguishable from a missing one (404).
+     */
     @GetMapping("/{id}")
     public ResponseEntity<?> getAnswer(@PathVariable UUID id, HttpServletRequest request) {
-        return answerRepository.findById(id)
+        UUID profileId = currentProfileIdOrNull();
+        if (profileId == null) {
+            return notFound(request, "Answer not found");
+        }
+        return answerRepository.findByIdForProfile(id, profileId)
                 .<ResponseEntity<?>>map(ResponseEntity::ok)
-                .orElseGet(() -> ResponseEntity.status(HttpStatus.NOT_FOUND)
-                        .body(ApiError.of(404, "Not Found", "Answer not found", request.getRequestURI(), correlationId())));
+                .orElseGet(() -> notFound(request, "Answer not found"));
     }
 
     @PostMapping("/draft")
@@ -77,15 +95,25 @@ public class ApplicationAnswerController {
         return ResponseEntity.status(HttpStatus.CREATED).body(result);
     }
 
+    /**
+     * Updates one of the caller's own answers. Lookup and write are both scoped
+     * by the caller's profile, so another account's answer cannot be read or
+     * modified here.
+     */
     @PutMapping("/{id}")
     public ResponseEntity<?> updateAnswer(@PathVariable UUID id, @RequestBody UpdateAnswerRequest body, HttpServletRequest request) {
-        var existing = answerRepository.findById(id);
-        if (existing.isEmpty()) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                    .body(ApiError.of(404, "Not Found", "Answer not found", request.getRequestURI(), correlationId()));
+        UUID profileId = currentProfileIdOrNull();
+        if (profileId == null) {
+            return notFound(request, "Answer not found");
         }
 
-        answerRepository.updateStatus(id, body.status() != null ? body.status() : existing.get().status(), body.answerText());
+        var existing = answerRepository.findByIdForProfile(id, profileId);
+        if (existing.isEmpty()) {
+            return notFound(request, "Answer not found");
+        }
+
+        answerRepository.updateStatusForProfile(
+                id, body.status() != null ? body.status() : existing.get().status(), body.answerText(), profileId);
 
         auditLogWriter.write(new AuditEntry(
                 actorEmail(),
@@ -98,7 +126,12 @@ public class ApplicationAnswerController {
                 UuidV7.generate()
         ));
 
-        return ResponseEntity.ok(answerRepository.findById(id).orElseThrow());
+        return ResponseEntity.ok(answerRepository.findByIdForProfile(id, profileId).orElseThrow());
+    }
+
+    private ResponseEntity<?> notFound(HttpServletRequest request, String detail) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(ApiError.of(404, "Not Found", detail, request.getRequestURI(), correlationId()));
     }
 
     private String correlationId() {
@@ -120,5 +153,16 @@ public class ApplicationAnswerController {
         return profileRepository.findByUserId(currentUserId())
                 .map(ProfileRecord::id)
                 .orElseThrow(() -> new IllegalStateException("No profile exists for the current user"));
+    }
+
+    /**
+     * Profile id for the authenticated caller, or null when the account has no
+     * profile yet — so authorization failures are answered with a clean 404
+     * instead of surface as a 500.
+     */
+    private UUID currentProfileIdOrNull() {
+        return profileRepository.findByUserId(currentUserId())
+                .map(ProfileRecord::id)
+                .orElse(null);
     }
 }

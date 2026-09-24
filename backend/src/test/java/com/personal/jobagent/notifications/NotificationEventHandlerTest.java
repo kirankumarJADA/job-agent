@@ -2,6 +2,7 @@ package com.personal.jobagent.notifications;
 
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.events.Envelope;
+import com.personal.jobagent.security.OwnerContext;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -21,12 +22,17 @@ import static org.mockito.Mockito.when;
 class NotificationEventHandlerTest {
 
     private NotificationService notificationService;
+    private OwnerContext ownerContext;
     private NotificationEventHandler handler;
 
     @BeforeEach
     void setUp() {
         notificationService = Mockito.mock(NotificationService.class);
-        handler = new NotificationEventHandler(notificationService);
+        // Defaults resolve to Optional.empty(), i.e. none of these events can be
+        // attributed to an owner — so the delivery carries a null profile and the
+        // dedup keys asserted below stay exactly as derived.
+        ownerContext = Mockito.mock(OwnerContext.class);
+        handler = new NotificationEventHandler(notificationService, ownerContext);
     }
 
     private Envelope envelope(String type, String aggregateType, UUID aggregateId, Map<String, Object> payload) {
@@ -193,6 +199,65 @@ class NotificationEventHandlerTest {
 
         assertThatThrownBy(() -> handler.handle(envelope))
                 .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void anApplicationScopedEventIsDeliveredToThatApplicationsOwner() {
+        UUID applicationId = UuidV7.generate();
+        UUID ownerProfileId = UuidV7.generate();
+        when(ownerContext.ownerOfApplication(applicationId)).thenReturn(java.util.Optional.of(ownerProfileId));
+
+        handler.handle(envelope(NotificationEvents.INTERVIEW_INVITATION, "APPLICATION", applicationId, Map.of(
+                "application_id", applicationId.toString(),
+                "email_message_id", "msg-9")));
+
+        ArgumentCaptor<NotificationService.Delivery> captor =
+                ArgumentCaptor.forClass(NotificationService.Delivery.class);
+        verify(notificationService).deliver(captor.capture());
+        // Without this the fan-out would file the notification as a system notice
+        // that no user ever sees.
+        assertThat(captor.getValue().profileId()).isEqualTo(ownerProfileId);
+    }
+
+    @Test
+    void aSharedJobEventWithoutAnExplicitOwnerIsDeliveredUnownedRatherThanToAStranger() {
+        UUID jobId = UuidV7.generate();
+
+        handler.handle(envelope(NotificationEvents.JOB_MATCHED, "JOB", jobId, Map.of(
+                "job_id", jobId.toString(), "job_title", "Staff Engineer")));
+
+        ArgumentCaptor<NotificationService.Delivery> captor =
+                ArgumentCaptor.forClass(NotificationService.Delivery.class);
+        verify(notificationService).deliver(captor.capture());
+        // Null owner = stored invisible to every user. Inventing an owner would put
+        // one candidate's job match in another candidate's bell.
+        assertThat(captor.getValue().profileId()).isNull();
+    }
+
+    @Test
+    void anExplicitProfileIdInThePayloadWins() {
+        UUID jobId = UuidV7.generate();
+        UUID ownerProfileId = UuidV7.generate();
+
+        handler.handle(envelope(NotificationEvents.JOB_MATCHED, "JOB", jobId, Map.of(
+                "job_id", jobId.toString(), "profile_id", ownerProfileId.toString())));
+
+        ArgumentCaptor<NotificationService.Delivery> captor =
+                ArgumentCaptor.forClass(NotificationService.Delivery.class);
+        verify(notificationService).deliver(captor.capture());
+        assertThat(captor.getValue().profileId()).isEqualTo(ownerProfileId);
+    }
+
+    @Test
+    void ownerScopedDedupKeyKeepsTwoCandidatesNotificationsDistinct() {
+        UUID jobId = UuidV7.generate();
+        UUID first = UuidV7.generate();
+        UUID second = UuidV7.generate();
+
+        assertThat(NotificationService.ownerScopedDedupKey("job-matched:" + jobId, first))
+                .isNotEqualTo(NotificationService.ownerScopedDedupKey("job-matched:" + jobId, second));
+        // System notices (no owner) keep the bare key so ops dedup is unchanged.
+        assertThat(NotificationService.ownerScopedDedupKey("outbox-dlq:x", null)).isEqualTo("outbox-dlq:x");
     }
 
     private static Map<String, Object> merge(Map<String, Object> a, Map<String, Object> b) {

@@ -16,15 +16,26 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * JDBC persistence for notifications (V001 table + V007 columns).
+ * JDBC persistence for notifications (V001 table + V007 columns + V022 owner).
  *
- * insertIfAbsent() is the idempotency mechanism: `on conflict do nothing`
+ * <p><b>Every method is owner-scoped.</b> Notifications are the one table a user
+ * reads directly and continuously (the bell, the Logs &amp; Audit page), so it is
+ * also the place a missing filter would be most visible: without the owner
+ * filter, user B reads user A's interview invitations. There is deliberately no
+ * unscoped read here at all — the system/ops rows a user must not see are
+ * excluded by the same filter rather than by a separate code path.
+ *
+ * <p>insertIfAbsent() is the idempotency mechanism: `on conflict do nothing`
  * against the partial UNIQUE index notifications_dedup_key_uq makes it
  * atomic — two concurrent dispatchers (or a redelivered outbox event) can
  * race, but only one row is ever created. The null return is the replay
  * signal: "a notification for this business occurrence already existed".
+ * Because V007's dedup index is global, the key itself is namespaced per
+ * owner by {@link NotificationService} — otherwise two candidates matched
+ * against the same shared job posting would collapse into a single row and
+ * only one of them would ever be told.
  *
- * Serde failure of metadata is non-fatal by design: a notification is an
+ * <p>Serde failure of metadata is non-fatal by design: a notification is an
  * operator/candidate-facing convenience, not the system of record (the
  * outbox row + audit_logs are).
  */
@@ -35,7 +46,7 @@ public class NotificationRepository {
 
     private static final String SELECT_COLUMNS =
             "select id, severity, category, title, body, link, dedup_key, metadata, "
-                    + "job_id, application_id, read_at, created_at from notifications";
+                    + "job_id, application_id, read_at, created_at, profile_id from notifications";
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
@@ -58,7 +69,8 @@ public class NotificationRepository {
                 (UUID) rs.getObject("job_id"),
                 (UUID) rs.getObject("application_id"),
                 toInstant(rs.getTimestamp("read_at")),
-                toInstant(rs.getTimestamp("created_at")));
+                toInstant(rs.getTimestamp("created_at")),
+                (UUID) rs.getObject("profile_id"));
     }
 
     /**
@@ -70,8 +82,8 @@ public class NotificationRepository {
     public NotificationRecord insertIfAbsent(NotificationRecord notification) {
         boolean inserted = jdbcTemplate.update("""
                         insert into notifications
-                            (id, severity, category, title, body, link, dedup_key, metadata, job_id, application_id, read_at, created_at)
-                        values (?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, now())
+                            (id, severity, category, title, body, link, dedup_key, metadata, job_id, application_id, read_at, created_at, profile_id)
+                        values (?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, now(), ?)
                         on conflict (dedup_key) where dedup_key is not null do nothing
                         """,
                 notification.id(),
@@ -84,46 +96,81 @@ public class NotificationRepository {
                 toJson(notification.metadata()),
                 notification.jobId(),
                 notification.applicationId(),
-                null) > 0;
+                null,
+                notification.profileId()) > 0;
 
         if (!inserted) {
             return null;
         }
-        return findById(notification.id()).orElse(notification);
+        return findById(notification.profileId(), notification.id()).orElse(notification);
     }
 
-    public Optional<NotificationRecord> findById(UUID id) {
+    /** Owner-scoped single read: a foreign id is indistinguishable from a missing one. */
+    public Optional<NotificationRecord> findById(UUID profileId, UUID id) {
+        if (profileId == null || id == null) {
+            return Optional.empty();
+        }
         List<NotificationRecord> rows = jdbcTemplate.query(
-                SELECT_COLUMNS + " where id = ?", rowMapper, id);
+                SELECT_COLUMNS + " where id = ? and profile_id = ?", rowMapper, id, profileId);
         return rows.stream().findFirst();
     }
 
-    public List<NotificationRecord> findRecent(int limit) {
+    public List<NotificationRecord> findRecent(UUID profileId, int limit) {
+        if (profileId == null) {
+            return List.of();
+        }
         return jdbcTemplate.query(
-                SELECT_COLUMNS + " order by created_at desc limit ?", rowMapper, Math.min(limit, 200));
+                SELECT_COLUMNS + " where profile_id = ? order by created_at desc limit ?",
+                rowMapper, profileId, Math.min(limit, 200));
     }
 
-    public List<NotificationRecord> findRecentUnread(int limit) {
+    public List<NotificationRecord> findRecentUnread(UUID profileId, int limit) {
+        if (profileId == null) {
+            return List.of();
+        }
         return jdbcTemplate.query(
-                SELECT_COLUMNS + " where read_at is null order by created_at desc limit ?",
-                rowMapper, Math.min(limit, 200));
+                SELECT_COLUMNS + " where profile_id = ? and read_at is null order by created_at desc limit ?",
+                rowMapper, profileId, Math.min(limit, 200));
     }
 
-    public long countUnread() {
+    public long countUnread(UUID profileId) {
+        if (profileId == null) {
+            return 0;
+        }
         Long count = jdbcTemplate.queryForObject(
-                "select count(*) from notifications where read_at is null", Long.class);
+                "select count(*) from notifications where profile_id = ? and read_at is null",
+                Long.class, profileId);
         return count != null ? count : 0;
     }
 
-    /** Marks a single notification read. Idempotent (no-op if already read). */
-    public boolean markRead(UUID id) {
+    /** Marks one of the caller's notifications read. Idempotent (no-op if already read). */
+    public boolean markRead(UUID profileId, UUID id) {
+        if (profileId == null) {
+            return false;
+        }
         return jdbcTemplate.update(
-                "update notifications set read_at = now() where id = ? and read_at is null", id) > 0;
+                "update notifications set read_at = now() where id = ? and profile_id = ? and read_at is null",
+                id, profileId) > 0;
     }
 
-    /** Marks every unread notification read. Returns how many rows changed. */
-    public int markAllRead() {
-        return jdbcTemplate.update("update notifications set read_at = now() where read_at is null");
+    /** Marks every unread notification of the caller read. Returns how many rows changed. */
+    public int markAllRead(UUID profileId) {
+        if (profileId == null) {
+            return 0;
+        }
+        return jdbcTemplate.update(
+                "update notifications set read_at = now() where profile_id = ? and read_at is null",
+                profileId);
+    }
+
+    /** Notification counts by owner, for the MCP metrics surface. */
+    public long countAll(UUID profileId) {
+        if (profileId == null) {
+            return 0;
+        }
+        Long count = jdbcTemplate.queryForObject(
+                "select count(*) from notifications where profile_id = ?", Long.class, profileId);
+        return count != null ? count : 0;
     }
 
     private String toJson(Map<String, Object> metadata) {

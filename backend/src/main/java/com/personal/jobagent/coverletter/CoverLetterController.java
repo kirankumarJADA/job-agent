@@ -40,17 +40,37 @@ public class CoverLetterController {
     public record GenerateRequest(UUID jobId, UUID applicationId) {}
     public record ApprovalRequest(boolean approved) {}
 
+    /**
+     * Lists the caller's own cover letters for a job.
+     *
+     * <p>Scoped by the caller's profile: previously this returned every
+     * account's letters for the job, which leaked other users' tailored resume
+     * content. An account with no profile yet has no letters, so it gets an
+     * empty list rather than a server error.
+     */
     @GetMapping("/job/{jobId}")
     public List<CoverLetterRecord> getCoverLettersByJob(@PathVariable UUID jobId) {
-        return coverLetterRepository.findByJobId(jobId);
+        UUID profileId = currentProfileIdOrNull();
+        if (profileId == null) {
+            return List.of();
+        }
+        return coverLetterRepository.findByJobIdForProfile(jobId, profileId);
     }
 
+    /**
+     * Reads one cover letter, only if the caller owns it. A letter belonging to
+     * another account is indistinguishable from a missing one (404), so this
+     * does not confirm that an id exists.
+     */
     @GetMapping("/{id}")
     public ResponseEntity<?> getCoverLetter(@PathVariable UUID id, HttpServletRequest request) {
-        return coverLetterRepository.findById(id)
+        UUID profileId = currentProfileIdOrNull();
+        if (profileId == null) {
+            return notFound(request, "Cover letter not found");
+        }
+        return coverLetterRepository.findByIdForProfile(id, profileId)
                 .<ResponseEntity<?>>map(ResponseEntity::ok)
-                .orElseGet(() -> ResponseEntity.status(HttpStatus.NOT_FOUND)
-                        .body(ApiError.of(404, "Not Found", "Cover letter not found", request.getRequestURI(), correlationId())));
+                .orElseGet(() -> notFound(request, "Cover letter not found"));
     }
 
     @PostMapping("/generate")
@@ -77,15 +97,24 @@ public class CoverLetterController {
         return ResponseEntity.status(HttpStatus.CREATED).body(result);
     }
 
+    /**
+     * Approves or unapproves one of the caller's own cover letters. The lookup
+     * and the update are both scoped by the caller's profile, so another
+     * account's letter can neither be read nor modified here.
+     */
     @PutMapping("/{id}/approval")
     public ResponseEntity<?> setApproval(@PathVariable UUID id, @RequestBody ApprovalRequest body, HttpServletRequest request) {
-        var existing = coverLetterRepository.findById(id);
-        if (existing.isEmpty()) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                    .body(ApiError.of(404, "Not Found", "Cover letter not found", request.getRequestURI(), correlationId()));
+        UUID profileId = currentProfileIdOrNull();
+        if (profileId == null) {
+            return notFound(request, "Cover letter not found");
         }
 
-        coverLetterRepository.setApproved(id, body.approved());
+        var existing = coverLetterRepository.findByIdForProfile(id, profileId);
+        if (existing.isEmpty()) {
+            return notFound(request, "Cover letter not found");
+        }
+
+        coverLetterRepository.setApprovedForProfile(id, body.approved(), profileId);
 
         auditLogWriter.write(new AuditEntry(
                 actorEmail(),
@@ -98,7 +127,12 @@ public class CoverLetterController {
                 UuidV7.generate()
         ));
 
-        return ResponseEntity.ok(coverLetterRepository.findById(id).orElseThrow());
+        return ResponseEntity.ok(coverLetterRepository.findByIdForProfile(id, profileId).orElseThrow());
+    }
+
+    private ResponseEntity<?> notFound(HttpServletRequest request, String detail) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(ApiError.of(404, "Not Found", detail, request.getRequestURI(), correlationId()));
     }
 
     private String correlationId() {
@@ -120,5 +154,16 @@ public class CoverLetterController {
         return profileRepository.findByUserId(currentUserId())
                 .map(ProfileRecord::id)
                 .orElseThrow(() -> new IllegalStateException("No profile exists for the current user"));
+    }
+
+    /**
+     * Profile id for the authenticated caller, or null when the account has no
+     * profile yet. Read/authorization paths use this so an account without a
+     * profile is answered with a clean 404/empty result instead of a 500.
+     */
+    private UUID currentProfileIdOrNull() {
+        return profileRepository.findByUserId(currentUserId())
+                .map(ProfileRecord::id)
+                .orElse(null);
     }
 }

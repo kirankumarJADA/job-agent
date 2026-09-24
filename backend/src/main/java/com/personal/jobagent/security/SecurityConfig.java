@@ -85,10 +85,31 @@ public class SecurityConfig {
     private String workerEventToken;
 
     private final RestAuthenticationEntryPoint restAuthenticationEntryPoint;
+    private final FirebaseTokenVerifier firebaseTokenVerifier;
+    private final UserRepository userRepository;
 
-    public SecurityConfig(RestAuthenticationEntryPoint restAuthenticationEntryPoint) {
+    public SecurityConfig(RestAuthenticationEntryPoint restAuthenticationEntryPoint,
+                          FirebaseTokenVerifier firebaseTokenVerifier,
+                          UserRepository userRepository) {
         this.restAuthenticationEntryPoint = restAuthenticationEntryPoint;
+        this.firebaseTokenVerifier = firebaseTokenVerifier;
+        this.userRepository = userRepository;
     }
+
+    /**
+     * Endpoints that establish a session from a credential supplied in the
+     * request body, and therefore cannot present a CSRF token by construction.
+     *
+     * <p>CSRF protects an <em>existing</em> authenticated session from being
+     * abused by another origin; these two endpoints are what create that
+     * session in the first place, and possession of the credential in the body
+     * is itself the authentication. Only a pre-authentication request can reach
+     * them, and neither mutates existing user data.
+     */
+    private static final String[] SESSION_ESTABLISHING_PATHS = {
+            "/api/v1/auth/login",
+            "/api/v1/auth/firebase/session"
+    };
 
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
@@ -103,14 +124,27 @@ public class SecurityConfig {
                             .csrfTokenRepository(csrfRepository)
                             .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler());
                     if (workerEventToken == null || workerEventToken.isBlank()) {
-                        customizer.ignoringRequestMatchers("/api/v1/auth/login");
+                        customizer.ignoringRequestMatchers(SESSION_ESTABLISHING_PATHS);
                     } else {
                         // Token mode: /automation/events is bearer-authenticated
                         // (no cookies involved), so CSRF does not apply there.
-                        customizer.ignoringRequestMatchers("/api/v1/auth/login", WorkerEventTokenFilter.EVENTS_PATH);
+                        customizer.ignoringRequestMatchers(
+                                "/api/v1/auth/login",
+                                "/api/v1/auth/firebase/session",
+                                WorkerEventTokenFilter.EVENTS_PATH);
                     }
                 })
                 .addFilterBefore(new WorkerEventTokenFilter(workerEventToken), CsrfFilter.class)
+                // Firebase ID tokens supplied as `Authorization: Bearer <token>`
+                // authenticate the request directly. Registered before the
+                // username/password filter so the standard Authentication object
+                // (and therefore the authorization rules below) is populated. It
+                // only authenticates already-linked accounts; new accounts are
+                // created exclusively by /auth/firebase/session, which enforces
+                // the registration invite code. See FirebaseAuthenticationFilter.
+                .addFilterBefore(
+                        new FirebaseAuthenticationFilter(firebaseTokenVerifier, userRepository, securityContextRepository()),
+                        org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter.class)
                 // Feature 8 live-verification fix: without this filter the
                 // deferred CsrfToken is never materialized, so the XSRF-TOKEN
                 // cookie is never written and EVERY mutating SPA call 403s
@@ -125,7 +159,12 @@ public class SecurityConfig {
                                 "/v3/api-docs/**",
                                 "/swagger-ui/**",
                                 "/swagger-ui.html",
-                                "/api/v1/auth/login"
+                                "/api/v1/auth/login",
+                                "/api/v1/auth/firebase/session",
+                                // Public, non-sensitive: whether an invite code is
+                                // required and whether registration is open. Lets
+                                // the sign-up form label itself honestly.
+                                "/api/v1/auth/registration-policy"
                         ).permitAll()
                         .anyRequest().authenticated()
                 );

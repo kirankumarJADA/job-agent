@@ -110,6 +110,7 @@ public class ResumeAtsIntelligenceService {
         try {
             notifications.emit(new NotificationService.NotificationCommand(NotificationEvents.CV_GENERATED, "CV", created.cvVersionId(),
                     Map.of("job_id", jobId.toString(), "application_id", applicationId == null ? "" : applicationId.toString(),
+                            "profile_id", profileId.toString(),
                             "cv_version_id", created.cvVersionId().toString(), "input_hash", hash,
                             "profile_revision", profile.masterRevision()), UuidV7.generate(), null));
         } catch (Exception ignored) {

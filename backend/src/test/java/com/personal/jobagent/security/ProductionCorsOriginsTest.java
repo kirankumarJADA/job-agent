@@ -157,7 +157,12 @@ class ProductionCorsOriginsTest {
     }
 
     private static SecurityConfig config(List<String> allowedOrigins, boolean allowLocalhost) {
-        SecurityConfig config = new SecurityConfig(new RestAuthenticationEntryPoint(new ObjectMapper()));
+        // The Firebase verifier and user repository are only consulted by
+        // filterChain(), which these tests deliberately do not build — they
+        // exercise corsConfigurationSource() and effectiveAllowedOrigins()
+        // directly. Passing nulls keeps the fixture honest about that.
+        SecurityConfig config = new SecurityConfig(
+                new RestAuthenticationEntryPoint(new ObjectMapper()), null, null);
         ReflectionTestUtils.setField(config, "allowedOrigins", allowedOrigins);
         ReflectionTestUtils.setField(config, "allowLocalhost", allowLocalhost);
         return config;

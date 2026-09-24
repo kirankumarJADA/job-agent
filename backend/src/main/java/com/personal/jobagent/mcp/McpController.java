@@ -10,6 +10,7 @@ import com.personal.jobagent.common.JdbcConversions;
 import com.personal.jobagent.coverletter.CoverLetterService;
 import com.personal.jobagent.jobs.JobRepository;
 import com.personal.jobagent.qa.ApplicationAnswerService;
+import com.personal.jobagent.security.OwnerContext;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import jakarta.servlet.http.HttpServletRequest;
@@ -48,26 +49,49 @@ public class McpController {
     private final ApplicationAnswerService answerService;
     private final AtsAdapterRegistry atsAdapterRegistry;
     private final ObjectMapper objectMapper;
+    private final OwnerContext ownerContext;
     @Autowired
     private JdbcTemplate db;
-
-    // Canonical "system" profile and application UUIDs for MCP-initiated calls.
-    // These are sentinel values: the services look up actual profile/app data
-    // using the jobId; these IDs are preserved in the audit trail so MCP
-    // calls are distinguishable from user-initiated calls.
-    private static final UUID MCP_PROFILE_ID = UUID.fromString("00000000-0000-0000-0000-000000000001");
-    private static final UUID MCP_APPLICATION_ID = UUID.fromString("00000000-0000-0000-0000-000000000002");
 
     public McpController(JobRepository jobRepository,
                          CoverLetterService coverLetterService,
                          ApplicationAnswerService answerService,
                          AtsAdapterRegistry atsAdapterRegistry,
-                         ObjectMapper objectMapper) {
+                         ObjectMapper objectMapper,
+                         OwnerContext ownerContext) {
         this.jobRepository = jobRepository;
         this.coverLetterService = coverLetterService;
         this.answerService = answerService;
         this.atsAdapterRegistry = atsAdapterRegistry;
         this.objectMapper = objectMapper;
+        this.ownerContext = ownerContext;
+    }
+
+    /**
+     * The calling account's profile.
+     *
+     * <p>MCP used to act as a fixed sentinel profile ({@code 00000000-...-0001})
+     * and a sentinel application id. Nothing had that profile, so generated cover
+     * letters and drafted answers were filed against a phantom owner — invisible
+     * to the user who asked for them — while the read tools returned every
+     * account's applications, emails and automation plans. Tools now act as the
+     * authenticated caller, and a caller with no profile is refused rather than
+     * silently writing data nobody owns.
+     */
+    private UUID requireProfileId() {
+        UUID profileId = ownerContext.profileIdOrNull();
+        if (profileId == null) {
+            throw new McpException(-32602, "No profile exists for this account");
+        }
+        return profileId;
+    }
+
+    /** The caller's own application for a job, if they have one; otherwise null. */
+    private UUID applicationForJob(UUID profileId, UUID jobId) {
+        return db.queryForList(
+                        "select id from applications where job_id=? and profile_id=? order by created_at desc limit 1",
+                        jobId, profileId)
+                .stream().findFirst().map(row -> (UUID) row.get("id")).orElse(null);
     }
 
     // ── Tool Manifest ──────────────────────────────────────────────────────────
@@ -157,9 +181,10 @@ public class McpController {
     private Object toolGenerateCoverLetter(JsonNode args) {
         if (!args.has("job_id")) throw new IllegalArgumentException("job_id is required");
         UUID jobId = UUID.fromString(args.get("job_id").asText());
+        UUID profileId = requireProfileId();
 
         CoverLetterService.GenerationResult result = coverLetterService.generateCoverLetter(
-                MCP_PROFILE_ID, jobId, MCP_APPLICATION_ID);
+                profileId, jobId, applicationForJob(profileId, jobId));
 
         return Map.of(
                 "cover_letter_id", result.coverLetter().id().toString(),
@@ -176,9 +201,10 @@ public class McpController {
 
         UUID jobId = UUID.fromString(args.get("job_id").asText());
         String question = args.get("question").asText();
+        UUID profileId = requireProfileId();
 
         ApplicationAnswerService.AnswerResult result = answerService.draftAnswer(
-                MCP_PROFILE_ID, jobId, MCP_APPLICATION_ID, question);
+                profileId, jobId, applicationForJob(profileId, jobId), question);
 
         return Map.of(
                 "answer_id", result.record().id(),
@@ -189,20 +215,25 @@ public class McpController {
         );
     }
 
+    // Every tool below is scoped to the authenticated caller's profile. The
+    // owner is never a tool argument — an MCP client cannot name whose data it
+    // wants, so there is no argument to tamper with.
     private Object toolListApplications() {
-        return Map.of("items", db.queryForList("select id,job_id,status,mode,created_at,updated_at from applications order by created_at desc limit 100"));
+        return Map.of("items", db.queryForList("select id,job_id,status,mode,created_at,updated_at from applications where profile_id=? order by created_at desc limit 100", requireProfileId()));
     }
     private Object toolGetApplication(JsonNode args) {
         UUID id=requiredUuid(args,"application_id");
-        return db.queryForList("select id,job_id,status,mode,created_at,updated_at from applications where id=?",id).stream().findFirst().map(x->Map.of("application",x)).orElseThrow(()->new McpException(-32602,"Application not found: "+id));
+        return db.queryForList("select id,job_id,status,mode,created_at,updated_at from applications where id=? and profile_id=?",id,requireProfileId()).stream().findFirst().map(x->Map.of("application",x)).orElseThrow(()->new McpException(-32602,"Application not found: "+id));
     }
-    private Object toolGetApplicationStatus(JsonNode args) { UUID id=requiredUuid(args,"application_id"); return db.queryForList("select id,status,updated_at from applications where id=?",id).stream().findFirst().orElseThrow(()->new McpException(-32602,"Application not found: "+id)); }
+    private Object toolGetApplicationStatus(JsonNode args) { UUID id=requiredUuid(args,"application_id"); return db.queryForList("select id,status,updated_at from applications where id=? and profile_id=?",id,requireProfileId()).stream().findFirst().orElseThrow(()->new McpException(-32602,"Application not found: "+id)); }
     // payload is jsonb: queryForList handed the driver's PGobject to Jackson, which rendered it
     // as {"type":"jsonb","value":"..."} instead of the event payload itself.
-    private Object toolGetApplicationTimeline(JsonNode args) { UUID id=requiredUuid(args,"application_id"); return Map.of("items",db.query("select id,type,payload::text as payload,actor,occurred_at from application_events where application_id=? order by occurred_at,id",(rs,n)->{ Map<String,Object> row=new LinkedHashMap<>(); row.put("id",rs.getObject("id")); row.put("type",rs.getString("type")); row.put("payload",JdbcConversions.readJson(rs,"payload",objectMapper)); row.put("actor",rs.getString("actor")); row.put("occurred_at",rs.getObject("occurred_at")); return row; },id)); }
-    private Object toolListEmails(JsonNode args) { if(args.has("application_id")){UUID id=requiredUuid(args,"application_id");return Map.of("items",db.queryForList("select id,message_id,from_address,subject,received_at,application_id,classification,classification_confidence from emails where application_id=? order by received_at desc limit 100",id));} return Map.of("items",db.queryForList("select id,message_id,from_address,subject,received_at,application_id,classification,classification_confidence from emails order by received_at desc limit 100")); }
-    private Object toolGetAutomationStatus(JsonNode args) { if(args.has("plan_id")){UUID id=requiredUuid(args,"plan_id");return db.queryForList("select id,application_id,status,submit_approved,heartbeat_at,updated_at from automation_plans where id=?",id).stream().findFirst().orElseThrow(()->new McpException(-32602,"Automation plan not found: "+id));} return Map.of("items",db.queryForList("select id,application_id,status,submit_approved,heartbeat_at,updated_at from automation_plans order by updated_at desc limit 100")); }
-    private Object toolGetMetrics() { return Map.of("applications",db.queryForObject("select count(*) from applications",Long.class),"emails",db.queryForObject("select count(*) from emails",Long.class),"automation_plans",db.queryForObject("select count(*) from automation_plans",Long.class),"worker_events",db.queryForObject("select count(*) from worker_events",Long.class),"notifications",db.queryForObject("select count(*) from notifications",Long.class)); }
+    // The join back to applications is what makes application_events (which has no owner
+    // column of its own) inheritable-scoped rather than unscoped.
+    private Object toolGetApplicationTimeline(JsonNode args) { UUID id=requiredUuid(args,"application_id"); return Map.of("items",db.query("select ev.id,ev.type,ev.payload::text as payload,ev.actor,ev.occurred_at from application_events ev join applications a on a.id=ev.application_id where ev.application_id=? and a.profile_id=? order by ev.occurred_at,ev.id",(rs,n)->{ Map<String,Object> row=new LinkedHashMap<>(); row.put("id",rs.getObject("id")); row.put("type",rs.getString("type")); row.put("payload",JdbcConversions.readJson(rs,"payload",objectMapper)); row.put("actor",rs.getString("actor")); row.put("occurred_at",rs.getObject("occurred_at")); return row; },id,requireProfileId())); }
+    private Object toolListEmails(JsonNode args) { UUID pid=requireProfileId(); if(args.has("application_id")){UUID id=requiredUuid(args,"application_id");return Map.of("items",db.queryForList("select id,message_id,from_address,subject,received_at,application_id,classification,classification_confidence from emails where application_id=? and profile_id=? order by received_at desc limit 100",id,pid));} return Map.of("items",db.queryForList("select id,message_id,from_address,subject,received_at,application_id,classification,classification_confidence from emails where profile_id=? order by received_at desc limit 100",pid)); }
+    private Object toolGetAutomationStatus(JsonNode args) { UUID pid=requireProfileId(); if(args.has("plan_id")){UUID id=requiredUuid(args,"plan_id");return db.queryForList("select id,application_id,status,submit_approved,heartbeat_at,updated_at from automation_plans where id=? and profile_id=?",id,pid).stream().findFirst().orElseThrow(()->new McpException(-32602,"Automation plan not found: "+id));} return Map.of("items",db.queryForList("select id,application_id,status,submit_approved,heartbeat_at,updated_at from automation_plans where profile_id=? order by updated_at desc limit 100",pid)); }
+    private Object toolGetMetrics() { UUID pid=requireProfileId(); return Map.of("applications",db.queryForObject("select count(*) from applications where profile_id=?",Long.class,pid),"emails",db.queryForObject("select count(*) from emails where profile_id=?",Long.class,pid),"automation_plans",db.queryForObject("select count(*) from automation_plans where profile_id=?",Long.class,pid),"worker_events",db.queryForObject("select count(*) from worker_events where profile_id=?",Long.class,pid),"notifications",db.queryForObject("select count(*) from notifications where profile_id=?",Long.class,pid)); }
     private Object toolGetProviderStatus() { return Map.of("providers",db.queryForList("select id,kind,enabled,base_url from llm_providers order by id")); }
     private UUID requiredUuid(JsonNode args,String name){if(!args.has(name))throw new IllegalArgumentException(name+" is required");return UUID.fromString(args.get(name).asText());}
 

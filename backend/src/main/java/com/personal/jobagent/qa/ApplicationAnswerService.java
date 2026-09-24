@@ -119,6 +119,9 @@ public class ApplicationAnswerService {
         try {
             Map<String, Object> payload = new HashMap<>();
             payload.put("job_id", jobId.toString());
+            // Explicit owner: answers aggregate on the answer id, so the fan-out
+            // has nothing else to derive the recipient from.
+            payload.put("profile_id", profileId.toString());
             payload.put("application_id", applicationId != null ? applicationId.toString() : "");
             payload.put("answer_id", id.toString());
             payload.put("job_title", job.title());

@@ -88,7 +88,10 @@ public class CoverLetterService {
         claimsValidation.put("checked_against_skills_count", skills.size());
         claimsValidation.put("checked_against_experiences_count", experiences.size());
 
-        int nextVersion = coverLetterRepository.getNextVersion(jobId);
+        // Scoped by profile: cover_letters carries unique(job_id, version),
+        // so a global counter would collide as soon as a second account
+        // generated a letter for the same job.
+        int nextVersion = coverLetterRepository.getNextVersion(jobId, profileId);
         String title = "Cover Letter v" + nextVersion + " - " + job.title();
 
         UUID clId = coverLetterRepository.insert(profileId, jobId, applicationId, nextVersion,
@@ -106,6 +109,10 @@ public class CoverLetterService {
                     clId,
                     Map.of(
                             "job_id", jobId.toString(),
+                            // Explicit owner so the notification is attributed to the
+                            // candidate whose letter this is, independently of the
+                            // application row.
+                            "profile_id", profileId.toString(),
                             "application_id", applicationId != null ? applicationId.toString() : "",
                             "cover_letter_id", clId.toString(),
                             "job_title", job.title(),

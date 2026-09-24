@@ -128,7 +128,12 @@ public class OutboxProcessor {
                     "outbox-dlq:" + eventId,
                     java.util.Map.of("event_id", eventId.toString(),
                             "event_type", String.valueOf(row.get("event_type"))),
-                    null, null, null, null);
+                    null, null, null, null,
+                    // System notification: an outbox dead-letter belongs to no user,
+                    // so it is stored unowned (V022) and is invisible to every
+                    // user-facing read. It is an ops signal, and the notification
+                    // table is not its system of record — the outbox row is.
+                    null);
 
             NotificationRecord stored = notificationRepository.insertIfAbsent(dlqNotification);
             if (stored != null) {

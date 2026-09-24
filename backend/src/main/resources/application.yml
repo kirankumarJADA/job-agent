@@ -60,6 +60,33 @@ app:
   # an authenticated browser session exactly as before. When set, POSTs to
   # /api/v1/automation/events must present `Authorization: Bearer <token>`.
   worker-event-token: ${WORKER_EVENT_TOKEN:}
+  # ── Authentication ────────────────────────────────────────────────
+  # Firebase Authentication (signup / sign-in / password reset).
+  #
+  # These are the ONLY values the backend needs from Firebase, and they are
+  # supplied exclusively as environment variables — there are no committed
+  # defaults, so a deployment that has not been given credentials reports
+  # exactly which variables are missing instead of starting up a verifier
+  # that cannot work. See FirebaseProperties / FirebaseAdminTokenVerifier.
+  #
+  # `private-key` is the service-account PEM from the Firebase console
+  # (Project settings -> Service accounts -> Generate new private key). In an
+  # environment variable its newlines are usually escaped as \n, which is
+  # accepted.
+  firebase:
+    project-id: ${FIREBASE_PROJECT_ID:}
+    client-email: ${FIREBASE_CLIENT_EMAIL:}
+    private-key: ${FIREBASE_PRIVATE_KEY:}
+  auth:
+    # When true, creating a NEW account requires the invite code below.
+    # Local development defaults to false so the sign-up flow can be exercised
+    # without a shared secret; the prod profile flips this to true, which means
+    # a production deploy that has not set APP_REGISTRATION_INVITE_CODE
+    # refuses new registrations outright (fail closed) rather than becoming
+    # open registration. Existing accounts can always sign in either way.
+    require-invite-code: ${APP_REQUIRE_INVITE_CODE:false}
+    registration-invite-code: ${APP_REGISTRATION_INVITE_CODE:}
+
   # CORS: comma-separated explicit origins (never "*"; credentials are allowed).
   # Local development trusts the loopback dev server by default; the prod
   # profile flips this to false, so production never trusts localhost even if

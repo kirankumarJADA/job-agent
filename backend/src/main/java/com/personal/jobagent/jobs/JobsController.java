@@ -26,11 +26,14 @@ public class JobsController {
 
     private final JobRepository jobRepository;
     private final JobSeedService jobSeedService;
+    private final com.personal.jobagent.security.OwnerContext ownerContext;
 
     public JobsController(JobRepository jobRepository,
-                          @org.springframework.beans.factory.annotation.Autowired(required = false) JobSeedService jobSeedService) {
+                          @org.springframework.beans.factory.annotation.Autowired(required = false) JobSeedService jobSeedService,
+                          com.personal.jobagent.security.OwnerContext ownerContext) {
         this.jobRepository = jobRepository;
         this.jobSeedService = jobSeedService;
+        this.ownerContext = ownerContext;
     }
 
     @GetMapping
@@ -62,6 +65,14 @@ public class JobsController {
                     body.put("job", job);
                     body.put("analysis", null);
                     body.put("score", null);
+                    // The CALLER's own match result. Jobs themselves are a shared
+                    // catalogue (public postings, globally deduplicated), so the
+                    // per-candidate part of a job — how well it matches you, and
+                    // why — is served from job_matches scoped to the caller. It is
+                    // null when this candidate has not scored the posting, which
+                    // is why the previous implementation must never be restored:
+                    // it kept one candidate's score on the shared row.
+                    body.put("match", jobRepository.findMatch(ownerContext.profileIdOrNull(), id).orElse(null));
                     body.put("decision_trace", java.util.List.of());
                     return ResponseEntity.ok(body);
                 })

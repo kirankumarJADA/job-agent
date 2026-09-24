@@ -21,10 +21,27 @@ import java.util.UUID;
 public class JobRepository {
 
     private final JdbcTemplate jdbcTemplate;
+    private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
 
-    public JobRepository(JdbcTemplate jdbcTemplate) {
+    public JobRepository(JdbcTemplate jdbcTemplate, com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
         this.jdbcTemplate = jdbcTemplate;
+        this.objectMapper = objectMapper;
     }
+
+    /**
+     * Columns are listed explicitly rather than {@code select *}.
+     *
+     * <p>The shared {@code jobs} row has historically carried columns that were
+     * NOT shared — V007 put the per-candidate match decision (match_score,
+     * match_recommendation, match_breakdown) here — and a {@code select *} is how
+     * such a column silently reaches every authenticated user the next time
+     * someone adds one. V022 moved that data to {@code job_matches} and dropped
+     * the columns; this list is the second half of that fix.
+     */
+    private static final String JOB_COLUMNS =
+            "id, source_id, external_id, company_id, company_name_raw, title, location_raw, city, country, "
+                    + "remote_type, employment_type, experience_level, salary_min, salary_max, salary_currency, "
+                    + "description_text, skills_extracted, application_url, canonical_url, posted_at, status";
 
     private static final RowMapper<JobRecord> ROW_MAPPER = (rs, rowNum) -> new JobRecord(
             (UUID) rs.getObject("id"),
@@ -73,7 +90,8 @@ public class JobRepository {
         }
 
         String where = conditions.isEmpty() ? "" : "where " + String.join(" and ", conditions);
-        String sql = "select * from jobs " + where + " order by first_seen_at desc, id desc limit ?";
+        String sql = "select " + JOB_COLUMNS + " from jobs " + where
+                + " order by first_seen_at desc, id desc limit ?";
         params.add(limit + 1); // fetch one extra to know if there's a next page
 
         List<JobRecord> rows = jdbcTemplate.query(sql, ROW_MAPPER, params.toArray());
@@ -96,7 +114,33 @@ public class JobRepository {
     }
 
     public Optional<JobRecord> findById(UUID id) {
-        return jdbcTemplate.query("select * from jobs where id = ?", ROW_MAPPER, id)
+        return jdbcTemplate.query("select " + JOB_COLUMNS + " from jobs where id = ?", ROW_MAPPER, id)
                 .stream().findFirst();
+    }
+
+    /** One candidate's own match decision for a posting, or empty if they have not scored it. */
+    public Optional<JobMatch> findMatch(UUID profileId, UUID jobId) {
+        if (profileId == null || jobId == null) {
+            return Optional.empty();
+        }
+        return jdbcTemplate.query("""
+                        select score, recommendation, breakdown, scored_at
+                        from job_matches where profile_id = ? and job_id = ?
+                        """,
+                (rs, rowNum) -> new JobMatch(
+                        rs.getInt("score"),
+                        rs.getString("recommendation"),
+                        JdbcConversions.readJsonMap(rs, "breakdown", objectMapper),
+                        rs.getTimestamp("scored_at").toInstant()),
+                profileId, jobId).stream().findFirst();
+    }
+
+    /**
+     * A candidate's match result for one posting. Scoped to (profile, job) by
+     * construction: it is a row of {@code job_matches}, so it cannot represent
+     * anyone else's decision.
+     */
+    public record JobMatch(int score, String recommendation, java.util.Map<String, Object> breakdown,
+                           java.time.Instant scoredAt) {
     }
 }

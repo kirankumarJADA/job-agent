@@ -75,6 +75,143 @@ Final contract (resolved from the PROPOSED draft — see below for what was deci
   - **Retained — `audit_logs`, unconditionally, including the `DATA_PURGE_REQUESTED` row this endpoint itself writes.** Two independent reasons this must remain: (1) legal/operational — you cannot meaningfully audit or investigate a data-deletion event if the record of that deletion is itself deletable; (2) technical — V001 already enforces this at the database level (`revoke update, delete on audit_logs from backend_role`), so retaining it isn't a policy choice the application layer could override even if it wanted to.
 - **Audit:** writes one `audit_logs` row (`action: "DATA_PURGE_REQUESTED"`) **before** the delete executes, in the same database transaction — if the delete fails, the audit row rolls back with it, so there's no "we tried to purge but only the audit trail survived" inconsistent state. `before_state` captures a snapshot (profile id + child-row counts) of what's about to be removed.
 - **Idempotency:** requires `X-Request-ID`. A retried purge request after the profile is already gone should not error — the endpoint treats "no profile exists" as a valid (already-satisfied) outcome, not a failure.
+- **Amendment (Firebase accounts):** an account whose credential lives in Firebase has no local password hash (`password_hash` is nullable as of V020). Confirmation by password is therefore impossible for those accounts and returns `403` with `"This account has no local password to confirm with."` — deliberately, rather than letting a null hash reach the encoder.
+
+---
+
+## Firebase Authentication — **BUILT**
+
+Firebase owns credential verification: password storage and hashing, password reset,
+and email delivery. This backend never sees a password, never issues a reset token,
+and never stores one. Its only job is to verify Firebase ID tokens and map the
+resulting identity onto a local account.
+
+### Identity model
+
+- The backend trusts exactly one client-supplied identifier: the **verified** `uid`
+  inside a Firebase ID token. No endpoint accepts a user id in a request body, and
+  adding one would be ignored.
+- `users.firebase_uid` (V020, unique where not null) links a local account to its
+  Firebase identity. `users.auth_provider` records `LOCAL` or `FIREBASE`.
+- Sign-in resolution order: match on `firebase_uid`, then link by email to an
+  existing local account (preserving its id, and therefore all of its profile data),
+  then — only for a genuinely new account — consult the registration gate.
+- Session behaviour is unchanged: requests are authorised by the existing
+  `HttpSession` and the `X-XSRF-TOKEN` / `XSRF-TOKEN` pair, so every pre-existing
+  endpoint works identically regardless of how the user signed in. A
+  `Authorization: Bearer <idToken>` header additionally authenticates a request
+  directly, but **only** for an account that is already linked.
+
+### `POST /api/v1/auth/firebase/session` — **BUILT**
+
+- **Auth:** none required to call it (this is what creates the session). CSRF-exempt,
+  like `/auth/login`, because there is no session to protect yet and possession of the
+  credential in the body is the authentication.
+- **Request:**
+  ```json
+  { "idToken": "string", "inviteCode": "string (optional)" }
+  ```
+- **Response 200:** same body shape as login — `{ userId, email, displayName }` — and
+  sets the session plus CSRF cookies. This is the only place a local account can be
+  created from a Firebase identity, and the only place the invite code is checked.
+- **Response 401:** the ID token is invalid, expired, or has a bad signature/audience.
+  Deliberately the same shape as a failed password login.
+- **Response 400:** the token is valid but carries no email, so there is nothing to
+  link an account to.
+- **Response 403:** registration was refused by the invite gate (missing, wrong, or
+  unconfigured code). Existing accounts are never refused this way.
+- **Response 503:** the server has no usable Firebase credentials. The message names
+  the missing environment variables.
+- **Audit:** `SIGNUP_COMPLETED` when the call created the account, otherwise
+  `LOGIN_SUCCESS`; `SIGNUP_REFUSED` on a gate refusal; `FIREBASE_LOGIN_FAILURE` on a
+  bad token.
+
+### `GET /api/v1/auth/registration-policy` — **BUILT**
+
+- **Auth:** none. Exposes no credential material and no account data.
+- **Response 200:** `{ "inviteCodeRequired": boolean, "registrationAvailable": boolean }`.
+  Lets the sign-up form label its invite-code field honestly instead of showing one
+  the server ignores, or hiding one it requires.
+
+### Registration gating — **BUILT**
+
+The application's `jobs`, `applications`, `notifications` and `audit_logs` tables are
+still globally scoped (see below), so on a public URL open registration would expose
+one account's data to anyone with the link. Registration is therefore gated and the
+gate **fails closed**:
+
+| `require-invite-code` | code configured | outcome for a new account |
+| --- | --- | --- |
+| `false` (dev default) | — | allowed |
+| `true` (prod default) | yes | allowed only if the supplied code matches |
+| `true` | **no** | **refused** — never falls open to open registration |
+
+Signing in to an existing account never consults the gate.
+
+### Password reset — **delegated to Firebase, no endpoint here**
+
+There is no `/auth/forgot-password` or `/auth/reset-password` on this backend, and
+none should be added. The frontend calls Firebase's own `sendPasswordResetEmail`, and
+Firebase sends the email and owns the token. This application generates no reset
+token, stores none, accepts none, and therefore cannot leak one.
+
+### Data isolation status
+
+Authentication alone does not create isolation. Ownership root is **`profiles.id`**
+— not a second concept bolted on beside `users.id`: V001 already makes `profiles`
+the one row per user that every other user-owned table hangs off.
+
+**Profile-owned and scoped.** Every read, write and delete filters on the owner
+resolved from the authenticated principal: `profiles`, `work_experiences`,
+`education`, `skills`, `projects`, `certifications`, `preference_sets`,
+`profile_evidence`, `applicant_identities`, `cover_letters`,
+`resume_ats_analyses`, `cv_versions`, and as of V022 `applications`,
+`notifications`, `emails`, `automation_plans`, `worker_events`,
+`account_sessions`, `audit_logs`, `job_matches` — each of these carries its own
+owner column. `application_events` and `verification_extractions` have no owner
+column of their own and are scoped by joining their parent (`applications`,
+`emails` respectively), which is why the ownership probe for them
+(`OwnerContext.ownerOfVerificationExtraction`, the MCP timeline tool) is a join
+rather than a column test. A foreign id is answered with `404` (never `403`,
+which would confirm the row exists) and every mutation carries the owner predicate
+in the statement itself, so there is no check-then-write window.
+
+**`jobs` stays a shared catalogue, deliberately.** Postings are deduped globally
+(`unique(source_id, external_id)`, `jobs.dedup_key`) and sourced from
+platform-configured connectors, so two candidates who discover the same posting
+share one row. Making it per-user would break dedup, source-failure tracking and
+catalogue browsing. What *was* wrongly shared is now fixed: V007 had put the
+per-candidate match decision (`match_score`, `match_recommendation`,
+`match_breakdown`) on that shared row, so two users scoring the same posting
+overwrote each other and flipped the row's `status` to `SCORED`. V022 moved it to
+`job_matches(profile_id, job_id)` and dropped the three columns from `jobs`.
+
+**Also global by design, and not user data:** `job_sources`, `companies`,
+`sponsor_records`, `job_snapshots`, `job_source_observations`,
+`discovery_extractions`, `job_analyses`, `job_scores`, `llm_*`, `prompts`,
+`routing_policies`, `model_benchmark_runs`, `benchmark_results`, `outbox_events`,
+`consumed_events`, `autonomy_policies`, `users`.
+
+**Legacy rows fail closed.** V022 attributes what it can prove and no more:
+rows reachable from an application inherit that application's owner; and when the
+database holds exactly one profile (i.e. the single-user Phase 1 deployment the
+data came from) that profile is provably the owner. With more than one profile,
+anything still unattributable keeps `profile_id = NULL` and is excluded from every
+user-facing read rather than shown to whoever asks first. `audit_logs` is never
+backfilled — it is append-only (V008), so an `update` in the migration would abort
+the statement — and its legacy rows are attributed at **read** time from `actor`,
+which already holds the acting account's email.
+
+**Regression suites for this contract:** `UserDataScopingTest` (asserts the
+ownership predicate is present in the statement that reaches the database —
+mocks cannot prove more), `UserDataIsolationTest` (controller-level refusals),
+and `UserDataIsolationIT` (both guarantees end-to-end against real PostgreSQL,
+plus the per-owner unique indexes and foreign keys that a mocked template cannot
+see). Run the last one with a database URL; without it, it is skipped:
+
+```
+mvn -f backend/pom.xml verify -Dit.postgres.url=jdbc:postgresql://127.0.0.1:5432/jobagent
+```
 
 ---
 

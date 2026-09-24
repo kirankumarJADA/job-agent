@@ -84,17 +84,33 @@ public class JobMatchService {
 
         // Persist the decision + emit the event atomically.
         boolean notified = Boolean.TRUE.equals(transactionTemplate.execute(tx -> {
+            // The decision belongs to (job, profile) — it is a function of THIS
+            // candidate's skills and preferences — so it is stored against the
+            // owner in job_matches, not on the shared jobs row where a second
+            // candidate scoring the same posting would overwrite the first
+            // (V022 moved it out; that is what those three columns used to be).
             jdbcTemplate.update("""
-                    update jobs set status = 'SCORED',
-                        match_score = ?,
-                        match_recommendation = ?,
-                        match_breakdown = ?::jsonb
-                    where id = ?
+                    insert into job_matches (profile_id, job_id, score, recommendation, breakdown, scored_at)
+                    values (?, ?, ?, ?, ?::jsonb, now())
+                    on conflict (profile_id, job_id) do update set
+                        score = excluded.score,
+                        recommendation = excluded.recommendation,
+                        breakdown = excluded.breakdown,
+                        scored_at = now()
                     """,
+                    profileId,
+                    jobId,
                     overall,
                     recommendation,
-                    breakdownJson(skillOverlap, remoteFit, salaryFit),
-                    jobId);
+                    breakdownJson(skillOverlap, remoteFit, salaryFit));
+
+            // Catalogue-level marker only: "this posting has been evaluated".
+            // Shared on purpose and carrying no candidate data, which is why it
+            // stays on the shared row while the decision itself does not.
+            jdbcTemplate.update("""
+                    update jobs set status = 'SCORED'
+                    where id = ? and status in ('DISCOVERED','ANALYSED')
+                    """, jobId);
 
             if (!"APPLY".equals(recommendation)) {
                 return false;
@@ -102,6 +118,11 @@ public class JobMatchService {
 
             Map<String, Object> payload = new HashMap<>();
             payload.put("job_id", jobId.toString());
+            // Explicit owner: this event aggregates on the JOB, which is shared
+            // between candidates, so the fan-out cannot derive the recipient from
+            // the aggregate and would otherwise file the notification as a
+            // system notice nobody sees.
+            payload.put("profile_id", profileId.toString());
             payload.put("job_title", job.title());
             payload.put("company", job.companyNameRaw() != null ? job.companyNameRaw() : "");
             payload.put("score", overall);

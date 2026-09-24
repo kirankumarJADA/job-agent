@@ -46,8 +46,27 @@ public class ApplicationAnswerRepository {
                 .stream().findFirst();
     }
 
+    /**
+     * Ownership-scoped read. Answers are keyed by {@code profile_id}, so this is
+     * what prevents one account reading another's drafted answers. A foreign id
+     * does not match and the caller sees a plain 404.
+     */
+    public Optional<ApplicationAnswerRecord> findByIdForProfile(UUID id, UUID profileId) {
+        return jdbcTemplate.query(
+                        "select * from application_answers where id = ? and profile_id = ?",
+                        rowMapper(), id, profileId)
+                .stream().findFirst();
+    }
+
     public List<ApplicationAnswerRecord> findByJobId(UUID jobId) {
         return jdbcTemplate.query("select * from application_answers where job_id = ? order by created_at desc", rowMapper(), jobId);
+    }
+
+    /** Ownership-scoped variant of {@link #findByJobId(UUID)}. */
+    public List<ApplicationAnswerRecord> findByJobIdForProfile(UUID jobId, UUID profileId) {
+        return jdbcTemplate.query(
+                "select * from application_answers where job_id = ? and profile_id = ? order by created_at desc",
+                rowMapper(), jobId, profileId);
     }
 
     public UUID insert(UUID profileId, UUID jobId, UUID applicationId,
@@ -69,5 +88,24 @@ public class ApplicationAnswerRepository {
         } else {
             jdbcTemplate.update("update application_answers set status = ?, updated_at = now() where id = ?", status, id);
         }
+    }
+
+    /**
+     * Ownership-scoped update. The {@code profile_id} predicate is the
+     * authorization check: another account's answer is never written, and the
+     * caller gets the same 404 as for an unknown id.
+     *
+     * @return true when a row the caller owns was updated
+     */
+    public boolean updateStatusForProfile(UUID id, String status, String updatedAnswer, UUID profileId) {
+        if (updatedAnswer != null) {
+            return jdbcTemplate.update(
+                    "update application_answers set status = ?, answer_text = ?, updated_at = now() "
+                            + "where id = ? and profile_id = ?",
+                    status, updatedAnswer, id, profileId) > 0;
+        }
+        return jdbcTemplate.update(
+                "update application_answers set status = ?, updated_at = now() where id = ? and profile_id = ?",
+                status, id, profileId) > 0;
     }
 }

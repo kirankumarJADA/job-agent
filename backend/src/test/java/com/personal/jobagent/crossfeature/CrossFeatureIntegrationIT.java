@@ -128,11 +128,18 @@ class CrossFeatureIntegrationIT {
 
         // ── isolation: every artifact is keyed to exactly its own job ──
         for (JobPackage pkg : List.of(pkgA, pkgB, pkgC)) {
-            Map<String, Object> jobRow = jdbcTemplate.queryForMap(
-                    "select status, match_score, match_recommendation, match_breakdown::text as breakdown from jobs where id = ?",
-                    pkg.jobId());
-            assertThat(jobRow.get("status")).isEqualTo("SCORED");
-            assertThat(jobRow.get("match_recommendation")).isEqualTo("APPLY");
+            // jobs.status is the shared catalogue's lifecycle state; the
+            // per-user match decision has lived in job_matches since V022
+            // (before that it was written onto the shared jobs row, where a
+            // second user's score overwrote the first's).
+            String jobStatus = jdbcTemplate.queryForObject(
+                    "select status from jobs where id = ?", String.class, pkg.jobId());
+            assertThat(jobStatus).isEqualTo("SCORED");
+            Map<String, Object> matchRow = jdbcTemplate.queryForMap(
+                    "select score, recommendation from job_matches where job_id = ? and profile_id = ?",
+                    pkg.jobId(), profileId);
+            assertThat(matchRow.get("recommendation")).isEqualTo("APPLY");
+            assertThat(((Number) matchRow.get("score")).intValue()).isEqualTo(pkg.score());
 
             // The job's own cover letter exists, is v1, and carries the job's own title
             Integer clCount = jdbcTemplate.queryForObject("""
@@ -159,27 +166,34 @@ class CrossFeatureIntegrationIT {
         assertThat(pkgC.clTitle()).doesNotContain(pkgA.title()).doesNotContain(pkgB.title());
 
         // Notifications: one per business occurrence per job, correlated to
-        // the right job — never crossed.
+        // the right job — never crossed. Keys are owner-scoped (V022): a
+        // notification with an owner is stored as "<key>:p:<profileId>" so
+        // two candidates' occurrences of the same event dedup independently.
         for (JobPackage pkg : List.of(pkgA, pkgB, pkgC)) {
-            awaitNotification("job-matched:" + pkg.jobId());
-            awaitNotification("cover-letter-generated:" + pkg.coverLetterId());
-            awaitNotification("answer-drafted:" + pkg.answerId());
+            awaitNotification(ownedKey("job-matched:" + pkg.jobId(), profileId));
+            awaitNotification(ownedKey("cover-letter-generated:" + pkg.coverLetterId(), profileId));
+            awaitNotification(ownedKey("answer-drafted:" + pkg.answerId(), profileId));
 
             UUID notifJobId = jdbcTemplate.queryForObject(
                     "select job_id from notifications where dedup_key = ?",
-                    UUID.class, "job-matched:" + pkg.jobId());
+                    UUID.class, ownedKey("job-matched:" + pkg.jobId(), profileId));
             assertThat(notifJobId).isEqualTo(pkg.jobId());
 
             UUID clNotifJob = jdbcTemplate.queryForObject(
                     "select job_id from notifications where dedup_key = ?",
-                    UUID.class, "cover-letter-generated:" + pkg.coverLetterId());
+                    UUID.class, ownedKey("cover-letter-generated:" + pkg.coverLetterId(), profileId));
             assertThat(clNotifJob).isEqualTo(pkg.jobId());
 
             UUID answerNotifJob = jdbcTemplate.queryForObject(
                     "select job_id from notifications where dedup_key = ?",
-                    UUID.class, "answer-drafted:" + pkg.answerId());
+                    UUID.class, ownedKey("answer-drafted:" + pkg.answerId(), profileId));
             assertThat(answerNotifJob).isEqualTo(pkg.jobId());
         }
+    }
+
+    /** The stored form of a dedup key for a notification that has an owner. */
+    private static String ownedKey(String bareKey, UUID profileId) {
+        return bareKey + ":p:" + profileId;
     }
 
     private JobPackage runPipeline(UUID profileId, JobFixture job) {
@@ -218,13 +232,15 @@ class CrossFeatureIntegrationIT {
         assertThat(result.record().status()).isEqualTo("HARD_STOP");
 
         // The hard stop fans out as a WARN notification keyed to the answer
-        awaitNotification("answer-drafted:" + result.record().id());
+        // (owner-scoped since V022 — see ownedKey below)
+        String key = ownedKey("answer-drafted:" + result.record().id(), profileId);
+        awaitNotification(key);
         String severity = jdbcTemplate.queryForObject(
                 "select severity from notifications where dedup_key = ?",
-                String.class, "answer-drafted:" + result.record().id());
+                String.class, key);
         String title = jdbcTemplate.queryForObject(
                 "select title from notifications where dedup_key = ?",
-                String.class, "answer-drafted:" + result.record().id());
+                String.class, key);
         assertThat(severity).isEqualTo("WARN");
         assertThat(title).contains("hard stop");
         assertThat(result.record().jobId()).isEqualTo(job.jobId());
