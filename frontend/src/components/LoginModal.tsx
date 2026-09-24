@@ -21,11 +21,6 @@ export const LoginModal: React.FC = () => {
     }
   };
 
-  const fillDev = () => {
-    setEmail('dev@example.local');
-    setPassword('DevPassword123!');
-  };
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
       <div className="w-full max-w-md rounded-2xl bg-slate-900 p-8 shadow-2xl border border-slate-800">
@@ -81,16 +76,28 @@ export const LoginModal: React.FC = () => {
           </button>
         </form>
 
-        <div className="mt-6 pt-6 border-t border-slate-800 flex justify-between items-center text-xs">
-          <span className="text-slate-500">Local Dev Mode</span>
-          <button
-            type="button"
-            onClick={fillDev}
-            className="text-indigo-400 hover:text-indigo-300 font-medium transition-colors underline"
-          >
-            Auto-fill Dev Credentials
-          </button>
-        </div>
+        {/*
+          Dev-only convenience control.
+          `import.meta.env.DEV` is replaced with the literal `false` by Vite in
+          production builds, so this entire block (including the credentials) is
+          eliminated from the production bundle. The credentials must stay inline
+          inside this guarded block so they cannot survive tree-shaking.
+        */}
+        {import.meta.env.DEV && (
+          <div className="mt-6 pt-6 border-t border-slate-800 flex justify-between items-center text-xs">
+            <span className="text-slate-500">Local Dev Mode</span>
+            <button
+              type="button"
+              onClick={() => {
+                setEmail('dev@example.local');
+                setPassword('DevPassword123!');
+              }}
+              className="text-indigo-400 hover:text-indigo-300 font-medium transition-colors underline"
+            >
+              Auto-fill Dev Credentials
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
