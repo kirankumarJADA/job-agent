@@ -176,9 +176,63 @@
 
   <build>
     <plugins>
+      <!--
+        Generates META-INF/build-info.properties so /actuator/info reports the
+        running artifact's name, version and build time. This works even in
+        the Docker build stage (which copies only pom.xml + src, so there is
+        no .git there), which is exactly why it is paired with the git plugin
+        below rather than relying on git metadata alone.
+      -->
       <plugin>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>build-info</id>
+            <goals>
+              <goal>build-info</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <!--
+        Writes git.properties into target/classes so Spring Boot's
+        GitInfoContributor can report branch/commit id via /actuator/info.
+
+        Safety choices:
+        - includeOnlyProperties keeps the file to exactly the four keys the
+          "simple" contributor reads. The plugin's default (full) output also
+          writes committer/author name + email, the git remote URL and build
+          user/host, none of which belong in a deployed artifact.
+        - failOnNoGitDirectory=false: the Docker build stage has no .git, and
+          it must not break the build there — it simply omits the git section.
+          That means a Docker/Render image only shows the SHA when the build
+          context actually contains .git (see docs/DEPLOYMENT.md).
+      -->
+      <plugin>
+        <groupId>io.github.git-commit-id</groupId>
+        <artifactId>git-commit-id-maven-plugin</artifactId>
+        <version>9.0.1</version>
+        <executions>
+          <execution>
+            <id>git-info</id>
+            <goals>
+              <goal>revision</goal>
+            </goals>
+          </execution>
+        </executions>
+        <configuration>
+          <failOnNoGitDirectory>false</failOnNoGitDirectory>
+          <failOnUnableToExtractRepoInfo>false</failOnUnableToExtractRepoInfo>
+          <generateGitPropertiesFile>true</generateGitPropertiesFile>
+          <generateGitPropertiesFilename>${project.build.outputDirectory}/git.properties</generateGitPropertiesFilename>
+          <includeOnlyProperties>
+            <includeOnlyProperty>^git\.branch$</includeOnlyProperty>
+            <includeOnlyProperty>^git\.commit\.id$</includeOnlyProperty>
+            <includeOnlyProperty>^git\.commit\.id\.abbrev$</includeOnlyProperty>
+            <includeOnlyProperty>^git\.commit\.time$</includeOnlyProperty>
+          </includeOnlyProperties>
+        </configuration>
       </plugin>
       <!--
         Without this, `*IT.java` files (JdbcAuditLogWriterIT, AuthControllerIT,

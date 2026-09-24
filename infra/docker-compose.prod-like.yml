@@ -28,6 +28,11 @@ services:
       SPRING_REDIS_PORT: 6379
       SPRING_REDIS_SSL: "false"
       APP_CORS_ALLOWED_ORIGINS: ${APP_CORS_ALLOWED_ORIGINS}
+      # Local stand-in only: this stack runs the prod profile against a
+      # frontend on http://localhost:8082, and the prod profile drops
+      # loopback origins unless this is explicitly true. Hosted Render
+      # must NOT set this (default false).
+      APP_CORS_ALLOW_LOCALHOST: "true"
       WORKER_EVENT_TOKEN: ${WORKER_EVENT_TOKEN}
       NIM_BASE_URL: ${NIM_BASE_URL:-https://integrate.api.nvidia.com}
       NIM_API_KEY: ${NIM_API_KEY:-}

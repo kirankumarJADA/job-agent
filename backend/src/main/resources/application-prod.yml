@@ -68,6 +68,13 @@ app:
   # Comma-separated explicit origins (never "*"; credentials are allowed).
   cors:
     allowed-origins: ${APP_CORS_ALLOWED_ORIGINS}
+    # Production never trusts a loopback origin. If http://localhost:5173 is
+    # left in APP_CORS_ALLOWED_ORIGINS it is filtered out and logged, rather
+    # than accepted with credentials. APP_CORS_ALLOW_LOCALHOST=true exists
+    # only for the local production-like stack
+    # (infra/docker-compose.prod-like.yml), which runs the prod profile
+    # against a frontend on http://localhost:8082.
+    allow-localhost: ${APP_CORS_ALLOW_LOCALHOST:false}
   csrf:
     # Cross-site SPA: CSRF cookie must also be SameSite=None; Secure so JS
     # can read it on the Vercel origin.

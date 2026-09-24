@@ -101,7 +101,13 @@ FREE-TIER: Upstash free tier is pay-per-command with a daily cap.
    - `SPRING_DATASOURCE_URL` (from Supabase, step 1)
    - `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD`
    - `SPRING_REDIS_HOST`, `SPRING_REDIS_PORT=6379`, `SPRING_REDIS_PASSWORD`, `SPRING_REDIS_SSL=true`
-   - `APP_CORS_ALLOWED_ORIGINS=https://<app>.vercel.app`
+   - `APP_CORS_ALLOWED_ORIGINS=https://<app>.vercel.app` — comma-separated,
+     **exactly** the real frontend origin(s). Never `*` (credentials are
+     allowed), and never a localhost origin: the prod profile sets
+     `app.cors.allow-localhost=false`, so loopback origins are dropped from the
+     effective allowlist and logged at startup instead of being trusted.
+     `APP_CORS_ALLOW_LOCALHOST=true` exists only for the local
+     production-like stack (`infra/docker-compose.prod-like.yml`).
    - `WORKER_EVENT_TOKEN=<openssl rand -hex 32>`
    - Optional LLM: `NIM_BASE_URL`, `NIM_API_KEY`, `GEMINI_API_KEY`
 3. Health check path: `/api/v1/system/health` (Render defaults to `/`;
@@ -111,6 +117,24 @@ FREE-TIER: Upstash free tier is pay-per-command with a daily cap.
 
 FREE-TIER: Render free instances sleep after inactivity and have no
 persistent disk; that is fine — DB storage means no disk is needed.
+
+### Build/version observability
+
+`GET /actuator/info` reports which artifact is running: `build.name`,
+`build.version` and `build.time` come from `META-INF/build-info.properties`,
+and a `git` section (branch, commit id, commit time) appears when
+`git.properties` was generated. The endpoint stays deliberately narrow —
+`management.info.env.enabled=false` keeps environment properties (which can
+carry datasource URLs and credentials) out of it, and the git plugin writes
+an explicit key allowlist so committer identity, author email and remote URLs
+never enter the image.
+
+The Docker build stage copies only `pom.xml` and `src`, so it has no `.git`:
+it therefore reports build metadata but no commit SHA. To surface the exact
+deployed SHA in the image, either add `COPY .git .git` to the build stage in
+`backend/Dockerfile` (valid only when Render's Docker build context is the
+repository root) or pass the revision in as a build argument. Until then
+treat `/actuator/info` as `version known, commit unknown`.
 
 ## 4. Vercel (frontend)
 

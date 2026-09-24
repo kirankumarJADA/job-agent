@@ -1,5 +1,7 @@
 package com.personal.jobagent.security;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -16,7 +18,10 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
+import java.net.URI;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Production hardening (deployment pass):
@@ -55,8 +60,20 @@ import java.util.List;
 @Configuration
 public class SecurityConfig {
 
+    private static final Logger log = LoggerFactory.getLogger(SecurityConfig.class);
+
     @Value("${app.cors.allowed-origins:http://localhost:5173}")
     private List<String> allowedOrigins;
+
+    /**
+     * When false, loopback origins are removed from the effective allowlist
+     * even if they are present in {@code app.cors.allowed-origins}. Defaults
+     * to true for local development; the prod profile sets it to false so a
+     * leftover {@code http://localhost:5173} in APP_CORS_ALLOWED_ORIGINS can
+     * never be trusted in production.
+     */
+    @Value("${app.cors.allow-localhost:true}")
+    private boolean allowLocalhost;
 
     @Value("${app.csrf.cookie-same-site:Lax}")
     private String csrfSameSite;
@@ -149,7 +166,7 @@ public class SecurityConfig {
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
-        configuration.setAllowedOrigins(allowedOrigins);
+        configuration.setAllowedOrigins(effectiveAllowedOrigins());
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("*"));
         configuration.setAllowCredentials(true);
@@ -157,5 +174,102 @@ public class SecurityConfig {
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/api/**", configuration);
         return source;
+    }
+
+    /**
+     * Resolves the origins Spring will actually trust. In production
+     * ({@code app.cors.allow-localhost=false}) loopback origins are dropped,
+     * so a dev origin accidentally left in {@code APP_CORS_ALLOWED_ORIGINS}
+     * is ignored instead of being silently accepted with credentials.
+     */
+    List<String> effectiveAllowedOrigins() {
+        if (allowLocalhost) {
+            return List.copyOf(allowedOrigins);
+        }
+        return rejectLoopbackOrigins(allowedOrigins);
+    }
+
+    static List<String> rejectLoopbackOrigins(List<String> origins) {
+        List<String> kept = new ArrayList<>();
+        List<String> dropped = new ArrayList<>();
+        for (String origin : origins) {
+            if (isLoopbackOrigin(origin)) {
+                dropped.add(origin);
+            } else {
+                kept.add(origin);
+            }
+        }
+        if (!dropped.isEmpty()) {
+            log.warn("app.cors.allow-localhost=false: ignoring {} loopback CORS origin(s) {}",
+                    dropped.size(), dropped);
+        }
+        if (kept.isEmpty()) {
+            log.warn("app.cors.allow-localhost=false left no trusted CORS origins; "
+                    + "cross-origin browser requests will be rejected with 403");
+        }
+        return List.copyOf(kept);
+    }
+
+    /**
+     * True only for genuine loopback origins (localhost, *.localhost, 127.0.0.0/8,
+     * ::1). Hosts that merely contain the word "localhost" elsewhere —
+     * e.g. {@code https://mylocalhost.example.com} — are NOT loopback.
+     */
+    static boolean isLoopbackOrigin(String origin) {
+        if (origin == null) {
+            return false;
+        }
+        String value = origin.trim();
+        if (value.isEmpty()) {
+            return false;
+        }
+        String host = null;
+        try {
+            host = URI.create(value).getHost();
+        } catch (IllegalArgumentException ignored) {
+            // Not a parseable URI; fall back to a bare host[:port] check below.
+        }
+        if (host == null) {
+            host = value.contains("://") ? null : stripPort(value);
+        }
+        if (host == null || host.isEmpty()) {
+            return false;
+        }
+        String normalised = host.toLowerCase(Locale.ROOT);
+        if (normalised.startsWith("[") && normalised.endsWith("]")) {
+            normalised = normalised.substring(1, normalised.length() - 1);
+        }
+        return normalised.equals("localhost")
+                || normalised.endsWith(".localhost")
+                || normalised.equals("::1")
+                || normalised.equals("0:0:0:0:0:0:0:1")
+                || isIpv4Loopback(normalised);
+    }
+
+    private static boolean isIpv4Loopback(String host) {
+        String[] parts = host.split("\\.");
+        if (parts.length != 4 || !parts[0].equals("127")) {
+            return false;
+        }
+        for (String part : parts) {
+            try {
+                int octet = Integer.parseInt(part);
+                if (octet < 0 || octet > 255) {
+                    return false;
+                }
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static String stripPort(String value) {
+        if (value.startsWith("[")) {
+            int end = value.indexOf(']');
+            return end < 0 ? value : value.substring(0, end + 1);
+        }
+        int colon = value.indexOf(':');
+        return colon < 0 ? value : value.substring(0, colon);
     }
 }
