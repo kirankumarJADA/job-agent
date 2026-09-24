@@ -196,7 +196,10 @@ public class AuthController {
      * <ul>
      *   <li>401 — the ID token itself is not acceptable</li>
      *   <li>400 — token is valid but carries no email to link an account to</li>
-     *   <li>403 — registration refused by the invite gate</li>
+     *   <li>403 — either the email is not verified yet (Firebase's
+     *       verification email has not been followed, so no account may be
+     *       claimed or created) or registration was refused by the invite
+     *       gate; the body distinguishes the two</li>
      *   <li>503 — the server has no usable Firebase credentials</li>
      * </ul>
      */

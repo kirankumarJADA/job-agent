@@ -118,8 +118,12 @@ resulting identity onto a local account.
   Deliberately the same shape as a failed password login.
 - **Response 400:** the token is valid but carries no email, so there is nothing to
   link an account to.
-- **Response 403:** registration was refused by the invite gate (missing, wrong, or
-  unconfigured code). Existing accounts are never refused this way.
+- **Response 403:** either the token's email is not verified yet — Firebase's
+  verification email has not been followed, so no account may be claimed or
+  created; the body says so and the response is identical whether or not a local
+  account exists — or registration was refused by the invite gate (missing,
+  wrong, or unconfigured code). Already-linked accounts are never refused this
+  way: they sign in through their UID link regardless of verification state.
 - **Response 503:** the server has no usable Firebase credentials. The message names
   the missing environment variables.
 - **Audit:** `SIGNUP_COMPLETED` when the call created the account, otherwise

@@ -21,14 +21,14 @@ import java.util.UUID;
  *       configuration.</li>
  *   <li><b>Email matches an existing local account</b> — link the Firebase
  *       identity to it, but only when the token reports the email as
- *       verified (otherwise anyone could claim an existing account by
- *       creating an unverified Firebase credential for its address). This is
- *       the standard Firebase account-linking behaviour and it is what
- *       preserves existing data (profile, preferences, CVs) when the seeded
- *       local account is later used with Firebase. Also not gated: no new
- *       account is being created.</li>
+ *       verified. This is the standard Firebase account-linking behaviour and
+ *       it is what preserves existing data (profile, preferences, CVs) when
+ *       the seeded local account is later used with Firebase. Also not gated:
+ *       no new account is being created.</li>
  *   <li><b>Nothing matches</b> — a genuinely new account, so
- *       {@link RegistrationGate} decides.</li>
+ *       {@link RegistrationGate} decides. Verification is required here too:
+ *       the email-verification step happens before the token exchange, so an
+ *       unverified token can never provision anything.</li>
  * </ol>
  *
  * <p>The caller supplies {@code identity.uid()} only ever from
@@ -131,7 +131,10 @@ public class FirebaseUserService {
                     "The Firebase account has no email address, so it cannot be linked to an application account.");
         }
 
-        // 1. Primary path: the UID from the signed token.
+        // 1. Primary path: the UID from the signed token. An already-linked
+        // account keeps working whatever the token's email_verified state —
+        // e.g. a user who changed their address in Firebase and is signing in
+        // under the old, still-verified UID link must not be locked out.
         var byUid = userRepository.findByFirebaseUid(identity.uid());
         if (byUid.isPresent()) {
             userRepository.touchLastLogin(byUid.get().id());
@@ -139,18 +142,26 @@ public class FirebaseUserService {
             return new ProvisionedUser(byUid.get(), false);
         }
 
-        // 2. Link to an existing local account with the same email — but only
-        // when Firebase has verified that the caller controls the address.
-        // Email/password tokens are only issued for a verified address once
-        // the verification email's link has been followed; Google tokens are
-        // verified at the provider. An unverified token whose email happens
-        // to name someone else's account must never claim it.
+        // 2 & 3. The token's identity is not linked to a local account yet, so
+        // this request would either claim an existing account by email or mint
+        // a new one. Either way the caller must have proven control of the
+        // address: anyone can create an unverified Firebase credential naming
+        // any address they like, and provisioning on the strength of that name
+        // alone would hand over (or squat) the account. Email/password tokens
+        // carry verified=true only once Firebase's verification link has been
+        // followed; Google tokens are verified at the provider, so Google
+        // sign-in is never asked to send a separate email. Refusing here —
+        // before the invite gate and before the email lookup — also keeps the
+        // response identical whether or not a local account exists, so the
+        // refusal leaks no account-existence signal.
+        if (!identity.emailVerified()) {
+            throw new UnverifiedEmail(
+                    "This email address has not been verified yet. Follow the verification link Firebase emailed you, then sign in again.");
+        }
+
+        // 3a. Link to an existing local account with the same email.
         var byEmail = userRepository.findByEmail(email);
         if (byEmail.isPresent()) {
-            if (!identity.emailVerified()) {
-                throw new UnverifiedEmail(
-                        "This email address has not been verified yet. Follow the verification link Firebase emailed you, then sign in again.");
-            }
             UserRecord existing = byEmail.get();
             boolean linked = userRepository.linkFirebaseUid(
                     existing.id(), identity.uid(), displayNameOrDefault(identity, email));
@@ -167,7 +178,7 @@ public class FirebaseUserService {
                     .orElseThrow(() -> new IdentityIncomplete("The linked account could not be read back."));
         }
 
-        // 3. New account: registration must be permitted.
+        // 3b. New account: registration must be permitted.
         RegistrationGate.Decision decision = registrationGate.evaluate(inviteCode);
         switch (decision) {
             case ALLOWED -> {

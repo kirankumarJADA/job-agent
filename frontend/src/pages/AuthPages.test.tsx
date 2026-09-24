@@ -61,6 +61,10 @@ describe('sign in page', () => {
     expect(html).toContain('href="/forgot-password"');
   });
 
+  it('offers Google sign-in alongside the password form', () => {
+    expect(html).toContain('Continue with Google');
+  });
+
   it('starts with empty fields and no prefilled credential', () => {
     expect(html).not.toContain('value="dev@example.local"');
     expect(html).not.toContain('value="DevPassword123!"');
@@ -176,6 +180,16 @@ describe('sign-up failure messaging', () => {
       new ApiError(403, 'A registration invite code is required to create an account.'),
     );
     expect(message).toContain('invite code');
+  });
+
+  it('sends an unverified email to the verification step, not a dead end', () => {
+    // The backend refuses to provision from an unverified token; the message
+    // must point back to the verification email, never echo the raw refusal.
+    const message = describeSignUpFailure(
+      new ApiError(403, 'This email address has not been verified yet. Follow the verification link Firebase emailed you, then sign in again.'),
+    );
+    expect(message).toContain('not verified');
+    expect(message).toContain('verification link');
   });
 
   it('reports a server without Firebase credentials plainly', () => {

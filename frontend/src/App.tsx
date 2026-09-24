@@ -3,7 +3,7 @@ import { BrowserRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom
 
 import { AuthProvider } from './context/AuthContext';
 import { Navigation } from './components/Navigation';
-import { ProtectedRoute, PublicOnlyRoute } from './components/RouteGuards';
+import { ProtectedRoute, PublicOnlyRoute, VerificationRoute } from './components/RouteGuards';
 
 import { DashboardPage } from './pages/DashboardPage';
 import { JobsFeedPage } from './pages/JobsFeedPage';
@@ -16,6 +16,7 @@ import { LogsPage } from './pages/LogsPage';
 
 import { LoginPage } from './pages/LoginPage';
 import { SignUpPage } from './pages/SignUpPage';
+import { VerifyEmailPage } from './pages/VerifyEmailPage';
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
 
 /**
@@ -65,6 +66,19 @@ export default function App() {
               <PublicOnlyRoute>
                 <ForgotPasswordPage />
               </PublicOnlyRoute>
+            }
+          />
+          {/*
+            The email-verification waiting room. Reachable only by a visitor
+            with a pending unverified Firebase account (see VerificationRoute);
+            after verification establishes the session it forwards into the app.
+          */}
+          <Route
+            path="/verify-email"
+            element={
+              <VerificationRoute>
+                <VerifyEmailPage />
+              </VerificationRoute>
             }
           />
 

@@ -135,15 +135,18 @@ FREE-TIER: Upstash free tier is pay-per-command with a daily cap.
      `503` with a message naming whichever variable is missing. It never degrades
      into allowing unverified requests.
 
-     **Email verification and existing accounts.** A Firebase credential whose
-     email Firebase has not verified is never linked to an existing local
-     account: anyone can create a Firebase account naming someone else's
-     address, and linking on the address alone would hand over that account.
-     Such a sign-in attempt answers `403` with a "verify your email" message
-     and the caller can retry after following Firebase's verification email.
-     Brand-new sign-ups are unaffected (they create their own account through
-     the invite gate). This is enforced server-side in
-     `FirebaseUserService.signIn` — the frontend never decides it.
+     **Email verification is enforced server-side.** A Firebase credential
+     whose email Firebase has not verified can neither link an existing local
+     account nor create a new one: anyone can create a Firebase account naming
+     someone else's address, and provisioning on the strength of that name
+     alone would hand over (or squat) the account. The sign-up screen therefore
+     sends Firebase's verification email and only exchanges the token for an
+     application session after the visitor has followed it. An unverified
+     exchange attempt answers `403` with a "verify your email" message —
+     identically whether or not a local account exists, so it leaks no
+     account-existence signal — and already-linked accounts keep working
+     through their UID link. Google identities are verified at the provider and
+     are unaffected.
    - **Registration gating** — `APP_REGISTRATION_INVITE_CODE=<openssl rand -hex 24>`.
      The prod profile defaults `APP_REQUIRE_INVITE_CODE=true`, so **leaving the
      invite code unset disables new sign-ups rather than opening registration**.
@@ -198,13 +201,24 @@ treat `/actuator/info` as `version known, commit unknown`.
      missing, instead of showing a form that cannot work.
 3. Deploy. The build bakes both the URL and the Firebase config into the bundle
    at build time — changing either requires a redeploy.
+   (`VITE_FIREBASE_MEASUREMENT_ID` is not used by this app; only the six above
+   are read.)
 4. In the Firebase console, add the Vercel domain under **Authentication →
    Settings → Authorized domains**, or sign-in fails with
    `auth/unauthorized-domain`.
-5. Under **Authentication → Sign-in method**, enable **Email/Password**.
-   Password-reset emails are sent by Firebase using the templates under
+5. Under **Authentication → Sign-in method**, enable **Email/Password** — and
+   **Google** for the Google sign-in button. Verification and password-reset
+   emails are sent by Firebase itself using the templates under
    **Authentication → Templates**, so no SMTP configuration is needed here.
-4. Cross-origin cookies: backend sets `SameSite=None; Secure` on both the
+
+   **Email verification is part of the sign-up flow.** After sign-up the app
+   shows a verification screen (resend with cooldown, check-again, back to
+   sign-in) and the backend refuses to create or link an application account
+   from a token whose `email_verified` is false — an unverified visitor is held
+   there until they follow Firebase's link. Google identities are verified by
+   the provider and skip that screen. No email-link (passwordless) sign-in is
+   used; enabling it is unnecessary for the current product.
+6. Cross-origin cookies: backend sets `SameSite=None; Secure` on both the
    session and XSRF cookies in prod. Browsers accept that only over HTTPS —
    Vercel and Render both provide it by default.
 

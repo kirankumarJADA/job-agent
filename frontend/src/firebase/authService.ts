@@ -1,8 +1,12 @@
 import {
   createUserWithEmailAndPassword,
+  GoogleAuthProvider,
   onAuthStateChanged,
+  reload,
+  sendEmailVerification,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
+  signInWithPopup,
   signOut,
   updateProfile,
   type User,
@@ -34,6 +38,10 @@ const FRIENDLY_MESSAGES: Record<string, string> = {
   'auth/invalid-api-key': 'Firebase rejected the configured API key.',
   'auth/missing-email': 'Enter your email address.',
   'auth/requires-recent-login': 'Please sign in again to continue.',
+  // Google popup specifics.
+  'auth/popup-closed-by-user': 'The Google sign-in window was closed before finishing. Try again when ready.',
+  'auth/cancelled-popup-request': 'Another sign-in window is already open. Finish or close it first.',
+  'auth/popup-blocked': 'The browser blocked the sign-in window. Allow popups for this site and try again.',
 };
 
 /** Error carrying both a message safe to display and the original code. */
@@ -93,6 +101,56 @@ export async function signInWithEmail(email: string, password: string): Promise<
     const credential = await signInWithEmailAndPassword(getFirebaseAuth(), email.trim(), password);
     return credential.user;
   } catch (error) {
+    throw toAuthFailure(error);
+  }
+}
+
+/**
+ * Signs in with Google through Firebase's own popup flow.
+ *
+ * The resulting identity is verified at the provider (Google-owned addresses
+ * carry email_verified in the token Firebase issues), so no separate
+ * verification email is ever sent for it. Creating the application account is
+ * still the backend's job, via the same session exchange email/password uses.
+ */
+export async function signInWithGoogle(): Promise<User> {
+  try {
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    const credential = await signInWithPopup(getFirebaseAuth(), provider);
+    return credential.user;
+  } catch (error) {
+    throw toAuthFailure(error);
+  }
+}
+
+/**
+ * Asks Firebase to send its standard verification email for a just-created
+ * account. No token, code or link is generated, stored or transported by this
+ * application — the whole flow (send, host, verify) lives inside Firebase, and
+ * `reload` below is how the app observes its result.
+ */
+export async function requestEmailVerification(user: User): Promise<void> {
+  try {
+    await sendEmailVerification(user);
+  } catch (error) {
+    throw toAuthFailure(error);
+  }
+}
+
+/**
+ * Refreshes the user's server-side state from Firebase, so a verification
+ * link followed moments ago is reflected without waiting for the SDK's own
+ * token refresh. Returns the fresh user; callers decide what emailVerified
+ * means for them.
+ */
+export async function refreshFirebaseUser(user: User): Promise<User> {
+  try {
+    await reload(user);
+    return user;
+  } catch (error) {
+    // A stale session mid-check (signed out in another tab, token revoked)
+    // surfaces as a normal retryable failure rather than a crash.
     throw toAuthFailure(error);
   }
 }

@@ -119,21 +119,40 @@ class FirebaseUserServiceTest {
     }
 
     @Test
-    void anUnverifiedEmailCanStillCreateANewAccountThroughTheGate() {
-        // Refusing only the link path keeps the normal sign-up flow working:
-        // a fresh address that matches no local account goes through the
-        // invite gate exactly as a verified one would.
-        UUID newId = UUID.randomUUID();
+    void anUnverifiedEmailCannotCreateANewAccountEither() {
+        // The frontend only exchanges tokens after Firebase's verification
+        // email has been followed, so an unverified token reaching this
+        // endpoint means someone skipped that step. Refuse before the invite
+        // gate and before the email lookup, so the refusal is identical
+        // whether or not a local account exists — no enumeration signal, and
+        // no local account minted from an unproven address.
         when(userRepository.findByFirebaseUid(UID)).thenReturn(Optional.empty());
         when(userRepository.findByEmail(NORMALISED_EMAIL)).thenReturn(Optional.empty());
         when(registrationGate.evaluate("invite")).thenReturn(RegistrationGate.Decision.ALLOWED);
-        when(userRepository.insertFirebaseUser(any(), eq(NORMALISED_EMAIL), eq("Person"), eq(UID))).thenReturn(newId);
-        when(userRepository.findById(newId)).thenReturn(Optional.of(user(newId, UID, "FIREBASE", null)));
-        when(profileRepository.findByUserId(newId)).thenReturn(Optional.empty());
 
-        var result = service.signIn(unverifiedIdentity(UID, EMAIL, "Person"), "invite");
+        assertThatThrownBy(() -> service.signIn(unverifiedIdentity(UID, EMAIL, "Person"), "invite"))
+                .isInstanceOf(FirebaseUserService.UnverifiedEmail.class);
 
-        assertThat(result.created()).isTrue();
+        verify(userRepository, never()).findByEmail(anyString());
+        verify(registrationGate, never()).evaluate(any());
+        verify(userRepository, never()).insertFirebaseUser(any(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void anAlreadyLinkedAccountKeepsWorkingEvenIfTheTokenIsUnverified() {
+        // A user who changed their email inside Firebase (or re-secured the
+        // account) still signs in through the existing UID link; verification
+        // is required only for claiming or creating accounts.
+        UserRecord existing = user(UUID.randomUUID(), UID, "FIREBASE", null);
+        when(userRepository.findByFirebaseUid(UID)).thenReturn(Optional.of(existing));
+        when(profileRepository.findByUserId(existing.id())).thenReturn(Optional.of(
+                mock(com.personal.jobagent.profile.ProfileRecord.class)));
+
+        var result = service.signIn(unverifiedIdentity(UID, EMAIL, "Person"), null);
+
+        assertThat(result.created()).isFalse();
+        assertThat(result.user()).isSameAs(existing);
+        verify(registrationGate, never()).evaluate(any());
     }
 
     @Test

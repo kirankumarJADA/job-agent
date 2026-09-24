@@ -5,7 +5,9 @@ import { AuthLayout } from '../components/AuthLayout';
 import { AuthNotice } from '../components/AuthNotice';
 import { FirebaseConfigNotice } from '../components/FirebaseConfigNotice';
 import { FormField } from '../components/FormField';
+import { GoogleButton } from '../components/GoogleButton';
 import { useAuth } from '../context/AuthContext';
+import { ApiError } from '../api/client';
 import { AuthFailure } from '../firebase/authService';
 import { validateSignIn, isValid, type FieldErrors, type SignInField } from '../auth/validation';
 
@@ -18,7 +20,7 @@ import { validateSignIn, isValid, type FieldErrors, type SignInField } from '../
  * fixed.
  */
 export const LoginPage: React.FC = () => {
-  const { login, firebaseConfigured, missingFirebaseKeys } = useAuth();
+  const { login, signInWithGoogle, firebaseConfigured, missingFirebaseKeys } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -27,6 +29,7 @@ export const LoginPage: React.FC = () => {
   const [errors, setErrors] = useState<FieldErrors<SignInField>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [googleSubmitting, setGoogleSubmitting] = useState(false);
 
   /** Where to land after signing in — set by ProtectedRoute when it redirected. */
   const redirectTo = (location.state as { from?: string } | null)?.from ?? '/';
@@ -52,17 +55,27 @@ export const LoginPage: React.FC = () => {
     setSubmitting(true);
     try {
       await login(email, password);
+      // The route guards resolve where this actually lands: a visitor whose
+      // email is still unverified is sent to the verification screen, everyone
+      // else straight to where they were headed.
       navigate(redirectTo, { replace: true });
     } catch (error) {
-      // Firebase reports bad email and bad password identically, so there is no
-      // useful per-field message to show here.
-      setFormError(
-        error instanceof AuthFailure || error instanceof Error
-          ? error.message
-          : 'Sign-in failed. Please try again.',
-      );
+      setFormError(describeSignInFailure(error));
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleGoogle = async () => {
+    setFormError(null);
+    setGoogleSubmitting(true);
+    try {
+      await signInWithGoogle();
+      navigate(redirectTo, { replace: true });
+    } catch (error) {
+      setFormError(describeSignInFailure(error));
+    } finally {
+      setGoogleSubmitting(false);
     }
   };
 
@@ -126,12 +139,51 @@ export const LoginPage: React.FC = () => {
 
         <button
           type="submit"
-          disabled={submitting}
+          disabled={submitting || googleSubmitting}
           className="w-full rounded-lg bg-indigo-600 px-4 py-2.5 font-medium text-white shadow-lg shadow-indigo-600/20 transition-all hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {submitting ? 'Signing in…' : 'Sign In'}
         </button>
+
+        <div className="flex items-center gap-3" aria-hidden="true">
+          <div className="h-px flex-1 bg-slate-700/70" />
+          <span className="text-xs font-medium uppercase tracking-wider text-slate-500">or</span>
+          <div className="h-px flex-1 bg-slate-700/70" />
+        </div>
+
+        <GoogleButton onClick={handleGoogle} disabled={submitting || googleSubmitting} />
       </form>
     </AuthLayout>
   );
 };
+
+/**
+ * Turns a sign-in failure into something the person can act on — never a raw
+ * Firebase or backend exception.
+ *
+ * Firebase errors arrive pre-mapped (AuthFailure carries friendly text). The
+ * backend exchange is mapped by status: a 403 about an invite code means the
+ * Google identity belongs to no account yet and registration is gated, which
+ * on this screen reads as "use Sign Up".
+ */
+export function describeSignInFailure(error: unknown): string {
+  if (error instanceof AuthFailure) {
+    return error.message;
+  }
+  if (error instanceof ApiError) {
+    if (error.status === 403 && error.message.includes('invite')) {
+      return 'There is no account for this Google identity yet, and registration needs an invite code. Use Create account below.';
+    }
+    if (error.status === 401) {
+      return 'Your sign-in could not be verified. Please try again.';
+    }
+    if (error.status >= 500) {
+      return 'The server could not complete sign-in. Please try again in a moment.';
+    }
+    return 'Sign-in failed. Please try again.';
+  }
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return 'Sign-in failed. Please try again.';
+}
