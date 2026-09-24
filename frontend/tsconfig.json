@@ -10,6 +10,8 @@
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
+    "types": ["node", "vite/client"],
+    "typeRoots": ["./node_modules/@types"],
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
