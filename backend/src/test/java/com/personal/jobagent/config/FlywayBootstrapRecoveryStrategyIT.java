@@ -14,6 +14,7 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.util.List;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -385,5 +386,120 @@ class FlywayBootstrapRecoveryStrategyIT {
                 "select version from public.flyway_schema_history order by installed_rank", String.class);
         assertThat(after).isEqualTo(before);
         assertFullyMigrated();
+    }
+
+    @Test
+    @Order(10)
+    void renderProductionStateBaselinedThroughV019ContinuesToTheShippedChain() {
+        // The exact production state observed on Render (2026-09): an earlier
+        // deploy of this same guarded recovery baselined the Supabase
+        // bootstrap schema at zero and applied the full chain its jar shipped
+        // (V001..V019); the application tables and real data exist; the
+        // newer jar ships V020..V023. The strategy must classify this as a
+        // pending upgrade and continue with plain migrate() — not fail
+        // closed — and the upgrade must preserve every row.
+        resetSchema();
+        createDocumentedRlsBootstrap();
+
+        // Emulate the earlier deploy: baseline at zero, then migrate only as
+        // far as that jar's chain went.
+        Flyway.configure()
+                .dataSource(jdbc.getDataSource())
+                .locations("classpath:db/migration")
+                .baselineOnMigrate(false)
+                .baselineVersion("0")
+                .load()
+                .baseline();
+        Flyway.configure()
+                .dataSource(jdbc.getDataSource())
+                .locations("classpath:db/migration")
+                .baselineOnMigrate(false)
+                .target("19")
+                .load()
+                .migrate();
+
+        // Production-like data written before the upgrade, on the V019
+        // schema. The V002 seed user/profile is part of the applied chain and
+        // therefore present in production too — it is the single profile the
+        // legacy rows can provably belong to.
+        UUID jobId = UUID.fromString("00000000-0000-7000-8000-00000000cd03");
+        UUID applicationId = UUID.fromString("00000000-0000-7000-8000-00000000cd04");
+        UUID auditId = UUID.fromString("00000000-0000-7000-8000-00000000cd05");
+        UUID sourceId = UUID.fromString("00000000-0000-7000-8000-00000000cd06");
+        jdbc.update("""
+                insert into job_sources (id, kind, org_identifier, display_name, capabilities)
+                values (?, 'MANUAL_IMPORT', 'render-org', 'Render source', '{}')
+                """, sourceId);
+        jdbc.update("""
+                insert into jobs (id, source_id, external_id, dedup_key, company_name_raw, title,
+                                  description_text, status, content_hash,
+                                  match_score, match_recommendation, match_breakdown)
+                values (?, ?, 'render-ext-1', 'render-dedup-1', 'Render Corp', 'Engineer', 'desc', 'DISCOVERED', 'render-hash-1',
+                        87, 'APPLY', '{"skill_overlap": 87}'::jsonb)
+                """, jobId, sourceId);
+        jdbc.update("insert into applications (id, job_id, status, mode) values (?, ?, 'READY_TO_APPLY', 'ASSISTED')",
+                applicationId, jobId);
+        jdbc.update("insert into audit_logs (id, actor, action, entity_type) values (?, ?, 'LOGIN_SUCCESS', 'USER')",
+                auditId, "dev@example.local");
+
+        // Exactly the numbers from the Render logs: 20 history rows (1
+        // baseline + 19 migrations) against a build shipping 23.
+        Integer historyRows = jdbc.queryForObject(
+                "select count(*) from public.flyway_schema_history", Integer.class);
+        assertThat(historyRows).isEqualTo(20);
+
+        // Before the fix this threw "Refusing Flyway bootstrap recovery:
+        // unexpected public schema state". It must instead continue the chain.
+        strategy.migrate(newFlyway());
+
+        assertFullyMigrated();
+
+        // ── every pre-existing row preserved, nothing duplicated ──
+        // The seeded account survives untouched and V020 backfills it as a
+        // LOCAL credential without rewriting anything.
+        String seedEmail = jdbc.queryForObject(
+                "select email::text from users where email = 'dev@example.local'", String.class);
+        assertThat(seedEmail).isEqualTo("dev@example.local");
+        String authProvider = jdbc.queryForObject(
+                "select auth_provider from users where email = 'dev@example.local'", String.class);
+        assertThat(authProvider).isEqualTo("LOCAL");
+
+        Integer profileCount = jdbc.queryForObject("select count(*) from profiles", Integer.class);
+        assertThat(profileCount).isEqualTo(1);
+        UUID seedProfileId = jdbc.queryForObject("select id from profiles", UUID.class);
+
+        // V022's single-profile attribution claims the legacy application for
+        // the only profile that could have owned it.
+        UUID attributedProfile = jdbc.queryForObject(
+                "select profile_id from applications where id = ?", UUID.class, applicationId);
+        assertThat(attributedProfile).isEqualTo(seedProfileId);
+        String applicationStatus = jdbc.queryForObject(
+                "select status from applications where id = ?", String.class, applicationId);
+        assertThat(applicationStatus).isEqualTo("READY_TO_APPLY");
+
+        // V022 moves the per-user match decision off the shared jobs row into
+        // job_matches — data preserved, not duplicated.
+        var match = jdbc.queryForMap(
+                "select score, recommendation from job_matches where job_id = ? and profile_id = ?",
+                jobId, seedProfileId);
+        assertThat(match.get("score")).isEqualTo(87);
+        assertThat(match.get("recommendation")).isEqualTo("APPLY");
+        Integer matchColumnCount = jdbc.queryForObject("""
+                select count(*) from information_schema.columns
+                where table_name = 'jobs' and column_name like 'match%'
+                """, Integer.class);
+        assertThat(matchColumnCount).isZero();
+
+        // The audit row survives append-only (V008) with its owner link
+        // retained as a historical reference (V023 dropped the purge-blocking
+        // foreign key).
+        Integer auditCount = jdbc.queryForObject(
+                "select count(*) from audit_logs where id = ?", Integer.class, auditId);
+        assertThat(auditCount).isEqualTo(1);
+
+        // The recovery's own baseline artifact is still exactly one row.
+        Integer baselineRows = jdbc.queryForObject(
+                "select count(*) from public.flyway_schema_history where type = 'BASELINE'", Integer.class);
+        assertThat(baselineRows).isEqualTo(1);
     }
 }

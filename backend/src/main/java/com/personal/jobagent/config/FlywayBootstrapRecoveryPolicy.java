@@ -67,16 +67,16 @@ public final class FlywayBootstrapRecoveryPolicy {
      *       baseline — the artifact our guarded recovery flow intentionally
      *       produces — so a recovered database is recognized as MIGRATED on
      *       every subsequent startup</li>
-     *   <li>when a baseline is present, the applied chain must cover every
-     *       migration script shipped with this build (recovery applies the
-     *       full chain in one startup, so a shorter chain means external
-     *       interference); without a baseline a trailing prefix is a normal
-     *       pending upgrade and migrates on</li>
      *   <li>the applied versions form an unbroken V001.. prefix of the
-     *       expected chain — no skipped or duplicate versions. Chain
-     *       verification is mandatory for baseline states; without a
-     *       baseline a clean history may migrate on even when the expected
-     *       scripts cannot be enumerated</li>
+     *       expected chain — no skipped, duplicated or foreign versions. This
+     *       covers both a complete chain and a pending upgrade: a database
+     *       baselined at zero by an earlier deploy whose jar shipped fewer
+     *       migrations (its recovery legitimately applied only that jar's
+     *       chain) is behind this build's chain and continues with plain
+     *       migrate(), which validates every applied checksum before applying
+     *       the rest. An EMPTY applied chain under a baseline with application
+     *       tables is never accepted — that shape is a baseline laid over an
+     *       unknown schema and fails closed</li>
      *   <li>the application schema (public.users) exists</li>
      * </ul>
      * Anything else fails closed for review.
@@ -105,10 +105,15 @@ public final class FlywayBootstrapRecoveryPolicy {
             boolean chainVerified = state.expectedMigrationVersions().isEmpty()
                     ? state.baselineRows() == 0
                     : isUnbrokenPrefix(state.appliedMigrationVersions(), state.expectedMigrationVersions());
-            boolean baselineChainComplete = state.baselineRows() == 0
-                    || (state.expectedMigrationVersions().isEmpty()
-                            || state.appliedMigrationVersions().size() == state.expectedMigrationVersions().size());
-            if (baselineOk && chainVerified && baselineChainComplete && state.usersExists()
+            // A baselined database trailing this build's chain is the normal
+            // pending-upgrade state (earlier deploys applied only the chain
+            // their jar shipped), not corruption: plain migrate() applies the
+            // remainder after validating the applied checksums. What is NOT
+            // acceptable under a baseline: an empty applied chain (a baseline
+            // over pre-existing tables whose provenance nothing certifies),
+            // gaps, duplicates, foreign versions, or failed rows — all of
+            // which fail closed above or below.
+            if (baselineOk && chainVerified && state.usersExists()
                     && !state.appliedMigrationVersions().isEmpty()) {
                 return Classification.MIGRATED;
             }

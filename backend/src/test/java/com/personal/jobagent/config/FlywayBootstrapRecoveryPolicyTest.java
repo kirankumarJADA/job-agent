@@ -50,12 +50,43 @@ class FlywayBootstrapRecoveryPolicyTest {
                 .isEqualTo(FlywayBootstrapRecoveryPolicy.Action.DROP_HISTORY_BASELINE_AT_ZERO_THEN_MIGRATE);
     }
 
-    // D. Baseline at zero with only part of the chain — external
-    // interference with the recovery flow; fails closed, never "healthy".
+    // D. Baseline at zero with only part of the chain, and a GAP (version 6
+    // missing while 7..10 applied) — a broken chain is external interference
+    // with the recovery flow; fails closed, never "healthy".
     @Test
-    void baselineAtZeroWithIncompleteChainFailsClosed() {
-        var state = state(true, 11, 11, 1, true, Set.of("public.users"), Set.of(), 0, true,
-                CHAIN.subList(0, 10), CHAIN);
+    void baselineAtZeroWithBrokenChainFailsClosed() {
+        var applied = new java.util.ArrayList<>(CHAIN.subList(0, 10));
+        applied.remove(Integer.valueOf(6));
+        var state = state(true, 10, 10, 1, true, Set.of("public.users"), Set.of(), 0, true, applied, CHAIN);
+        assertThat(FlywayBootstrapRecoveryPolicy.decide(state))
+                .isEqualTo(FlywayBootstrapRecoveryPolicy.Action.FAIL_CLOSED);
+    }
+
+    // D2. The exact production state observed on Render (2026-09): one
+    // version-0 baseline laid down by an earlier deploy of the same guarded
+    // recovery when its jar shipped V001..V019, all 19 applied successfully,
+    // application tables present, and this newer jar shipping V020..V023. A
+    // shorter-but-unbroken chain under a version-0 baseline is a pending
+    // upgrade, not corruption: plain migrate() validates the applied checksums
+    // and applies the remainder.
+    @Test
+    void baselinedDatabaseTrailingTheShippedChainIsAPendingUpgrade() {
+        var expected = List.of(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23);
+        var state = state(true, 20, 20, 1, true, Set.of("public.users"), Set.of("public.rls_auto_enable"),
+                0, true, expected.subList(0, 19), expected);
+        assertThat(FlywayBootstrapRecoveryPolicy.classify(state))
+                .isEqualTo(FlywayBootstrapRecoveryPolicy.Classification.MIGRATED);
+        assertThat(FlywayBootstrapRecoveryPolicy.decide(state))
+                .isEqualTo(FlywayBootstrapRecoveryPolicy.Action.MIGRATE);
+    }
+
+    // D3. A baseline over pre-existing tables with NOTHING applied proves no
+    // provenance at all — never accepted as healthy, even though the schema
+    // looks like the application's.
+    @Test
+    void baselineOverTablesNothingAppliedFailsClosed() {
+        var state = state(true, 5, 5, 1, true, Set.of("public.users", "public.profiles"), Set.of(), 0, true,
+                List.of(), CHAIN);
         assertThat(FlywayBootstrapRecoveryPolicy.decide(state))
                 .isEqualTo(FlywayBootstrapRecoveryPolicy.Action.FAIL_CLOSED);
     }
@@ -125,6 +156,17 @@ class FlywayBootstrapRecoveryPolicyTest {
                 .isEqualTo(FlywayBootstrapRecoveryPolicy.Action.FAIL_CLOSED);
     }
 
+    // A history row for a version this build does not ship (or more applied
+    // rows than shipped scripts) is foreign interference — fail closed.
+    @Test
+    void appliedVersionsBeyondTheShippedChainFailClosed() {
+        var applied = new java.util.ArrayList<Integer>(CHAIN);
+        applied.add(99);
+        var state = state(true, 20, 20, 1, true, Set.of("public.users"), Set.of(), 0, true, applied, CHAIN);
+        assertThat(FlywayBootstrapRecoveryPolicy.decide(state))
+                .isEqualTo(FlywayBootstrapRecoveryPolicy.Action.FAIL_CLOSED);
+    }
+
     // Migrated DB without a baseline may trail the latest script (pending
     // upgrade) and migrates on as long as the history is clean.
     @Test
@@ -135,14 +177,17 @@ class FlywayBootstrapRecoveryPolicyTest {
                 .isEqualTo(FlywayBootstrapRecoveryPolicy.Action.MIGRATE);
     }
 
-    // Baseline-at-zero trailing chain is NOT a pending upgrade: recovery
-    // always applies the complete chain in one startup, so a shorter chain
-    // with a baseline fails closed even without other anomalies.
+    // Baseline-at-zero trailing the shipped chain IS a pending upgrade: the
+    // baseline and the chain it applied were produced by an earlier deploy of
+    // this same recovery flow, whose jar legitimately shipped fewer migrations
+    // than this one. Plain migrate() validates the applied checksums and
+    // continues — fail-closed is reserved for broken chains, empty chains,
+    // unknown versions and failed rows.
     @Test
-    void baselineTrailingChainIsNotAPendingUpgrade() {
+    void baselineTrailingChainIsAPendingUpgradeWhenUnbroken() {
         var state = state(true, 5, 5, 1, true, Set.of("public.users"), Set.of(), 0, true, CHAIN.subList(0, 4), CHAIN);
         assertThat(FlywayBootstrapRecoveryPolicy.decide(state))
-                .isEqualTo(FlywayBootstrapRecoveryPolicy.Action.FAIL_CLOSED);
+                .isEqualTo(FlywayBootstrapRecoveryPolicy.Action.MIGRATE);
     }
 
     // Enumeration failure of the expected chain must fail closed for

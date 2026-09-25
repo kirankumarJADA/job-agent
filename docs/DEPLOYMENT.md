@@ -343,7 +343,37 @@ Without `-Dit.postgres.url` the suite is skipped rather than failed, so a build
 machine without a database is unaffected. Note that the other `*IT` classes use
 Testcontainers and need a working Docker daemon.
 
-## 8. Production vs free-tier requirements
+## 8. Troubleshooting startup failures
+
+**"Refusing Flyway bootstrap recovery: unexpected public schema state"** — the
+guarded startup refuses a database shape it cannot vouch for. Check, in order:
+
+1. **Is the right profile active?** The log line
+   `No active profile set, falling back to 1 default profile: default` means
+   `SPRING_PROFILES_ACTIVE=prod` is missing from the service's environment.
+   That is never acceptable in production even when the app happens to boot:
+   the default profile turns registration gating **off**, trusts loopback CORS
+   origins, and — decisively — sets session/CSRF cookies `SameSite=Lax`, which
+   cross-origin browsers refuse to send to the Render backend, so no Vercel
+   login can ever work. Render must set `SPRING_PROFILES_ACTIVE=prod`
+   explicitly; the backend Docker image also defaults it to `prod` so an
+   image-based deploy cannot forget it.
+2. **Is the history trailing the shipped chain?** A database baselined at
+   version 0 whose history ends before the newest migration (e.g. baseline +
+   V001..V019 while this build ships V023) is a **pending upgrade**, not a
+   fault: earlier deploys applied only the chain their jar shipped. Since the
+   guarded-recovery fix, the strategy continues with a plain migrate() after
+   verifying the applied chain is an unbroken prefix (checksums validated) —
+   this is the exact production state reproduced by the regression test
+   `renderProductionStateBaselinedThroughV019ContinuesToTheShippedChain`.
+   Still failing closed, by design: failed history rows, gaps, duplicated or
+   foreign versions, a baseline over tables with nothing applied, or objects
+   that are neither application schema nor the documented Supabase bootstrap
+   routine. If you see a refusal, capture the `SchemaState[...]` from the log
+   — it names every object and every count — and compare it against those
+   cases; never disable the guard to force a start.
+
+## 9. Production vs free-tier requirements
 
 | Concern | Free/hobby OK | Production requirement |
 |---|---|---|

@@ -19,4 +19,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/target/*.jar app.jar
 EXPOSE 8080
+# Production-safe default for image-based deployments (Render builds this
+# Dockerfile directly). Without it a deploy that forgets
+# SPRING_PROFILES_ACTIVE silently boots the default profile: registration
+# gating off, SameSite=Lax cookies (which cross-origin Vercel browsers will
+# not send), and loopback CORS trusted. docker-compose files set their own
+# profile and always override this.
+ENV SPRING_PROFILES_ACTIVE=prod
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]
