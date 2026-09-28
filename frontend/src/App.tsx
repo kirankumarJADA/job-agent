@@ -28,9 +28,9 @@ import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
  * bookmarkable.
  */
 const AppShell: React.FC = () => (
-  <div className="flex min-h-screen bg-slate-950 text-slate-100 antialiased">
+  <div className="flex min-h-screen flex-col bg-cream-50 text-ink antialiased lg:flex-row">
     <Navigation />
-    <main className="flex-1 p-6 lg:p-8 overflow-y-auto max-h-screen">
+    <main className="min-w-0 flex-1">
       {/* Renders nothing outside local development (see LocalInspectionBanner). */}
       <LocalInspectionBanner />
       <Outlet />

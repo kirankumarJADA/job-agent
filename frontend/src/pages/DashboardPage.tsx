@@ -2,7 +2,28 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { apiFetch } from '../api/client';
 import { Job } from '../types';
+import {
+  Alert,
+  EmptyState,
+  JobStatusPill,
+  MetricCard,
+  PageHeader,
+  PageShell,
+  PrimaryButton,
+  SecondaryButton,
+  TraceBlock,
+  WorkplacePill,
+} from '../components/ui';
 
+/**
+ * Dashboard — Robin's landing page.
+ *
+ * Presentation-only redesign of the old dark "Mission Control": the same real
+ * API data (system health, the five most recent jobs) and the same handlers
+ * (seed UK jobs, LLM failover ping, benchmark link), under the light design
+ * system with metric cards, a proper actions section and polished empty
+ * states.
+ */
 export const DashboardPage: React.FC = () => {
   const [health, setHealth] = useState<{ status: string; components?: Record<string, string> } | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -49,169 +70,151 @@ export const DashboardPage: React.FC = () => {
     }
   };
 
+  const backendUp = health?.status === 'UP';
+
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">Mission Control</h1>
-          <p className="text-sm text-slate-400">Personal AI Job Agent — Phase 1 Command Center</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <span
-            className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold ${
-              health?.status === 'UP'
-                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-            }`}
-          >
-            <span className="w-2 h-2 rounded-full bg-current mr-2 animate-pulse" />
-            Backend: {health?.status || 'CHECKING...'}
-          </span>
-        </div>
-      </div>
+    <PageShell>
+      <div className="space-y-6">
+        <PageHeader
+          eyebrow="Overview"
+          title="Dashboard"
+          subtitle="Your AI job agent at a glance: system health, the latest discovered postings, and the levers that drive discovery."
+          actions={
+            <span
+              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold ${
+                backendUp
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                  : 'border-amber-300 bg-amber-50 text-amber-800'
+              }`}
+            >
+              <span
+                aria-hidden="true"
+                className={`h-2 w-2 rounded-full ${backendUp ? 'animate-pulse bg-emerald-500' : 'bg-amber-500'}`}
+              />
+              Backend {health?.status || 'checking…'}
+            </span>
+          }
+        />
 
-      {/* Metric Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="p-5 rounded-xl bg-slate-800/60 border border-slate-700/60">
-          <div className="text-xs font-medium uppercase tracking-wider text-slate-400">Total Jobs Ingested</div>
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-3xl font-bold text-white">{jobs.length > 0 ? `${jobs.length}+` : '2'}</span>
-            <span className="text-xs text-indigo-400">FTS Indexed</span>
+        {/* Metric cards — same real values as before */}
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <MetricCard
+            label="Jobs in pipeline"
+            value={jobs.length > 0 ? `${jobs.length}+` : '0'}
+            hint="Most recently ingested (top 5)"
+          />
+          <MetricCard
+            label="Application mode"
+            value="Assisted"
+            hint="Human-in-the-loop gate active"
+          />
+          <MetricCard label="Target market" value="United Kingdom" hint="GBP (£) salary data" />
+          <MetricCard
+            label="Model router"
+            value="Multi-provider"
+            hint="Empirical failover + usage ledger"
+          />
+        </div>
+
+        {/* Quick actions — same endpoints and handlers as before */}
+        <section className="rounded-xl border border-line bg-surface shadow-card">
+          <div className="border-b border-line px-5 py-3.5">
+            <h2 className="text-sm font-semibold text-ink">Quick actions</h2>
+            <p className="mt-0.5 text-xs text-ink-muted">
+              Populate the feed and verify the LLM routing stack without leaving the dashboard.
+            </p>
           </div>
-        </div>
-
-        <div className="p-5 rounded-xl bg-slate-800/60 border border-slate-700/60">
-          <div className="text-xs font-medium uppercase tracking-wider text-slate-400">Application Mode</div>
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-emerald-400">ASSISTED</span>
-            <span className="text-xs text-slate-500">HITL Gate Active</span>
-          </div>
-        </div>
-
-        <div className="p-5 rounded-xl bg-slate-800/60 border border-slate-700/60">
-          <div className="text-xs font-medium uppercase tracking-wider text-slate-400">Target Market</div>
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-white">United Kingdom</span>
-            <span className="text-xs text-slate-400">GBP (£)</span>
-          </div>
-        </div>
-
-        <div className="p-5 rounded-xl bg-slate-800/60 border border-slate-700/60">
-          <div className="text-xs font-medium uppercase tracking-wider text-slate-400">Model Router</div>
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-xl font-bold text-indigo-400">Multi-Provider</span>
-            <span className="text-xs text-emerald-400">Ledger Active</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Quick Action Bar */}
-      <div className="p-5 rounded-xl bg-slate-800/40 border border-slate-700/50">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 mb-3">
-          Phase 1 Quick Actions
-        </h2>
-        <div className="flex flex-wrap gap-3">
-          <button
-            onClick={handleSeedJobs}
-            disabled={seeding}
-            className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-all shadow-md shadow-indigo-600/20 disabled:opacity-50"
-          >
-            {seeding ? 'Seeding UK Jobs...' : '🌱 Seed 25 UK Tech Jobs'}
-          </button>
-
-          <button
-            onClick={handlePingFailover}
-            disabled={pinging}
-            className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-all disabled:opacity-50"
-          >
-            {pinging ? 'Testing Failover...' : '⚡ Test LLM Failover Ping'}
-          </button>
-
-          <Link
-            to="/models"
-            className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-all inline-flex items-center"
-          >
-            🎯 Run Benchmark Suite
-          </Link>
-        </div>
-
-        {seedMessage && (
-          <div className="mt-3 p-3 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs">
-            {seedMessage}
-          </div>
-        )}
-
-        {pingResult && (
-          <div className="mt-4 p-4 rounded-lg bg-slate-950 border border-slate-800">
-            <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
-              Live Router Trace Output:
+          <div className="space-y-4 px-5 py-4">
+            <div className="flex flex-wrap gap-3">
+              <PrimaryButton onClick={handleSeedJobs} disabled={seeding}>
+                {seeding ? 'Seeding UK jobs…' : 'Seed 25 UK tech jobs'}
+              </PrimaryButton>
+              <SecondaryButton onClick={handlePingFailover} disabled={pinging}>
+                {pinging ? 'Testing failover…' : 'Test LLM failover ping'}
+              </SecondaryButton>
+              <SecondaryButton href="/models">Run benchmark suite</SecondaryButton>
             </div>
-            <pre className="text-xs text-emerald-400 font-mono overflow-x-auto">
-              {JSON.stringify(pingResult, null, 2)}
-            </pre>
-          </div>
-        )}
-      </div>
 
-      {/* Recent Discovered Jobs */}
-      <div className="rounded-xl bg-slate-800/60 border border-slate-700/60 overflow-hidden">
-        <div className="p-4 border-b border-slate-700/60 flex items-center justify-between">
-          <h2 className="font-semibold text-white text-sm">Recently Ingested Postings</h2>
-          <Link to="/jobs" className="text-xs text-indigo-400 hover:text-indigo-300 font-medium">
-            View All Jobs →
-          </Link>
-        </div>
+            {seedMessage && <Alert tone="info">{seedMessage}</Alert>}
 
-        <div className="divide-y divide-slate-700/40">
-          {jobs.length === 0 ? (
-            <div className="p-8 text-center text-slate-400 text-sm">
-              No jobs discovered yet. Click &quot;Seed 25 UK Tech Jobs&quot; above to populate the feed!
-            </div>
-          ) : (
-            jobs.map((job) => (
-              <div key={job.id} className="p-4 hover:bg-slate-800/40 transition-colors flex items-center justify-between gap-4">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <Link to={`/jobs/${job.id}`} className="font-medium text-white hover:text-indigo-400 truncate">
-                      {job.title}
-                    </Link>
-                    {job.remote_type && (
-                      <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-700 text-slate-300">
-                        {job.remote_type}
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-xs text-slate-400 mt-1 flex items-center gap-3">
-                    <span className="font-medium text-slate-300">{job.company_name_raw || 'Unknown Co'}</span>
-                    <span>•</span>
-                    <span>{job.location_raw || 'UK'}</span>
-                    {job.salary_min && (
-                      <>
-                        <span>•</span>
-                        <span className="text-emerald-400 font-semibold">
-                          £{job.salary_min.toLocaleString()} - £{job.salary_max?.toLocaleString()}
-                        </span>
-                      </>
-                    )}
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-                    {job.status}
-                  </span>
-                  <Link
-                    to={`/jobs/${job.id}`}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-700 hover:bg-slate-600 text-slate-200 transition-colors"
-                  >
-                    View
-                  </Link>
-                </div>
+            {pingResult && (
+              <div>
+                <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-faint">
+                  Live router trace output
+                </p>
+                <TraceBlock>{JSON.stringify(pingResult, null, 2)}</TraceBlock>
               </div>
-            ))
-          )}
-        </div>
+            )}
+          </div>
+        </section>
+
+        {/* Recent postings — same /jobs?limit=5 data */}
+        <section className="rounded-xl border border-line bg-surface shadow-card">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-3.5">
+            <h2 className="text-sm font-semibold text-ink">Recently ingested postings</h2>
+            <Link
+              to="/jobs"
+              className="text-xs font-semibold text-forest-700 hover:text-forest-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600"
+            >
+              View all jobs →
+            </Link>
+          </div>
+          <div className="divide-y divide-line">
+            {jobs.length === 0 ? (
+              <div className="p-5">
+                <EmptyState
+                  title="No jobs discovered yet"
+                  body="Seed the feed with 25 real UK tech jobs, or add a posting directly from the Jobs Feed page."
+                  actions={<PrimaryButton onClick={handleSeedJobs} disabled={seeding}>Seed UK tech jobs</PrimaryButton>}
+                />
+              </div>
+            ) : (
+              jobs.map((job) => (
+                <div
+                  key={job.id}
+                  className="flex flex-col gap-3 px-5 py-4 transition-colors hover:bg-cream-50/70 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Link
+                        to={`/jobs/${job.id}`}
+                        className="truncate text-sm font-semibold text-ink hover:text-forest-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600"
+                      >
+                        {job.title}
+                      </Link>
+                      <WorkplacePill type={job.remote_type} />
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-ink-muted">
+                      <span className="font-medium text-ink-soft">
+                        {job.company_name_raw || 'Unknown company'}
+                      </span>
+                      <span aria-hidden="true">·</span>
+                      <span>{job.location_raw || 'UK'}</span>
+                      {job.salary_min && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="font-semibold text-forest-700">
+                            £{job.salary_min.toLocaleString()} – £{job.salary_max?.toLocaleString()}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <JobStatusPill status={job.status} />
+                    <Link
+                      to={`/jobs/${job.id}`}
+                      className="rounded-lg border border-line bg-surface px-3 py-1.5 text-xs font-semibold text-ink-soft transition-colors hover:border-forest-300 hover:bg-forest-50 hover:text-forest-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600"
+                    >
+                      View
+                    </Link>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
       </div>
-    </div>
+    </PageShell>
   );
 };

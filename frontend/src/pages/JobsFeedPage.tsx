@@ -1,8 +1,27 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { Link } from 'react-router-dom';
 import { apiFetch } from '../api/client';
 import { Job } from '../types';
+import {
+  Alert,
+  Chip,
+  EmptyState,
+  JobCard,
+  Loading,
+  PageHeader,
+  PageShell,
+  PrimaryButton,
+  Select,
+  TextInput,
+} from '../components/ui';
 
+/**
+ * Jobs Feed — browse and search every discovered UK posting.
+ *
+ * Presentation-only redesign: the same fetch pipeline (full-text search + status
+ * filter + limit), the same URL-import handler, the same job data. The list is
+ * now a responsive card grid (1 col mobile / 2 col tablet / 3 col desktop)
+ * built on the shared JobCard primitive.
+ */
 export const JobsFeedPage: React.FC = () => {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [search, setSearch] = useState('');
@@ -49,149 +68,124 @@ export const JobsFeedPage: React.FC = () => {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">Jobs Feed</h1>
-          <p className="text-sm text-slate-400">Search and review discovered UK job postings with full-text search</p>
-        </div>
-      </div>
+    <PageShell>
+      <div className="space-y-6">
+        <PageHeader
+          eyebrow="Opportunities"
+          title="Jobs Feed"
+          subtitle="Every posting Robin has discovered, with full-text search across titles, companies and descriptions."
+        />
 
-      {/* Quick Add Form */}
-      <div className="p-4 rounded-xl bg-slate-800/40 border border-slate-700/50">
-        <form onSubmit={handleImport} className="flex flex-col sm:flex-row items-center gap-3">
-          <input
-            type="url"
-            value={importUrl}
-            onChange={(e) => setImportUrl(e.target.value)}
-            placeholder="Paste LinkedIn or ATS job URL (e.g. boards.greenhouse.io/...)"
-            className="flex-1 w-full rounded-lg bg-slate-900 border border-slate-700 px-3.5 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
-          <button
-            type="submit"
-            className="w-full sm:w-auto px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors shadow-md"
-          >
-            Quick Add
-          </button>
-        </form>
-        {importMsg && (
-          <div className="mt-2 text-xs text-indigo-400">
-            {importMsg}
-          </div>
-        )}
-      </div>
-
-      {/* Filters Bar */}
-      <div className="flex flex-col sm:flex-row items-center gap-4 bg-slate-800/60 p-4 rounded-xl border border-slate-700/60">
-        <div className="flex-1 w-full relative">
-          <span className="absolute inset-y-0 left-3 flex items-center text-slate-500">🔍</span>
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search keywords (e.g. Kotlin, Kubernetes, Senior)..."
-            className="w-full pl-9 pr-3.5 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
-        </div>
-
-        <div className="w-full sm:w-48">
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="w-full py-2 px-3 rounded-lg bg-slate-900 border border-slate-700 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          >
-            <option value="">All Statuses</option>
-            <option value="DISCOVERED">DISCOVERED</option>
-            <option value="FILTERED_OUT">FILTERED_OUT</option>
-            <option value="ANALYSED">ANALYSED</option>
-            <option value="SCORED">SCORED</option>
-            <option value="DECIDED">DECIDED</option>
-            <option value="ARCHIVED">ARCHIVED</option>
-          </select>
-        </div>
-      </div>
-
-      {/* Jobs List */}
-      <div className="space-y-3">
-        {loading ? (
-          <div className="p-12 text-center text-slate-400 text-sm">Searching job database...</div>
-        ) : jobs.length === 0 ? (
-          <div className="p-12 rounded-xl bg-slate-800/40 border border-slate-700/50 text-center text-slate-400 text-sm">
-            No matching jobs found. Try adjusting your search query or filters.
-          </div>
-        ) : (
-          jobs.map((job) => (
-            <div
-              key={job.id}
-              className="p-5 rounded-xl bg-slate-800/60 border border-slate-700/60 hover:border-slate-600 transition-all group"
-            >
-              <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
-                <div className="space-y-1.5 flex-1">
-                  <div className="flex items-center gap-2.5 flex-wrap">
-                    <Link
-                      to={`/jobs/${job.id}`}
-                      className="text-base font-bold text-white group-hover:text-indigo-400 transition-colors"
-                    >
-                      {job.title}
-                    </Link>
-                    {job.remote_type && (
-                      <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-700 text-slate-300">
-                        {job.remote_type}
-                      </span>
-                    )}
-                    <span className="px-2 py-0.5 rounded-full text-[11px] font-medium bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-                      {job.status}
-                    </span>
-                  </div>
-
-                  <div className="text-xs text-slate-400 flex items-center gap-2 flex-wrap">
-                    <span className="font-semibold text-slate-200">{job.company_name_raw || 'Company'}</span>
-                    <span>•</span>
-                    <span>📍 {job.location_raw || 'UK'}</span>
-                    {job.salary_min && (
-                      <>
-                        <span>•</span>
-                        <span className="text-emerald-400 font-semibold">
-                          💰 £{job.salary_min.toLocaleString()} - £{job.salary_max?.toLocaleString()} / yr
-                        </span>
-                      </>
-                    )}
-                  </div>
-
-                  <p className="text-xs text-slate-300 line-clamp-2 pt-1 leading-relaxed">
-                    {job.description_text}
-                  </p>
-
-                  {job.skills_extracted && job.skills_extracted.length > 0 && (
-                    <div className="flex items-center gap-1.5 flex-wrap pt-1.5">
-                      {job.skills_extracted.slice(0, 6).map((skill, i) => (
-                        <span
-                          key={i}
-                          className="px-2 py-0.5 rounded text-[11px] bg-slate-900/80 text-slate-400 border border-slate-700/50"
-                        >
-                          {skill}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                <div className="sm:text-right flex sm:flex-col items-center sm:items-end justify-between gap-2">
-                  <span className="text-[11px] text-slate-500">
-                    Seen {new Date(job.first_seen_at).toLocaleDateString()}
-                  </span>
-                  <Link
-                    to={`/jobs/${job.id}`}
-                    className="px-4 py-2 rounded-lg text-xs font-semibold bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-400 border border-indigo-500/30 transition-colors"
-                  >
-                    View Details
-                  </Link>
-                </div>
-              </div>
+        {/* Add a job by URL — same /jobs/import-url handler as before */}
+        <section className="rounded-xl border border-line bg-surface p-4 shadow-card sm:p-5">
+          <form onSubmit={handleImport} className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <div className="flex-1">
+              <label htmlFor="import-url" className="mb-1 block text-xs font-semibold text-ink-soft">
+                Add a posting by link
+              </label>
+              <TextInput
+                id="import-url"
+                type="url"
+                value={importUrl}
+                onChange={(e) => setImportUrl(e.target.value)}
+                placeholder="Paste a LinkedIn or ATS job URL (e.g. boards.greenhouse.io/...)"
+              />
             </div>
-          ))
+            <PrimaryButton type="submit" className="sm:mb-0 sm:self-end">
+              Quick add
+            </PrimaryButton>
+          </form>
+          {importMsg && (
+            <div className="mt-3">
+              <Alert tone="info">{importMsg}</Alert>
+            </div>
+          )}
+        </section>
+
+        {/* Search + status filter — same query params as before */}
+        <div className="flex flex-col gap-3 rounded-xl border border-line bg-surface p-4 shadow-card sm:flex-row sm:items-center">
+          <div className="relative flex-1">
+            <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-ink-faint">
+              <svg viewBox="0 0 20 20" fill="none" className="h-4 w-4" aria-hidden="true">
+                <circle cx="9" cy="9" r="5.5" stroke="currentColor" strokeWidth="1.6" />
+                <path d="m13.5 13.5 3 3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+              </svg>
+            </span>
+            <TextInput
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search keywords (e.g. Kotlin, Kubernetes, Senior)…"
+              className="pl-9"
+              aria-label="Search jobs"
+            />
+          </div>
+          <div className="sm:w-52">
+            <Select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              aria-label="Filter by pipeline status"
+            >
+              <option value="">All statuses</option>
+              <option value="DISCOVERED">DISCOVERED</option>
+              <option value="FILTERED_OUT">FILTERED_OUT</option>
+              <option value="ANALYSED">ANALYSED</option>
+              <option value="SCORED">SCORED</option>
+              <option value="DECIDED">DECIDED</option>
+              <option value="ARCHIVED">ARCHIVED</option>
+            </Select>
+          </div>
+        </div>
+
+        {/* Results */}
+        {loading ? (
+          <Loading>Searching the job database…</Loading>
+        ) : jobs.length === 0 ? (
+          <EmptyState
+            title="No matching jobs yet"
+            body="Try different keywords or clear the status filter — or add a posting directly with Quick add above."
+          />
+        ) : (
+          <>
+            <p className="text-xs font-medium text-ink-muted" role="status">
+              {jobs.length} {jobs.length === 1 ? 'job' : 'jobs'} found
+            </p>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {jobs.map((job) => (
+                <JobCard
+                  key={job.id}
+                  job={job}
+                  actions={
+                    <span className="inline-flex items-center gap-1 text-xs font-semibold text-forest-700">
+                      View details
+                      <svg viewBox="0 0 16 16" fill="none" className="h-3.5 w-3.5" aria-hidden="true">
+                        <path
+                          d="m6 3.5 4.5 4.5L6 12.5"
+                          stroke="currentColor"
+                          strokeWidth="1.6"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </span>
+                  }
+                  footer={
+                    job.skills_extracted && job.skills_extracted.length > 6 ? (
+                      <span className="text-[11px] text-ink-faint">
+                        +{job.skills_extracted.length - 6} more skills listed
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 text-[11px] text-ink-faint">
+                        <Chip>{job.employment_type || 'FULL_TIME'}</Chip>
+                      </span>
+                    )
+                  }
+                />
+              ))}
+            </div>
+          </>
         )}
       </div>
-    </div>
+    </PageShell>
   );
 };

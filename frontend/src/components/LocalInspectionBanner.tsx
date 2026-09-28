@@ -19,12 +19,12 @@ export const LocalInspectionBanner: React.FC =
         <div
           role="status"
           data-testid="local-inspection-banner"
-          className="mb-5 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-amber-200"
+          className="mb-5 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-amber-400 bg-amber-50 px-4 py-2.5 text-amber-900 shadow-card"
         >
           <span className="font-mono text-[11px] font-bold tracking-wider">
             {LOCAL_INSPECTION_MARKER}
           </span>
-          <span className="text-xs text-amber-200/80">
+          <span className="text-xs text-amber-800">
             Development only. Signed in as the seeded local development account through the normal
             login endpoint — no Firebase sign-in, nothing faked. This banner cannot appear in a
             production build.

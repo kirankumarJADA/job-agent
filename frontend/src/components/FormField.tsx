@@ -53,7 +53,7 @@ export const FormField: React.FC<FormFieldProps> = ({
     <div>
       <label
         htmlFor={inputId}
-        className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-slate-400"
+        className="mb-1.5 block text-xs font-semibold text-ink-soft"
       >
         {label}
       </label>
@@ -70,12 +70,12 @@ export const FormField: React.FC<FormFieldProps> = ({
           disabled={disabled}
           aria-invalid={error ? true : undefined}
           aria-describedby={describedBy === '' ? undefined : describedBy}
-          className={`w-full rounded-lg border bg-slate-800/80 px-3.5 py-2.5 text-white placeholder-slate-500 transition-colors focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-60 ${
+          className={`w-full rounded-lg border bg-surface px-3.5 py-2.5 text-ink placeholder-ink-faint transition-colors focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-60 ${
             revealable ? 'pr-16' : ''
           } ${
             error
-              ? 'border-red-500/50 focus:ring-red-500/60'
-              : 'border-slate-700 focus:ring-indigo-500'
+              ? 'border-red-400 focus:ring-red-500/30'
+              : 'border-line focus:border-forest-600 focus:ring-forest-600/20'
           }`}
         />
 
@@ -85,7 +85,7 @@ export const FormField: React.FC<FormFieldProps> = ({
             onClick={() => setRevealed((current) => !current)}
             disabled={disabled}
             aria-label={revealed ? 'Hide password' : 'Show password'}
-            className="absolute inset-y-0 right-0 px-3 text-xs font-semibold uppercase tracking-wider text-slate-400 transition-colors hover:text-indigo-300 disabled:opacity-50"
+            className="absolute inset-y-0 right-0 px-3 text-xs font-semibold uppercase tracking-wider text-ink-muted transition-colors hover:text-forest-700 disabled:opacity-50"
           >
             {revealed ? 'Hide' : 'Show'}
           </button>
@@ -93,12 +93,12 @@ export const FormField: React.FC<FormFieldProps> = ({
       </div>
 
       {error && (
-        <p id={errorId} role="alert" className="mt-1.5 text-xs text-red-400">
+        <p id={errorId} role="alert" className="mt-1.5 text-xs text-red-700">
           {error}
         </p>
       )}
       {hint && !error && (
-        <p id={hintId} className="mt-1.5 text-xs text-slate-500">
+        <p id={hintId} className="mt-1.5 text-xs text-ink-muted">
           {hint}
         </p>
       )}

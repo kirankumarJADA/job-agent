@@ -20,24 +20,24 @@ interface FirebaseConfigNoticeProps {
 
 export const FirebaseConfigNotice: React.FC<FirebaseConfigNoticeProps> = ({ missingKeys }) => (
   <AuthNotice tone="error">
-    <p className="font-semibold text-red-200">Firebase Authentication is not configured</p>
+    <p className="font-semibold text-red-800">Firebase Authentication is not configured</p>
     <p className="mt-1.5">
       This deployment is missing the Firebase web configuration, so sign-in, sign-up and password
       reset are unavailable.
     </p>
     {missingKeys.length > 0 && (
       <>
-        <p className="mt-3 text-xs font-semibold uppercase tracking-wider text-red-200/80">
+        <p className="mt-3 text-xs font-semibold uppercase tracking-wider text-red-700">
           Set these environment variables and rebuild the frontend
         </p>
-        <ul className="mt-1.5 space-y-0.5 font-mono text-xs text-red-200">
+        <ul className="mt-1.5 space-y-0.5 font-mono text-xs text-red-800">
           {missingKeys.map((key) => (
             <li key={key}>{key}</li>
           ))}
         </ul>
       </>
     )}
-    <p className="mt-3 text-xs text-red-200/80">
+    <p className="mt-3 text-xs text-red-700">
       They come from the Firebase console under Project settings &rarr; Your apps &rarr; Web app.
       These values are public identifiers, not secrets.
     </p>

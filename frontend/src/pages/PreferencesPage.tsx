@@ -1,7 +1,26 @@
 import React, { useEffect, useState } from 'react';
 import { apiFetch } from '../api/client';
 import { PreferenceSet, ScoringWeights } from '../types';
+import {
+  Alert,
+  Label,
+  Loading,
+  PageHeader,
+  PageShell,
+  PrimaryButton,
+  SectionCard,
+  Select,
+  StatusPill,
+  TextInput,
+} from '../components/ui';
 
+/**
+ * Job Search Preferences.
+ *
+ * Presentation-only redesign: identical fields, validation rules and PUT
+ * /preferences payload. The scoring-weight sliders keep the live sum-to-100
+ * check; the application-mode selector is now a card group.
+ */
 export const PreferencesPage: React.FC = () => {
   const [prefs, setPrefs] = useState<PreferenceSet | null>(null);
   const [loading, setLoading] = useState(true);
@@ -12,8 +31,8 @@ export const PreferencesPage: React.FC = () => {
   const [titlesStr, setTitlesStr] = useState('');
   const [skillsStr, setSkillsStr] = useState('');
   const [salaryMin, setSalaryMin] = useState<number>(60000);
-  const [sponsorshipPolicy, setSponsorshipPolicy] = useState<PreferenceSet['sponsorship_policy']>('SHOW_ALL');
-  const [appMode, setAppMode] = useState<PreferenceSet['application_mode']>('ASSISTED');
+  const [sponsorshipPolicy, setSponsorshipPolicy] = useState<PreferenceSet['sponsorshipPolicy']>('SHOW_ALL');
+  const [appMode, setAppMode] = useState<PreferenceSet['applicationMode']>('ASSISTED');
   const [remoteTypes, setRemoteTypes] = useState<string[]>(['REMOTE', 'HYBRID']);
 
   const [weights, setWeights] = useState<ScoringWeights>({
@@ -47,13 +66,13 @@ export const PreferencesPage: React.FC = () => {
       const p = await apiFetch<PreferenceSet>('/preferences');
       setPrefs(p);
       setTitlesStr((p.titles || []).join(', '));
-      setSkillsStr((p.required_skills || []).join(', '));
-      setSalaryMin(p.salary_min_gbp || 60000);
-      setSponsorshipPolicy(p.sponsorship_policy || 'SHOW_ALL');
-      setAppMode(p.application_mode || 'ASSISTED');
-      setRemoteTypes(p.remote_types || ['REMOTE', 'HYBRID']);
-      if (p.scoring_weights) {
-        setWeights(p.scoring_weights);
+      setSkillsStr((p.requiredSkills || []).join(', '));
+      setSalaryMin(p.salaryMinGbp || 60000);
+      setSponsorshipPolicy(p.sponsorshipPolicy || 'SHOW_ALL');
+      setAppMode(p.applicationMode || 'ASSISTED');
+      setRemoteTypes(p.remoteTypes || ['REMOTE', 'HYBRID']);
+      if (p.scoringWeights) {
+        setWeights(p.scoringWeights);
       }
     } catch {
       setPrefs(null);
@@ -97,8 +116,8 @@ export const PreferencesPage: React.FC = () => {
         method: 'PUT',
         body: JSON.stringify({
           titles,
-          keywordsInclude: prefs?.keywords_include || [],
-          keywordsExclude: prefs?.keywords_exclude || [],
+          keywordsInclude: prefs?.keywordsInclude || [],
+          keywordsExclude: prefs?.keywordsExclude || [],
           requiredSkills,
           locationsAllowed: ['UK'],
           remoteTypes,
@@ -119,199 +138,178 @@ export const PreferencesPage: React.FC = () => {
   };
 
   if (loading) {
-    return <div className="p-12 text-center text-slate-400 text-sm">Loading job preferences...</div>;
+    return <PageShell><Loading>Loading job preferences…</Loading></PageShell>;
   }
 
   return (
-    <div className="space-y-6 max-w-4xl mx-auto">
-      <div>
-        <h1 className="text-2xl font-bold text-white tracking-tight">Job Search Preferences</h1>
-        <p className="text-sm text-slate-400">Configure discovery filters, sponsorship requirements, and scoring weight vectors</p>
-      </div>
+    <PageShell>
+      <div className="space-y-6 max-w-4xl">
+        <PageHeader
+          eyebrow="Tune the agent"
+          title="Job Search Preferences"
+          subtitle="Configure discovery filters, sponsorship requirements, and the scoring weight vector the agent ranks jobs with."
+        />
 
-      {message && (
-        <div
-          className={`p-4 rounded-xl text-xs font-semibold ${
-            message.type === 'success'
-              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-              : 'bg-red-500/10 text-red-400 border border-red-500/20'
-          }`}
-        >
-          {message.text}
-        </div>
-      )}
+        {message && <Alert tone={message.type === 'success' ? 'success' : 'error'}>{message.text}</Alert>}
 
-      <form onSubmit={handleSave} className="space-y-6">
-        {/* Core Search Scope */}
-        <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-4">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
-            Target Job Criteria
-          </h2>
-
-          <div className="space-y-4">
+        <form onSubmit={handleSave} className="space-y-6">
+          {/* Target job criteria */}
+          <SectionCard title="Target job criteria" bodyClassName="space-y-5">
             <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1">
-                Target Job Titles (comma-separated)
-              </label>
-              <input
+              <Label htmlFor="pref-titles">Target job titles (comma-separated)</Label>
+              <TextInput
+                id="pref-titles"
                 type="text"
                 value={titlesStr}
                 onChange={(e) => setTitlesStr(e.target.value)}
                 placeholder="Senior Backend Engineer, Platform Engineer, Software Architect"
-                className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
               />
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1">
-                Required Technical Skills (comma-separated)
-              </label>
-              <input
+              <Label htmlFor="pref-skills">Required technical skills (comma-separated)</Label>
+              <TextInput
+                id="pref-skills"
                 type="text"
                 value={skillsStr}
                 onChange={(e) => setSkillsStr(e.target.value)}
                 placeholder="Java, Kotlin, Spring Boot, Kubernetes, AWS"
-                className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
               />
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">
-                  Minimum Base Salary (£ GBP / Year)
-                </label>
-                <input
+                <Label htmlFor="pref-salary">Minimum base salary (£ GBP / year)</Label>
+                <TextInput
+                  id="pref-salary"
                   type="number"
                   step="5000"
                   value={salaryMin}
                   onChange={(e) => setSalaryMin(Number(e.target.value))}
-                  className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">
-                  Sponsorship Requirement Policy
-                </label>
-                <select
+                <Label htmlFor="pref-sponsorship">Sponsorship requirement policy</Label>
+                <Select
+                  id="pref-sponsorship"
                   value={sponsorshipPolicy}
-                  onChange={(e) => setSponsorshipPolicy(e.target.value as PreferenceSet['sponsorship_policy'])}
-                  className="w-full rounded-lg bg-slate-900 border border-slate-700 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  onChange={(e) => setSponsorshipPolicy(e.target.value as PreferenceSet['sponsorshipPolicy'])}
                 >
-                  <option value="SHOW_ALL">Show All Jobs (Informational Only)</option>
-                  <option value="SPONSORSHIP_REQUIRED">Sponsorship Required (Filter Out Non-Sponsors)</option>
-                  <option value="SPONSORSHIP_PREFERRED">Sponsorship Preferred (Prioritize Sponsors)</option>
-                  <option value="SPONSORSHIP_NOT_REQUIRED">Sponsorship Not Required</option>
-                </select>
+                  <option value="SHOW_ALL">Show all jobs (informational only)</option>
+                  <option value="SPONSORSHIP_REQUIRED">Sponsorship required (filter out non-sponsors)</option>
+                  <option value="SPONSORSHIP_PREFERRED">Sponsorship preferred (prioritize sponsors)</option>
+                  <option value="SPONSORSHIP_NOT_REQUIRED">Sponsorship not required</option>
+                </Select>
               </div>
             </div>
 
-            <div className="pt-2">
-              <label className="block text-xs font-medium text-slate-400 mb-2">Workplace Preferences</label>
-              <div className="flex gap-4">
-                {['REMOTE', 'HYBRID', 'ONSITE'].map((type) => (
-                  <label key={type} className="inline-flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+            <fieldset>
+              <legend className="mb-2 text-xs font-semibold text-ink-soft">Workplace preferences</legend>
+              <div className="flex flex-wrap gap-2">
+                {['REMOTE', 'HYBRID', 'ONSITE'].map((type) => {
+                  const selected = remoteTypes.includes(type);
+                  return (
+                    <button
+                      key={type}
+                      type="button"
+                      aria-pressed={selected}
+                      onClick={() => toggleRemote(type)}
+                      className={`rounded-full border px-4 py-1.5 text-xs font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600 ${
+                        selected
+                          ? 'border-forest-700 bg-forest-900 text-cream-50'
+                          : 'border-line bg-surface text-ink-soft hover:border-forest-300 hover:bg-forest-50'
+                      }`}
+                    >
+                      {type}
+                    </button>
+                  );
+                })}
+              </div>
+            </fieldset>
+          </SectionCard>
+
+          {/* Scoring weights with live validation */}
+          <SectionCard
+            title="Scoring weight vector"
+            hint="All weight points must sum to exactly 100"
+            actions={
+              <StatusPill tone={isWeightValid ? 'emerald' : 'red'} className="font-mono">
+                Sum: {weightSum} / 100
+              </StatusPill>
+            }
+            bodyClassName="space-y-4"
+          >
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {[
+                { key: 'skill', label: 'Technical skill match', max: 50 },
+                { key: 'visa', label: 'Visa sponsorship availability', max: 50 },
+                { key: 'experience', label: 'Years of experience match', max: 30 },
+                { key: 'location', label: 'Location & remote alignment', max: 30 },
+                { key: 'salary', label: 'Salary vs target', max: 30 },
+                { key: 'career', label: 'Career growth goals', max: 30 },
+                { key: 'difficulty', label: 'Application friction / effort', max: 20 },
+              ].map(({ key, label, max }) => {
+                const weightKey = key as keyof ScoringWeights;
+                const val = weights[weightKey] || 0;
+                return (
+                  <div key={key} className="rounded-lg border border-line bg-cream-50/70 p-3">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-medium text-ink-soft">{label}</span>
+                      <span className="font-mono font-bold text-forest-700">{val} pts</span>
+                    </div>
                     <input
-                      type="checkbox"
-                      checked={remoteTypes.includes(type)}
-                      onChange={() => toggleRemote(type)}
-                      className="rounded bg-slate-800 border-slate-700 text-indigo-600 focus:ring-indigo-500"
+                      type="range"
+                      min="0"
+                      max={max}
+                      value={val}
+                      aria-label={`${label} weight`}
+                      onChange={(e) => handleWeightChange(weightKey, Number(e.target.value))}
+                      className="mt-2 w-full cursor-pointer accent-forest-700"
                     />
-                    {type}
-                  </label>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Scoring Weights Section with Live Validation */}
-        <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
-                Scoring Weight Vector
-              </h2>
-              <p className="text-xs text-slate-400">All weight points must sum to exactly 100%</p>
-            </div>
-            <div
-              className={`px-3 py-1 rounded-full text-xs font-mono font-bold ${
-                isWeightValid
-                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                  : 'bg-red-500/10 text-red-400 border border-red-500/20'
-              }`}
-            >
-              Sum: {weightSum} / 100
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-            {[
-              { key: 'skill', label: 'Technical Skill Match', max: 50 },
-              { key: 'visa', label: 'Visa Sponsorship Availability', max: 50 },
-              { key: 'experience', label: 'Years of Experience Match', max: 30 },
-              { key: 'location', label: 'Location & Remote Alignment', max: 30 },
-              { key: 'salary', label: 'Salary vs Target', max: 30 },
-              { key: 'career', label: 'Career Growth Goals', max: 30 },
-              { key: 'difficulty', label: 'Application Friction / Effort', max: 20 },
-            ].map(({ key, label, max }) => {
-              const weightKey = key as keyof ScoringWeights;
-              const val = weights[weightKey] || 0;
-              return (
-                <div key={key} className="space-y-1 bg-slate-900/60 p-3 rounded-lg border border-slate-800">
-                  <div className="flex justify-between text-xs">
-                    <span className="text-slate-300 font-medium">{label}</span>
-                    <span className="font-mono text-indigo-400 font-bold">{val} pts</span>
                   </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max={max}
-                    value={val}
-                    onChange={(e) => handleWeightChange(weightKey, Number(e.target.value))}
-                    className="w-full accent-indigo-500 cursor-pointer"
-                  />
-                </div>
-              );
-            })}
-          </div>
-        </div>
+                );
+              })}
+            </div>
+          </SectionCard>
 
-        {/* Application Mode Selection */}
-        <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-3">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
-            Autonomous Application Mode
-          </h2>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {[
-              { mode: 'MANUAL', title: 'Manual', desc: 'Discovery only; user submits all applications manually.' },
-              { mode: 'ASSISTED', title: 'Assisted (Recommended)', desc: 'Tailors CV & prepares interaction plan; requires user sign-off.' },
-              { mode: 'CONTROLLED_AUTO', title: 'Controlled Auto', desc: 'Autonomous submission within strict policy limits and kill-switches.' },
-            ].map(({ mode, title, desc }) => (
-              <div
-                key={mode}
-                onClick={() => setAppMode(mode as PreferenceSet['application_mode'])}
-                className={`p-4 rounded-xl border cursor-pointer transition-all ${
-                  appMode === mode
-                    ? 'bg-indigo-600/15 border-indigo-500 text-white'
-                    : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:border-slate-700'
-                }`}
-              >
-                <div className="font-bold text-sm mb-1">{title}</div>
-                <div className="text-[11px] leading-relaxed text-slate-400">{desc}</div>
-              </div>
-            ))}
-          </div>
-        </div>
+          {/* Application mode */}
+          <SectionCard title="Autonomous application mode" bodyClassName="space-y-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              {[
+                { mode: 'MANUAL', title: 'Manual', desc: 'Discovery only; user submits all applications manually.' },
+                { mode: 'ASSISTED', title: 'Assisted (Recommended)', desc: 'Tailors CV & prepares interaction plan; requires user sign-off.' },
+                { mode: 'CONTROLLED_AUTO', title: 'Controlled Auto', desc: 'Autonomous submission within strict policy limits and kill-switches.' },
+              ].map(({ mode, title, desc }) => {
+                const selected = appMode === mode;
+                return (
+                  <button
+                    key={mode}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => setAppMode(mode as PreferenceSet['applicationMode'])}
+                    className={`rounded-xl border p-4 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600 ${
+                      selected
+                        ? 'border-forest-700 bg-forest-50 ring-1 ring-forest-700'
+                        : 'border-line bg-surface hover:border-forest-300 hover:bg-forest-50/50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className={`text-sm font-bold ${selected ? 'text-forest-900' : 'text-ink'}`}>{title}</span>
+                      {selected && <span aria-hidden="true" className="h-2 w-2 rounded-full bg-forest-700" />}
+                    </div>
+                    <div className="mt-1 text-[11px] leading-relaxed text-ink-muted">{desc}</div>
+                  </button>
+                );
+              })}
+            </div>
+          </SectionCard>
 
-        <button
-          type="submit"
-          disabled={saving || !isWeightValid}
-          className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm shadow-lg shadow-indigo-600/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {saving ? 'Saving Preferences...' : 'Save Job Search Preferences'}
-        </button>
-      </form>
-    </div>
+          <PrimaryButton type="submit" disabled={saving || !isWeightValid} className="w-full py-3">
+            {saving ? 'Saving preferences…' : 'Save job search preferences'}
+          </PrimaryButton>
+        </form>
+      </div>
+    </PageShell>
   );
 };

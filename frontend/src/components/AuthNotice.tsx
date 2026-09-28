@@ -14,9 +14,9 @@ interface AuthNoticeProps {
 }
 
 const TONE_CLASSES: Record<AuthNoticeProps['tone'], string> = {
-  error: 'border-red-500/25 bg-red-500/10 text-red-300',
-  success: 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300',
-  info: 'border-indigo-500/25 bg-indigo-500/10 text-indigo-200',
+  error: 'border-red-200 bg-red-50 text-red-800',
+  success: 'border-emerald-200 bg-emerald-50 text-emerald-900',
+  info: 'border-forest-200 bg-forest-50 text-forest-900',
 };
 
 export const AuthNotice: React.FC<AuthNoticeProps> = ({ tone, children }) => (

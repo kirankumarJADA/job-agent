@@ -134,21 +134,25 @@ export interface ScoringWeights {
   difficulty: number;
 }
 
+// Matches the API's actual JSON casing (Jackson default camelCase, confirmed
+// against the live endpoint). The previous snake_case shape never matched the
+// wire format, so most saved values silently fell back to UI defaults on load.
 export interface PreferenceSet {
   id: string;
-  profile_id: string;
+  profileId: string;
   titles: string[];
-  keywords_include: string[];
-  keywords_exclude: string[];
-  required_skills: string[];
-  locations_allowed: string[];
-  remote_types: string[];
-  employment_types: string[];
-  salary_min_gbp?: number;
-  sponsorship_policy: 'SPONSORSHIP_REQUIRED' | 'SPONSORSHIP_PREFERRED' | 'SPONSORSHIP_NOT_REQUIRED' | 'SHOW_ALL';
-  application_mode: 'MANUAL' | 'ASSISTED' | 'CONTROLLED_AUTO';
-  scoring_weights: ScoringWeights;
-  is_active: boolean;
+  keywordsInclude: string[];
+  keywordsExclude: string[];
+  requiredSkills: string[];
+  locationsAllowed: string[];
+  remoteTypes: string[];
+  employmentTypes: string[];
+  experienceLevels?: string[];
+  salaryMinGbp?: number;
+  sponsorshipPolicy: 'SPONSORSHIP_REQUIRED' | 'SPONSORSHIP_PREFERRED' | 'SPONSORSHIP_NOT_REQUIRED' | 'SHOW_ALL';
+  applicationMode: 'MANUAL' | 'ASSISTED' | 'CONTROLLED_AUTO';
+  scoringWeights: ScoringWeights;
+  isActive: boolean;
 }
 
 export interface LlmModel {
@@ -240,36 +244,40 @@ export interface ResumeAtsAnalysis {
   contentSha256: string;
 }
 
+// Matches the API's actual JSON casing (camelCase) — the previous snake_case
+// declarations never matched the wire format, which left letter/answer bodies
+// rendering as blank cards.
 export interface CoverLetter {
   id: string;
-  profile_id: string;
-  job_id: string;
-  application_id?: string;
+  profileId: string;
+  jobId: string;
+  applicationId?: string;
   version: number;
   title: string;
-  body_markdown: string;
-  claims_validation: {
+  bodyMarkdown: string;
+  claimsValidation: {
     passed: boolean;
     issues?: string[];
   };
-  is_approved: boolean;
-  created_at: string;
-  updated_at: string;
-}export interface ApplicationAnswer {
+  isApproved: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface ApplicationAnswer {
   id: string;
-  profile_id: string;
-  job_id: string;
-  application_id?: string;
-  question_text: string;
-  question_type: string;
-  answer_text: string;
+  profileId: string;
+  jobId: string;
+  applicationId?: string;
+  questionText: string;
+  questionType: string;
+  answerText: string;
   confidence: number;
   status: 'ANSWERED' | 'NEEDS_USER_INPUT' | 'HARD_STOP';
-  validation_notes?: {
-    question_type?: string;
+  validationNotes?: {
+    questionType?: string;
     issues?: string[];
   };
-  created_at: string;
-  updated_at: string;
+  createdAt: string;
+  updatedAt: string;
 }
 

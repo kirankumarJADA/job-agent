@@ -1,7 +1,26 @@
 import React, { useEffect, useState } from 'react';
 import { apiFetch } from '../api/client';
 import { LlmModel, RoutingPolicy, BenchmarkRun } from '../types';
+import {
+  DataTable,
+  JobStatusPill,
+  Loading,
+  MetricCard,
+  PageHeader,
+  PageShell,
+  PrimaryButton,
+  SecondaryButton,
+  SectionCard,
+  StatusPill,
+  TraceBlock,
+} from '../components/ui';
 
+/**
+ * Models, Routing & Benchmarks.
+ *
+ * Presentation-only redesign: same four GETs, same toggle/ping/benchmark/
+ * promote handlers. Tables render through the shared DataTable primitive.
+ */
 export const ModelsPage: React.FC = () => {
   const [models, setModels] = useState<LlmModel[]>([]);
   const [routing, setRouting] = useState<RoutingPolicy[]>([]);
@@ -9,12 +28,12 @@ export const ModelsPage: React.FC = () => {
   const [stats, setStats] = useState<Array<{ provider_id: string; call_count: number; avg_latency_ms: number; success_rate: number }>>([]);
   const [loading, setLoading] = useState(true);
 
-  // Ping Diagnostic State
+  // Ping diagnostic state
   const [forceFallback, setForceFallback] = useState(false);
   const [pingTrace, setPingTrace] = useState<any>(null);
   const [pinging, setPinging] = useState(false);
 
-  // Benchmark Trigger State
+  // Benchmark trigger state
   const [runningBenchmark, setRunningBenchmark] = useState(false);
   const [benchmarkMsg, setBenchmarkMsg] = useState<string | null>(null);
   const [promotingId, setPromotingId] = useState<string | null>(null);
@@ -104,242 +123,155 @@ export const ModelsPage: React.FC = () => {
   };
 
   if (loading) {
-    return <div className="p-12 text-center text-slate-400 text-sm">Loading model registry &amp; benchmarks...</div>;
+    return <PageShell><Loading>Loading model registry & benchmarks…</Loading></PageShell>;
   }
 
   return (
-    <div className="space-y-8 max-w-5xl mx-auto">
-      <div>
-        <h1 className="text-2xl font-bold text-white tracking-tight">Models, Routing &amp; Benchmarks</h1>
-        <p className="text-sm text-slate-400">Multi-provider LLM registry, empirical router policies, and golden test harness</p>
-      </div>
+    <PageShell>
+      <div className="space-y-6">
+        <PageHeader
+          eyebrow="Agent operations"
+          title="Models, Routing & Benchmarks"
+          subtitle="Multi-provider LLM registry, empirical router policies, and the golden test harness that promotes winners."
+        />
 
-      {/* Interactive Ping Diagnostics */}
-      <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
-              Live Router Diagnostic &amp; Failover Test
-            </h2>
-            <p className="text-xs text-slate-400">Verifies circuit breaker fallback and usage ledger write</p>
-          </div>
-
-          <div className="flex items-center gap-4">
-            <label className="inline-flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={forceFallback}
-                onChange={(e) => setForceFallback(e.target.checked)}
-                className="rounded bg-slate-800 border-slate-700 text-indigo-600 focus:ring-indigo-500"
-              />
-              Force Fallback (Simulate Failure)
-            </label>
-
-            <button
-              onClick={handlePing}
-              disabled={pinging}
-              className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-all shadow-md disabled:opacity-50"
-            >
-              {pinging ? 'Pinging Router...' : '⚡ Ping Router'}
-            </button>
-          </div>
-        </div>
-
-        {pingTrace && (
-          <div className="p-4 rounded-lg bg-slate-950 border border-slate-800">
-            <div className="text-xs font-mono text-slate-400 mb-1">Execution Trace Output:</div>
-            <pre className="text-xs font-mono text-emerald-400 overflow-x-auto">
-              {JSON.stringify(pingTrace, null, 2)}
-            </pre>
-          </div>
-        )}
-      </div>
-
-      {/* Model Registry Table */}
-      <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-4">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
-          Registered LLM Providers &amp; Models
-        </h2>
-
-        <div className="divide-y divide-slate-700/40">
-          {models.map((model) => (
-            <div key={model.id} className="py-3 flex items-center justify-between gap-4">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="font-semibold text-sm text-white">{model.display_name || model.model_key}</span>
-                  <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-700 text-slate-300">
-                    {model.provider_id}
-                  </span>
-                </div>
-                <p className="text-xs text-slate-400 font-mono mt-0.5">{model.model_key}</p>
-              </div>
-
-              <button
-                onClick={() => handleToggleModel(model.id, model.enabled)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
-                  model.enabled
-                    ? 'bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30'
-                    : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
-                }`}
-              >
-                {model.enabled ? 'Enabled' : 'Disabled'}
-              </button>
+        {/* Router diagnostic */}
+        <SectionCard
+          title="Live router diagnostic & failover test"
+          hint="Verifies circuit-breaker fallback and usage-ledger write"
+          actions={
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-ink-soft">
+                <input
+                  type="checkbox"
+                  checked={forceFallback}
+                  onChange={(e) => setForceFallback(e.target.checked)}
+                  className="h-4 w-4 rounded border-line accent-forest-700"
+                />
+                Force fallback (simulate failure)
+              </label>
+              <PrimaryButton onClick={handlePing} disabled={pinging} className="px-4 py-2 text-xs">
+                {pinging ? 'Pinging router…' : 'Ping router'}
+              </PrimaryButton>
             </div>
-          ))}
-        </div>
-      </div>
+          }
+          bodyClassName="space-y-3"
+        >
+          {pingTrace ? (
+            <>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-faint">
+                Execution trace output
+              </p>
+              <TraceBlock>{JSON.stringify(pingTrace, null, 2)}</TraceBlock>
+            </>
+          ) : (
+            <p className="text-xs text-ink-muted">
+              Run a ping to exercise the primary model and, if it fails or fallback is forced, the fallback chain — results land in the usage ledger.
+            </p>
+          )}
+        </SectionCard>
 
-      {/* Active Routing Policies Table */}
-      <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-4">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
-          Active Empirical Routing Policies
-        </h2>
+        {/* Model registry */}
+        <SectionCard title="Registered LLM providers & models" bodyClassName="pt-2">
+          <DataTable
+            columns={['Model', 'Provider', 'Context window', 'State', '']}
+            emptyMessage="No models registered."
+            rows={models.map((model) => [
+              <div>
+                <p className="font-semibold text-ink">{model.display_name || model.model_key}</p>
+                <p className="font-mono text-[11px] text-ink-muted">{model.model_key}</p>
+              </div>,
+              <span className="font-mono text-xs">{model.provider_id}</span>,
+              <span className="font-mono text-xs">{model.context_window ? model.context_window.toLocaleString() : '—'}</span>,
+              <StatusPill tone={model.enabled ? 'emerald' : 'slate'}>{model.enabled ? 'Enabled' : 'Disabled'}</StatusPill>,
+              <SecondaryButton
+                onClick={() => handleToggleModel(model.id, model.enabled)}
+                className="px-3 py-1.5 text-xs"
+              >
+                {model.enabled ? 'Disable' : 'Enable'}
+              </SecondaryButton>,
+            ])}
+          />
+        </SectionCard>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="text-slate-400 border-b border-slate-700/60">
-              <tr>
-                <th className="pb-2">Task Type</th>
-                <th className="pb-2">Primary Model</th>
-                <th className="pb-2">Basis</th>
-                <th className="pb-2">Rationale / Source</th>
-                <th className="pb-2">Updated</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-700/40 text-slate-300">
-              {routing.length === 0 ? (
-                <tr>
-                  <td colSpan={5} className="py-4 text-center text-slate-500">
-                    No custom policies promoted yet. Operating on default fallback chain.
-                  </td>
-                </tr>
+        {/* Routing policies */}
+        <SectionCard title="Active empirical routing policies" bodyClassName="pt-2">
+          <DataTable
+            columns={['Task type', 'Primary model', 'Basis', 'Rationale / source', 'Updated']}
+            emptyMessage="No custom policies promoted yet. Operating on the default fallback chain."
+            rows={routing.map((policy) => [
+              <span className="font-mono text-xs font-semibold text-forest-700">{policy.task_type}</span>,
+              <span className="font-mono text-xs text-ink">{policy.primary_model_id || 'Default'}</span>,
+              <StatusPill tone={policy.basis === 'BENCHMARK' ? 'emerald' : policy.basis === 'MANUAL' ? 'sky' : 'slate'}>{policy.basis}</StatusPill>,
+              <span className="block max-w-xs truncate text-xs" title={policy.rationale || ''}>{policy.rationale || 'N/A'}</span>,
+              <span className="whitespace-nowrap text-xs text-ink-muted">{new Date(policy.updated_at).toLocaleString()}</span>,
+            ])}
+          />
+        </SectionCard>
+
+        {/* Benchmark harness */}
+        <SectionCard
+          title="Golden benchmark harness"
+          hint="Suite: job_classification@v1 (20 curated cases)"
+          actions={
+            <PrimaryButton onClick={handleStartBenchmark} disabled={runningBenchmark} className="px-4 py-2 text-xs">
+              {runningBenchmark ? 'Executing runs…' : 'Run benchmark suite'}
+            </PrimaryButton>
+          }
+          bodyClassName="space-y-3 pt-2"
+        >
+          {benchmarkMsg && (
+            <p className="rounded-lg border border-forest-200 bg-forest-50 px-3.5 py-2.5 text-xs text-forest-900">
+              {benchmarkMsg}
+            </p>
+          )}
+          <DataTable
+            columns={['Run ID', 'Suite', 'Task', 'Status', 'Started', 'Actions']}
+            emptyMessage='No benchmark runs recorded. Click "Run benchmark suite" to begin.'
+            rows={runs.map((run) => [
+              <span className="font-mono text-xs text-ink-muted">{run.id.slice(0, 8)}…</span>,
+              <span className="font-medium text-ink">{run.suite}</span>,
+              <span className="font-mono text-xs text-forest-700">{run.task_type}</span>,
+              <JobStatusPill status={run.status} />,
+              <span className="whitespace-nowrap text-xs text-ink-muted">{new Date(run.started_at).toLocaleString()}</span>,
+              run.status === 'COMPLETED' ? (
+                <SecondaryButton
+                  onClick={() => handlePromote(run.id)}
+                  disabled={promotingId === run.id}
+                  className="px-3 py-1.5 text-xs"
+                >
+                  {promotingId === run.id ? 'Promoting…' : 'Promote model'}
+                </SecondaryButton>
               ) : (
-                routing.map((policy) => (
-                  <tr key={policy.task_type}>
-                    <td className="py-2.5 font-mono text-indigo-400 font-semibold">{policy.task_type}</td>
-                    <td className="py-2.5 font-mono text-white">{policy.primary_model_id || 'Default'}</td>
-                    <td className="py-2.5">
-                      <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-300 text-[11px] font-semibold">
-                        {policy.basis}
-                      </span>
-                    </td>
-                    <td className="py-2.5 text-slate-400 max-w-xs truncate">{policy.rationale || 'N/A'}</td>
-                    <td className="py-2.5 text-slate-500">{new Date(policy.updated_at).toLocaleTimeString()}</td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+                <span className="text-xs text-ink-faint">—</span>
+              ),
+            ])}
+          />
+        </SectionCard>
 
-      {/* Benchmark Suite & Promotion Section */}
-      <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        {/* Usage ledger */}
+        {stats.length > 0 && (
           <div>
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
-              Golden Benchmark Harness
-            </h2>
-            <p className="text-xs text-slate-400">Suite: job_classification@v1 (20 curated cases)</p>
-          </div>
-
-          <button
-            onClick={handleStartBenchmark}
-            disabled={runningBenchmark}
-            className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-all shadow-md disabled:opacity-50"
-          >
-            {runningBenchmark ? 'Executing Runs...' : '🎯 Run Benchmark Suite'}
-          </button>
-        </div>
-
-        {benchmarkMsg && (
-          <div className="p-3 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs">
-            {benchmarkMsg}
+            <p className="mb-3 text-sm font-semibold text-ink">Production usage ledger summary</p>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              {stats.map((st, i) => (
+                <MetricCard
+                  key={i}
+                  label={st.provider_id}
+                  value={`${st.call_count} calls`}
+                  hint={
+                    <>
+                      <span className="font-mono">{Math.round(st.avg_latency_ms)}ms avg</span>
+                      {' · '}
+                      <span className="font-mono text-forest-700">{((st.success_rate || 0) * 100).toFixed(1)}% success</span>
+                    </>
+                  }
+                />
+              ))}
+            </div>
           </div>
         )}
-
-        <div className="overflow-x-auto pt-2">
-          <table className="w-full text-left text-xs">
-            <thead className="text-slate-400 border-b border-slate-700/60">
-              <tr>
-                <th className="pb-2">Run ID</th>
-                <th className="pb-2">Suite</th>
-                <th className="pb-2">Task</th>
-                <th className="pb-2">Status</th>
-                <th className="pb-2">Started</th>
-                <th className="pb-2 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-700/40 text-slate-300">
-              {runs.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="py-4 text-center text-slate-500">
-                    No benchmark runs recorded. Click &quot;Run Benchmark Suite&quot; above to begin!
-                  </td>
-                </tr>
-              ) : (
-                runs.map((run) => (
-                  <tr key={run.id}>
-                    <td className="py-2.5 font-mono text-slate-400">{run.id.slice(0, 8)}...</td>
-                    <td className="py-2.5 font-medium text-white">{run.suite}</td>
-                    <td className="py-2.5 font-mono text-indigo-400">{run.task_type}</td>
-                    <td className="py-2.5">
-                      <span
-                        className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
-                          run.status === 'COMPLETED'
-                            ? 'bg-emerald-500/20 text-emerald-400'
-                            : run.status === 'RUNNING'
-                            ? 'bg-amber-500/20 text-amber-400'
-                            : 'bg-red-500/20 text-red-400'
-                        }`}
-                      >
-                        {run.status}
-                      </span>
-                    </td>
-                    <td className="py-2.5 text-slate-500">{new Date(run.started_at).toLocaleTimeString()}</td>
-                    <td className="py-2.5 text-right">
-                      {run.status === 'COMPLETED' && (
-                        <button
-                          onClick={() => handlePromote(run.id)}
-                          disabled={promotingId === run.id}
-                          className="px-3 py-1 rounded bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-400 border border-indigo-500/30 font-semibold text-[11px] transition-colors"
-                        >
-                          {promotingId === run.id ? 'Promoting...' : 'Promote Model'}
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
       </div>
-
-      {/* LLM Usage Ledger Stats */}
-      {stats.length > 0 && (
-        <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-4">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
-            Production Usage Ledger Summary
-          </h2>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            {stats.map((st, i) => (
-              <div key={i} className="p-4 rounded-lg bg-slate-900/60 border border-slate-800">
-                <span className="text-xs font-mono text-slate-400 uppercase">{st.provider_id}</span>
-                <div className="text-2xl font-bold text-white mt-1">{st.call_count} calls</div>
-                <div className="flex justify-between text-xs text-slate-400 mt-2">
-                  <span>Avg Latency:</span>
-                  <span className="font-mono text-indigo-300">{Math.round(st.avg_latency_ms)}ms</span>
-                </div>
-                <div className="flex justify-between text-xs text-slate-400 mt-1">
-                  <span>Success Rate:</span>
-                  <span className="font-mono text-emerald-400">{((st.success_rate || 0) * 100).toFixed(1)}%</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
+    </PageShell>
   );
 };

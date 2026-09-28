@@ -87,7 +87,7 @@ export const LoginPage: React.FC = () => {
       footer={
         <>
           Don&apos;t have an account?{' '}
-          <Link to="/signup" className="font-semibold text-indigo-400 hover:text-indigo-300">
+          <Link to="/signup" className="font-semibold text-forest-700 hover:text-forest-900">
             Create one
           </Link>
         </>
@@ -130,7 +130,7 @@ export const LoginPage: React.FC = () => {
           <div className="mt-2 text-right">
             <Link
               to="/forgot-password"
-              className="text-xs font-medium text-indigo-400 hover:text-indigo-300"
+              className="text-xs font-medium text-forest-700 hover:text-forest-900"
             >
               Forgot your password?
             </Link>
@@ -140,15 +140,15 @@ export const LoginPage: React.FC = () => {
         <button
           type="submit"
           disabled={submitting || googleSubmitting}
-          className="w-full rounded-lg bg-indigo-600 px-4 py-2.5 font-medium text-white shadow-lg shadow-indigo-600/20 transition-all hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+          className="w-full rounded-lg bg-forest-900 px-4 py-2.5 font-semibold text-cream-50 transition-colors hover:bg-forest-800 focus:outline-none focus:ring-2 focus:ring-forest-600 focus:ring-offset-2 focus:ring-offset-cream-50 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {submitting ? 'Signing in…' : 'Sign In'}
         </button>
 
         <div className="flex items-center gap-3" aria-hidden="true">
-          <div className="h-px flex-1 bg-slate-700/70" />
-          <span className="text-xs font-medium uppercase tracking-wider text-slate-500">or</span>
-          <div className="h-px flex-1 bg-slate-700/70" />
+          <div className="h-px flex-1 bg-line" />
+          <span className="text-xs font-medium uppercase tracking-wider text-ink-faint">or</span>
+          <div className="h-px flex-1 bg-line" />
         </div>
 
         <GoogleButton onClick={handleGoogle} disabled={submitting || googleSubmitting} />

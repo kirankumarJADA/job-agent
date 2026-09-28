@@ -31,7 +31,7 @@ export interface NotificationItem {
 const severityColor: Record<string, string> = {
   ERROR: 'border-red-500/40 bg-red-500/10',
   WARN: 'border-amber-500/40 bg-amber-500/10',
-  INFO: 'border-indigo-500/30 bg-indigo-500/10',
+  INFO: 'border-sky-500/40 bg-sky-500/10',
 };
 
 export const NotificationBell: React.FC = () => {
@@ -118,7 +118,7 @@ export const NotificationBell: React.FC = () => {
       <button
         onClick={() => setOpen((o) => !o)}
         title="Notifications"
-        className="relative p-2 rounded-lg hover:bg-slate-800 text-slate-300 hover:text-white transition-colors"
+        className="relative rounded-lg p-2 text-ink-soft transition-colors hover:bg-cream-100 hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600"
       >
         <span className="text-base leading-none">🔔</span>
         {unread > 0 && (
@@ -129,13 +129,13 @@ export const NotificationBell: React.FC = () => {
       </button>
 
       {open && (
-        <div className="absolute right-0 mt-2 w-96 max-w-[90vw] rounded-xl bg-slate-900 border border-slate-700 shadow-2xl z-50 overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
-            <span className="text-sm font-semibold text-white">Notifications</span>
+        <div className="absolute right-0 z-50 mt-2 w-96 max-w-[90vw] overflow-hidden rounded-xl border border-line bg-surface shadow-pop">
+          <div className="flex items-center justify-between border-b border-line px-4 py-3">
+            <span className="text-sm font-semibold text-ink">Notifications</span>
             {unread > 0 && (
               <button
                 onClick={markAllRead}
-                className="text-xs text-indigo-400 hover:text-indigo-300"
+                className="text-xs font-semibold text-forest-700 hover:text-forest-900"
               >
                 Mark all read
               </button>
@@ -144,9 +144,9 @@ export const NotificationBell: React.FC = () => {
 
           <div className="max-h-96 overflow-y-auto">
             {loading ? (
-              <div className="px-4 py-6 text-center text-xs text-slate-500">Loading…</div>
+              <div className="px-4 py-6 text-center text-xs text-ink-muted">Loading…</div>
             ) : items.length === 0 ? (
-              <div className="px-4 py-6 text-center text-xs text-slate-500">
+              <div className="px-4 py-6 text-center text-xs text-ink-muted">
                 No unread notifications
               </div>
             ) : (
@@ -154,20 +154,20 @@ export const NotificationBell: React.FC = () => {
                 <button
                   key={n.id}
                   onClick={() => markReadAndFollow(n)}
-                  className={`w-full text-left px-4 py-3 border-l-2 hover:bg-slate-800/60 transition-colors ${
+                  className={`w-full border-l-2 px-4 py-3 text-left transition-colors hover:bg-cream-50/70 focus:outline-none focus-visible:bg-forest-50 ${
                     severityColor[n.severity] ?? severityColor.INFO
                   }`}
                 >
                   <div className="flex items-center gap-2">
-                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-800 text-slate-300 uppercase">
+                    <span className="rounded bg-surface-sunken px-1.5 py-0.5 text-[9px] font-bold uppercase text-ink-soft">
                       {n.category}
                     </span>
-                    <span className="text-[10px] text-slate-500 ml-auto">
+                    <span className="ml-auto text-[10px] text-ink-faint">
                       {new Date(n.created_at).toLocaleTimeString()}
                     </span>
                   </div>
-                  <div className="text-sm text-white mt-1">{n.title}</div>
-                  {n.body && <div className="text-xs text-slate-400 mt-0.5 line-clamp-2">{n.body}</div>}
+                  <div className="mt-1 text-sm font-medium text-ink">{n.title}</div>
+                  {n.body && <div className="mt-0.5 line-clamp-2 text-xs text-ink-muted">{n.body}</div>}
                 </button>
               ))
             )}

@@ -14,11 +14,11 @@ export const SessionLoader: React.FC<{ message?: string }> = ({
   <div
     role="status"
     aria-live="polite"
-    className="flex min-h-screen flex-col items-center justify-center gap-4 bg-slate-950 text-slate-400"
+    className="flex min-h-screen flex-col items-center justify-center gap-4 bg-cream-50"
   >
-    <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 text-lg font-bold text-white shadow-lg shadow-indigo-900/40">
+    <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-forest-900 text-lg font-bold text-cream-50 shadow-raise">
       R
     </div>
-    <p className="font-mono text-xs tracking-wide text-slate-500">{message}</p>
+    <p className="text-xs tracking-wide text-ink-muted">{message}</p>
   </div>
 );

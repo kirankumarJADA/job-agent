@@ -16,7 +16,7 @@ export const GoogleButton: React.FC<{
     type="button"
     onClick={onClick}
     disabled={disabled}
-    className="flex w-full items-center justify-center gap-3 rounded-lg border border-slate-700 bg-slate-900/60 px-4 py-2.5 font-medium text-slate-100 transition-all hover:border-slate-600 hover:bg-slate-800/60 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+    className="flex w-full items-center justify-center gap-3 rounded-lg border border-line bg-surface px-4 py-2.5 font-medium text-ink transition-colors hover:border-forest-300 hover:bg-forest-50 focus:outline-none focus:ring-2 focus:ring-forest-600 focus:ring-offset-2 focus:ring-offset-cream-50 disabled:cursor-not-allowed disabled:opacity-50"
   >
     <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5">
       <path

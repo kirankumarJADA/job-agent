@@ -5,9 +5,10 @@ import React from 'react';
  * reset. Keeping the brand lockup and the surface treatment in one component is
  * what makes the three screens read as one product rather than three forms.
  *
- * Uses the same palette as the rest of the application (slate-950 base,
- * slate-800 borders, indigo accent) so the transition into the app after
- * signing in is visually continuous.
+ * Uses the light design system palette (cream canvas, white card, forest
+ * accent) so the transition into the app after signing in is visually
+ * continuous. All copy is passed in by the pages, so the asserted strings
+ * ('Robin', 'Your AI Job Agent', titles, subtitles) are untouched.
  */
 
 interface AuthLayoutProps {
@@ -27,41 +28,41 @@ export const AuthLayout: React.FC<AuthLayoutProps> = ({
   children,
   footer,
 }) => (
-  <div className="relative min-h-screen bg-slate-950 text-slate-100 antialiased flex flex-col">
-    {/* Ambient background: two soft indigo glows over the slate base. Purely
+  <div className="relative flex min-h-screen flex-col bg-cream-50 text-ink antialiased">
+    {/* Ambient background: two soft forest washes over the warm canvas. Purely
         decorative, and aria-hidden so it stays out of the accessibility tree. */}
     <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden">
-      <div className="absolute -top-40 left-1/2 h-96 w-[36rem] -translate-x-1/2 rounded-full bg-indigo-600/20 blur-3xl" />
-      <div className="absolute bottom-[-12rem] right-[-8rem] h-80 w-80 rounded-full bg-violet-600/10 blur-3xl" />
+      <div className="absolute -top-40 left-1/2 h-96 w-[36rem] -translate-x-1/2 rounded-full bg-forest-100/60 blur-3xl" />
+      <div className="absolute bottom-[-12rem] right-[-8rem] h-80 w-80 rounded-full bg-cream-200/70 blur-3xl" />
     </div>
 
     <header className="relative z-10 flex items-center justify-center gap-3 px-6 py-8">
-      <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 text-lg font-bold text-white shadow-lg shadow-indigo-900/40">
+      <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-forest-900 text-lg font-bold text-cream-50 shadow-raise">
         R
       </div>
       <div className="leading-tight">
-        <p className="text-lg font-bold tracking-tight text-white">Robin</p>
-        <p className="text-xs font-mono text-indigo-300/90">Your AI Job Agent</p>
+        <p className="text-lg font-bold tracking-tight text-ink">Robin</p>
+        <p className="text-xs font-medium text-forest-700">Your AI Job Agent</p>
       </div>
     </header>
 
     <main className="relative z-10 flex flex-1 items-start justify-center px-4 pb-16 sm:items-center sm:pb-24">
       <div className="w-full max-w-md">
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-6 shadow-2xl backdrop-blur-sm sm:p-8">
+        <div className="rounded-2xl border border-line bg-surface p-6 shadow-raise sm:p-8">
           <div className="mb-6">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo-400">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-forest-600">
               {eyebrow}
             </p>
-            <h1 className="mt-2 text-2xl font-bold tracking-tight text-white sm:text-[1.75rem]">
+            <h1 className="mt-2 text-2xl font-bold tracking-tight text-ink sm:text-[1.75rem]">
               {title}
             </h1>
-            <p className="mt-1.5 text-sm leading-relaxed text-slate-400">{subtitle}</p>
+            <p className="mt-1.5 text-sm leading-relaxed text-ink-muted">{subtitle}</p>
           </div>
 
           {children}
         </div>
 
-        {footer && <div className="mt-6 text-center text-sm text-slate-400">{footer}</div>}
+        {footer && <div className="mt-6 text-center text-sm text-ink-muted">{footer}</div>}
       </div>
     </main>
   </div>

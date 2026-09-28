@@ -1,8 +1,34 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { apiFetch } from '../api/client';
-import { JobDetailResponse, ResumeAtsAnalysis } from '../types';
+import { ApplicationAnswer, CoverLetter, JobDetailResponse, ResumeAtsAnalysis } from '../types';
+import {
+  Alert,
+  Chip,
+  DocumentPreview,
+  JobStatusPill,
+  Loading,
+  PageHeader,
+  PageShell,
+  PrimaryButton,
+  SecondaryButton,
+  SectionCard,
+  StatusPill,
+  WorkplacePill,
+} from '../components/ui';
 
+/**
+ * Job Details — the deepest page in the product.
+ *
+ * Presentation-only redesign. Same data and handlers as before: the job +
+ * analysis + score + decision trace from /jobs/:id, and the three application
+ * subsystems (tailored CV, cover letter, application Q&A) with their generate,
+ * approve and draft actions untouched.
+ *
+ * Layout hierarchy: job header → intelligence (2-col with score sidebar) →
+ * application package (full width, so generated documents are finally easy to
+ * read instead of being squeezed into a narrow column).
+ */
 export const JobDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const [data, setData] = useState<JobDetailResponse | null>(null);
@@ -19,211 +45,287 @@ export const JobDetailPage: React.FC = () => {
   }, [id]);
 
   if (loading) {
-    return <div className="p-12 text-center text-slate-400 text-sm">Loading job intelligence...</div>;
+    return (
+      <PageShell>
+        <Loading>Loading job intelligence…</Loading>
+      </PageShell>
+    );
   }
 
   if (error || !data) {
     return (
-      <div className="p-8 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm">
-        {error || 'Job not found'}
-        <div className="mt-4">
-          <Link to="/jobs" className="text-indigo-400 hover:underline">
-            ← Back to Jobs Feed
-          </Link>
+      <PageShell>
+        <div className="space-y-4">
+          <Alert tone="error">{error || 'Job not found'}</Alert>
+          <SecondaryButton href="/jobs">← Back to Jobs Feed</SecondaryButton>
         </div>
-      </div>
+      </PageShell>
     );
   }
 
   const { job, analysis, score, decision_trace } = data;
 
   return (
-    <div className="space-y-6 max-w-5xl mx-auto">
-      <div className="flex items-center justify-between">
-        <Link to="/jobs" className="text-sm text-slate-400 hover:text-slate-200 flex items-center gap-1">
-          ← Back to Jobs Feed
-        </Link>
-        <div className="flex items-center gap-2">
-          <span className="px-3 py-1 rounded-full text-xs font-semibold bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-            {job.status}
-          </span>
-        </div>
-      </div>
-
-      {/* Hero Header */}
-      <div className="p-6 rounded-2xl bg-slate-800/80 border border-slate-700/70 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-bold text-white tracking-tight">{job.title}</h1>
-            <p className="text-base text-slate-300 font-medium mt-1">
-              {job.company_name_raw || 'Direct Employer'}
-            </p>
-          </div>
-          {job.application_url && (
-            <a
-              href={job.application_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm transition-all shadow-lg shadow-indigo-600/20 text-center"
+    <PageShell>
+      <div className="space-y-6">
+        {/* Breadcrumb + status */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <nav aria-label="Breadcrumb" className="text-sm">
+            <Link
+              to="/jobs"
+              className="font-medium text-ink-muted transition-colors hover:text-forest-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600"
             >
-              Apply on Official Board ↗
-            </a>
-          )}
-        </div>
-
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-3 border-t border-slate-700/50 text-xs">
-          <div>
-            <span className="text-slate-500 block">Location</span>
-            <span className="text-white font-medium">{job.location_raw || 'United Kingdom'}</span>
-          </div>
-          <div>
-            <span className="text-slate-500 block">Workplace Type</span>
-            <span className="text-white font-medium">{job.remote_type || 'HYBRID'}</span>
-          </div>
-          <div>
-            <span className="text-slate-500 block">Compensation</span>
-            <span className="text-emerald-400 font-semibold">
-              {job.salary_min ? `£${job.salary_min.toLocaleString()} - £${job.salary_max?.toLocaleString()}` : 'Competitive'}
-            </span>
-          </div>
-          <div>
-            <span className="text-slate-500 block">Posted Date</span>
-            <span className="text-white font-medium">
-              {job.posted_at ? new Date(job.posted_at).toLocaleDateString() : 'Recent'}
-            </span>
+              ← Jobs Feed
+            </Link>
+            <span aria-hidden="true" className="mx-2 text-ink-faint">/</span>
+            <span className="font-semibold text-ink">{job.title}</span>
+          </nav>
+          <div className="flex items-center gap-2">
+            <WorkplacePill type={job.remote_type} />
+            <JobStatusPill status={job.status} />
           </div>
         </div>
-      </div>
 
-      {/* Two Column Grid: Analysis & Score vs Description */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left 2 Cols: Description & Skills */}
-        <div className="lg:col-span-2 space-y-6">
-          <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 mb-3">
-              Job Description
-            </h2>
-            <div className="text-sm text-slate-300 leading-relaxed whitespace-pre-line">
-              {job.description_text}
-            </div>
-          </div>
-
-          {job.skills_extracted && job.skills_extracted.length > 0 && (
-            <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60">
-              <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 mb-3">
-                Extracted Skills & Technologies
-              </h2>
-              <div className="flex flex-wrap gap-2">
-                {job.skills_extracted.map((skill, i) => (
-                  <span
-                    key={i}
-                    className="px-3 py-1 rounded-lg text-xs font-medium bg-slate-900 text-indigo-300 border border-slate-700/60"
-                  >
-                    {skill}
-                  </span>
-                ))}
+        {/* Job header */}
+        <header className="rounded-xl border border-line bg-surface p-6 shadow-card">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+            <div className="min-w-0">
+              <h1 className="text-2xl font-bold tracking-tight text-ink">{job.title}</h1>
+              <p className="mt-1 text-base font-medium text-ink-soft">
+                {job.company_name_raw || 'Direct employer'}
+              </p>
+              <div className="mt-4 grid grid-cols-1 gap-x-8 gap-y-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
+                <MetaItem label="Location">{job.location_raw || 'United Kingdom'}</MetaItem>
+                <MetaItem label="Workplace type">{job.remote_type || 'HYBRID'}</MetaItem>
+                <MetaItem label="Compensation">
+                  {job.salary_min
+                    ? `£${job.salary_min.toLocaleString()} – £${job.salary_max?.toLocaleString()}`
+                    : 'Competitive'}
+                </MetaItem>
+                <MetaItem label="Posted">
+                  {job.posted_at ? new Date(job.posted_at).toLocaleDateString() : 'Recently'}
+                </MetaItem>
               </div>
             </div>
-          )}
-        </div>
+            {job.application_url && (
+              <div className="shrink-0">
+                <a
+                  href={job.application_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-forest-900 px-5 py-2.5 text-sm font-semibold text-cream-50 shadow-raise transition-colors hover:bg-forest-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600 focus-visible:ring-offset-2"
+                >
+                  Apply on official board
+                  <svg viewBox="0 0 16 16" fill="none" className="h-3.5 w-3.5" aria-hidden="true">
+                    <path
+                      d="M4.5 11.5 11.5 4.5M6 4.5h5.5V10"
+                      stroke="currentColor"
+                      strokeWidth="1.6"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </a>
+                <p className="mt-1.5 text-center text-[11px] text-ink-faint">
+                  Opens the employer's board
+                </p>
+              </div>
+            )}
+          </div>
+        </header>
 
-        {/* Right 1 Col: Intelligence, Scoring & Audit */}
-        <div className="space-y-6">
-          {/* Tailored CV Subsystem: generated from the canonical Master Profile */}
-          <TailoredCvSection jobId={job.id} />
+        {/* Intelligence: description + sponsorship left, score + trace right */}
+        <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+          <div className="space-y-6 xl:col-span-2">
+            <SectionCard title="Job description">
+              <div className="whitespace-pre-line text-sm leading-relaxed text-ink-soft">
+                {job.description_text}
+              </div>
+            </SectionCard>
 
-          {/* Cover Letter Subsystem */}
-          <CoverLetterSection jobId={job.id} />
+            {analysis?.summary && (
+              <SectionCard title="Analyst summary" hint="LLM analysis of this posting">
+                <p className="text-sm leading-relaxed text-ink-soft">{analysis.summary}</p>
+              </SectionCard>
+            )}
 
-          {/* Application QA Subsystem */}
-          <ApplicationQASection jobId={job.id} />
+            {analysis?.match_explanation && (
+              <SectionCard title="Why this matches your profile">
+                <p className="text-sm leading-relaxed text-ink-soft">{analysis.match_explanation}</p>
+              </SectionCard>
+            )}
 
-          {/* Score Card */}
-          <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 mb-4 flex items-center justify-between">
-              <span>Compatibility Score</span>
-              <span className="text-xs font-mono text-indigo-400">Phase 3</span>
-            </h2>
-
-            {score ? (
-              <div className="space-y-4">
-                <div className="flex items-baseline justify-between">
-                  <span className="text-3xl font-extrabold text-white">{score.overall}/100</span>
-                  <span className="px-2.5 py-0.5 rounded text-xs font-bold bg-emerald-500/20 text-emerald-400">
-                    {score.recommendation}
-                  </span>
-                </div>
-                <div className="space-y-1.5 text-xs">
-                  {Object.entries(score.breakdown).map(([cat, val]) => (
-                    <div key={cat} className="flex justify-between text-slate-300">
-                      <span className="capitalize">{cat}</span>
-                      <span className="font-mono font-medium">{val} pts</span>
+            {analysis?.skills_required && (
+              <SectionCard title="Skills required" hint="Grouped by requirement level">
+                <div className="space-y-3">
+                  {Object.entries(analysis.skills_required).map(([group, skills]) => (
+                    <div key={group}>
+                      <p className="text-xs font-semibold capitalize text-ink-muted">{group}</p>
+                      <div className="mt-1.5 flex flex-wrap gap-1.5">
+                        {skills.map((skill, i) => (
+                          <Chip key={`${skill}-${i}`}>{skill}</Chip>
+                        ))}
+                      </div>
                     </div>
                   ))}
                 </div>
-              </div>
-            ) : (
-              <div className="p-4 rounded-lg bg-slate-900/60 border border-slate-800 text-center">
-                <span className="text-2xl font-bold text-slate-400">-- / 100</span>
-                <p className="text-xs text-slate-500 mt-2">
-                  Scoring calculation runs in Phase 3 after rule-filtering gate.
-                </p>
-              </div>
+              </SectionCard>
             )}
-          </div>
 
-          {/* Sponsorship Intelligence Card */}
-          <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 mb-4 flex items-center justify-between">
-              <span>Sponsorship Signal</span>
-              <span className="text-xs font-mono text-indigo-400">Signals 1–4</span>
-            </h2>
-
-            {analysis?.sponsorship ? (
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-bold text-white">{analysis.sponsorship.status}</span>
-                  <span className="text-xs font-mono text-emerald-400">
-                    {(analysis.sponsorship.confidence * 100).toFixed(0)}% Conf
-                  </span>
+            {job.skills_extracted && job.skills_extracted.length > 0 && (
+              <SectionCard title="Extracted skills & technologies">
+                <div className="flex flex-wrap gap-1.5">
+                  {job.skills_extracted.map((skill, i) => (
+                    <Chip key={`${skill}-${i}`}>{skill}</Chip>
+                  ))}
                 </div>
-                <p className="text-xs text-slate-300 leading-relaxed">{analysis.sponsorship.reason}</p>
-              </div>
-            ) : (
-              <div className="p-4 rounded-lg bg-slate-900/60 border border-slate-800 text-center">
-                <p className="text-xs text-slate-400 font-medium">Home Office Register Cross-Check</p>
-                <p className="text-[11px] text-slate-500 mt-1">
-                  Sponsorship evaluation fuses Home Office Register + JD analysis in Phase 3.
-                </p>
-              </div>
+              </SectionCard>
             )}
           </div>
 
-          {/* Decision Trace */}
-          <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 mb-3">
-              Auditable Decision Trace
-            </h2>
-            {decision_trace && decision_trace.length > 0 ? (
-              <div className="space-y-2">
-                {decision_trace.map((step, i) => (
-                  <div key={i} className="text-xs p-2 rounded bg-slate-900 border border-slate-800 flex justify-between">
-                    <span className="font-mono text-slate-300">{step.step}</span>
-                    <span className="font-semibold text-emerald-400">{step.outcome}</span>
+          <div className="space-y-6">
+            {/* Score */}
+            <SectionCard title="Compatibility score">
+              {score ? (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <span className="text-3xl font-extrabold tracking-tight text-ink">
+                      {score.overall}
+                      <span className="text-base font-semibold text-ink-faint">/100</span>
+                    </span>
+                    <StatusPill tone={score.recommendation === 'APPLY' ? 'emerald' : score.recommendation === 'REVIEW' ? 'amber' : 'slate'}>
+                      {score.recommendation}
+                    </StatusPill>
                   </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-slate-500">
-                Decision steps are logged idempotently as each filter evaluates the job.
-              </p>
-            )}
+                  <ScoreBar value={score.overall} />
+                  <div className="space-y-1.5 text-xs">
+                    {Object.entries(score.breakdown).map(([cat, val]) => (
+                      <div key={cat} className="flex items-center justify-between text-ink-soft">
+                        <span className="capitalize">{cat.replace(/_/g, ' ').toLowerCase()}</span>
+                        <span className="font-mono font-semibold text-ink">{val} pts</span>
+                      </div>
+                    ))}
+                  </div>
+                  {score.explanation && (
+                    <p className="border-t border-line pt-3 text-xs leading-relaxed text-ink-muted">
+                      {score.explanation}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="rounded-lg border border-dashed border-line bg-cream-50 p-4 text-center">
+                  <span className="text-2xl font-bold text-ink-faint">— / 100</span>
+                  <p className="mt-2 text-xs leading-relaxed text-ink-muted">
+                    Scoring runs in Phase 3 after the rule-filtering gate.
+                  </p>
+                </div>
+              )}
+            </SectionCard>
+
+            {/* Sponsorship */}
+            <SectionCard title="Sponsorship signal" hint="Home Office cross-check">
+              {analysis?.sponsorship ? (
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-bold text-ink">{analysis.sponsorship.status}</span>
+                    <span className="font-mono text-xs font-semibold text-forest-700">
+                      {(analysis.sponsorship.confidence * 100).toFixed(0)}% confidence
+                    </span>
+                  </div>
+                  <p className="text-xs leading-relaxed text-ink-soft">{analysis.sponsorship.reason}</p>
+                  {analysis.sponsorship.evidence?.length > 0 && (
+                    <div className="space-y-1.5 border-t border-line pt-2.5">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-faint">
+                        Evidence
+                      </p>
+                      {analysis.sponsorship.evidence.map((ev, i) => (
+                        <div key={i} className="rounded-md border border-line bg-cream-50 px-2.5 py-1.5 text-[11px] text-ink-soft">
+                          <span className="font-semibold text-ink">{ev.type}</span>
+                          {ev.snippet && <span className="ml-1.5">— “{ev.snippet}”</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="text-xs leading-relaxed text-ink-muted">
+                  Sponsorship evaluation fuses the Home Office register with JD analysis in Phase 3.
+                </p>
+              )}
+            </SectionCard>
+
+            {/* Decision trace */}
+            <SectionCard title="Decision trace">
+              {decision_trace && decision_trace.length > 0 ? (
+                <ol className="space-y-1.5">
+                  {decision_trace.map((step, i) => (
+                    <li
+                      key={i}
+                      className="flex items-center justify-between gap-2 rounded-md border border-line bg-cream-50 px-2.5 py-1.5"
+                    >
+                      <span className="truncate font-mono text-[11px] text-ink-soft">{step.step}</span>
+                      <span className="shrink-0 text-[11px] font-bold text-forest-700">{step.outcome}</span>
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="text-xs leading-relaxed text-ink-muted">
+                  Decision steps are logged idempotently as each filter evaluates the job.
+                </p>
+              )}
+            </SectionCard>
+          </div>
+        </div>
+
+        {/* Application package — full width so documents are readable */}
+        <div className="space-y-4">
+          <PageHeader
+            eyebrow="Application package"
+            title="Apply with preparation"
+            subtitle="Everything Robin prepares for this specific job: a tailored CV snapshot, a grounded cover letter and drafted application answers."
+          />
+          <div className="space-y-6">
+            <TailoredCvSection jobId={job.id} />
+            <CoverLetterSection jobId={job.id} />
+            <ApplicationQASection jobId={job.id} />
           </div>
         </div>
       </div>
-    </div>
+    </PageShell>
   );
 };
+
+/* ------------------------------------------------------------------ */
+/* Small shared pieces                                                 */
+/* ------------------------------------------------------------------ */
+
+const MetaItem: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+  <div>
+    <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-faint">{label}</p>
+    <p className="mt-0.5 font-medium text-ink">{children}</p>
+  </div>
+);
+
+const ScoreBar: React.FC<{ value: number }> = ({ value }) => (
+  <div
+    role="img"
+    aria-label={`Overall compatibility ${value} out of 100`}
+    className="h-2 w-full overflow-hidden rounded-full bg-cream-200"
+  >
+    <div
+      className="h-full rounded-full bg-forest-700 transition-all"
+      style={{ width: `${Math.max(0, Math.min(100, value))}%` }}
+    />
+  </div>
+);
+
+const SectionHint: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <span className="text-[11px] text-ink-faint">{children}</span>
+);
+
+/* ------------------------------------------------------------------ */
+/* Tailored CV subsystem                                               */
+/* ------------------------------------------------------------------ */
 
 const TailoredCvSection: React.FC<{ jobId: string }> = ({ jobId }) => {
   const [analysis, setAnalysis] = useState<ResumeAtsAnalysis | null>(null);
@@ -235,20 +337,112 @@ const TailoredCvSection: React.FC<{ jobId: string }> = ({ jobId }) => {
     catch (e) { setError(e instanceof Error ? e.message : 'Tailoring failed'); }
     finally { setLoading(false); }
   };
-  return <div className="p-6 rounded-xl bg-slate-800/60 border border-indigo-500/20 space-y-3">
-    <div className="flex items-center justify-between"><h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">Job-specific ATS CV</h2><span className="text-xs text-indigo-400">Master Profile → immutable snapshot</span></div>
-    {error && <div className="text-xs text-red-400">{error}</div>}
-    {analysis ? <><div className="grid grid-cols-2 gap-2 text-xs"><div className="text-slate-400">CV version <span className="block text-white font-mono">{analysis.cvVersionId}</span></div><div className="text-slate-400">Master revision <span className="block text-white">{analysis.profileRevision}</span></div><div className="text-slate-400">Evidence claims <span className="block text-emerald-400">{analysis.verifiedEvidence.length}</span></div><div className="text-slate-400">Gaps <span className="block text-amber-400">{analysis.gaps.length ? analysis.gaps.join(', ') : 'None detected'}</span></div></div><div className="space-y-2 text-xs"><div><span className="text-slate-500">Matched verified evidence</span><div className="flex flex-wrap gap-1 mt-1">{analysis.verifiedEvidence.map((item, index) => <span key={`${item.evidence_id}-${index}`} className="px-2 py-1 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">{item.claim}</span>)}</div></div><div className="p-2 rounded bg-slate-900 text-slate-300">ATS keyword coverage: <strong className="text-indigo-300">{String(analysis.atsReport.keyword_coverage ?? 0)}%</strong> <span className="text-slate-500">(heuristic, not a hiring guarantee)</span></div></div><pre className="max-h-48 overflow-auto p-3 rounded bg-slate-900 text-[11px] text-slate-300 whitespace-pre-wrap">{analysis.resumeMarkdown}</pre><div className="flex items-center justify-between pt-2 border-t border-slate-700"><span className="text-[11px] text-slate-500">Immutable PDF artifact · SHA-256 {analysis.contentSha256}</span><a href={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1'}/resume-intelligence/cv/${analysis.cvVersionId}/artifact`} target="_blank" rel="noreferrer" className="px-3 py-1.5 rounded bg-indigo-600 text-xs text-white">Download exact CV PDF</a></div></> : <><p className="text-xs text-slate-400">This never edits the Master Profile. It creates a distinct, provenance-linked CV for this job.</p><button onClick={tailor} disabled={loading} className="w-full py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white disabled:opacity-50">{loading ? 'Analysing verified evidence...' : 'Generate job-specific CV'}</button></>}
-  </div>;
+  return (
+    <SectionCard
+      title="Job-specific ATS CV"
+      hint="Generated from your Master Profile — an immutable snapshot"
+      bodyClassName="space-y-4"
+    >
+      {error && <Alert tone="error">{error}</Alert>}
+      {analysis ? (
+        <>
+          <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
+            <Stat label="CV version" value={analysis.cvVersionId} mono />
+            <Stat label="Master revision" value={`r${analysis.profileRevision}`} />
+            <Stat label="Evidence claims" value={String(analysis.verifiedEvidence.length)} tone="text-forest-700" />
+            <Stat
+              label="Gaps"
+              value={analysis.gaps.length ? `${analysis.gaps.length}` : 'None'}
+              tone={analysis.gaps.length ? 'text-amber-700' : 'text-forest-700'}
+            />
+          </div>
+
+          {analysis.gaps.length > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900">
+              <span className="font-semibold">Gaps detected: </span>{analysis.gaps.join(' · ')}
+            </div>
+          )}
+
+          <div>
+            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-faint">
+              Matched verified evidence
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {analysis.verifiedEvidence.map((item, index) => (
+                <StatusPill key={`${item.evidence_id}-${index}`} tone="emerald">
+                  {item.claim}
+                </StatusPill>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-cream-50 px-3.5 py-2.5 text-xs text-ink-soft">
+            <span>
+              ATS keyword coverage: <strong className="font-semibold text-forest-700">{String(analysis.atsReport.keyword_coverage ?? 0)}%</strong>
+            </span>
+            <span className="text-ink-faint">(heuristic, not a hiring guarantee)</span>
+          </div>
+
+          <div>
+            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-faint">
+              Tailored CV document
+            </p>
+            <DocumentPreview className="max-h-[32rem]">{analysis.resumeMarkdown}</DocumentPreview>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-3.5">
+            <span className="text-[11px] text-ink-faint">
+              Immutable PDF artifact · SHA-256 {analysis.contentSha256.slice(0, 16)}…
+            </span>
+            <a
+              href={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1'}/resume-intelligence/cv/${analysis.cvVersionId}/artifact`}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-forest-900 px-4 py-2 text-xs font-semibold text-cream-50 transition-colors hover:bg-forest-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600 focus-visible:ring-offset-2"
+            >
+              Download exact CV PDF
+            </a>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="text-sm leading-relaxed text-ink-soft">
+            This never edits your Master Profile. It creates a distinct, provenance-linked CV tailored to this job.
+          </p>
+          <PrimaryButton onClick={tailor} disabled={loading}>
+            {loading ? 'Analysing verified evidence…' : 'Generate job-specific CV'}
+          </PrimaryButton>
+        </>
+      )}
+    </SectionCard>
+  );
 };
 
+const Stat: React.FC<{ label: string; value: string; mono?: boolean; tone?: string }> = ({
+  label,
+  value,
+  mono = false,
+  tone = 'text-ink',
+}) => (
+  <div>
+    <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-faint">{label}</p>
+    <p className={`mt-0.5 truncate font-semibold ${mono ? 'font-mono text-[11px]' : ''} ${tone}`} title={value}>
+      {value}
+    </p>
+  </div>
+);
+
+/* ------------------------------------------------------------------ */
+/* Cover letter subsystem                                              */
+/* ------------------------------------------------------------------ */
+
 const CoverLetterSection: React.FC<{ jobId: string }> = ({ jobId }) => {
-  const [coverLetters, setCoverLetters] = useState<import('../types').CoverLetter[]>([]);
+  const [coverLetters, setCoverLetters] = useState<CoverLetter[]>([]);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchLetters = () => {
-    apiFetch<import('../types').CoverLetter[]>(`/cover-letters/job/${jobId}`)
+    apiFetch<CoverLetter[]>(`/cover-letters/job/${jobId}`)
       .then(setCoverLetters)
       .catch(() => {});
   };
@@ -288,69 +482,65 @@ const CoverLetterSection: React.FC<{ jobId: string }> = ({ jobId }) => {
   const latest = coverLetters[0];
 
   return (
-    <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
-          Cover Letter
-        </h2>
-        <span className="text-xs font-mono text-indigo-400">Feature 2</span>
-      </div>
-
-      {error && <div className="p-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs">{error}</div>}
+    <SectionCard
+      title="Cover letter"
+      hint="Every claim grounded in your verified evidence"
+      actions={latest ? <SectionHint>Version {latest.version + 1} available on regenerate</SectionHint> : undefined}
+      bodyClassName="space-y-4"
+    >
+      {error && <Alert tone="error">{error}</Alert>}
 
       {latest ? (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between text-xs">
-            <span className="font-medium text-white">{latest.title}</span>
-            <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${latest.is_approved ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
-              {latest.is_approved ? 'Approved' : 'Pending Review'}
-            </span>
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-sm font-semibold text-ink">{latest.title}</span>
+            <StatusPill tone={latest.isApproved ? 'emerald' : 'amber'}>
+              {latest.isApproved ? 'Approved' : 'Pending review'}
+            </StatusPill>
           </div>
 
-          <div className="max-h-48 overflow-y-auto p-3 rounded-lg bg-slate-900/80 border border-slate-800 text-xs text-slate-300 font-mono whitespace-pre-wrap leading-relaxed">
-            {latest.body_markdown}
+          <div>
+            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-faint">
+              Letter document
+            </p>
+            <DocumentPreview className="max-h-[32rem]">{latest.bodyMarkdown}</DocumentPreview>
           </div>
 
-          <div className="flex items-center justify-between pt-2">
-            <button
-              onClick={() => handleApproval(latest.id, !latest.is_approved)}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-700 hover:bg-slate-600 text-white transition-colors"
-            >
-              {latest.is_approved ? 'Mark Unapproved' : 'Approve Letter'}
-            </button>
-            <button
-              onClick={handleGenerate}
-              disabled={generating}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors"
-            >
-              {generating ? 'Regenerating...' : 'Regenerate v' + (latest.version + 1)}
-            </button>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-3.5">
+            <SecondaryButton onClick={() => handleApproval(latest.id, !latest.isApproved)}>
+              {latest.isApproved ? 'Mark unapproved' : 'Approve letter'}
+            </SecondaryButton>
+            <PrimaryButton onClick={handleGenerate} disabled={generating}>
+              {generating ? 'Regenerating…' : `Regenerate v${latest.version + 1}`}
+            </PrimaryButton>
           </div>
-        </div>
+        </>
       ) : (
-        <div className="text-center py-4 space-y-3">
-          <p className="text-xs text-slate-400">No cover letter generated yet for this job.</p>
-          <button
-            onClick={handleGenerate}
-            disabled={generating}
-            className="w-full py-2 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold disabled:opacity-50 transition-all shadow-md shadow-indigo-600/20"
-          >
-            {generating ? 'Synthesizing with Anti-Fabrication...' : 'Generate ATS Cover Letter'}
-          </button>
+        <div className="space-y-3">
+          <p className="text-sm leading-relaxed text-ink-soft">
+            No cover letter generated yet for this job. Robin drafts it from your verified evidence — never invented claims.
+          </p>
+          <PrimaryButton onClick={handleGenerate} disabled={generating}>
+            {generating ? 'Synthesising with anti-fabrication checks…' : 'Generate ATS cover letter'}
+          </PrimaryButton>
         </div>
       )}
-    </div>
+    </SectionCard>
   );
 };
 
+/* ------------------------------------------------------------------ */
+/* Application Q&A subsystem                                           */
+/* ------------------------------------------------------------------ */
+
 const ApplicationQASection: React.FC<{ jobId: string }> = ({ jobId }) => {
-  const [answers, setAnswers] = useState<import('../types').ApplicationAnswer[]>([]);
+  const [answers, setAnswers] = useState<ApplicationAnswer[]>([]);
   const [questionText, setQuestionText] = useState('');
   const [drafting, setDrafting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchAnswers = () => {
-    apiFetch<import('../types').ApplicationAnswer[]>(`/application-answers/job/${jobId}`)
+    apiFetch<ApplicationAnswer[]>(`/application-answers/job/${jobId}`)
       .then(setAnswers)
       .catch(() => {});
   };
@@ -379,50 +569,63 @@ const ApplicationQASection: React.FC<{ jobId: string }> = ({ jobId }) => {
   };
 
   return (
-    <div className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
-          Application Q&A
-        </h2>
-        <span className="text-xs font-mono text-indigo-400">Feature 3</span>
-      </div>
+    <SectionCard
+      title="Application Q&A"
+      hint="Drafted from verified facts only"
+      bodyClassName="space-y-4"
+    >
+      {error && <Alert tone="error">{error}</Alert>}
 
-      {error && <div className="p-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs">{error}</div>}
-
-      <form onSubmit={handleDraft} className="space-y-2">
-        <input
-          type="text"
-          value={questionText}
-          onChange={(e) => setQuestionText(e.target.value)}
-          placeholder="e.g. Why do you want to work here?"
-          className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
-        />
+      <form onSubmit={handleDraft} className="flex flex-col gap-3 sm:flex-row sm:items-end">
+        <div className="flex-1">
+          <label htmlFor="qa-question" className="mb-1 block text-xs font-semibold text-ink-soft">
+            Screening question
+          </label>
+          <input
+            id="qa-question"
+            type="text"
+            value={questionText}
+            onChange={(e) => setQuestionText(e.target.value)}
+            placeholder="e.g. Why do you want to work here?"
+            className="w-full rounded-lg border border-line bg-surface px-3.5 py-2 text-sm text-ink placeholder-ink-faint transition-colors focus:border-forest-600 focus:outline-none focus:ring-2 focus:ring-forest-600/20"
+          />
+        </div>
         <button
           type="submit"
           disabled={drafting || !questionText.trim()}
-          className="w-full py-1.5 px-3 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-xs font-medium disabled:opacity-50 transition-colors"
+          className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-line bg-surface px-4 py-2 text-sm font-semibold text-ink-soft transition-colors hover:border-forest-300 hover:bg-forest-50 hover:text-forest-900 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600 focus-visible:ring-offset-2"
         >
-          {drafting ? 'Drafting from Verified Facts...' : 'Draft Grounded Answer'}
+          {drafting ? 'Drafting from verified facts…' : 'Draft grounded answer'}
         </button>
       </form>
 
-      {answers.length > 0 && (
-        <div className="space-y-3 pt-2">
+      {answers.length > 0 ? (
+        <div className="space-y-3 border-t border-line pt-4">
           {answers.map((ans) => (
-            <div key={ans.id} className="p-3 rounded-lg bg-slate-900/80 border border-slate-800 space-y-1.5 text-xs">
-              <div className="flex items-center justify-between">
-                <span className="font-medium text-slate-300 line-clamp-1">{ans.question_text}</span>
-                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${ans.status === 'ANSWERED' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
+            <div key={ans.id} className="rounded-lg border border-line bg-cream-50/70 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-sm font-semibold text-ink">{ans.questionText}</span>
+                <StatusPill tone={ans.status === 'ANSWERED' ? 'emerald' : ans.status === 'HARD_STOP' ? 'red' : 'amber'}>
                   {ans.status}
-                </span>
+                </StatusPill>
               </div>
-              <p className="text-slate-400 leading-relaxed font-sans">{ans.answer_text}</p>
+              <p className="mt-2 text-sm leading-relaxed text-ink-soft">{ans.answerText}</p>
+              {ans.validationNotes?.issues && ans.validationNotes.issues.length > 0 && (
+                <ul className="mt-2 space-y-0.5 border-t border-line pt-2 text-xs text-amber-800">
+                  {ans.validationNotes.issues.map((issue, i) => (
+                    <li key={i}>• {issue}</li>
+                  ))}
+                </ul>
+              )}
             </div>
           ))}
         </div>
+      ) : (
+        <p className="border-t border-line pt-4 text-sm leading-relaxed text-ink-muted">
+          Drafted answers appear here. Robin only answers from your verified Master Profile evidence —
+          anything it cannot support is flagged for your input.
+        </p>
       )}
-    </div>
+    </SectionCard>
   );
 };
-
-

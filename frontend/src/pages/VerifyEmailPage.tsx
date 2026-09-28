@@ -134,7 +134,7 @@ export const VerifyEmailPage: React.FC = () => {
           <button
             type="button"
             onClick={handleBackToSignIn}
-            className="font-semibold text-indigo-400 hover:text-indigo-300"
+            className="font-semibold text-forest-700 hover:text-forest-900"
           >
             Back to Sign In
           </button>
@@ -150,15 +150,15 @@ export const VerifyEmailPage: React.FC = () => {
         </AuthNotice>
       )}
       {showVerificationSentCopy && (
-        <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/10 p-4">
-          <p className="text-sm leading-relaxed text-slate-200">
+        <div className="rounded-xl border border-forest-200 bg-forest-50 p-4">
+          <p className="text-sm leading-relaxed text-ink">
             We&apos;ve sent a verification link to{' '}
-            <span className="font-semibold text-white">{email || 'your email address'}</span>.
+            <span className="font-semibold text-forest-900">{email || 'your email address'}</span>.
           </p>
-          <p className="mt-2 text-xs leading-relaxed text-slate-400">
+          <p className="mt-2 text-xs leading-relaxed text-ink-muted">
             Follow the link in that email, then come back here and press{' '}
-            <span className="font-medium text-slate-300">Check again</span>. The link expires after a while — use{' '}
-            <span className="font-medium text-slate-300">Resend</span> to get a fresh one.
+            <span className="font-medium text-ink-soft">Check again</span>. The link expires after a while — use{' '}
+            <span className="font-medium text-ink-soft">Resend</span> to get a fresh one.
           </p>
         </div>
       )}
@@ -171,7 +171,7 @@ export const VerifyEmailPage: React.FC = () => {
           type="button"
           onClick={() => handleCheckAgain(inviteRequired ? inviteCode.trim() : undefined)}
           disabled={checking}
-          className="w-full rounded-lg bg-indigo-600 px-4 py-2.5 font-medium text-white shadow-lg shadow-indigo-600/20 transition-all hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+          className="w-full rounded-lg bg-forest-900 px-4 py-2.5 font-semibold text-cream-50 transition-colors hover:bg-forest-800 focus:outline-none focus:ring-2 focus:ring-forest-600 focus:ring-offset-2 focus:ring-offset-cream-50 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {checking ? 'Checking…' : "I've verified my email — Check again"}
         </button>
@@ -192,7 +192,7 @@ export const VerifyEmailPage: React.FC = () => {
           type="button"
           onClick={handleResend}
           disabled={resending || cooldownSeconds > 0}
-          className="w-full rounded-lg border border-slate-700 px-4 py-2.5 font-medium text-slate-200 transition-all hover:border-slate-600 hover:bg-slate-800/60 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+          className="w-full rounded-lg border border-line bg-surface px-4 py-2.5 font-semibold text-ink-soft transition-colors hover:border-forest-300 hover:bg-forest-50 focus:outline-none focus:ring-2 focus:ring-forest-600 focus:ring-offset-2 focus:ring-offset-cream-50 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {resending
             ? 'Sending…'
@@ -202,7 +202,7 @@ export const VerifyEmailPage: React.FC = () => {
         </button>
       </div>
 
-      <p className="text-center text-xs leading-relaxed text-slate-500">
+      <p className="text-center text-xs leading-relaxed text-ink-muted">
         Keep this tab open if you can — but signing in again later works too, and picks up right here.
       </p>
     </AuthLayout>

@@ -1,7 +1,28 @@
 import React, { useEffect, useState } from 'react';
 import { apiFetch } from '../api/client';
 import { Profile } from '../types';
+import {
+  Alert,
+  EmptyState,
+  Loading,
+  PageHeader,
+  PageShell,
+  PrimaryButton,
+  SecondaryButton,
+  SectionCard,
+  StatusPill,
+  TextInput,
+  Textarea,
+} from '../components/ui';
 
+/**
+ * Master Profile / Master CV.
+ *
+ * Presentation-only redesign: every field, endpoint call and handler is
+ * unchanged (save profile, add/update/delete evidence, complete setup, purge
+ * with password confirmation). The evidence sections now render as clean white
+ * cards with readable inputs instead of dark console-style grids.
+ */
 export const ProfilePage: React.FC = () => {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [evidenceCount, setEvidenceCount] = useState(0);
@@ -61,34 +82,142 @@ export const ProfilePage: React.FC = () => {
     catch (e) { setError(e instanceof Error ? e.message : 'Purge failed'); }
   };
 
-  if (loading) return <div className="p-12 text-center text-slate-400 text-sm">Loading Master Profile...</div>;
-  if (!profile) return <div className="max-w-3xl mx-auto p-8 rounded-xl bg-slate-800 border border-slate-700 text-slate-300">No Master Profile exists yet. Ask the account owner to initialize setup.</div>;
+  if (loading) {
+    return <PageShell><Loading>Loading Master Profile…</Loading></PageShell>;
+  }
+  if (!profile) {
+    return (
+      <PageShell>
+        <div className="max-w-3xl">
+          <EmptyState
+            title="No Master Profile yet"
+            body="Ask the account owner to initialize setup. The Master Profile is the single source of verified career evidence."
+          />
+        </div>
+      </PageShell>
+    );
+  }
 
   const p = profile;
-  return <div className="space-y-6 max-w-6xl mx-auto">
-    <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-      <div><h1 className="text-2xl font-bold text-white">Master Profile / Master CV</h1><p className="text-sm text-slate-400">Enter career evidence once. Tailored CVs are immutable job-specific snapshots.</p><p className="text-xs text-emerald-400 mt-1">{evidenceCount} provenance-linked verified evidence claims</p></div>
-      <div className="flex items-center gap-2"><span className={`px-3 py-1 rounded-full text-xs font-bold ${p.setup_status === 'READY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>{p.setup_status === 'READY' ? 'SETUP COMPLETE' : 'SETUP INCOMPLETE'}</span><span className="text-xs text-slate-500">revision {p.master_revision}</span><button onClick={() => setShowPurge(true)} className="px-3 py-2 rounded-lg text-xs text-red-400 border border-red-500/20">Purge data</button></div>
-    </header>
-    {message && <div className="p-3 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs">{message}</div>}
-    {error && <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-300 text-xs">{error}</div>}
+  return (
+    <PageShell>
+      <div className="space-y-6">
+        <PageHeader
+          eyebrow="Career evidence"
+          title="Master Profile"
+          subtitle="Enter career evidence once. Tailored CVs are immutable job-specific snapshots built from this record."
+          actions={
+            <>
+              <StatusPill tone={p.setup_status === 'READY' ? 'emerald' : 'amber'}>
+                {p.setup_status === 'READY' ? 'Setup complete' : 'Setup incomplete'}
+              </StatusPill>
+              <span className="text-xs text-ink-muted">revision {p.master_revision}</span>
+              <button
+                type="button"
+                onClick={() => setShowPurge(true)}
+                className="rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 transition-colors hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600"
+              >
+                Purge data
+              </button>
+            </>
+          }
+        />
 
-    <form onSubmit={saveProfile} className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-4">
-      <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">Canonical identity and summary</h2>
-      <div className="grid md:grid-cols-3 gap-3">{(['headline', 'location', 'phone'] as const).map(key => <label key={key} className="text-xs text-slate-400">{key}<input value={(p[key] as string) ?? ''} onChange={e => setProfile({ ...p, [key]: e.target.value })} className="mt-1 w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white" /></label>)}</div>
-      <label className="text-xs text-slate-400 block">Professional summary<textarea value={p.professional_summary ?? ''} onChange={e => setProfile({ ...p, professional_summary: e.target.value })} rows={3} className="mt-1 w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-white" /></label>
-      <button className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold">Save Master Profile</button>
-    </form>
+        {evidenceCount > 0 && (
+          <Alert tone="success">{evidenceCount} provenance-linked verified evidence claims on record.</Alert>
+        )}
+        {message && <Alert tone="info">{message}</Alert>}
+        {error && <Alert tone="error">{error}</Alert>}
 
-    <EvidenceSection title="Education / MSc and degrees" items={p.education} fields={['institution', 'qualification', 'field', 'startYear', 'endYear', 'grade']} values={newEducation} setValues={setNewEducation} onAdd={() => add('/profile/education', { ...newEducation, startYear: newEducation.startYear ? Number(newEducation.startYear) : null, endYear: newEducation.endYear ? Number(newEducation.endYear) : null }, () => setNewEducation({ institution: '', qualification: '', field: '', startYear: '', endYear: '', grade: '' }))} onUpdate={(id, values, reset) => update('/profile/education', id, { ...values, startYear: values.startYear ? Number(values.startYear) : null, endYear: values.endYear ? Number(values.endYear) : null }, reset)} onDelete={id => remove('/profile/education', id)} />
-    <EvidenceSection title="Work experience" items={p.experiences} fields={['company', 'title', 'startMonth', 'endMonth', 'location', 'bullets']} values={newExperience} setValues={setNewExperience} onAdd={() => add('/profile/experiences', { ...newExperience, startMonth: newExperience.startMonth || null, endMonth: newExperience.endMonth || null, bullets: newExperience.bullets ? newExperience.bullets.split('\n').map(text => ({ text })) : [] }, () => setNewExperience({ company: '', title: '', startMonth: '', endMonth: '', location: '', bullets: '' }))} onUpdate={(id, values, reset) => update('/profile/experiences', id, { ...values, startMonth: values.startMonth || null, endMonth: values.endMonth || null, bullets: values.bullets ? values.bullets.split('\\n').map(text => ({ text })) : [] }, reset)} onDelete={id => remove('/profile/experiences', id)} />
-    <EvidenceSection title="Projects" items={p.projects} fields={['name', 'summary', 'url']} values={newProject} setValues={setNewProject} onAdd={() => add('/profile/projects', { ...newProject, bullets: [] }, () => setNewProject({ name: '', summary: '', url: '' }))} onUpdate={(id, values, reset) => update('/profile/projects', id, { ...values, bullets: [] }, reset)} onDelete={id => remove('/profile/projects', id)} />
-    <EvidenceSection title="Verified skills" items={p.skills} fields={['name', 'category', 'mastery', 'years']} values={newSkill} setValues={setNewSkill} onAdd={() => add('/profile/skills', { ...newSkill, mastery: Number(newSkill.mastery), years: newSkill.years ? Number(newSkill.years) : null }, () => setNewSkill({ name: '', category: '', mastery: '3', years: '' }))} onUpdate={(id, values, reset) => update('/profile/skills', id, { ...values, mastery: Number(values.mastery), years: values.years ? Number(values.years) : null }, reset)} onDelete={id => remove('/profile/skills', id)} />
-    <EvidenceSection title="Certifications" items={p.certifications} fields={['name', 'issuer', 'issuedOn', 'credentialId']} values={newCertification} setValues={setNewCertification} onAdd={() => add('/profile/certifications', newCertification, () => setNewCertification({ name: '', issuer: '', issuedOn: '', credentialId: '' }))} onUpdate={(id, values, reset) => update('/profile/certifications', id, values, reset)} onDelete={id => remove('/profile/certifications', id)} />
+        <SectionCard title="Canonical identity & summary" bodyClassName="space-y-4">
+          <form onSubmit={saveProfile} className="space-y-4">
+            <div className="grid gap-4 md:grid-cols-3">
+              <FieldInput label="Headline" value={p.headline ?? ''} onChange={(v) => setProfile({ ...p, headline: v })} />
+              <FieldInput label="Location" value={p.location ?? ''} onChange={(v) => setProfile({ ...p, location: v })} />
+              <FieldInput label="Phone" value={p.phone ?? ''} onChange={(v) => setProfile({ ...p, phone: v })} />
+            </div>
+            <div>
+              <label htmlFor="professional-summary" className="mb-1 block text-xs font-semibold text-ink-soft">
+                Professional summary
+              </label>
+              <Textarea
+                id="professional-summary"
+                value={p.professional_summary ?? ''}
+                onChange={(e) => setProfile({ ...p, professional_summary: e.target.value })}
+                rows={3}
+              />
+            </div>
+            <PrimaryButton type="submit">Save Master Profile</PrimaryButton>
+          </form>
+        </SectionCard>
 
-    <div className="flex justify-end"><button onClick={completeSetup} className="px-5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold">Mark Master Profile complete</button></div>
-    {showPurge && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"><form onSubmit={purge} className="w-full max-w-md rounded-xl bg-slate-900 border border-red-500/30 p-6 space-y-4"><h2 className="text-lg font-bold text-red-400">Purge career data</h2><p className="text-xs text-slate-300">This removes the editable Master Profile. Historical tailored CV snapshots remain immutable.</p><input type="password" required value={purgePassword} onChange={e => setPurgePassword(e.target.value)} placeholder="Account password" className="w-full rounded-lg bg-slate-800 border border-slate-700 px-3 py-2 text-white" /><div className="flex justify-end gap-2"><button type="button" onClick={() => setShowPurge(false)} className="px-3 py-2 text-xs text-slate-300">Cancel</button><button className="px-3 py-2 rounded bg-red-600 text-xs text-white">Confirm purge</button></div></form></div>}
-  </div>;
+        <EvidenceSection title="Education / MSc and degrees" items={p.education} fields={['institution', 'qualification', 'field', 'startYear', 'endYear', 'grade']} values={newEducation} setValues={setNewEducation} onAdd={() => add('/profile/education', { ...newEducation, startYear: newEducation.startYear ? Number(newEducation.startYear) : null, endYear: newEducation.endYear ? Number(newEducation.endYear) : null }, () => setNewEducation({ institution: '', qualification: '', field: '', startYear: '', endYear: '', grade: '' }))} onUpdate={(id, values, reset) => update('/profile/education', id, { ...values, startYear: values.startYear ? Number(values.startYear) : null, endYear: values.endYear ? Number(values.endYear) : null }, reset)} onDelete={(id) => remove('/profile/education', id)} />
+        <EvidenceSection title="Work experience" items={p.experiences} fields={['company', 'title', 'startMonth', 'endMonth', 'location', 'bullets']} values={newExperience} setValues={setNewExperience} onAdd={() => add('/profile/experiences', { ...newExperience, startMonth: newExperience.startMonth || null, endMonth: newExperience.endMonth || null, bullets: newExperience.bullets ? newExperience.bullets.split('\n').map((text) => ({ text })) : [] }, () => setNewExperience({ company: '', title: '', startMonth: '', endMonth: '', location: '', bullets: '' }))} onUpdate={(id, values, reset) => update('/profile/experiences', id, { ...values, startMonth: values.startMonth || null, endMonth: values.endMonth || null, bullets: values.bullets ? values.bullets.split('\\\\n').map((text) => ({ text })) : [] }, reset)} onDelete={(id) => remove('/profile/experiences', id)} />
+        <EvidenceSection title="Projects" items={p.projects} fields={['name', 'summary', 'url']} values={newProject} setValues={setNewProject} onAdd={() => add('/profile/projects', { ...newProject, bullets: [] }, () => setNewProject({ name: '', summary: '', url: '' }))} onUpdate={(id, values, reset) => update('/profile/projects', id, { ...values, bullets: [] }, reset)} onDelete={(id) => remove('/profile/projects', id)} />
+        <EvidenceSection title="Verified skills" items={p.skills} fields={['name', 'category', 'mastery', 'years']} values={newSkill} setValues={setNewSkill} onAdd={() => add('/profile/skills', { ...newSkill, mastery: Number(newSkill.mastery), years: newSkill.years ? Number(newSkill.years) : null }, () => setNewSkill({ name: '', category: '', mastery: '3', years: '' }))} onUpdate={(id, values, reset) => update('/profile/skills', id, { ...values, mastery: Number(values.mastery), years: values.years ? Number(values.years) : null }, reset)} onDelete={(id) => remove('/profile/skills', id)} />
+        <EvidenceSection title="Certifications" items={p.certifications} fields={['name', 'issuer', 'issuedOn', 'credentialId']} values={newCertification} setValues={setNewCertification} onAdd={() => add('/profile/certifications', newCertification, () => setNewCertification({ name: '', issuer: '', issuedOn: '', credentialId: '' }))} onUpdate={(id, values, reset) => update('/profile/certifications', id, values, reset)} onDelete={(id) => remove('/profile/certifications', id)} />
+
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={completeSetup}
+            className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-forest-700 px-5 py-2.5 text-sm font-semibold text-cream-50 transition-colors hover:bg-forest-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600 focus-visible:ring-offset-2"
+          >
+            Mark Master Profile complete
+          </button>
+        </div>
+
+        {showPurge && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/60 p-4" role="dialog" aria-modal="true" aria-labelledby="purge-title">
+            <form onSubmit={purge} className="w-full max-w-md space-y-4 rounded-xl border border-line bg-surface p-6 shadow-pop">
+              <div>
+                <h2 id="purge-title" className="text-lg font-bold text-red-700">Purge career data</h2>
+                <p className="mt-1 text-xs leading-relaxed text-ink-muted">
+                  This removes the editable Master Profile. Historical tailored CV snapshots remain immutable.
+                </p>
+              </div>
+              <div>
+                <label htmlFor="purge-password" className="mb-1 block text-xs font-semibold text-ink-soft">
+                  Account password
+                </label>
+                <input
+                  id="purge-password"
+                  type="password"
+                  required
+                  value={purgePassword}
+                  onChange={(e) => setPurgePassword(e.target.value)}
+                  className="w-full rounded-lg border border-line bg-surface px-3.5 py-2 text-sm text-ink focus:border-forest-600 focus:outline-none focus:ring-2 focus:ring-forest-600/20"
+                />
+              </div>
+              <div className="flex justify-end gap-2">
+                <SecondaryButton type="button" onClick={() => setShowPurge(false)}>Cancel</SecondaryButton>
+                <button
+                  type="submit"
+                  className="inline-flex items-center justify-center rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 focus-visible:ring-offset-2"
+                >
+                  Confirm purge
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+      </div>
+    </PageShell>
+  );
+};
+
+const FieldInput: React.FC<{ label: string; value: string; onChange: (v: string) => void }> = ({
+  label,
+  value,
+  onChange,
+}) => {
+  const id = `profile-${label.toLowerCase().replace(/\s+/g, '-')}`;
+  return (
+    <div>
+      <label htmlFor={id} className="mb-1 block text-xs font-semibold text-ink-soft">{label}</label>
+      <TextInput id={id} value={value} onChange={(e) => onChange(e.target.value)} />
+    </div>
+  );
 };
 
 function normalizeProfile(raw: any): Profile {
@@ -110,10 +239,70 @@ function normalizeProfile(raw: any): Profile {
 function EvidenceSection({ title, items, fields, values, setValues, onAdd, onUpdate, onDelete }: { title: string; items: any[]; fields: string[]; values: Record<string, string>; setValues: (v: any) => void; onAdd: () => void; onUpdate?: (id: string, values: Record<string, string>, reset: () => void) => void; onDelete?: (id: string) => void }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const valueFor = (item: any, field: string) => {
-    const snake = field.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+    const snake = field.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
     if (field === 'bullets') return (item.bullets ?? []).map((bullet: any) => bullet.text ?? '').join('\\n');
     return String(item[field] ?? item[snake] ?? '');
   };
   const reset = () => { setEditingId(null); };
-  return <section className="p-6 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-4"><div className="flex justify-between"><h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">{title}</h2><span className="text-xs text-slate-500">{items?.length ?? 0} reusable evidence records</span></div><div className="grid md:grid-cols-3 gap-2">{fields.map(field => <input key={field} placeholder={field} value={values[field] ?? ''} onChange={e => setValues({ ...values, [field]: e.target.value })} className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-white" />)}<button type="button" onClick={() => editingId && onUpdate ? onUpdate(editingId, values, reset) : onAdd()} className="rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-2 text-xs text-white">{editingId ? 'Save edit' : 'Add verified record'}</button>{editingId && <button type="button" onClick={reset} className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-400">Cancel</button>}</div><div className="grid md:grid-cols-2 gap-2">{(items ?? []).map((item: any) => <div key={item.id} className="p-3 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-300"><div className="font-semibold text-white">{item.name ?? item.title ?? item.qualification ?? item.company}</div><div>{item.summary ?? item.institution ?? item.issuer ?? item.category ?? ''}</div><div className="flex items-center justify-between mt-2"><span className="text-emerald-400 text-[10px]">USER_VERIFIED evidence</span><span className="flex gap-2"><button type="button" onClick={() => { setEditingId(item.id); setValues(Object.fromEntries(fields.map(field => [field, valueFor(item, field)]))); }} className="text-indigo-400 hover:text-indigo-300">Edit</button>{onDelete && <button type="button" onClick={() => onDelete(item.id)} className="text-red-400 hover:text-red-300">Delete</button>}</span></div></div>)}</div></section>;
+  return (
+    <SectionCard
+      title={title}
+      hint={`${items?.length ?? 0} reusable evidence records`}
+      bodyClassName="space-y-4"
+    >
+      <div className="grid gap-2 md:grid-cols-3 lg:grid-cols-4">
+        {fields.map((field) => (
+          <TextInput
+            key={field}
+            placeholder={field}
+            aria-label={`${title} — new record ${field}`}
+            value={values[field] ?? ''}
+            onChange={(e) => setValues({ ...values, [field]: e.target.value })}
+          />
+        ))}
+        {editingId && onUpdate ? (
+          <SecondaryButton type="button" onClick={() => onUpdate(editingId, values, reset)}>Save edit</SecondaryButton>
+        ) : (
+          <SecondaryButton type="button" onClick={onAdd}>Add verified record</SecondaryButton>
+        )}
+        {editingId && <SecondaryButton type="button" onClick={reset}>Cancel</SecondaryButton>}
+      </div>
+
+      {(items ?? []).length === 0 ? (
+        <p className="rounded-lg border border-dashed border-line bg-cream-50 px-4 py-3 text-xs text-ink-muted">
+          No records yet — add the first verified entry above.
+        </p>
+      ) : (
+        <div className="grid gap-2 md:grid-cols-2">
+          {(items ?? []).map((item: any) => (
+            <div key={item.id} className="rounded-lg border border-line bg-cream-50/70 p-3.5 text-xs">
+              <div className="font-semibold text-ink">{item.name ?? item.title ?? item.qualification ?? item.company}</div>
+              <div className="mt-0.5 text-ink-muted">{item.summary ?? item.institution ?? item.issuer ?? item.category ?? ''}</div>
+              <div className="mt-2 flex items-center justify-between">
+                <StatusPill tone="emerald">User-verified evidence</StatusPill>
+                <span className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { setEditingId(item.id); setValues(Object.fromEntries(fields.map((field) => [field, valueFor(item, field)]))); }}
+                    className="font-semibold text-forest-700 hover:text-forest-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600"
+                  >
+                    Edit
+                  </button>
+                  {onDelete && (
+                    <button
+                      type="button"
+                      onClick={() => onDelete(item.id)}
+                      className="font-semibold text-red-600 hover:text-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600"
+                    >
+                      Delete
+                    </button>
+                  )}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </SectionCard>
+  );
 }
