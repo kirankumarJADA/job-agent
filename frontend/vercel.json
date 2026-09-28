@@ -1,0 +1,16 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    { "source": "/login", "destination": "/index.html" },
+    { "source": "/signup", "destination": "/index.html" },
+    { "source": "/forgot-password", "destination": "/index.html" },
+    { "source": "/verify-email", "destination": "/index.html" },
+    { "source": "/jobs", "destination": "/index.html" },
+    { "source": "/jobs/:id", "destination": "/index.html" },
+    { "source": "/profile", "destination": "/index.html" },
+    { "source": "/preferences", "destination": "/index.html" },
+    { "source": "/models", "destination": "/index.html" },
+    { "source": "/sources", "destination": "/index.html" },
+    { "source": "/logs", "destination": "/index.html" }
+  ]
+}

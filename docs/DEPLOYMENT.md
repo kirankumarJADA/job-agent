@@ -139,10 +139,11 @@ FREE-TIER: Upstash free tier is pay-per-command with a daily cap.
      whose email Firebase has not verified can neither link an existing local
      account nor create a new one: anyone can create a Firebase account naming
      someone else's address, and provisioning on the strength of that name
-     alone would hand over (or squat) the account. The sign-up screen therefore
-     sends Firebase's verification email and only exchanges the token for an
-     application session after the visitor has followed it. An unverified
-     exchange attempt answers `403` with a "verify your email" message —
+     alone would hand over (or squat) the account. The sign-up screen requests
+     Firebase's native verification email, reports if Firebase refuses that
+     request, and only exchanges the token for an application session after the
+     visitor has followed the link. An unverified exchange attempt answers `403`
+     with a "verify your email" message —
      identically whether or not a local account exists, so it leaks no
      account-existence signal — and already-linked accounts keep working
      through their UID link. Google identities are verified at the provider and
@@ -182,7 +183,11 @@ treat `/actuator/info` as `version known, commit unknown`.
 
 ## 4. Vercel (frontend)
 
-1. Import the repo; framework preset Vite; root directory `frontend`.
+1. Import the repo; framework preset Vite; root directory `frontend`. Keep
+   `frontend/vercel.json` in this configured root: its exact-route SPA rewrites
+   send the current React Router pages to `/index.html` while leaving `/api/*`,
+   `/assets/*`, and real static files alone. Add a rewrite whenever a new
+   top-level React Router route is introduced.
 2. Environment:
    - `VITE_API_BASE_URL=https://<render-backend>.onrender.com/api/v1`
    - Firebase **web app** configuration (Firebase console → Project settings →

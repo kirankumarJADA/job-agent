@@ -7,6 +7,7 @@ import { FormField } from '../components/FormField';
 import { useAuth } from '../context/AuthContext';
 import { ApiError } from '../api/client';
 import { AuthFailure } from '../firebase/authService';
+import type { PendingVerification } from '../context/AuthContext';
 
 /** Seconds a just-sent verification email blocks the resend button. */
 const RESEND_COOLDOWN_SECONDS = 60;
@@ -14,11 +15,11 @@ const RESEND_COOLDOWN_SECONDS = 60;
 /**
  * Email verification — the second stage of email/password sign-up.
  *
- * Firebase created the account and sent its own verification email; no
- * application session exists yet and none may: the backend refuses to
- * provision from an unverified token, so the gates would bounce this visitor
- * anyway. This screen is where they wait, resend, and confirm — and the
- * "Check again" action is the only path into the application.
+ * Firebase created the account and may have sent its own verification email;
+ * if that request failed, the page reports it and offers a retry. No application
+ * session exists yet and none may: the backend refuses to provision from an
+ * unverified token. This screen is where the visitor waits, resends, and
+ * confirms — and the "Check again" action is the only path into the application.
  *
  * Firebase hosts the link itself (including its expiry handling); this page
  * never sees or validates a token, it only reloads the Firebase user and asks
@@ -42,6 +43,11 @@ export const VerifyEmailPage: React.FC = () => {
   const resendSequence = useRef(0);
 
   const email = pendingVerification?.email ?? '';
+
+  // The sign-up flow records when Firebase refused the automatic send. Until a
+  // resend actually succeeds, the page must not claim an email is on its way.
+  const sendFailedAtSignup = pendingVerification?.verificationEmailFailed === true;
+  const showVerificationSentCopy = shouldShowVerificationSentCopy(pendingVerification);
 
   // The cooldown ticks only while it is running, and stops when it hits zero.
   const cooling = cooldownSeconds > 0;
@@ -135,17 +141,27 @@ export const VerifyEmailPage: React.FC = () => {
         </>
       }
     >
-      <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/10 p-4">
-        <p className="text-sm leading-relaxed text-slate-200">
-          We&apos;ve sent a verification link to{' '}
-          <span className="font-semibold text-white">{email || 'your email address'}</span>.
-        </p>
-        <p className="mt-2 text-xs leading-relaxed text-slate-400">
-          Follow the link in that email, then come back here and press{' '}
-          <span className="font-medium text-slate-300">Check again</span>. The link expires after a while — use{' '}
-          <span className="font-medium text-slate-300">Resend</span> to get a fresh one.
-        </p>
-      </div>
+      {sendFailedAtSignup && (
+        <AuthNotice tone="error">
+          We could not send the verification email automatically. Use
+          &ldquo;Resend verification email&rdquo; below — if it keeps failing, the
+          Firebase project&apos;s email sending needs attention before sign-up can
+          complete.
+        </AuthNotice>
+      )}
+      {showVerificationSentCopy && (
+        <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/10 p-4">
+          <p className="text-sm leading-relaxed text-slate-200">
+            We&apos;ve sent a verification link to{' '}
+            <span className="font-semibold text-white">{email || 'your email address'}</span>.
+          </p>
+          <p className="mt-2 text-xs leading-relaxed text-slate-400">
+            Follow the link in that email, then come back here and press{' '}
+            <span className="font-medium text-slate-300">Check again</span>. The link expires after a while — use{' '}
+            <span className="font-medium text-slate-300">Resend</span> to get a fresh one.
+          </p>
+        </div>
+      )}
 
       {resendNotice && <AuthNotice tone={resendNotice.tone}>{resendNotice.text}</AuthNotice>}
       {checkNotice && <AuthNotice tone={checkNotice.tone}>{checkNotice.text}</AuthNotice>}
@@ -198,6 +214,10 @@ export const VerifyEmailPage: React.FC = () => {
  * Firebase errors arrive pre-mapped (AuthFailure); backend errors are mapped
  * by status so no raw exception text ever reaches the screen.
  */
+export function shouldShowVerificationSentCopy(pending: PendingVerification | null): boolean {
+  return pending !== null && pending.verificationEmailFailed !== true;
+}
+
 export function describeVerificationFailure(error: unknown): string {
   if (error instanceof AuthFailure) {
     if (error.code === 'auth/no-current-user') {

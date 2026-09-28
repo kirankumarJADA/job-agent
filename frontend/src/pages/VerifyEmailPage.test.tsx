@@ -4,7 +4,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
 
 import { AuthProvider } from '../context/AuthContext';
-import { VerifyEmailPage, describeVerificationFailure } from './VerifyEmailPage';
+import {
+  VerifyEmailPage,
+  describeVerificationFailure,
+  shouldShowVerificationSentCopy,
+} from './VerifyEmailPage';
 import { describeSignInFailure } from './LoginPage';
 import { ApiError } from '../api/client';
 import { AuthFailure } from '../firebase/authService';
@@ -31,9 +35,10 @@ const render = (element: React.ReactElement) =>
 describe('verify email page', () => {
   const html = render(React.createElement(VerifyEmailPage));
 
-  it('explains that a verification email was sent', () => {
+  it('does not claim a verification email was sent without a pending account', () => {
     expect(html).toContain('Verify your email');
-    expect(html).toContain('We&#x27;ve sent a verification link to');
+    expect(html).not.toContain('We&#x27;ve sent a verification link to');
+    expect(shouldShowVerificationSentCopy(null)).toBe(false);
   });
 
   it('offers check-again, resend, and back-to-sign-in', () => {

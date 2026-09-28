@@ -50,11 +50,18 @@ export interface SignUpInput {
  * happens, and `signup: true` lets the backend clean up the fresh Firebase
  * account if that exchange is refused. Persisted to sessionStorage so a page
  * reload in the middle of verifying does not lose the code the user typed.
+ *
+ * `verificationEmailFailed` records that Firebase refused the automatic
+ * verification-email send at sign-up time. The verification screen must then
+ * say so honestly instead of claiming an email is on its way — the send can
+ * genuinely fail (rate limits, a misconfigured email channel on the Firebase
+ * project), and a false "sent" sends the user into an infinite waiting loop.
  */
 export interface PendingVerification {
   email: string;
   inviteCode?: string;
   signup: boolean;
+  verificationEmailFailed?: boolean;
 }
 
 const PENDING_STORAGE_KEY = 'robin.pending-verification';
@@ -237,11 +244,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           // preserved for the deferred exchange.
           if (!firebaseUser.emailVerified) {
             pendingUserRef.current = firebaseUser;
-            updatePending((previous) => ({
-              email: firebaseUser.email ?? previous?.email ?? '',
-              inviteCode: previous?.inviteCode,
-              signup: previous?.signup ?? false,
-            }));
+            updatePending((previous) => {
+              const email = firebaseUser.email ?? previous?.email ?? '';
+              return {
+                email,
+                inviteCode: previous?.inviteCode,
+                signup: previous?.signup ?? false,
+                verificationEmailFailed:
+                  previous?.email === email ? previous.verificationEmailFailed : undefined,
+              };
+            });
             setFirebaseResolved(true);
             return;
           }
@@ -299,11 +311,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         // Verified-waiting: route to the verification screen instead of
         // attempting an exchange the backend would refuse.
         pendingUserRef.current = firebaseUser;
-        updatePending((previous) => ({
-          email: firebaseUser.email ?? email,
-          inviteCode: previous?.inviteCode,
-          signup: false,
-        }));
+        updatePending((previous) => {
+          const pendingEmail = firebaseUser.email ?? email;
+          return {
+            email: pendingEmail,
+            inviteCode: previous?.inviteCode,
+            signup: false,
+            verificationEmailFailed:
+              previous?.email === pendingEmail ? previous.verificationEmailFailed : undefined,
+          };
+        });
         return;
       }
 
@@ -320,12 +337,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // 2. Firebase's own verification email. The application account is NOT
       //    created here and no session is established: the exchange happens on
       //    the verification screen, after Firebase reports the address as
-      //    verified. A failure to send (rate limiting, network) is not fatal —
-      //    the account exists and the verification screen's Resend covers it.
+      //    verified. A failure to send (rate limits, a Firebase project whose
+      //    email-verification channel is misconfigured) is not fatal — the
+      //    account exists and the verification screen's Resend covers it — but
+      //    it is recorded so the screen never claims an email was sent when
+      //    none was.
+      let verificationEmailFailed = false;
       try {
         await requestEmailVerification(firebaseUser);
       } catch (error) {
         console.warn(toAuthFailure(error).message);
+        verificationEmailFailed = true;
       }
 
       // 3. Hold at the verification screen. The auth-state listener fires with
@@ -337,6 +359,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         email: input.email.trim(),
         inviteCode: input.inviteCode || undefined,
         signup: true,
+        verificationEmailFailed,
       });
     },
     [updatePending],
@@ -365,7 +388,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new AuthFailure('auth/no-current-user', 'Your sign-in session expired. Please sign in again.');
     }
     await requestEmailVerification(firebaseUser);
-  }, []);
+    updatePending((previous) => {
+      if (!previous || previous.email !== firebaseUser.email) {
+        return previous;
+      }
+      const { verificationEmailFailed: _ignored, ...sentPending } = previous;
+      return sentPending;
+    });
+  }, [updatePending]);
 
   const checkEmailVerification = useCallback(
     async (options?: { inviteCode?: string }): Promise<'not-verified' | 'verified'> => {

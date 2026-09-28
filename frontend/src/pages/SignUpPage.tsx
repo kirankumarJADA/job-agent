@@ -22,7 +22,7 @@ import {
  * Create account.
  *
  * The flow is deliberately three-stage and none of the stages is optional:
- * Firebase creates the credential and sends its verification email, the
+ * Firebase creates the credential and requests its verification email, the
  * visitor follows that link, and only then does this application ask the
  * backend for a session — the backend verifies the token cryptographically and
  * enforces the registration invite code there. An unverified account can
@@ -109,8 +109,9 @@ export const SignUpPage: React.FC = () => {
     setSubmitting(true);
     try {
       await signUp({ fullName, email, password, inviteCode });
-      // The Firebase account exists and its verification email is on its way;
-      // the route guards take the visitor to the verification screen from here.
+      // The Firebase account exists; the route guards take the visitor to
+      // the verification screen from here. That screen reports whether the
+      // verification-email request succeeded.
       navigate('/', { replace: true });
     } catch (error) {
       setFormError(describeSignUpFailure(error));
@@ -258,7 +259,7 @@ export const SignUpPage: React.FC = () => {
 
         <p className="text-center text-xs leading-relaxed text-slate-500">
           Your password is handled by Firebase Authentication. Robin never stores it. We&apos;ll
-          email you a verification link to confirm your address before your account is created.
+          ask Firebase to email you a verification link before Robin creates your application account.
         </p>
       </form>
     </AuthLayout>
