@@ -46,6 +46,31 @@ public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
     private static final String FIREBASE_APP_NAME = "job-agent-firebase";
     private static final String TOKEN_URI = "https://oauth2.googleapis.com/token";
 
+    /**
+     * Synthetic, non-secret value for the two service-account identifiers the
+     * Google auth library insists on finding in the credential JSON.
+     *
+     * <p>{@code ServiceAccountCredentials.fromJson} rejects the whole
+     * credential unless {@code client_id}, {@code client_email},
+     * {@code private_key} <em>and</em> {@code private_key_id} are all present:
+     *
+     * <pre>
+     *   if (clientId == null || clientEmail == null
+     *       || privateKey == null || privateKeyId == null) {
+     *     throw new IOException("Error reading service account credential ...");
+     *   }
+     * </pre>
+     *
+     * <p>Verified against {@code google-auth-library-oauth2-http} 1.23.0, the
+     * version firebase-admin 9.4.1 resolves to. The three environment variables
+     * this class reads carry no client id, and the JWT-bearer assertion the SDK
+     * signs for token refresh identifies the service account by
+     * {@code client_email} alone — {@code client_id} is never read when signing
+     * (only exposed via {@code getClientId()}). A placeholder is therefore inert
+     * here, exactly like the private key id.
+     */
+    private static final String SYNTHETIC_SERVICE_ACCOUNT_ID = "firebase-admin-env";
+
     private final FirebaseProperties properties;
 
     /**
@@ -179,8 +204,7 @@ public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
 
     private FirebaseAuth initialise() {
         try {
-            GoogleCredentials credentials = GoogleCredentials.fromStream(
-                    new ByteArrayInputStream(serviceAccountJson().getBytes(StandardCharsets.UTF_8)));
+            GoogleCredentials credentials = credentials();
 
             FirebaseOptions options = FirebaseOptions.builder()
                     .setCredentials(credentials)
@@ -208,6 +232,23 @@ public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
     }
 
     /**
+     * Builds the Admin SDK credential from the configured environment
+     * variables. Package-private (rather than private) purely so the regression
+     * tests can assert that a Render-shaped private key is genuinely accepted by
+     * the SDK without needing network access.
+     *
+     * @throws IOException when the assembled credential is not acceptable to the
+     *                     Google auth library — e.g. a private key that is not a
+     *                     parseable PKCS#8 PEM. Callers translate this into
+     *                     {@link FirebaseTokenVerifier.Unavailable}, so a bad key
+     *                     fails closed instead of authenticating anything.
+     */
+    GoogleCredentials credentials() throws IOException {
+        return GoogleCredentials.fromStream(
+                new ByteArrayInputStream(serviceAccountJson().getBytes(StandardCharsets.UTF_8)));
+    }
+
+    /**
      * The service-account JSON the Google auth library expects, built from the
      * three environment variables. Built as a {@code Map} so the private key's
      * newlines are escaped correctly rather than hand-concatenated.
@@ -216,7 +257,12 @@ public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
         Map<String, String> json = new LinkedHashMap<>();
         json.put("type", "service_account");
         json.put("project_id", properties.getProjectId());
-        json.put("private_key_id", "firebase-admin-env");
+        json.put("private_key_id", SYNTHETIC_SERVICE_ACCOUNT_ID);
+        // Required by ServiceAccountCredentials.fromJson even though it is never
+        // used to sign: omitting it made EVERY deployment fail credential
+        // loading with "service-account credentials could not be read", no
+        // matter how correct FIREBASE_PRIVATE_KEY was. See the constant above.
+        json.put("client_id", SYNTHETIC_SERVICE_ACCOUNT_ID);
         json.put("private_key", properties.normalisedPrivateKey());
         json.put("client_email", properties.getClientEmail());
         json.put("token_uri", TOKEN_URI);
