@@ -1,6 +1,11 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
-import { ApiError, apiFetch, setIdTokenProvider } from '../api/client';
+import { API_BASE, ApiError, apiFetch, setIdTokenProvider } from '../api/client';
+import {
+  LOCAL_INSPECTION_MARKER,
+  currentLocalInspectionMode,
+  establishLocalInspectionSession,
+} from '../localInspection';
 import { currentFirebaseUser, currentIdToken } from '../firebase/client';
 import {
   AuthFailure,
@@ -172,6 +177,57 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   /**
+   * The single in-flight local inspection sign-in, shared between the two
+   * mounts React 18's StrictMode performs in development. Without it, one page
+   * load would POST /auth/login twice and write two audit rows for a session
+   * the developer established once.
+   */
+  const localInspectionAttempt = useRef<Promise<boolean> | null>(null);
+
+  /**
+   * LOCAL INSPECTION MODE — local development only (see ../localInspection.ts).
+   *
+   * Signs in as the seeded local development account through the ordinary
+   * `POST /auth/login` endpoint, so the session this establishes is a real one:
+   * the backend authenticates it and authorises every subsequent request exactly
+   * as it does for any local account. No Firebase credential is faked and no
+   * account is created.
+   *
+   * A refusal leaves the browser signed out — the guards then behave exactly as
+   * they do for any signed-out visitor. This never invents a session the server
+   * did not issue.
+   */
+  const startLocalInspectionSession = useCallback((): Promise<boolean> => {
+    if (localInspectionAttempt.current === null) {
+      localInspectionAttempt.current = (async () => {
+        const result = await establishLocalInspectionSession(
+          currentLocalInspectionMode(API_BASE),
+          (endpoint, body) =>
+            apiFetch<BackendUser>(endpoint, { method: 'POST', body: JSON.stringify(body) }),
+        );
+
+        if (result.status === 'signed-in') {
+          console.warn(
+            `${LOCAL_INSPECTION_MARKER}: signed in as the local development account over ` +
+              'POST /auth/login (local development build only; Firebase sign-in bypassed on this machine).',
+          );
+          setUser(toUser(result.response));
+          return true;
+        }
+        if (result.status === 'failed') {
+          console.warn(
+            `${LOCAL_INSPECTION_MARKER}: could not sign in as the local development account; staying ` +
+              'signed out. Check VITE_LOCAL_INSPECTION_EMAIL / VITE_LOCAL_INSPECTION_PASSWORD in ' +
+              'frontend/.env.local and that the local backend is running with the seeded development account.',
+          );
+        }
+        return false;
+      })();
+    }
+    return localInspectionAttempt.current;
+  }, []);
+
+  /**
    * Reads the current application session. This stays authoritative for
    * "is this browser signed in", because it is what the server itself will
    * enforce on every subsequent request.
@@ -210,6 +266,36 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   useEffect(() => {
     let cancelled = false;
+
+    /*
+     * LOCAL INSPECTION MODE — local development only.
+     *
+     * The `import.meta.env.DEV` test is written here, at the call site rather
+     * than only inside the helper, so Vite's constant folding removes this whole
+     * branch from a production build. Firebase is deliberately not subscribed to
+     * on this path: inspecting the app without Firebase is the point of the mode.
+     * If the sign-in is refused, both promise flags are still resolved, so the
+     * guards send the visitor to /login exactly as they would for anyone else.
+     */
+    if (import.meta.env.DEV && currentLocalInspectionMode(API_BASE).enabled) {
+      console.warn(
+        `${LOCAL_INSPECTION_MARKER}: enabled (local development build). Signing in as the seeded ` +
+          'local development account over POST /auth/login. Firebase sign-in is bypassed on this ' +
+          'machine only; every backend authentication and authorization check still applies.',
+      );
+      // `startLocalInspectionSession` shares one request between StrictMode's two
+      // mounts; both mounts still await it, so the promise flags resolve either way.
+      void (async () => {
+        await startLocalInspectionSession();
+        if (!cancelled) {
+          setFirebaseResolved(true);
+          setSessionResolved(true);
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
 
     void refresh();
 
@@ -301,7 +387,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       unsubscribe();
       setIdTokenProvider(null);
     };
-  }, [refresh, exchangeSession, updatePending]);
+  }, [refresh, exchangeSession, updatePending, startLocalInspectionSession]);
 
   const login = useCallback(
     async (email: string, password: string) => {

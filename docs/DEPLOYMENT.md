@@ -285,8 +285,15 @@ curl -X POST https://<render-backend>/api/v1/automation/events \
 
 # 8. Flyway applied:
 #    Render logs show "Successfully applied N migrations" on first boot.
-#    A database that predates the isolation work must reach v023 and report
-#    "Successfully applied 23 migrations" (or "up to date" if already there).
+#    A database that predates the isolation work must reach v024 and report
+#    "Successfully applied 24 migrations" (or "up to date" if already there).
+
+# 8b. The seeded development credential is gone (V024):
+#    SELECT email, password_hash IS NULL AS credential_removed
+#    FROM users WHERE email = 'dev@example.local';
+#    -> the row is still there (deliberately: it owns the seeded profile),
+#       credential_removed = true. A non-null password_hash here means the
+#       deployment is not running the prod profile — see section 8.
 
 # 9. User data is isolated (V022). Signs of success after the first deploy:
 #    SELECT count(*) FROM applications  WHERE profile_id IS NULL;
@@ -348,6 +355,54 @@ Without `-Dit.postgres.url` the suite is skipped rather than failed, so a build
 machine without a database is unaffected. Note that the other `*IT` classes use
 Testcontainers and need a working Docker daemon.
 
+### Seeded development account (V024)
+
+V002/V003 seed `dev@example.local` with a password written out in V003's own
+comment, and Flyway applies the same chain in every environment — so the hosted
+database held a working credential that anyone who can read this repository
+knows. **V024 removes it, and only where the configuration does not claim to be
+local development.**
+
+- `application.yml` sets
+  `spring.flyway.placeholders.remove_seed_dev_account=true`, so production — and
+  any unknown, misspelled or future profile — neutralizes the credential.
+  `application-local.yml` is the only file that sets it to `false`, which is what
+  keeps the seeded login that local inspection mode signs in with
+  (`frontend/src/localInspection.ts`).
+- "Neutralize" means `password_hash = null` on the still-unmodified seed row, not
+  a `DELETE`. `profiles.user_id`, and everything under `profiles`, cascades from
+  `users`, and V022's backfill may have attributed real rows to the seeded
+  profile — deleting could therefore destroy production data as a side effect of
+  a security fix. A null hash matches no password (the encoder returns false, so
+  the login answers 401), and V020 made the column nullable for exactly this case.
+- The correction is scoped to the published V003 hash and matches nothing else,
+  so it is idempotent and a password the operator rotated themselves is left
+  exactly as it is.
+- It is verified by `SeededDevCredentialConfigurationTest` (the property, per
+  profile), `SeededDevCredentialMigrationIT` (fresh database, upgrade from V023,
+  the local opt-out, idempotence and scope) and `SeededDevCredentialRemovalIT`
+  (a real login attempt against a production-configured context is refused,
+  while a genuinely hashed account still signs in).
+
+After deploying it, confirm on the hosted database:
+
+```sql
+SELECT email, password_hash IS NULL AS credential_removed, auth_provider
+FROM users WHERE email = 'dev@example.local';
+-- -> one row, credential_removed = true, auth_provider = 'LOCAL'
+```
+
+The row surviving is expected and is not a finding: it still owns the seeded
+profile and any data an operator wrote while using it. What must never appear
+again is a non-null `password_hash` on that row.
+
+**Caveat for the local production-like stack.**
+`infra/docker-compose.prod-like.yml` runs the prod profile against the *same*
+local PostgreSQL volume as the local profile, so starting it neutralizes the
+seeded credential in your local database too. Local development gets it back with
+a fresh volume (`docker compose -f infra/docker-compose.yml down -v`), or by
+re-applying V003's hash by hand if that database holds data worth keeping.
+
 ## 8. Troubleshooting startup failures
 
 **"Refusing Flyway bootstrap recovery: unexpected public schema state"** — the
@@ -363,6 +418,12 @@ guarded startup refuses a database shape it cannot vouch for. Check, in order:
    login can ever work. Render must set `SPRING_PROFILES_ACTIVE=prod`
    explicitly; the backend Docker image also defaults it to `prod` so an
    image-based deploy cannot forget it.
+
+   The same misconfiguration is why the seeded development credential can
+   reappear: the default profile is *also* the profile that keeps it, because
+   only `application-local.yml` opts out of V024's removal. Seeing a non-null
+   `password_hash` for `dev@example.local` on a hosted database is therefore a
+   second, independent symptom of a missing `SPRING_PROFILES_ACTIVE=prod`.
 2. **Is the history trailing the shipped chain?** A database baselined at
    version 0 whose history ends before the newest migration (e.g. baseline +
    V001..V019 while this build ships V023) is a **pending upgrade**, not a

@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom
 
 import { AuthProvider } from './context/AuthContext';
 import { Navigation } from './components/Navigation';
+import { LocalInspectionBanner } from './components/LocalInspectionBanner';
 import { ProtectedRoute, PublicOnlyRoute, VerificationRoute } from './components/RouteGuards';
 
 import { DashboardPage } from './pages/DashboardPage';
@@ -30,6 +31,8 @@ const AppShell: React.FC = () => (
   <div className="flex min-h-screen bg-slate-950 text-slate-100 antialiased">
     <Navigation />
     <main className="flex-1 p-6 lg:p-8 overflow-y-auto max-h-screen">
+      {/* Renders nothing outside local development (see LocalInspectionBanner). */}
+      <LocalInspectionBanner />
       <Outlet />
     </main>
   </div>

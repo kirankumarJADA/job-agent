@@ -1,6 +1,25 @@
+# Local development profile (`SPRING_PROFILES_ACTIVE=local`, which is what
+# infra/docker-compose.yml runs).
 spring:
   jpa:
     show-sql: false
+
+  flyway:
+    placeholders:
+      # KEEP the seeded development account here, and only here.
+      #
+      # V024 neutralizes dev@example.local's published password everywhere else,
+      # because Flyway applies the same chain to the hosted deployment and a
+      # known credential must not exist there. Local development needs it: it is
+      # the account local inspection mode signs in with
+      # (frontend/src/localInspection.ts), and V002/V003 seed it with the matching
+      # profile and preference data.
+      #
+      # Note this is an opt-OUT of a security correction, which is why the
+      # default in application.yml is `true` (remove) rather than the other way
+      # round: nothing outside this file keeps the credential, and no runtime
+      # code path can re-create it in a deployment.
+      remove_seed_dev_account: false
 
 logging:
   level:

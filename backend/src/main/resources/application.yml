@@ -24,6 +24,17 @@ spring:
     # populated schemas fail closed.
     baseline-version: 0
 
+    placeholders:
+      # V024 neutralizes the seeded development credential (dev@example.local,
+      # whose password is published in V003's comment) unless a deployment says
+      # it is local development. The default is the secure one on purpose: a
+      # fresh, unknown, misspelled or future profile is treated as production
+      # and loses the published credential. Only application-local.yml opts out
+      # so that local development keeps a working seeded login for local
+      # inspection mode (frontend/src/localInspection.ts).
+      # V024 refuses to run if this value is missing or is not true/false.
+      remove_seed_dev_account: true
+
   data:
     redis:
       host: ${SPRING_REDIS_HOST:localhost}

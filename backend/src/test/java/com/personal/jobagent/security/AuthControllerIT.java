@@ -31,8 +31,15 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * V003's corrective migration) rather than creating a throwaway user, since
  * exercising the actual seed data end-to-end is itself part of what needs
  * proving.
+ *
+ * That login only exists in local development, so this class pins the local
+ * value of V024's placeholder: the production value removes the published
+ * credential (application.yml defaults to it, application-local.yml opts out),
+ * and SeededDevCredentialRemovalIT is the class that proves the removal. The
+ * pair of classes is deliberate — one keeps the seeded local login working,
+ * the other proves a deployment cannot use it.
  */
-@SpringBootTest
+@SpringBootTest(properties = "spring.flyway.placeholders.remove_seed_dev_account=false")
 @AutoConfigureMockMvc
 @Testcontainers
 // The two purge tests share state (the seeded profile): the wrong-password

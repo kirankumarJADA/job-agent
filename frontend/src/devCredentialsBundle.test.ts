@@ -8,16 +8,26 @@ import { fileURLToPath } from 'node:url';
 /**
  * Strings that must never survive into a production bundle.
  *
- * The first four are the historical dev-credentials UI. The rest are
- * server-side secret names and shapes: the Firebase service account must never
- * be reachable from the browser, and a VITE_-prefixed copy of it would ship it
- * to every visitor.
+ * The first four are the historical dev-credentials UI, and the next three are
+ * the local inspection mode's *live* path (the copy it prints when it signs
+ * itself in and the banner it renders): that mode is local-development only, so
+ * a production bundle must not be able to announce — let alone run — it. The
+ * rest are server-side secret names and shapes: the Firebase service account
+ * must never be reachable from the browser, and a VITE_-prefixed copy of it
+ * would ship it to every visitor.
  */
 const FORBIDDEN_DEV_STRINGS = [
   'Auto-fill Dev Credentials',
   'DevPassword123!',
   'dev@example.local',
   'Local Dev Mode',
+  // Fragments of the local inspection mode's live path: the warning AuthContext
+  // prints from the development-only branch, and the banner the app shell
+  // renders. Worded here as they appear in the source; if that copy is reworded,
+  // keep these in step — their absence from a production bundle is the point.
+  ': enabled (local development build)',
+  'Development only. Signed in as the seeded',
+  'local-inspection-banner',
   'FIREBASE_PRIVATE_KEY',
   'FIREBASE_CLIENT_EMAIL',
   'BEGIN PRIVATE KEY',
@@ -83,6 +93,49 @@ describe('production bundle', () => {
           delete process.env.NODE_ENV;
         } else {
           process.env.NODE_ENV = previousNodeEnv;
+        }
+        rmSync(outDir, { recursive: true, force: true });
+      }
+    },
+    180_000,
+  );
+
+  it(
+    'refuses to produce a bundle when local inspection mode is configured',
+    async () => {
+      const outDir = mkdtempSync(join(tmpdir(), 'job-agent-dist-refused-'));
+      // A deployable build must never carry the inspection flag or, worse, a
+      // development credential that Vite would inline into the JavaScript it
+      // serves. vite.config.ts fails the build instead of trusting the
+      // deployment environment to stay clean — this is that guarantee.
+      const inspectionEnv = {
+        VITE_LOCAL_INSPECTION_MODE: 'true',
+        VITE_LOCAL_INSPECTION_EMAIL: 'dev@example.local',
+        VITE_LOCAL_INSPECTION_PASSWORD: 'not-a-real-password',
+      };
+      const previous: Record<string, string | undefined> = {};
+      for (const [name, value] of Object.entries(inspectionEnv)) {
+        previous[name] = process.env[name];
+        process.env[name] = value;
+      }
+
+      try {
+        await expect(
+          build({
+            root: frontendRoot,
+            configFile: resolve(frontendRoot, 'vite.config.ts'),
+            mode: 'production',
+            logLevel: 'silent',
+            build: { outDir, emptyOutDir: true },
+          }),
+        ).rejects.toThrow(/Refusing to build/);
+      } finally {
+        for (const [name, value] of Object.entries(previous)) {
+          if (value === undefined) {
+            delete process.env[name];
+          } else {
+            process.env[name] = value;
+          }
         }
         rmSync(outDir, { recursive: true, force: true });
       }

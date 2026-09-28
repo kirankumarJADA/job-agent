@@ -83,6 +83,12 @@ class FlywayBootstrapRecoveryStrategyIT {
                 .locations("classpath:db/migration")
                 .baselineOnMigrate(false)
                 .baselineVersion("0")
+                // This class constructs Flyway directly instead of using the
+                // Spring-configured bean, so it has to supply V024's placeholder
+                // itself. It uses the production value on purpose: these
+                // scenarios reproduce hosted deployments, and the correction
+                // must therefore be part of what is being verified here.
+                .placeholders(java.util.Map.of("remove_seed_dev_account", "true"))
                 .load();
     }
 
@@ -455,14 +461,22 @@ class FlywayBootstrapRecoveryStrategyIT {
         assertFullyMigrated();
 
         // ── every pre-existing row preserved, nothing duplicated ──
-        // The seeded account survives untouched and V020 backfills it as a
-        // LOCAL credential without rewriting anything.
+        // The seeded account's row survives with its data and its LOCAL
+        // provenance intact, while V024 removes the one thing that made it a
+        // hole: the published development password. This is the real upgrade
+        // path for the hosted database (baseline at 0, V001..V019 applied, this
+        // jar shipping V024).
         String seedEmail = jdbc.queryForObject(
                 "select email::text from users where email = 'dev@example.local'", String.class);
         assertThat(seedEmail).isEqualTo("dev@example.local");
         String authProvider = jdbc.queryForObject(
                 "select auth_provider from users where email = 'dev@example.local'", String.class);
         assertThat(authProvider).isEqualTo("LOCAL");
+        String seedHash = jdbc.queryForObject(
+                "select password_hash from users where email = 'dev@example.local'", String.class);
+        assertThat(seedHash)
+                .as("V024 must remove the published development password during the upgrade")
+                .isNull();
 
         Integer profileCount = jdbc.queryForObject("select count(*) from profiles", Integer.class);
         assertThat(profileCount).isEqualTo(1);
