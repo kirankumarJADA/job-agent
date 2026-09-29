@@ -1,0 +1,148 @@
+{
+ "meta": {
+  "total": 72
+ },
+ "jobs": [
+  {
+   "absolute_url": "https://job-boards.greenhouse.io/monzo/jobs/8143930",
+   "data_compliance": [
+    {
+     "type": "gdpr",
+     "requires_consent": false,
+     "requires_processing_consent": false,
+     "requires_retention_consent": false,
+     "retention_period": null,
+     "demographic_data_consent_applies": true
+    }
+   ],
+   "internal_job_id": 3524371,
+   "location": {
+    "name": "Cardiff, London or Remote (UK)"
+   },
+   "metadata": null,
+   "id": 8143930,
+   "updated_at": "2026-09-25T05:17:09-04:00",
+   "requisition_id": "3422",
+   "title": "Anaplan Support Analyst",
+   "company_name": "Monzo",
+   "first_published": "2026-08-24T09:04:42-04:00",
+   "language": "en",
+   "application_deadline": null,
+   "content": "&lt;div class=&quot;content-intro&quot;&gt;&lt;p&gt;&lt;strong&gt;&lt;em&gt;🚀 We’re on a mission to make money work for everyone.&lt;/em&gt;&lt;/strong&gt;&lt;/p&gt;\n&lt;p&gt;We’re waving goodbye to the complicated and confusing ways of traditional banking.&lt;/p&gt;\n&lt;p&gt;After starting as a prepaid card, our product offering has grown a lot in the last 10 years in the UK. As well as&amp;nbsp;&lt;a href=&quot;https://monzo.com/current-account/personal&quot;&gt;personal&lt;/a&gt; and &lt;a href=&quot;https://monzo.com/business-banking&quot;&gt;business&lt;/a&gt; bank accounts, we offer &lt;",
+   "departments": [
+    {
+     "id": 54075,
+     "name": "Finance",
+     "child_ids": [],
+     "parent_id": 396395
+    }
+   ],
+   "offices": [
+    {
+     "id": 14736,
+     "name": "London",
+     "location": null,
+     "child_ids": [],
+     "parent_id": 114746
+    }
+   ],
+   "ai_disclaimer": null,
+   "include_ai_disclaimer": false,
+   "ai_opt_out_request_url": null
+  },
+  {
+   "absolute_url": "https://job-boards.greenhouse.io/monzo/jobs/7115379",
+   "data_compliance": [
+    {
+     "type": "gdpr",
+     "requires_consent": false,
+     "requires_processing_consent": false,
+     "requires_retention_consent": false,
+     "retention_period": null,
+     "demographic_data_consent_applies": true
+    }
+   ],
+   "internal_job_id": 3205590,
+   "location": {
+    "name": "Cardiff, London or Remote (UK)"
+   },
+   "metadata": null,
+   "id": 7115379,
+   "updated_at": "2026-09-25T05:17:09-04:00",
+   "requisition_id": "2311",
+   "title": "Android Engineer",
+   "company_name": "Monzo",
+   "first_published": "2026-03-09T09:32:35-04:00",
+   "language": "en",
+   "application_deadline": null,
+   "content": "&lt;div class=&quot;content-intro&quot;&gt;&lt;p&gt;&lt;strong&gt;&lt;em&gt;🚀 We’re on a mission to make money work for everyone.&lt;/em&gt;&lt;/strong&gt;&lt;/p&gt;\n&lt;p&gt;We’re waving goodbye to the complicated and confusing ways of traditional banking.&lt;/p&gt;\n&lt;p&gt;After starting as a prepaid card, our product offering has grown a lot in the last 10 years in the UK. As well as&amp;nbsp;&lt;a href=&quot;https://monzo.com/current-account/personal&quot;&gt;personal&lt;/a&gt; and &lt;a href=&quot;https://monzo.com/business-banking&quot;&gt;business&lt;/a&gt; bank accounts, we offer &lt;",
+   "departments": [
+    {
+     "id": 43595,
+     "name": "Engineering",
+     "child_ids": [],
+     "parent_id": 396396
+    }
+   ],
+   "offices": [
+    {
+     "id": 77079,
+     "name": "Cardiff, London or Remote (UK)",
+     "location": null,
+     "child_ids": [],
+     "parent_id": 114746
+    }
+   ],
+   "ai_disclaimer": null,
+   "include_ai_disclaimer": false,
+   "ai_opt_out_request_url": null
+  },
+  {
+   "absolute_url": "https://job-boards.greenhouse.io/monzo/jobs/7343996",
+   "data_compliance": [
+    {
+     "type": "gdpr",
+     "requires_consent": false,
+     "requires_processing_consent": false,
+     "requires_retention_consent": false,
+     "retention_period": null,
+     "demographic_data_consent_applies": true
+    }
+   ],
+   "internal_job_id": 3276761,
+   "location": {
+    "name": "Barcelona"
+   },
+   "metadata": null,
+   "id": 7343996,
+   "updated_at": "2026-09-25T05:17:09-04:00",
+   "requisition_id": "11746",
+   "title": "Android Engineer",
+   "company_name": "Monzo",
+   "first_published": "2025-10-21T08:12:57-04:00",
+   "language": "en",
+   "application_deadline": null,
+   "content": "&lt;div class=&quot;content-intro&quot;&gt;&lt;p&gt;&lt;strong&gt;&lt;em&gt;🚀 We’re on a mission to make money work for everyone.&lt;/em&gt;&lt;/strong&gt;&lt;/p&gt;\n&lt;p&gt;We’re waving goodbye to the complicated and confusing ways of traditional banking.&lt;/p&gt;\n&lt;p&gt;After starting as a prepaid card, our product offering has grown a lot in the last 10 years in the UK. As well as&amp;nbsp;&lt;a href=&quot;https://monzo.com/current-account/personal&quot;&gt;personal&lt;/a&gt; and &lt;a href=&quot;https://monzo.com/business-banking&quot;&gt;business&lt;/a&gt; bank accounts, we offer &lt;",
+   "departments": [
+    {
+     "id": 43595,
+     "name": "Engineering",
+     "child_ids": [],
+     "parent_id": 396396
+    }
+   ],
+   "offices": [
+    {
+     "id": 332444,
+     "name": "Barcelona",
+     "location": null,
+     "child_ids": [],
+     "parent_id": 109271
+    }
+   ],
+   "ai_disclaimer": null,
+   "include_ai_disclaimer": false,
+   "ai_opt_out_request_url": null
+  }
+ ]
+}
