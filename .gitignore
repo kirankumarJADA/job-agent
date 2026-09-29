@@ -35,3 +35,6 @@ infra/.env.prod-like
 worker/node_modules/
 research/
 frontend/tsconfig.tsbuildinfo
+# Scrapling sidecar local Python environment
+sidecar/scrapling/.venv/
+__pycache__/

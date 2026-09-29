@@ -126,6 +126,30 @@ services:
     volumes:
       - worker-data:/data
 
+  # Optional Scrapling sidecar for the discovery engine (see
+  # sidecar/scrapling/README.md). Opt-in via the `scrapling` profile so the
+  # verified core stack starts unchanged without it. The backend reaches it
+  # at http://scrapling:8199 when SCRAPLING_BASE_URL is set; the port is
+  # published to loopback only because the sidecar fetches arbitrary URLs
+  # on request and is a local operator tool, never a public service.
+  scrapling:
+    profiles: ["scrapling"]
+    build:
+      context: ../sidecar/scrapling
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      # Set SCRAPLING_API_TOKEN in the environment to require Bearer auth
+      # from the backend (the backend then sends the same value).
+      SCRAPLING_API_TOKEN: ${SCRAPLING_API_TOKEN:-}
+    ports:
+      - "127.0.0.1:8199:8199"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8199/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
 volumes:
   pgdata:
   worker-data:
