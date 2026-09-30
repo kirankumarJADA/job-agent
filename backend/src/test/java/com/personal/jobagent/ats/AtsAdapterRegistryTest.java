@@ -11,7 +11,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class AtsAdapterRegistryTest {
 
     private final List<AtsAdapter> allAdapters = List.of(
-            new AtsAdapters.GreenhouseAdapter(),
+            new GreenhouseAdapter(),
             new AtsAdapters.LeverAdapter(),
             new AtsAdapters.AshbyAdapter(),
             new AtsAdapters.WorkdayAdapter(),

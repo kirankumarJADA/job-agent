@@ -6,12 +6,8 @@ import java.util.regex.Pattern;
 
 public final class AtsAdapters {
 
-    @Component
-    public static class GreenhouseAdapter extends BaseAtsAdapter {
-        public GreenhouseAdapter() {
-            super(AtsKind.GREENHOUSE, Pattern.compile("boards\\.greenhouse\\.io|greenhouse\\.io"), false, false);
-        }
-    }
+    // Greenhouse is implemented as a real read-only form inspector:
+    // see GreenhouseAdapter (top-level, real inspectForm).
 
     @Component
     public static class LeverAdapter extends BaseAtsAdapter {

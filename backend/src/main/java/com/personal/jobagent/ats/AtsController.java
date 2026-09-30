@@ -43,7 +43,16 @@ public class AtsController {
         }
 
         return adapterRegistry.findAdapterForUrl(body.url())
-                .<ResponseEntity<?>>map(adapter -> ResponseEntity.ok(adapter.inspectForm(body.url())))
+                .<ResponseEntity<?>>map(adapter -> {
+                    try {
+                        return ResponseEntity.ok(adapter.inspectForm(body.url()));
+                    } catch (IllegalStateException e) {
+                        // Real inspection (e.g. Greenhouse) is unavailable —
+                        // deterministic 503, never a silent mock fallback.
+                        return ResponseEntity.status(503).body(ApiError.of(503, "Inspection Unavailable",
+                                e.getMessage(), request.getRequestURI(), correlationId()));
+                    }
+                })
                 .orElseGet(() -> ResponseEntity.status(404).body(ApiError.of(404, "Not Found", "No adapter matched URL: " + body.url(), request.getRequestURI(), correlationId())));
     }
 

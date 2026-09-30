@@ -15,8 +15,36 @@ public interface AtsAdapter {
             boolean requiresAuth,
             boolean multiStep,
             java.util.List<String> supportedFields,
-            boolean supportsFileUpload
-    ) {}
+            boolean supportsFileUpload,
+            java.util.List<FormFieldDescriptor> fields
+    ) {
+        /** Null fields normalize to an empty list so adapters without real inspection stay safe. */
+        public FormDescriptor {
+            fields = fields == null ? java.util.List.of() : java.util.List.copyOf(fields);
+        }
+    }
+
+    /**
+     * One inspected form control (Phase 3A, read-only). Deterministic metadata
+     * only — never candidate values. {@code key} is the stable field identifier
+     * (Greenhouse: the control's {@code id}, e.g. {@code first_name},
+     * {@code resume}, {@code question_123}); {@code selector} is the
+     * deterministic locator ({@code #id}); {@code options} holds select/radio
+     * choices when statically present (empty when rendered by JavaScript —
+     * uncertainty is reported, never guessed).
+     */
+    record FormFieldDescriptor(
+            String key,
+            String label,
+            String htmlType,
+            boolean required,
+            String selector,
+            java.util.List<String> options
+    ) {
+        public FormFieldDescriptor {
+            options = options == null ? java.util.List.of() : java.util.List.copyOf(options);
+        }
+    }
 
     FormDescriptor inspectForm(String url);
 

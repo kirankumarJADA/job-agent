@@ -10,8 +10,10 @@ public abstract class BaseAtsAdapter implements AtsAdapter {
 
     private final AtsKind kind;
     private final Pattern domainPattern;
-    private final boolean requiresAuth;
-    private final boolean multiStep;
+    // Widened to protected (read-only) so subclasses can build richer
+    // FormDescriptors from the same constructor constants.
+    protected final boolean requiresAuth;
+    protected final boolean multiStep;
 
     protected BaseAtsAdapter(AtsKind kind, Pattern domainPattern, boolean requiresAuth, boolean multiStep) {
         this.kind = kind;
@@ -39,7 +41,8 @@ public abstract class BaseAtsAdapter implements AtsAdapter {
                 requiresAuth,
                 multiStep,
                 List.of("full_name", "email", "phone", "resume", "cover_letter", "linkedin_url"),
-                true
+                true,
+                List.of()
         );
     }
 
