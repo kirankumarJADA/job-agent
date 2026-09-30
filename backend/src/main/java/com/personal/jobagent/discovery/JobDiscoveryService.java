@@ -13,6 +13,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.time.Instant;
 import java.util.UUID;
 
 @Service
@@ -44,13 +45,28 @@ public class JobDiscoveryService {
             String descriptionText,
             List<String> skillsExtracted,
             String applicationUrl,
-            String canonicalUrl
-    ) {}
+            String canonicalUrl,
+            Instant postedAt
+    ) {
+        /** Backwards-compatible constructor for existing ingestion callers. */
+        public IngestJobCommand(UUID sourceId, String externalId, UUID companyId, String companyNameRaw,
+                                String title, String locationRaw, String city, String country, String remoteType,
+                                String employmentType, String experienceLevel, Number salaryMin, Number salaryMax,
+                                String salaryCurrency, String descriptionText, List<String> skillsExtracted,
+                                String applicationUrl, String canonicalUrl) {
+            this(sourceId, externalId, companyId, companyNameRaw, title, locationRaw, city, country, remoteType,
+                    employmentType, experienceLevel, salaryMin, salaryMax, salaryCurrency, descriptionText,
+                    skillsExtracted, applicationUrl, canonicalUrl, null);
+        }
+    }
 
     public record IngestResult(UUID jobId, String action, String dedupKey, String contentHash) {}
 
     public IngestResult ingestJob(IngestJobCommand cmd) {
         String dedupKey = computeDedupKey(cmd.companyNameRaw(), cmd.title(), cmd.locationRaw());
+        // JDBC cannot infer a type for java.time.Instant via setObject(); bind
+        // the driver-supported java.sql.Timestamp instead.
+        java.sql.Timestamp postedAtTs = cmd.postedAt() == null ? null : java.sql.Timestamp.from(cmd.postedAt());
         String contentHash = sha256(cmd.title() + "\n" + cmd.descriptionText());
 
         // Check if job exists by dedup_key or (source_id, external_id)
@@ -65,15 +81,22 @@ public class JobDiscoveryService {
 
             if (contentHash.equals(prevHash)) {
                 // Stale / identical job seen again: update last_seen_at
-                jdbcTemplate.update("update jobs set last_seen_at = now() where id = ?", existingId);
+                if (postedAtTs == null) {
+                    jdbcTemplate.update("update jobs set last_seen_at = now() where id = ?", existingId);
+                } else {
+                    jdbcTemplate.update("update jobs set last_seen_at = now(), posted_at = ?::timestamptz, posted_date_source = 'EXPLICIT' where id = ?",
+                            postedAtTs, existingId);
+                }
                 recordObservation(existingId, cmd, contentHash);
                 return new IngestResult(existingId, "TOUCHED", dedupKey, contentHash);
             } else {
                 // Repost or content updated
                 jdbcTemplate.update("""
-                        update jobs set content_hash = ?, repost_count = repost_count + 1, last_seen_at = now()
+                        update jobs set content_hash = ?, repost_count = repost_count + 1, last_seen_at = now(),
+                            posted_at = coalesce(?::timestamptz, posted_at),
+                            posted_date_source = case when ?::timestamptz is null then posted_date_source else 'EXPLICIT' end
                         where id = ?
-                        """, contentHash, existingId);
+                        """, contentHash, postedAtTs, postedAtTs, existingId);
                 recordObservation(existingId, cmd, contentHash);
                 return new IngestResult(existingId, "UPDATED", dedupKey, contentHash);
             }
@@ -89,13 +112,14 @@ public class JobDiscoveryService {
                                   description_text, skills_extracted, application_url, canonical_url,
                                   posted_at, posted_date_source, first_seen_at, last_seen_at,
                                   repost_count, content_hash, status)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), 'EXPLICIT', now(), now(), 0, ?, 'DISCOVERED')
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz,
+                        case when ?::timestamptz is null then 'UNKNOWN' else 'EXPLICIT' end, now(), now(), 0, ?, 'DISCOVERED')
                 """,
                 id, cmd.sourceId(), cmd.externalId(), dedupKey, cmd.companyId(), cmd.companyNameRaw(),
                 cmd.title(), cmd.locationRaw(), cmd.city(), cmd.country(), cmd.remoteType(), cmd.employmentType(),
                 cmd.experienceLevel(), cmd.salaryMin(), cmd.salaryMax(), cmd.salaryCurrency(),
                 cmd.descriptionText(), skillsArray, cmd.applicationUrl(), cmd.canonicalUrl(),
-                contentHash);
+                postedAtTs, postedAtTs, contentHash);
 
         recordObservation(id, cmd, contentHash);
         return new IngestResult(id, "INSERTED", dedupKey, contentHash);

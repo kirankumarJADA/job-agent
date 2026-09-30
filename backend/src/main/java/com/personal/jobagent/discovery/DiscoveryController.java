@@ -44,19 +44,39 @@ public class DiscoveryController {
      *       scraper providers (unchanged behavior);</li>
      *   <li>without {@code url} — kind-aware dispatch: the source row in
      *       {@code job_sources} decides the connector. Currently
-     *       {@code kind = GREENHOUSE} is supported, using the source's
-     *       {@code org_identifier} as the board token; any other kind without
-     *       a URL is refused rather than guessed at.</li>
+     *       {@code kind = GREENHOUSE} and {@code kind = ASHBY} use the
+     *       source's {@code org_identifier} as the board token/name; a hosted
+     *       Ashby URL is accepted only when it matches that persisted source.</li>
      * </ul>
-     * The source id and its org identifier come from the source row — never
-     * from the request body — so a caller cannot point the connector at an
-     * arbitrary board.
+     * The source id and org identifier come from the source row. When an Ashby
+     * URL is supplied it must match the source board, preventing cross-source
+     * board selection.
      */
     @PostMapping("/run")
     public ResponseEntity<?> run(@RequestParam java.util.UUID sourceId,
                                  @RequestParam(required = false) String sourceType,
                                  @RequestParam(required = false) String url,
                                  HttpServletRequest request) {
+        if (url != null && !url.isBlank() && AshbyProvider.isHostedBoardUrl(url)) {
+            try {
+                String board = AshbyProvider.boardNameFromHostedUrl(url);
+                List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+                        "select kind, org_identifier, enabled from job_sources where id = ?", sourceId);
+                if (rows.isEmpty()) return notFound(request, "Discovery source not found");
+                Map<String, Object> source = rows.get(0);
+                if (!Boolean.TRUE.equals(source.get("enabled"))) return badRequest(request, "Discovery source is disabled");
+                if (!AshbyProvider.SOURCE_KIND.equals(String.valueOf(source.get("kind")))) {
+                    return badRequest(request, "Hosted Ashby URL requires an ASHBY discovery source");
+                }
+                String registeredBoard = AshbyProvider.boardNameFromIdentifier(String.valueOf(source.get("org_identifier")));
+                if (!board.equalsIgnoreCase(registeredBoard)) {
+                    return badRequest(request, "Ashby URL board does not match the registered source");
+                }
+                return ResponseEntity.ok(orchestrator.discoverAshbyBoard(sourceId, registeredBoard));
+            } catch (IllegalArgumentException e) {
+                return badRequest(request, e.getMessage());
+            }
+        }
         if (url != null && !url.isBlank()) {
             return ResponseEntity.ok(orchestrator.discover(sourceId, sourceType, url));
         }
@@ -71,15 +91,18 @@ public class DiscoveryController {
         if (!Boolean.TRUE.equals(source.get("enabled"))) {
             return badRequest(request, "Discovery source is disabled");
         }
-        if (!GreenhouseProvider.SOURCE_KIND.equals(kind)) {
-            return badRequest(request, "url is required for discovery kind " + kind);
-        }
         String orgIdentifier = source.get("org_identifier") == null ? null : String.valueOf(source.get("org_identifier"));
         if (orgIdentifier == null || orgIdentifier.isBlank()) {
-            return badRequest(request, "Greenhouse source has no org_identifier");
+            return badRequest(request, kind + " source has no org_identifier");
         }
         try {
-            return ResponseEntity.ok(orchestrator.discoverGreenhouseBoard(sourceId, orgIdentifier));
+            if (GreenhouseProvider.SOURCE_KIND.equals(kind)) {
+                return ResponseEntity.ok(orchestrator.discoverGreenhouseBoard(sourceId, orgIdentifier));
+            }
+            if (AshbyProvider.SOURCE_KIND.equals(kind)) {
+                return ResponseEntity.ok(orchestrator.discoverAshbyBoard(sourceId, orgIdentifier));
+            }
+            return badRequest(request, "url is required for discovery kind " + kind);
         } catch (IllegalArgumentException e) {
             return badRequest(request, e.getMessage());
         }
