@@ -8,6 +8,7 @@ import com.personal.jobagent.events.EventHandler;
 import com.personal.jobagent.jobs.JobMatchService;
 import com.personal.jobagent.jobs.JobRepository;
 import com.personal.jobagent.jobs.JobRecord;
+import com.personal.jobagent.automation.InspectionPlanService;
 import com.personal.jobagent.notifications.NotificationEvents;
 import com.personal.jobagent.notifications.NotificationService;
 import com.personal.jobagent.qa.ApplicationAnswerService;
@@ -56,6 +57,7 @@ public class ApplicationPipelineEventHandler implements EventHandler {
     static final String CONSUMER_NAME = "application-pipeline";
 
     private final ApplicationPipelineService pipeline;
+    private final InspectionPlanService inspectionPlanService;
     private final ResumeAtsIntelligenceService resumeService;
     private final CoverLetterService coverLetterService;
     private final ApplicationAnswerService answerService;
@@ -65,6 +67,7 @@ public class ApplicationPipelineEventHandler implements EventHandler {
     private final ObjectMapper json;
 
     public ApplicationPipelineEventHandler(ApplicationPipelineService pipeline,
+                                           InspectionPlanService inspectionPlanService,
                                            ResumeAtsIntelligenceService resumeService,
                                            CoverLetterService coverLetterService,
                                            ApplicationAnswerService answerService,
@@ -73,6 +76,7 @@ public class ApplicationPipelineEventHandler implements EventHandler {
                                            JdbcTemplate db,
                                            ObjectMapper json) {
         this.pipeline = pipeline;
+        this.inspectionPlanService = inspectionPlanService;
         this.resumeService = resumeService;
         this.coverLetterService = coverLetterService;
         this.answerService = answerService;
@@ -163,6 +167,24 @@ public class ApplicationPipelineEventHandler implements EventHandler {
                     ),
                     UuidV7.generate(),
                     null));
+            // Phase 2: create an inspection-only automation plan so the worker
+            // can navigate to the application URL and take a screenshot. This
+            // does not fill forms or submit anything — it proves the queue →
+            // claim → execute path works end-to-end.
+            try {
+                inspectionPlanService.createInspectionPlan(profileId, applicationId, jobId)
+                        .ifPresent(planId -> {
+                            record(applicationId, "INSPECTION_PLAN_CREATED",
+                                    Map.of("plan_id", planId.toString()));
+                            log.info("Inspection plan {} queued for application {}", planId, applicationId);
+                        });
+            } catch (Exception e) {
+                record(applicationId, "INSPECTION_PLAN_FAILED",
+                        Map.of("error", e.getClass().getSimpleName()));
+                log.warn("Inspection plan creation failed for application {}: {}",
+                        applicationId, e.getMessage());
+            }
+
             log.info("Application {} fully prepared and queued (READY_TO_APPLY)", applicationId);
         } else {
             log.warn("Application {} preparation incomplete (cv={} cover={} answers={}) — state unchanged, "

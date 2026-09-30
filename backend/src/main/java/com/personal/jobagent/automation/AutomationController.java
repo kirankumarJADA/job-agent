@@ -160,6 +160,24 @@ public class AutomationController {
         return ResponseEntity.ok(Map.of("accepted", fresh, "replayed", !fresh));
     }
 
+    /**
+     * Atomically claims the oldest PREPARED plan and returns it in RUNNING
+     * state. Worker-only: two workers polling concurrently never receive the
+     * same plan (PostgreSQL {@code FOR UPDATE SKIP LOCKED}).
+     *
+     * <p>Returns 204 No Content when no plan is available, so the worker can
+     * distinguish "nothing to do" from an error.
+     */
+    @PostMapping("/plans/claim-next")
+    public ResponseEntity<?> claimNext() {
+        if (!machineOrLocalDev()) {
+            return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
+        }
+        return plans.claimNext()
+                .<ResponseEntity<?>>map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.noContent().build());
+    }
+
     @PostMapping("/plans/recover-stale")
     public ResponseEntity<?> recover(@RequestParam(defaultValue = "15") long minutes) {
         if (!machineOrLocalDev()) {

@@ -5,6 +5,8 @@ import com.personal.jobagent.common.UuidV7;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import org.springframework.transaction.annotation.Transactional;
+
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -185,6 +187,31 @@ public class AutomationPlanRepository {
         }
         return db.query("select profile_id from applications where id=?", (rs, n) -> (UUID) rs.getObject(1), applicationId)
                 .stream().filter(java.util.Objects::nonNull).findFirst();
+    }
+
+    /**
+     * Atomically claims the oldest PREPARED plan, returning the full plan row
+     * now in RUNNING state. {@code FOR UPDATE SKIP LOCKED} ensures two
+     * concurrent workers never claim the same plan — the loser sees no row
+     * and gets {@code Optional.empty()}.
+     *
+     * <p>Must run inside a transaction for the lock to be released correctly;
+     * the {@code @Transactional} annotation is on this method so callers
+     * (the controller) do not need their own.
+     */
+    @Transactional
+    public Optional<PlanRow> claimNext() {
+        List<UUID> ids = db.query("""
+                select id from automation_plans
+                where status = 'PREPARED'
+                order by created_at
+                limit 1
+                for update skip locked
+                """, (rs, n) -> (UUID) rs.getObject(1));
+        if (ids.isEmpty()) return Optional.empty();
+        UUID id = ids.get(0);
+        db.update("update automation_plans set status='RUNNING', heartbeat_at=now(), updated_at=now() where id=?", id);
+        return findById(id);
     }
 
     private PlanRow mapRow(java.sql.ResultSet rs) throws java.sql.SQLException {

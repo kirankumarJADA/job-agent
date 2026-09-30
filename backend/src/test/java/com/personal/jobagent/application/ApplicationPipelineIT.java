@@ -164,11 +164,13 @@ class ApplicationPipelineIT {
         for (Seed seed : jobs) {
             jdbc.update("""
                     insert into jobs (id, source_id, external_id, dedup_key, company_name_raw, title,
-                                      location_raw, description_text, skills_extracted, status, content_hash)
-                    values (?, ?, ?, ?, 'Pipeline Corp', ?, 'London', 'Java platform role', ?::text[], 'DISCOVERED', ?)
+                                      location_raw, description_text, skills_extracted, status, content_hash,
+                                      application_url)
+                    values (?, ?, ?, ?, 'Pipeline Corp', ?, 'London', 'Java platform role', ?::text[], 'DISCOVERED', ?,
+                            'https://example.com/apply/' || ?)
                     on conflict (id) do nothing
                     """, seed.jobId(), SOURCE, "ext-" + seed.jobId(), "dedup-" + seed.jobId(),
-                    seed.title(), seed.skills(), "hash-" + seed.jobId());
+                    seed.title(), seed.skills(), "hash-" + seed.jobId(), seed.jobId());
         }
     }
 
@@ -340,9 +342,84 @@ class ApplicationPipelineIT {
         assertThat(prepared).isZero();
     }
 
+    @Test
+    @Order(7)
+    void fullPhase2Bridge_preparedApplicationCreatesPlan_claimedAndCompletedByWorker() throws Exception {
+        UUID appId = applicationIdOf(JOB_APPLY);
+
+        // 1. Preparation created an inspection plan in PREPARED state
+        Awaitility.await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+            Integer planCount = jdbc.queryForObject(
+                    "select count(*) from automation_plans where application_id = ? and status = 'PREPARED'",
+                    Integer.class, appId);
+            assertThat(planCount).isEqualTo(1);
+        });
+
+        UUID planId = jdbc.queryForObject(
+                "select id from automation_plans where application_id = ?",
+                UUID.class, appId);
+        assertThat(planId).isNotNull();
+
+        // 2. Timeline recorded the plan creation
+        Integer createdEvent = jdbc.queryForObject("""
+                select count(*) from application_events
+                where application_id = ? and type = 'INSPECTION_PLAN_CREATED'
+                """, Integer.class, appId);
+        assertThat(createdEvent).isEqualTo(1);
+
+        // 3. Worker claims the plan via claim-next -> transitions to RUNNING
+        mockMvc.perform(post("/api/v1/automation/plans/claim-next").session(sessionA).with(csrf()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(planId.toString()))
+                .andExpect(jsonPath("$.status").value("RUNNING"));
+
+        String statusInDb = jdbc.queryForObject(
+                "select status from automation_plans where id = ?",
+                String.class, planId);
+        assertThat(statusInDb).isEqualTo("RUNNING");
+
+        // 4. Worker records an execution event
+        String eventId = "worker-evt-" + UUID.randomUUID();
+        mockMvc.perform(post("/api/v1/automation/events").session(sessionA).with(csrf())
+                        .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "eventId": "%s",
+                                  "planId": "%s",
+                                  "applicationId": "%s",
+                                  "jobId": "%s",
+                                  "type": "STEP_COMPLETED",
+                                  "payload": {"stepId": "navigate-application", "stepType": "NAVIGATE"}
+                                }
+                                """.formatted(eventId, planId, appId, JOB_APPLY)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.accepted").value(true));
+
+        Integer recordedEvents = jdbc.queryForObject(
+                "select count(*) from worker_events where event_id = ? and plan_id = ?",
+                Integer.class, eventId, planId);
+        assertThat(recordedEvents).isEqualTo(1);
+
+        // 5. Worker completes the plan
+        mockMvc.perform(post("/api/v1/automation/plans/" + planId + "/complete").session(sessionA).with(csrf())
+                        .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                        .content("{\"outcome\":\"COMPLETED\",\"detail\":\"Inspection completed\"}"))
+                .andExpect(status().isNoContent());
+
+        String finalStatus = jdbc.queryForObject(
+                "select status from automation_plans where id = ?",
+                String.class, planId);
+        assertThat(finalStatus).isEqualTo("COMPLETED");
+
+        // 6. Next claim returns 204 No Content (queue is empty)
+        mockMvc.perform(post("/api/v1/automation/plans/claim-next").session(sessionA).with(csrf()))
+                .andExpect(status().isNoContent());
+    }
+
     private UUID applicationIdOf(UUID jobId) {
         return jdbc.queryForObject(
                 "select id from applications where profile_id = ? and job_id = ? and status not in ('FAILED','WITHDRAWN')",
                 UUID.class, PROFILE_A, jobId);
     }
 }
+

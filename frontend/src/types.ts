@@ -169,6 +169,11 @@ export interface ApplicationSummary {
   jobLocation?: string | null;
   matchScore?: number | null;
   matchRecommendation?: string | null;
+  planId?: string | null;
+  planStatus?: string | null;
+  planSubmitApproved?: boolean | null;
+  planHeartbeatAt?: string | null;
+  planUpdatedAt?: string | null;
 }
 
 export interface LlmModel {

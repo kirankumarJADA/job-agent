@@ -129,3 +129,60 @@ test('invalid OTP does not reach the verified terminal state', async () => {
     assert.equal(mock.submission, null);
   } finally { await mock.close(); }
 });
+
+test('INSPECTION plan with REAL_SUBMIT triggers HardStopError and cannot bypass safety gate', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-inspection-safety-'));
+  const mock = await startMockEnvironment({ jobId: 'job-insp-fail', applicationId: 'app-insp-fail' });
+  const inspectionPlan = {
+    planId: 'plan-inspection-forbidden',
+    planType: 'INSPECTION',
+    version: 1,
+    correlation: { jobId: 'job-insp-fail', applicationId: 'app-insp-fail' },
+    steps: [
+      { id: 'navigate-application', type: StepType.NAVIGATE, policy: Policy.AUTO, params: { url: `${mock.baseUrl}/apply/job-insp-fail` } },
+      { id: 'safety-check', type: StepType.POLICY_CHECK, policy: Policy.AUTO, params: { action: 'REAL_SUBMIT' } },
+    ],
+  };
+  const worker = new BrowserWorker({
+    statePath: path.join(root, 'state.json'),
+    artifactDir: root,
+  });
+  try {
+    await assert.rejects(
+      () => worker.execute(inspectionPlan, { approve: true, headless: true }),
+      (err) => err instanceof HardStopError && err.reason === 'FORBIDDEN_REAL_SUBMISSION'
+    );
+    assert.equal(mock.submission, null);
+  } finally {
+    await mock.close();
+  }
+});
+
+test('INSPECTION plan with INSPECT_ONLY executes navigation and screenshot without submitting', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-inspection-safe-'));
+  const mock = await startMockEnvironment({ jobId: 'job-insp-safe', applicationId: 'app-insp-safe' });
+  const inspectionPlan = {
+    planId: 'plan-inspection-safe',
+    planType: 'INSPECTION',
+    version: 1,
+    correlation: { jobId: 'job-insp-safe', applicationId: 'app-insp-safe' },
+    steps: [
+      { id: 'navigate-application', type: StepType.NAVIGATE, policy: Policy.AUTO, params: { url: `${mock.baseUrl}/apply/job-insp-safe` } },
+      { id: 'screenshot-landing', type: StepType.SCREENSHOT, policy: Policy.AUTO, params: {} },
+      { id: 'safety-check', type: StepType.POLICY_CHECK, policy: Policy.AUTO, params: { action: 'INSPECT_ONLY' } },
+    ],
+  };
+  const worker = new BrowserWorker({
+    statePath: path.join(root, 'state.json'),
+    artifactDir: root,
+  });
+  try {
+    const result = await worker.execute(inspectionPlan, { approve: false, headless: true });
+    assert.equal(result.status, 'COMPLETED');
+    assert.equal(mock.submission, null);
+    assert.ok(fs.existsSync(path.join(root, 'plan-inspection-safe-screenshot-landing.png')));
+  } finally {
+    await mock.close();
+  }
+});
+

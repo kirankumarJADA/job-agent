@@ -22,7 +22,13 @@ export class BrowserWorker {
   }
 
   async execute(plan, { approve = false, failAfterStep = null, headless = true } = {}) {
-    validatePackage(plan.package);
+    // Inspection-only plans navigate and screenshot without touching files.
+    // Package validation is specific to plans that upload or interact with
+    // form data — skipping it here does not weaken the existing safety model
+    // for full plans, which still pass through validatePackage unchanged.
+    if (plan.planType !== 'INSPECTION') {
+      validatePackage(plan.package);
+    }
     plan.planFingerprint = planFingerprint(plan);
     const state = this.store.begin(plan);
     if (state.status === 'COMPLETED') return { status: 'COMPLETED', recovered: true, state };

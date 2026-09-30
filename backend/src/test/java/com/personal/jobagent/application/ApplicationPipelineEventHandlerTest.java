@@ -1,6 +1,7 @@
 package com.personal.jobagent.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.personal.jobagent.automation.InspectionPlanService;
 import com.personal.jobagent.coverletter.CoverLetterService;
 import com.personal.jobagent.events.Envelope;
 import com.personal.jobagent.jobs.JobRecord;
@@ -48,6 +49,7 @@ class ApplicationPipelineEventHandlerTest {
     private static final UUID JOB = UUID.randomUUID();
 
     private final ApplicationPipelineService pipeline = mock(ApplicationPipelineService.class);
+    private final InspectionPlanService inspectionPlanService = mock(InspectionPlanService.class);
     private final ResumeAtsIntelligenceService resumeService = mock(ResumeAtsIntelligenceService.class);
     private final CoverLetterService coverLetterService = mock(CoverLetterService.class);
     private final ApplicationAnswerService answerService = mock(ApplicationAnswerService.class);
@@ -58,9 +60,9 @@ class ApplicationPipelineEventHandlerTest {
 
     @BeforeEach
     void setUp() {
-        reset(pipeline, resumeService, coverLetterService, answerService, jobRepository, notifications, db);
-        handler = new ApplicationPipelineEventHandler(pipeline, resumeService, coverLetterService,
-                answerService, jobRepository, notifications, db, new ObjectMapper());
+        reset(pipeline, inspectionPlanService, resumeService, coverLetterService, answerService, jobRepository, notifications, db);
+        handler = new ApplicationPipelineEventHandler(pipeline, inspectionPlanService, resumeService,
+                coverLetterService, answerService, jobRepository, notifications, db, new ObjectMapper());
         when(db.queryForObject(contains("count(*) from applications"), eq(Integer.class), eq(APPLICATION)))
                 .thenReturn(1);
         when(db.update(contains("application_events"), any(UUID.class), eq(APPLICATION), any(String.class)))
