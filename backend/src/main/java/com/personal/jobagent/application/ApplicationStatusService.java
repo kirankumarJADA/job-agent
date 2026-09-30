@@ -86,6 +86,42 @@ public class ApplicationStatusService {
         return db.query("select id,job_id,status,mode,created_at,updated_at from applications where id=? and profile_id=?",(rs,n)->Map.of("id",rs.getObject("id"),"jobId",rs.getObject("job_id"),"status",rs.getString("status"),"mode",rs.getString("mode"),"createdAt",rs.getTimestamp("created_at").toInstant(),"updatedAt",rs.getTimestamp("updated_at").toInstant()),id,ownerProfileId).stream().findFirst();
     }
 
+    /**
+     * The owner's application queue, newest first, joined with the job for
+     * display and the candidate's own match decision (job_matches is
+     * per-profile since V022, so the join is scoped by the owner — never by
+     * the shared job row). This is what the Applications page and the
+     * worker-facing queue render.
+     */
+    public List<Map<String,Object>> listForOwner(UUID ownerProfileId) {
+        if (ownerProfileId == null) return List.of();
+        return db.query("""
+                select a.id, a.job_id, a.status, a.mode, a.created_at, a.updated_at,
+                       j.title as job_title, coalesce(j.company_name_raw, '') as company_name,
+                       j.location_raw as job_location,
+                       m.score as match_score, m.recommendation as match_recommendation
+                from applications a
+                join jobs j on j.id = a.job_id
+                left join job_matches m on m.job_id = a.job_id and m.profile_id = a.profile_id
+                where a.profile_id = ?
+                order by a.created_at desc, a.id
+                """, (rs, n) -> {
+                    Map<String,Object> row = new LinkedHashMap<>();
+                    row.put("id", rs.getObject("id"));
+                    row.put("jobId", rs.getObject("job_id"));
+                    row.put("status", rs.getString("status"));
+                    row.put("mode", rs.getString("mode"));
+                    row.put("createdAt", rs.getTimestamp("created_at").toInstant());
+                    row.put("updatedAt", rs.getTimestamp("updated_at").toInstant());
+                    row.put("jobTitle", rs.getString("job_title"));
+                    row.put("company", rs.getString("company_name"));
+                    row.put("jobLocation", rs.getString("job_location"));
+                    row.put("matchScore", rs.getObject("match_score"));
+                    row.put("matchRecommendation", rs.getString("match_recommendation"));
+                    return row;
+                }, ownerProfileId);
+    }
+
     /** Owner-scoped existence check used to authenticate timeline requests. */
     public boolean existsForOwner(UUID ownerProfileId, UUID id) {
         if (ownerProfileId == null || id == null) return false;

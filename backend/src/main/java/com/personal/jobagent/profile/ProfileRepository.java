@@ -59,6 +59,11 @@ public class ProfileRepository {
                 .stream().findFirst();
     }
 
+    /** Every profile id in the system — the candidate set for automatic matching. */
+    public List<UUID> findAllIds() {
+        return jdbcTemplate.query("select id from profiles order by id", (rs, n) -> (UUID) rs.getObject(1));
+    }
+
     public Optional<ProfileRecord> findById(UUID profileId) {
         return jdbcTemplate.query("select * from profiles where id = ?", profileRowMapper(), profileId)
                 .stream().findFirst();

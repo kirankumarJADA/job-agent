@@ -55,6 +55,7 @@ public class NotificationEventHandler implements EventHandler {
                  NotificationEvents.CV_GENERATED,
                  NotificationEvents.COVER_LETTER_GENERATED,
                  NotificationEvents.APPLICATION_ANSWER_DRAFTED,
+                 NotificationEvents.APPLICATION_CREATED,
                  NotificationEvents.APPLICATION_PREPARED,
                  NotificationEvents.APPLICATION_SUBMITTED,
                  NotificationEvents.APPLICATION_STATUS_CHANGED,
@@ -180,6 +181,7 @@ public class NotificationEventHandler implements EventHandler {
             case NotificationEvents.CV_GENERATED -> "CV_GENERATED";
             case NotificationEvents.COVER_LETTER_GENERATED -> "COVER_LETTER_GENERATED";
             case NotificationEvents.APPLICATION_ANSWER_DRAFTED -> "APPLICATION_ANSWER_DRAFTED";
+            case NotificationEvents.APPLICATION_CREATED -> "APPLICATION_CREATED";
             case NotificationEvents.APPLICATION_PREPARED -> "APPLICATION_PREPARED";
             case NotificationEvents.APPLICATION_SUBMITTED -> "APPLICATION_SUBMITTED";
             case NotificationEvents.APPLICATION_STATUS_CHANGED -> "APPLICATION_STATUS_CHANGED";

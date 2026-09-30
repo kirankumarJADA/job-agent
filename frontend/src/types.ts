@@ -155,6 +155,22 @@ export interface PreferenceSet {
   isActive: boolean;
 }
 
+// Owner-scoped application row from GET /api/v1/applications (camelCase wire
+// format). Match fields come from the candidate's own job_matches decision.
+export interface ApplicationSummary {
+  id: string;
+  jobId: string;
+  status: string;
+  mode: string;
+  createdAt: string;
+  updatedAt: string;
+  jobTitle: string;
+  company: string;
+  jobLocation?: string | null;
+  matchScore?: number | null;
+  matchRecommendation?: string | null;
+}
+
 export interface LlmModel {
   id: string;
   provider_id: string;

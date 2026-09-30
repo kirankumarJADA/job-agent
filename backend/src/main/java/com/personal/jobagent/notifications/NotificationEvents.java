@@ -23,6 +23,7 @@ public final class NotificationEvents {
     public static final String APPLICATION_ANSWER_DRAFTED = "application_answer.drafted";
 
     // ── application lifecycle ────────────────────────────────────────
+    public static final String APPLICATION_CREATED = "application.created";
     public static final String APPLICATION_PREPARED = "application.prepared";
     public static final String APPLICATION_SUBMITTED = "application.submitted";
     public static final String APPLICATION_STATUS_CHANGED = "application.status_changed";

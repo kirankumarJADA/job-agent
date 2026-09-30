@@ -1,3 +1,5 @@
+import type { ApplicationSummary } from '../types';
+
 export const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1';
 
 /**
@@ -113,6 +115,12 @@ export async function apiFetch<T>(endpoint: string, options: RequestInit = {}): 
 export interface RegistrationPolicy {
   inviteCodeRequired: boolean;
   registrationAvailable: boolean;
+}
+
+export interface ApplicationListResponse { items: ApplicationSummary[] }
+
+export function fetchApplications(): Promise<ApplicationListResponse> {
+  return apiFetch<ApplicationListResponse>('/applications');
 }
 
 export function fetchRegistrationPolicy(): Promise<RegistrationPolicy> {

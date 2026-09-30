@@ -33,6 +33,10 @@ public class ApplicationController {
     private final OwnerContext ownerContext;
     public ApplicationController(ApplicationStatusService service, OwnerContext ownerContext){this.service=service;this.ownerContext=ownerContext;}
     public record TransitionRequest(String targetStatus,String eventKey,String actor,Map<String,Object> context){}
+    /** The caller's own applications, newest first (the READY_TO_APPLY queue view). */
+    @GetMapping public ResponseEntity<?> list(){
+        return ResponseEntity.ok(Map.of("items", service.listForOwner(ownerContext.profileIdOrNull())));
+    }
     @GetMapping("/{id}") public ResponseEntity<?> get(@PathVariable UUID id){return service.find(ownerContext.profileIdOrNull(), id).<ResponseEntity<?>>map(ResponseEntity::ok).orElseGet(()->ResponseEntity.notFound().build());}
     @GetMapping("/{id}/timeline") public ResponseEntity<?> timeline(@PathVariable UUID id){UUID profileId=ownerContext.profileIdOrNull();if(!service.existsForOwner(profileId, id))return ResponseEntity.notFound().build();return ResponseEntity.ok(Map.of("items",service.timeline(profileId, id)));}
     @PostMapping("/{id}/status") public ResponseEntity<?> transition(@PathVariable UUID id,@RequestBody TransitionRequest r){
