@@ -40,6 +40,7 @@ import java.util.*;
 public class AutomationController {
 
     private final AutomationPlanRepository plans;
+    private final ExecutionPackageService executionPackages;
     private final AuditLogWriter audit;
     private final OwnerContext ownerContext;
     private final String workerToken;
@@ -47,11 +48,13 @@ public class AutomationController {
     public AutomationController(AutomationPlanRepository plans,
                                 AuditLogWriter audit,
                                 OwnerContext ownerContext,
-                                @Value("${app.worker-event-token:}") String workerToken) {
+                                @Value("${app.worker-event-token:}") String workerToken,
+                                ExecutionPackageService executionPackages) {
         this.plans = plans;
         this.audit = audit;
         this.ownerContext = ownerContext;
         this.workerToken = workerToken == null ? "" : workerToken;
+        this.executionPackages = executionPackages;
     }
 
     public record CreateRequest(UUID applicationId, UUID jobId, String targetUrl, String idempotencyKey, List<AutomationPlan.Step> steps) {}
@@ -135,7 +138,8 @@ public class AutomationController {
         }
         String outcome = r.outcome();
         boolean ok = switch (outcome == null ? "" : outcome) {
-            case "AWAITING_SUBMIT_APPROVAL", "COMPLETED", "FAILED", "BLOCKED_ANTI_BOT" -> plans.transition(id, "RUNNING", outcome);
+            case "AWAITING_SUBMIT_APPROVAL", "HUMAN_REQUIRED", "COMPLETED", "FAILED", "BLOCKED_ANTI_BOT" ->
+                    plans.transition(id, "RUNNING", outcome == null ? "" : outcome.equals("HUMAN_REQUIRED") ? "AWAITING_APPROVAL" : outcome);
             case "SUBMITTED" -> plans.findById(id).filter(p -> p.submitApproved()).map(p -> plans.transition(id, "RUNNING", outcome)).orElse(false);
             default -> false;
         };
@@ -176,6 +180,70 @@ public class AutomationController {
         return plans.claimNext()
                 .<ResponseEntity<?>>map(ResponseEntity::ok)
                 .orElseGet(() -> ResponseEntity.noContent().build());
+    }
+
+    /**
+     * READ-ONLY execution package for a GREENHOUSE plan (Phase 3B):
+     * candidate fields, artifact metadata + download URLs, ANSWERED answers,
+     * inspected Greenhouse field metadata with per-field classification, and
+     * the safety contract. Worker-authenticated or plan-owner scoped; contains
+     * no credentials and no unapproved answers.
+     */
+    @GetMapping("/plans/{id}/package")
+    public ResponseEntity<?> packageFor(@PathVariable UUID id) {
+        if (!mayActOnPlan(id)) {
+            return notFound();
+        }
+        var plan = plans.findById(id).orElse(null);
+        if (plan == null || plan.applicationId() == null) {
+            return notFound();
+        }
+        UUID profileId = plans.ownerOfPlan(id).orElse(null);
+        if (profileId == null) {
+            return notFound();
+        }
+        UUID jobId = plans.jobIdOf(id).orElse(null);
+        if (jobId == null) {
+            return notFound();
+        }
+        try {
+            return ResponseEntity.ok(executionPackages.build(id, profileId, plan.applicationId(), jobId));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(503).body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * READ-ONLY artifact download (cv | cover-letter) for a GREENHOUSE plan.
+     * Streams the exact bytes whose sha256 is published in the execution
+     * package, so the worker can verify after download.
+     */
+    @GetMapping("/plans/{id}/artifacts/{kind}")
+    public ResponseEntity<?> artifact(@PathVariable UUID id, @PathVariable String kind) {
+        if (!mayActOnPlan(id)) {
+            return notFound();
+        }
+        var plan = plans.findById(id).orElse(null);
+        if (plan == null || plan.applicationId() == null) {
+            return notFound();
+        }
+        UUID profileId = plans.ownerOfPlan(id).orElse(null);
+        UUID jobId = plans.jobIdOf(id).orElse(null);
+        if (profileId == null || jobId == null) {
+            return notFound();
+        }
+        if (!kind.equals("cv") && !kind.equals("cover-letter")) {
+            return ResponseEntity.badRequest().body(Map.of("error", "unknown artifact kind"));
+        }
+        var bytes = executionPackages.artifactBytes(id, profileId, plan.applicationId(), jobId, kind);
+        if (bytes == null) {
+            return notFound();
+        }
+        return ResponseEntity.ok()
+                .header("Content-Type", bytes.contentType())
+                .header("Content-Disposition", "attachment; filename=\"" + bytes.fileName() + "\"")
+                .header("X-Artifact-Sha256", bytes.sha256())
+                .body(bytes.content());
     }
 
     @PostMapping("/plans/recover-stale")
