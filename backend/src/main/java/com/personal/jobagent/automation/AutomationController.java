@@ -130,7 +130,23 @@ public class AutomationController {
         if (!mayActOnPlan(id)) {
             return notFound();
         }
-        return ResponseEntity.status(410).body(Map.of("error", "real application submission is disabled"));
+        var plan = plans.find(ownerContext.profileIdOrNull(), id).orElse(null);
+        if (plan == null || !"AWAITING_APPROVAL".equals(plan.status())) {
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "approval requires a validated plan awaiting human review"));
+        }
+        String rejection = approvalPrecondition(plan);
+        if (rejection != null) {
+            return ResponseEntity.status(409).body(Map.of("error", rejection));
+        }
+        if (!plans.approveForSubmission(id)) {
+            return ResponseEntity.status(409).body(Map.of("error", "review state changed"));
+        }
+        audit.write(new AuditEntry(ownerContext.actorOr("user"), "GREENHOUSE_SUBMIT_APPROVED", "AUTOMATION_PLAN", id,
+                null, Map.of("approvedForSubmission", true, "submissionEnabled", false), null, UuidV7.generate()));
+        // Approval records intent only: READY_TO_SUBMIT plans are never served
+        // to a worker again and no endpoint transitions them to SUBMITTED.
+        return ResponseEntity.ok(Map.of("status", "READY_TO_SUBMIT", "submissionEnabled", false));
     }
 
     @PostMapping("/plans/{id}/complete")
@@ -197,13 +213,107 @@ public class AutomationController {
         }
         Map<String, Object> body = review == null ? Map.of() : review;
         if (Boolean.TRUE.equals(body.get("acknowledge"))) {
-            boolean updated = plans.transition(id, "AWAITING_APPROVAL", "COMPLETED");
-            if (!updated) return ResponseEntity.status(409).body(Map.of("error", "review state changed"));
+            // Review is recorded and audited, but it is NOT approval and never
+            // completes the plan. Only an explicit submit approval moves a
+            // plan out of AWAITING_APPROVAL — to READY_TO_SUBMIT, not to
+            // COMPLETED or SUBMITTED.
             audit.write(new AuditEntry(ownerContext.actorOr("user"), "GREENHOUSE_FORM_REVIEWED", "AUTOMATION_PLAN", id,
                     null, Map.of("acknowledged", true, "submissionEnabled", false), null, UuidV7.generate()));
             return ResponseEntity.noContent().build();
         }
         return ResponseEntity.badRequest().body(Map.of("error", "review acknowledgement is required"));
+    }
+
+    /**
+     * Server-side approval preconditions. The worker already enforced the
+     * execution-time safety contract — selector allowlist, per-field value
+     * verification, upload binding, VALIDATE hard stops (identity, login,
+     * required fields/uploads), anti-bot detection — so a plan in
+     * AWAITING_APPROVAL has passed that entire chain. Approval independently
+     * re-verifies what the stored plan JSON must itself guarantee before a
+     * human signature is attached to it: package/correlation identity, zero
+     * unresolved required gaps, artifacts bound to immutable versions whose
+     * stored checksums still match, and no submission-capable step anywhere
+     * in the plan. Returns null when every precondition holds, otherwise a
+     * human-readable rejection reason.
+     */
+    private String approvalPrecondition(AutomationPlanRepository.PlanRow plan) {
+        Map<String, Object> stored = plan.plan() == null ? Map.of() : plan.plan();
+        if (!"GREENHOUSE".equals(stored.get("planType"))) {
+            return "only greenhouse execution plans can be approved for submission";
+        }
+        Map<String, Object> pkg = asObjectMap(stored.get("package"));
+        Map<String, Object> correlation = asObjectMap(stored.get("correlation"));
+        if (pkg.isEmpty() || correlation.isEmpty()
+                || !Objects.equals(pkg.get("planId"), plan.id().toString())
+                || !Objects.equals(pkg.get("applicationId"), correlation.get("applicationId"))
+                || !Objects.equals(pkg.get("jobId"), correlation.get("jobId"))
+                || !Objects.equals(pkg.get("expectedUrl"), plan.targetUrl())) {
+            return "package correlation does not match its plan";
+        }
+        if (pkg.get("requiredGaps") instanceof List<?> gaps && !gaps.isEmpty()) {
+            return "unresolved human-required fields remain (" + gaps.size() + ")";
+        }
+        if (stored.get("steps") instanceof List<?> steps) {
+            for (Object o : steps) {
+                Map<String, Object> step = asObjectMap(o);
+                String type = String.valueOf(step.get("type"));
+                if ("CLICK".equals(type) || "MOCK_SUBMIT".equals(type)) {
+                    return "submission-capable steps cannot be approved";
+                }
+                if ("POLICY_CHECK".equals(type)
+                        && "REAL_SUBMIT".equals(asObjectMap(step.get("params")).get("action"))) {
+                    return "real submission steps cannot be approved";
+                }
+            }
+        }
+        UUID applicationId = uuid(correlation.get("applicationId"));
+        UUID jobId = uuid(correlation.get("jobId"));
+        UUID profileId = ownerContext.profileIdOrNull();
+        if (applicationId == null || jobId == null || profileId == null) {
+            return "plan correlation is incomplete";
+        }
+        String cvReason = verifyArtifact(plan.id(), profileId, applicationId, jobId, "cv", pkg.get("cv"), true);
+        if (cvReason != null) return cvReason;
+        String coverReason = verifyArtifact(plan.id(), profileId, applicationId, jobId, "cover-letter", pkg.get("coverLetter"), false);
+        return coverReason != null ? coverReason : null;
+    }
+
+    /** Verifies one artifact precondition; null when satisfied, else the reason. */
+    private String verifyArtifact(UUID planId, UUID profileId, UUID applicationId, UUID jobId,
+                                  String kind, Object artifact, boolean required) {
+        Map<String, Object> meta = asObjectMap(artifact);
+        if (meta.isEmpty()) {
+            return required ? "the approved package has no bound " + kind + " artifact" : null;
+        }
+        Object versionId = meta.get("versionId");
+        Object sha256 = meta.get("sha256");
+        if (!(versionId instanceof String v) || v.isBlank() || !(sha256 instanceof String s) || s.isBlank()) {
+            return "the " + kind + " artifact is missing its immutable version or checksum";
+        }
+        ExecutionPackageService.ArtifactBytes bytes;
+        try {
+            bytes = executionPackages.artifactBytes(planId, profileId, applicationId, jobId, kind, UUID.fromString(v));
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return "the " + kind + " artifact is not linked to this application: " + e.getMessage();
+        }
+        if (bytes == null || !s.equals(bytes.sha256())) {
+            return "the " + kind + " artifact checksum does not match the stored version";
+        }
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> asObjectMap(Object o) {
+        return o instanceof Map ? (Map<String, Object>) o : Map.of();
+    }
+
+    private UUID uuid(Object o) {
+        try {
+            return o == null ? null : UUID.fromString(String.valueOf(o));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     /**

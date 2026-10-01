@@ -24,6 +24,7 @@ export const ApplicationsPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reviewingPlan, setReviewingPlan] = useState<string | null>(null);
+  const [approvingPlan, setApprovingPlan] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
 
   const fetchApplications = useCallback(async () => {
@@ -57,6 +58,21 @@ export const ApplicationsPage: React.FC = () => {
       setReviewError(err instanceof Error ? err.message : 'Could not record review');
     } finally {
       setReviewingPlan(null);
+    }
+  };
+
+  const approvePlan = async (planId: string) => {
+    setApprovingPlan(planId);
+    setReviewError(null);
+    try {
+      // Explicit APPROVED_FOR_SUBMISSION. The backend keeps actual submission
+      // disabled: the plan becomes READY_TO_SUBMIT and nothing ever submits it.
+      await apiFetch(`/automation/plans/${planId}/approve-submit`, { method: 'POST' });
+      await fetchApplications();
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : 'Approval failed');
+    } finally {
+      setApprovingPlan(null);
     }
   };
 
@@ -140,6 +156,9 @@ export const ApplicationsPage: React.FC = () => {
                     {application.planStatus === 'AWAITING_APPROVAL' && (
                       <span className="text-amber-400 text-xs font-medium">Human review required</span>
                     )}
+                    {application.planStatus === 'READY_TO_SUBMIT' && (
+                      <span className="text-emerald-400 text-xs font-medium">Ready to submit — actual submission is disabled</span>
+                    )}
                     {application.planStatus === 'AWAITING_SUBMIT_APPROVAL' && (
                       <span className="text-red-400 text-xs font-medium">Submission is disabled</span>
                     )}
@@ -150,14 +169,24 @@ export const ApplicationsPage: React.FC = () => {
                       <span className="text-red-400 text-xs">Blocked by anti-bot</span>
                     )}
                     {application.planStatus === 'AWAITING_APPROVAL' && application.planId && (
-                      <button
-                        type="button"
-                        disabled={reviewingPlan === application.planId}
-                        onClick={() => acknowledgeReview(application.planId!)}
-                        className="ml-auto rounded-md border border-amber-500/40 px-3 py-1 text-xs font-semibold text-amber-200 hover:bg-amber-500/10 disabled:opacity-50"
-                      >
-                        {reviewingPlan === application.planId ? 'Recording…' : 'I reviewed the form'}
-                      </button>
+                      <div className="ml-auto flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={reviewingPlan === application.planId || approvingPlan === application.planId}
+                          onClick={() => acknowledgeReview(application.planId!)}
+                          className="rounded-md border border-amber-500/40 px-3 py-1 text-xs font-semibold text-amber-200 hover:bg-amber-500/10 disabled:opacity-50"
+                        >
+                          {reviewingPlan === application.planId ? 'Recording…' : 'I reviewed the form'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={reviewingPlan === application.planId || approvingPlan === application.planId}
+                          onClick={() => approvePlan(application.planId!)}
+                          className="rounded-md border border-emerald-500/40 px-3 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50"
+                        >
+                          {approvingPlan === application.planId ? 'Approving…' : 'Approve for submission'}
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>
@@ -180,6 +209,7 @@ function PlanStatusBadge({ status }: { status?: string | null }) {
     FAILED: 'bg-red-500/20 text-red-300',
     BLOCKED_ANTI_BOT: 'bg-red-500/20 text-red-300',
     AWAITING_APPROVAL: 'bg-amber-500/20 text-amber-300',
+    READY_TO_SUBMIT: 'bg-emerald-500/20 text-emerald-300',
     AWAITING_SUBMIT_APPROVAL: 'bg-red-500/20 text-red-300',
     ABANDONED: 'bg-gray-500/20 text-gray-400',
   };

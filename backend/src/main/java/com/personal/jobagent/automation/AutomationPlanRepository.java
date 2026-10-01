@@ -133,6 +133,17 @@ public class AutomationPlanRepository {
         return db.update("update automation_plans set submit_approved=true,status='RUNNING',updated_at=now() where id=? and status='AWAITING_SUBMIT_APPROVAL' and submit_approved=false", id) == 1;
     }
 
+    /**
+     * Explicit owner approval of a validated plan: AWAITING_APPROVAL →
+     * READY_TO_SUBMIT with {@code submit_approved=true}. Atomic and
+     * single-shot — a second approval, or one racing a state change, no-ops.
+     * READY_TO_SUBMIT is a terminal Phase 3 state: no worker sees the plan
+     * again (claim-next only serves PREPARED) and submission stays disabled.
+     */
+    public boolean approveForSubmission(UUID id) {
+        return db.update("update automation_plans set submit_approved=true,status='READY_TO_SUBMIT',updated_at=now() where id=? and status='AWAITING_APPROVAL' and submit_approved=false", id) == 1;
+    }
+
     public boolean appendStep(UUID id, int index, String stepId, String status, Map<String, Object> result, String screenshot) {
         try {
             String value = json.writeValueAsString(result);
