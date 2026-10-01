@@ -23,6 +23,8 @@ export const ApplicationsPage: React.FC = () => {
   const [applications, setApplications] = useState<ApplicationSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [reviewingPlan, setReviewingPlan] = useState<string | null>(null);
+  const [reviewError, setReviewError] = useState<string | null>(null);
 
   const fetchApplications = useCallback(async () => {
     setLoading(true);
@@ -41,6 +43,22 @@ export const ApplicationsPage: React.FC = () => {
   useEffect(() => {
     fetchApplications();
   }, [fetchApplications]);
+
+  const acknowledgeReview = async (planId: string) => {
+    setReviewingPlan(planId);
+    setReviewError(null);
+    try {
+      await apiFetch(`/automation/plans/${planId}/review`, {
+        method: 'POST',
+        body: JSON.stringify({ acknowledge: true }),
+      });
+      await fetchApplications();
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : 'Could not record review');
+    } finally {
+      setReviewingPlan(null);
+    }
+  };
 
   return (
     <PageShell>
@@ -73,6 +91,8 @@ export const ApplicationsPage: React.FC = () => {
           body="When a discovered job matches your profile strongly enough (APPLY), an application is created here automatically and prepared for review."
         />
       )}
+
+      {reviewError && <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300" role="alert">{reviewError}</div>}
 
       {!loading && applications.length > 0 && (
         <div className="space-y-3">
@@ -117,14 +137,27 @@ export const ApplicationsPage: React.FC = () => {
                   <div className="flex items-center gap-3 text-sm">
                     <span className="text-ink-muted">Automation</span>
                     <PlanStatusBadge status={application.planStatus} />
+                    {application.planStatus === 'AWAITING_APPROVAL' && (
+                      <span className="text-amber-400 text-xs font-medium">Human review required</span>
+                    )}
                     {application.planStatus === 'AWAITING_SUBMIT_APPROVAL' && (
-                      <span className="text-amber-400 text-xs font-medium">Needs approval</span>
+                      <span className="text-red-400 text-xs font-medium">Submission is disabled</span>
                     )}
                     {application.planStatus === 'FAILED' && (
                       <span className="text-red-400 text-xs">Plan failed</span>
                     )}
                     {application.planStatus === 'BLOCKED_ANTI_BOT' && (
                       <span className="text-red-400 text-xs">Blocked by anti-bot</span>
+                    )}
+                    {application.planStatus === 'AWAITING_APPROVAL' && application.planId && (
+                      <button
+                        type="button"
+                        disabled={reviewingPlan === application.planId}
+                        onClick={() => acknowledgeReview(application.planId!)}
+                        className="ml-auto rounded-md border border-amber-500/40 px-3 py-1 text-xs font-semibold text-amber-200 hover:bg-amber-500/10 disabled:opacity-50"
+                      >
+                        {reviewingPlan === application.planId ? 'Recording…' : 'I reviewed the form'}
+                      </button>
                     )}
                   </div>
                 </div>
@@ -146,7 +179,8 @@ function PlanStatusBadge({ status }: { status?: string | null }) {
     SUBMITTED: 'bg-green-500/20 text-green-300',
     FAILED: 'bg-red-500/20 text-red-300',
     BLOCKED_ANTI_BOT: 'bg-red-500/20 text-red-300',
-    AWAITING_SUBMIT_APPROVAL: 'bg-amber-500/20 text-amber-300',
+    AWAITING_APPROVAL: 'bg-amber-500/20 text-amber-300',
+    AWAITING_SUBMIT_APPROVAL: 'bg-red-500/20 text-red-300',
     ABANDONED: 'bg-gray-500/20 text-gray-400',
   };
   return (

@@ -124,11 +124,13 @@ public class AutomationController {
 
     @PostMapping("/plans/{id}/approve-submit")
     public ResponseEntity<?> approve(@PathVariable UUID id) {
+        if (ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(403).body(Map.of("error", "human approval is required"));
+        }
         if (!mayActOnPlan(id)) {
             return notFound();
         }
-        return plans.approveSubmit(id) ? ResponseEntity.noContent().build()
-                : ResponseEntity.status(409).body(Map.of("error", "submit approval requires AWAITING_SUBMIT_APPROVAL"));
+        return ResponseEntity.status(410).body(Map.of("error", "real application submission is disabled"));
     }
 
     @PostMapping("/plans/{id}/complete")
@@ -138,9 +140,9 @@ public class AutomationController {
         }
         String outcome = r.outcome();
         boolean ok = switch (outcome == null ? "" : outcome) {
-            case "AWAITING_SUBMIT_APPROVAL", "HUMAN_REQUIRED", "COMPLETED", "FAILED", "BLOCKED_ANTI_BOT" ->
-                    plans.transition(id, "RUNNING", outcome == null ? "" : outcome.equals("HUMAN_REQUIRED") ? "AWAITING_APPROVAL" : outcome);
-            case "SUBMITTED" -> plans.findById(id).filter(p -> p.submitApproved()).map(p -> plans.transition(id, "RUNNING", outcome)).orElse(false);
+            case "HUMAN_REQUIRED", "COMPLETED", "FAILED", "BLOCKED_ANTI_BOT" ->
+                    plans.transition(id, "RUNNING", outcome.equals("HUMAN_REQUIRED") ? "AWAITING_APPROVAL" : outcome);
+            case "SUBMITTED" -> false;
             default -> false;
         };
         if (!ok) {
@@ -183,6 +185,25 @@ public class AutomationController {
         return plans.claimNext()
                 .<ResponseEntity<?>>map(ResponseEntity::ok)
                 .orElseGet(() -> ResponseEntity.noContent().build());
+    }
+
+    @PostMapping("/plans/{id}/review")
+    public ResponseEntity<?> review(@PathVariable UUID id,
+                                    @RequestBody(required = false) Map<String, Object> review) {
+        if (!mayActOnPlan(id) || ownerContext.isWorkerRequest()) return notFound();
+        var plan = plans.find(ownerContext.profileIdOrNull(), id).orElse(null);
+        if (plan == null || !"AWAITING_APPROVAL".equals(plan.status())) {
+            return ResponseEntity.status(409).body(Map.of("error", "plan is not awaiting human review"));
+        }
+        Map<String, Object> body = review == null ? Map.of() : review;
+        if (Boolean.TRUE.equals(body.get("acknowledge"))) {
+            boolean updated = plans.transition(id, "AWAITING_APPROVAL", "COMPLETED");
+            if (!updated) return ResponseEntity.status(409).body(Map.of("error", "review state changed"));
+            audit.write(new AuditEntry(ownerContext.actorOr("user"), "GREENHOUSE_FORM_REVIEWED", "AUTOMATION_PLAN", id,
+                    null, Map.of("acknowledged", true, "submissionEnabled", false), null, UuidV7.generate()));
+            return ResponseEntity.noContent().build();
+        }
+        return ResponseEntity.badRequest().body(Map.of("error", "review acknowledgement is required"));
     }
 
     /**
