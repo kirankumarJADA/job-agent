@@ -294,6 +294,7 @@ export interface ApplicationAnswer {
   answerText: string;
   confidence: number;
   status: 'ANSWERED' | 'NEEDS_USER_INPUT' | 'HARD_STOP';
+  humanConfirmed: boolean;
   validationNotes?: {
     questionType?: string;
     issues?: string[];

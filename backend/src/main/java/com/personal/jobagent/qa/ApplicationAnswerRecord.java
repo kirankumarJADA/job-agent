@@ -16,7 +16,14 @@ public record ApplicationAnswerRecord(
         BigDecimal confidence,
         String status,
         Map<String, Object> validationNotes,
+        boolean humanConfirmed,
         Instant createdAt,
-        Instant updatedAt
-) {
+        Instant updatedAt) {
+    public ApplicationAnswerRecord(UUID id, UUID profileId, UUID jobId, UUID applicationId,
+                                   String questionText, String questionType, String answerText,
+                                   BigDecimal confidence, String status, Map<String, Object> validationNotes,
+                                   Instant createdAt, Instant updatedAt) {
+        this(id, profileId, jobId, applicationId, questionText, questionType, answerText,
+                confidence, status, validationNotes, false, createdAt, updatedAt);
+    }
 }

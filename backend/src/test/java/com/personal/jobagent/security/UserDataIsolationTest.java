@@ -30,6 +30,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -149,8 +150,54 @@ class UserDataIsolationTest {
                 new ApplicationAnswerController.UpdateAnswerRequest("ANSWERED", "changed"), request());
 
         assertThat(response.getStatusCode().value()).isEqualTo(404);
-        verify(repository, never()).updateStatusForProfile(any(), anyString(), any(), any());
+        verify(repository, never()).updateStatusForProfile(any(), anyString(), any(), anyBoolean(), any());
         verify(repository, never()).updateStatus(any(), anyString(), any());
+    }
+
+    @Test
+    void confirmingAnOwnedAnswerForAutofillIsExplicitAndProfileScoped() {
+        ApplicationAnswerRepository repository = mock(ApplicationAnswerRepository.class);
+        UUID answerId = UUID.randomUUID();
+        var draft = new com.personal.jobagent.qa.ApplicationAnswerRecord(answerId, profileId,
+                UUID.randomUUID(), UUID.randomUUID(), "Why this role?", "WHY_ROLE", "A drafted response",
+                java.math.BigDecimal.valueOf(0.9), "ANSWERED", Map.of(), false,
+                java.time.Instant.now(), java.time.Instant.now());
+        var confirmed = new com.personal.jobagent.qa.ApplicationAnswerRecord(answerId, profileId,
+                draft.jobId(), draft.applicationId(), draft.questionText(), draft.questionType(), draft.answerText(),
+                draft.confidence(), draft.status(), draft.validationNotes(), true,
+                draft.createdAt(), java.time.Instant.now());
+        when(repository.findByIdForProfile(answerId, profileId)).thenReturn(Optional.of(draft), Optional.of(confirmed));
+        when(repository.updateStatusForProfile(answerId, "ANSWERED", null, true, profileId)).thenReturn(true);
+
+        ApplicationAnswerController controller = answerController(repository);
+        authenticate();
+
+        var response = controller.updateAnswer(answerId,
+                new ApplicationAnswerController.UpdateAnswerRequest(null, null, true), request());
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        verify(repository).updateStatusForProfile(answerId, "ANSWERED", null, true, profileId);
+        assertThat(response.getBody()).isEqualTo(confirmed);
+    }
+
+    @Test
+    void generatedDraftCannotBeConfirmedForAutofillUntilMarkedAnswered() {
+        ApplicationAnswerRepository repository = mock(ApplicationAnswerRepository.class);
+        UUID answerId = UUID.randomUUID();
+        var draft = new com.personal.jobagent.qa.ApplicationAnswerRecord(answerId, profileId,
+                UUID.randomUUID(), UUID.randomUUID(), "Question?", "GENERAL", "Draft",
+                java.math.BigDecimal.valueOf(0.5), "NEEDS_USER_INPUT", Map.of(), false,
+                java.time.Instant.now(), java.time.Instant.now());
+        when(repository.findByIdForProfile(answerId, profileId)).thenReturn(Optional.of(draft));
+
+        ApplicationAnswerController controller = answerController(repository);
+        authenticate();
+
+        var response = controller.updateAnswer(answerId,
+                new ApplicationAnswerController.UpdateAnswerRequest(null, null, true), request());
+
+        assertThat(response.getStatusCode().value()).isEqualTo(400);
+        verify(repository, never()).updateStatusForProfile(any(), anyString(), any(), anyBoolean(), any());
     }
 
     @Test

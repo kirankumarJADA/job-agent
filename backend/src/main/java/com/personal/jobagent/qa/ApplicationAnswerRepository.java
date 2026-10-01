@@ -36,6 +36,7 @@ public class ApplicationAnswerRepository {
                 rs.getBigDecimal("confidence"),
                 rs.getString("status"),
                 JdbcConversions.readJsonMap(rs, "validation_notes", objectMapper),
+                rs.getBoolean("human_confirmed"),
                 rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").toInstant() : null,
                 rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toInstant() : null
         );
@@ -97,15 +98,18 @@ public class ApplicationAnswerRepository {
      *
      * @return true when a row the caller owns was updated
      */
-    public boolean updateStatusForProfile(UUID id, String status, String updatedAnswer, UUID profileId) {
+    public boolean updateStatusForProfile(UUID id, String status, String updatedAnswer,
+                                           boolean humanConfirmed, UUID profileId) {
         if (updatedAnswer != null) {
             return jdbcTemplate.update(
-                    "update application_answers set status = ?, answer_text = ?, updated_at = now() "
+                    "update application_answers set status = ?, answer_text = ?, human_confirmed = ?, updated_at = now() "
                             + "where id = ? and profile_id = ?",
-                    status, updatedAnswer, id, profileId) > 0;
+                    status, updatedAnswer, humanConfirmed, id, profileId) > 0;
         }
         return jdbcTemplate.update(
-                "update application_answers set status = ?, updated_at = now() where id = ? and profile_id = ?",
-                status, id, profileId) > 0;
+                "update application_answers set status = ?, human_confirmed = ?, updated_at = now() "
+                        + "where id = ? and profile_id = ?",
+                status, humanConfirmed, id, profileId) > 0;
     }
+
 }

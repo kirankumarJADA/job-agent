@@ -38,7 +38,11 @@ public class ApplicationAnswerController {
     }
 
     public record DraftAnswerRequest(UUID jobId, UUID applicationId, String questionText) {}
-    public record UpdateAnswerRequest(String status, String answerText) {}
+    public record UpdateAnswerRequest(String status, String answerText, Boolean confirmForAutofill) {
+        public UpdateAnswerRequest(String status, String answerText) {
+            this(status, answerText, null);
+        }
+    }
 
     /**
      * Lists the caller's own drafted answers for a job.
@@ -112,8 +116,26 @@ public class ApplicationAnswerController {
             return notFound(request, "Answer not found");
         }
 
-        answerRepository.updateStatusForProfile(
-                id, body.status() != null ? body.status() : existing.get().status(), body.answerText(), profileId);
+        String status = body.status() != null ? body.status() : existing.get().status();
+        if (!List.of("ANSWERED", "NEEDS_USER_INPUT", "HARD_STOP").contains(status)) {
+            return ResponseEntity.badRequest().body(ApiError.of(400, "Bad Request", "Unsupported answer status",
+                    request.getRequestURI(), correlationId()));
+        }
+        String answerText = body.answerText() != null ? body.answerText() : existing.get().answerText();
+        boolean humanConfirmed = Boolean.TRUE.equals(body.confirmForAutofill());
+        if (humanConfirmed && (!"ANSWERED".equals(status) || answerText == null || answerText.isBlank())) {
+            return ResponseEntity.badRequest().body(ApiError.of(400, "Bad Request",
+                    "A non-empty ANSWERED response is required for autofill confirmation",
+                    request.getRequestURI(), correlationId()));
+        }
+        if (body.confirmForAutofill() == null && body.answerText() == null
+                && "ANSWERED".equals(status)) {
+            humanConfirmed = existing.get().humanConfirmed();
+        }
+        if (body.confirmForAutofill() == null && body.answerText() != null) {
+            humanConfirmed = false;
+        }
+        answerRepository.updateStatusForProfile(id, status, body.answerText(), humanConfirmed, profileId);
 
         auditLogWriter.write(new AuditEntry(
                 actorEmail(),
@@ -121,7 +143,7 @@ public class ApplicationAnswerController {
                 "APPLICATION_ANSWER",
                 id,
                 Map.of("status", existing.get().status()),
-                Map.of("status", body.status() != null ? body.status() : existing.get().status()),
+                Map.of("status", status, "humanConfirmed", humanConfirmed),
                 request.getRemoteAddr(),
                 UuidV7.generate()
         ));

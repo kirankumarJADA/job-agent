@@ -617,6 +617,30 @@ const ApplicationQASection: React.FC<{ jobId: string }> = ({ jobId }) => {
                   ))}
                 </ul>
               )}
+              {ans.status === 'ANSWERED' && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setError(null);
+                    try {
+                      await apiFetch(`/application-answers/${ans.id}`, {
+                        method: 'PUT',
+                        body: JSON.stringify({ confirmForAutofill: !ans.humanConfirmed }),
+                      });
+                      fetchAnswers();
+                    } catch (err: unknown) {
+                      setError(err instanceof Error ? err.message : 'Confirmation update failed');
+                    }
+                  }}
+                  className="mt-3 rounded-md border border-line bg-surface px-3 py-1.5 text-xs font-semibold text-ink-soft hover:border-forest-400"
+                >
+                  {ans.humanConfirmed ? 'Remove autofill confirmation' : 'I reviewed this answer — allow autofill'}
+                </button>
+              )}
+              <p className="mt-2 text-[11px] text-ink-faint">
+                {ans.humanConfirmed ? 'Explicitly reviewed by you; eligible for exact-question autofill.'
+                  : 'Draft only. It will not be autofilled until you review and confirm it.'}
+              </p>
             </div>
           ))}
         </div>
