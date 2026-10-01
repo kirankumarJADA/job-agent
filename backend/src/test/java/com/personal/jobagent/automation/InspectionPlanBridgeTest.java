@@ -42,6 +42,7 @@ class InspectionPlanBridgeTest {
 
     private ApplicationPipelineService pipelineService;
     private InspectionPlanService inspectionPlanService;
+    private GreenhouseExecutionPlanService greenhousePlanService;
     private ResumeAtsIntelligenceService resumeService;
     private CoverLetterService coverLetterService;
     private ApplicationAnswerService answerService;
@@ -64,9 +65,10 @@ class InspectionPlanBridgeTest {
         notifications = mock(NotificationService.class);
 
         inspectionPlanService = new InspectionPlanService(planRepo, db);
+        greenhousePlanService = mock(GreenhouseExecutionPlanService.class);
 
         handler = new ApplicationPipelineEventHandler(
-                pipelineService, inspectionPlanService,
+                pipelineService, inspectionPlanService, greenhousePlanService,
                 resumeService, coverLetterService, answerService,
                 jobRepository, notifications, db, new ObjectMapper());
 
@@ -76,18 +78,20 @@ class InspectionPlanBridgeTest {
         // Timeline writes succeed
         when(db.update(contains("application_events"), any(UUID.class), eq(APP_ID), any(), any()))
                 .thenReturn(1);
-        // Job lookup
+        // Dispatch treats this fixture as a non-Greenhouse application.
+        String nonGreenhouseUrl = "https://jobs.example.org/acme";
         when(jobRepository.findById(JOB_ID)).thenReturn(Optional.of(
-                new JobRecord(JOB_ID, UUID.randomUUID(), "gh-1", null, "Acme", "Java Engineer",
+                new JobRecord(JOB_ID, UUID.randomUUID(), "other-1", null, "Acme", "Java Engineer",
                         "London", null, null, null, null, null,
                         new BigDecimal("40000"), new BigDecimal("60000"), "GBP",
-                        "Java role", List.of("Java"), APP_URL, APP_URL, Instant.now(), "DISCOVERED")));
+                        "Java role", List.of("Java"), nonGreenhouseUrl, nonGreenhouseUrl, Instant.now(), "DISCOVERED")));
+        when(greenhousePlanService.handles(nonGreenhouseUrl)).thenReturn(false);
         // Application URL query for InspectionPlanService
         when(db.query(contains("application_url"), any(RowMapper.class), eq(JOB_ID)))
-                .thenReturn(List.of(APP_URL));
+                .thenReturn(List.of(nonGreenhouseUrl));
         // Plan creation returns a deterministic id
         when(planRepo.create(eq(PROFILE), eq(APP_ID), eq(JOB_ID),
-                eq(APP_URL), eq("inspect:" + APP_ID), anyList()))
+                eq("https://jobs.example.org/acme"), eq("inspect:" + APP_ID), anyList()))
                 .thenReturn(PLAN_ID);
     }
 
@@ -103,7 +107,7 @@ class InspectionPlanBridgeTest {
 
         // Inspection plan was created with correct parameters
         verify(planRepo).create(eq(PROFILE), eq(APP_ID), eq(JOB_ID),
-                eq(APP_URL), eq("inspect:" + APP_ID),
+                eq("https://jobs.example.org/acme"), eq("inspect:" + APP_ID),
                 argThat(steps -> steps.size() == 3
                         && "NAVIGATE".equals(steps.get(0).type())
                         && "SCREENSHOT".equals(steps.get(1).type())
@@ -135,7 +139,7 @@ class InspectionPlanBridgeTest {
         // repository ensures only one row. The service is called twice but
         // the second insert is a no-op.
         verify(planRepo, times(2)).create(eq(PROFILE), eq(APP_ID), eq(JOB_ID),
-                eq(APP_URL), eq("inspect:" + APP_ID), anyList());
+                eq("https://jobs.example.org/acme"), eq("inspect:" + APP_ID), anyList());
     }
 
     @Test
@@ -171,7 +175,7 @@ class InspectionPlanBridgeTest {
 
         // The failure was recorded
         verify(db).update(contains("application_events"), any(UUID.class), eq(APP_ID),
-                eq("INSPECTION_PLAN_FAILED"), contains("RuntimeException"));
+                eq("AUTOMATION_PLAN_FAILED"), contains("RuntimeException"));
     }
 
     private Envelope createdEnvelope() {

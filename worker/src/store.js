@@ -74,6 +74,12 @@ export class StateStore {
     this.#save();
   }
 
+  greenhouseExpected(planId, entries) {
+    const plan = this.state.plans[planId];
+    plan.greenhouseExpected = entries;
+    this.#save();
+  }
+
   event(planId, event) {
     this.state.plans[planId].events.push({ ...event, at: Date.now() });
     this.#save();

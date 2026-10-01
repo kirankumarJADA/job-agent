@@ -249,13 +249,17 @@ class ApplicationPipelineIT {
             assertThat(cv).isEqualTo(1);
             assertThat(cover).isEqualTo(1);
             assertThat(answers).isEqualTo(1);
-        });
-        // Preparation outcome recorded on the timeline, three OK steps:
-        Integer okSteps = jdbc.queryForObject("""
+            // Preparation outcome recorded on the timeline, three OK steps.
+            // Each step commits its artifact row before its PREPARATION event
+            // row, so this assertion must retry inside the await window — a
+            // one-shot query can legitimately observe the artifacts a moment
+            // before the third timeline event lands.
+            Integer okSteps = jdbc.queryForObject("""
                 select count(*) from application_events
                 where application_id = ? and type = 'PREPARATION' and payload->>'status' = 'OK'
                 """, Integer.class, applicationIdOf(JOB_APPLY));
-        assertThat(okSteps).isEqualTo(3);
+            assertThat(okSteps).isEqualTo(3);
+        });
         // application.prepared emitted through the outbox:
         Integer prepared = jdbc.queryForObject(
                 "select count(*) from outbox_events where event_type = 'application.prepared'",

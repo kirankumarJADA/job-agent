@@ -60,22 +60,25 @@ public class GreenhouseAdapter extends BaseAtsAdapter {
     /** Hard cap on inspected page size (larger responses = unavailable). */
     private static final int MAX_PAGE_BYTES = 2 * 1024 * 1024;
 
-    private final HttpClient client = HttpClient.newBuilder()
+    private static final HttpClient CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
-            .followRedirects(HttpClient.Redirect.NORMAL)
+            .followRedirects(HttpClient.Redirect.NEVER)
             .build();
     private final Function<String, String> fetcher;
 
     public GreenhouseAdapter() {
         this(url -> {
             try {
-                HttpResponse<byte[]> response = HttpClient.newHttpClient().send(HttpRequest.newBuilder(URI.create(url))
+                HttpResponse<byte[]> response = CLIENT.send(HttpRequest.newBuilder(URI.create(url))
                                 .timeout(Duration.ofSeconds(20))
                                 .header("Accept", "text/html")
                                 .header("User-Agent", "PersonalJobAgent/1.0 (+read-only-inspection)")
                                 .GET()
                                 .build(),
                         HttpResponse.BodyHandlers.ofByteArray());
+                if (response.statusCode() >= 300 && response.statusCode() < 400) {
+                    throw new IllegalStateException("REDIRECT_NOT_FOLLOWED");
+                }
                 if (response.statusCode() >= 400) {
                     throw new IllegalStateException("UPSTREAM_STATUS_" + response.statusCode());
                 }
@@ -96,6 +99,22 @@ public class GreenhouseAdapter extends BaseAtsAdapter {
     GreenhouseAdapter(Function<String, String> fetcher) {
         super(AtsKind.GREENHOUSE, Pattern.compile("boards\\.greenhouse\\.io|greenhouse\\.io"), false, false);
         this.fetcher = fetcher;
+    }
+
+    @Override
+    public boolean matchesUrl(String url) {
+        if (url == null || url.isBlank()) return false;
+        try {
+            URI uri = URI.create(url);
+            String host = uri.getHost();
+            return "https".equalsIgnoreCase(uri.getScheme())
+                    && (uri.getPort() == -1 || uri.getPort() == 443)
+                    && uri.getUserInfo() == null
+                    && ("boards.greenhouse.io".equalsIgnoreCase(host)
+                    || "job-boards.greenhouse.io".equalsIgnoreCase(host));
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
     }
 
     @Override
@@ -121,10 +140,36 @@ public class GreenhouseAdapter extends BaseAtsAdapter {
     static List<FormFieldDescriptor> parse(String html) {
         Document document = Jsoup.parse(html);
         List<FormFieldDescriptor> fields = new ArrayList<>();
+        java.util.Set<String> groupedRadios = new java.util.HashSet<>();
         for (Element control : document.select("input[id], select[id], textarea[id]")) {
             if (isValidationMirror(control)) continue;
             String id = control.id();
             if (id == null || id.isBlank()) continue;
+            // Radio groups are reported once per group (key = group name) with
+            // the full option value set, so the mapper can select by value.
+            if ("radio".equalsIgnoreCase(htmlType(control)) && !control.attr("name").isBlank()) {
+                String group = control.attr("name");
+                if (group.matches("[A-Za-z0-9_-]{1,80}")) {
+                    if (!groupedRadios.add("radio:" + group)) continue;
+                    // Filter controls by the literal name rather than interpolating
+                    // untrusted page content into a CSS selector.
+                    Elements groupControls = document.select("input[type=radio]").stream()
+                            .filter(radio -> group.equals(radio.attr("name")))
+                            .collect(org.jsoup.select.Elements::new, Elements::add, Elements::addAll);
+                    LinkedHashSet<String> options = new LinkedHashSet<>();
+                    for (Element radio : groupControls) {
+                        if (!radio.attr("value").isBlank()) options.add(radio.attr("value"));
+                    }
+                    fields.add(new FormFieldDescriptor(
+                            id,
+                            groupLabel(document, groupControls, group),
+                            "radio",
+                            radioGroupRequired(groupControls, group),
+                            "#" + id,
+                            new ArrayList<>(options)));
+                    continue;
+                }
+            }
             fields.add(new FormFieldDescriptor(
                     id,
                     labelFor(document, control, id),
@@ -134,6 +179,38 @@ public class GreenhouseAdapter extends BaseAtsAdapter {
                     optionsOf(control)));
         }
         return fields;
+    }
+
+    /** Group label from the smallest containing wrapper, excluding option labels. */
+    private static String groupLabel(Document document, Elements groupControls, String group) {
+        Element wrapper = radioGroupWrapper(groupControls, group);
+        if (wrapper != null) {
+            for (Element label : wrapper.select("label")) {
+                if (label.hasAttr("for")) continue;
+                if (!label.text().isBlank()) return stripRequiredMarker(label.text());
+            }
+        }
+        return null;
+    }
+
+    private static boolean radioGroupRequired(Elements groupControls, String group) {
+        if (groupControls.stream().anyMatch(GreenhouseAdapter::isRequired)) return true;
+        Element wrapper = radioGroupWrapper(groupControls, group);
+        if (wrapper == null) return false;
+        return !wrapper.select("input[class*=requiredInput]").isEmpty()
+                || wrapper.select("label").stream().filter(label -> !label.hasAttr("for"))
+                .anyMatch(label -> label.text().trim().endsWith("*"));
+    }
+
+    private static Element radioGroupWrapper(Elements groupControls, String group) {
+        if (groupControls.isEmpty()) return null;
+        Element parent = groupControls.first().parent();
+        for (int depth = 0; parent != null && depth < 6; depth++, parent = parent.parent()) {
+            long radios = parent.select("input[type=radio]").stream()
+                    .filter(radio -> group.equals(radio.attr("name"))).count();
+            if (radios == groupControls.size()) return parent;
+        }
+        return null;
     }
 
     private FormDescriptor buildDescriptor(String url, List<FormFieldDescriptor> fields) {
@@ -159,7 +236,9 @@ public class GreenhouseAdapter extends BaseAtsAdapter {
     }
 
     private static String labelFor(Document document, Element control, String id) {
-        Element label = document.selectFirst("label[for=" + id + "]");
+        Element label = document.select("label[for]").stream()
+                .filter(candidate -> id.equals(candidate.attr("for")))
+                .findFirst().orElse(null);
         if (label != null && !label.text().isBlank()) {
             return stripRequiredMarker(label.text());
         }
@@ -190,7 +269,9 @@ public class GreenhouseAdapter extends BaseAtsAdapter {
             // The smallest wrapper containing this field's own label decides:
             // mirror present → required; label present without mirror → optional.
             // Walking past that wrapper would read other fields' mirrors.
-            if (!parent.select("label[for=" + control.id() + "]").isEmpty()) {
+            boolean hasLabel = parent.select("label[for]").stream()
+                    .anyMatch(label -> control.id().equals(label.attr("for")));
+            if (hasLabel) {
                 return !parent.select("input[class*=requiredInput]").isEmpty();
             }
             parent = parent.parent();
@@ -210,7 +291,10 @@ public class GreenhouseAdapter extends BaseAtsAdapter {
         String type = control.attr("type");
         if ("radio".equalsIgnoreCase(type) && !control.attr("name").isBlank()) {
             LinkedHashSet<String> values = new LinkedHashSet<>();
-            for (Element radio : control.ownerDocument().select("input[type=radio][name=" + control.attr("name") + "]")) {
+            String group = control.attr("name");
+            if (!group.matches("[A-Za-z0-9_-]{1,80}")) return List.of();
+            for (Element radio : control.ownerDocument().select("input[type=radio]").stream()
+                    .filter(item -> group.equals(item.attr("name"))).toList()) {
                 if (!radio.attr("value").isBlank()) values.add(radio.attr("value"));
             }
             return new ArrayList<>(values);

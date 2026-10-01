@@ -14,6 +14,7 @@ export const StepType = Object.freeze({
   MAILBOX_VERIFY: 'MAILBOX_VERIFY',
   POLICY_CHECK: 'POLICY_CHECK',
   MOCK_SUBMIT: 'MOCK_SUBMIT',
+  VALIDATE: 'VALIDATE',
 });
 
 export const Policy = Object.freeze({ AUTO: 'AUTO', REQUIRES_APPROVAL: 'REQUIRES_APPROVAL', FORBIDDEN: 'FORBIDDEN' });
@@ -27,8 +28,43 @@ const allowedSelectors = new Set([
   'input[name="otp"]',
 ]);
 
+// Greenhouse apply-form selectors (Phase 3C): exact ids for the verified
+// standard fields, closed patterns for Greenhouse's generated question ids
+// and radio-by-value groups. Everything else stays rejected.
+const greenhouseSelectors = new Set([
+  '#first_name', '#last_name', '#email', '#phone', '#country',
+  '#candidate-location', '#resume', '#cover_letter', '#portfolio', '#work_auth',
+  'input[type=file]#resume', 'input[type=file]#cover_letter',
+]);
+const greenhousePatterns = [
+  /^#[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/,
+  /^input\[type=radio\]\[name="[A-Za-z0-9_-]{1,80}"\]\[value="[A-Za-z0-9_. -]{1,120}"\]$/,
+];
+
+export function greenhousePageIdentityMatches(expectedUrl, actualUrl) {
+  try {
+    const expected = new URL(expectedUrl);
+    const actual = new URL(actualUrl);
+    const allowedHosts = new Set(['boards.greenhouse.io', 'job-boards.greenhouse.io']);
+    const defaultPort = (url) => !url.port || url.port === '443';
+    return expected.protocol === 'https:' && actual.protocol === 'https:'
+      && !expected.username && !expected.password && !actual.username && !actual.password
+      && defaultPort(expected) && defaultPort(actual)
+      && allowedHosts.has(expected.hostname.toLowerCase())
+      && allowedHosts.has(actual.hostname.toLowerCase())
+      && expected.pathname.replace(/\/$/, '') === actual.pathname.replace(/\/$/, '');
+  } catch {
+    return false;
+  }
+}
+
 export function assertSafeSelector(selector) {
-  if (!allowedSelectors.has(selector)) throw new Error(`UNALLOWLISTED_SELECTOR:${selector}`);
+  if (allowedSelectors.has(selector)) return;
+  if (greenhouseSelectors.has(selector)) return;
+  for (const pattern of greenhousePatterns) {
+    if (pattern.test(selector)) return;
+  }
+  throw new Error(`UNALLOWLISTED_SELECTOR:${selector}`);
 }
 
 export function validatePackage(pkg) {

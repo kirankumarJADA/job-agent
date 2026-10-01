@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { BrowserWorker } from './browser_worker.js';
 
@@ -11,111 +12,170 @@ const artifactDir = args.get('--artifacts') ?? process.env.WORKER_ARTIFACT_DIR ?
 const approve = args.get('--approve') === true || args.get('--approve') === 'true';
 const eventUrl = process.env.WORKER_EVENT_URL;
 const eventToken = process.env.WORKER_EVENT_TOKEN;
-// ── polling configuration ─────────────────────────────────────────
-const pollUrl = process.env.WORKER_POLL_URL;       // POST claim-next
+const pollUrl = process.env.WORKER_POLL_URL;
 const pollIntervalMs = parseInt(process.env.WORKER_POLL_INTERVAL_MS || '10000', 10);
-const heartbeatUrl = process.env.WORKER_HEARTBEAT_URL; // POST plans/{id}/heartbeat
-const completeUrl = process.env.WORKER_COMPLETE_URL;   // POST plans/{id}/complete
+const heartbeatUrl = process.env.WORKER_HEARTBEAT_URL;
+const completeUrl = process.env.WORKER_COMPLETE_URL;
 
+const authHeaders = () => eventToken ? { authorization: `Bearer ${eventToken}` } : {};
 const eventSink = (event) => {
   process.stdout.write(`${JSON.stringify(event)}\n`);
-  if (eventUrl) {
-    const body = JSON.stringify({ eventId: `${event.planId ?? 'plan'}:${event.type}:${event.stepId ?? ''}`, ...event });
-    const headers = { 'content-type': 'application/json' };
-    if (eventToken) headers['authorization'] = `Bearer ${eventToken}`;
-    (async () => { for (let attempt = 0; attempt < 3; attempt += 1) { try { const response = await fetch(eventUrl, { method: 'POST', headers, body }); if (response.ok) return; } catch {} await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1))); } })();
-  }
+  if (!eventUrl) return;
+  const body = JSON.stringify({ eventId: `${event.planId ?? 'plan'}:${event.type}:${event.stepId ?? ''}`, ...event });
+  (async () => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const response = await fetch(eventUrl, { method: 'POST', headers: { ...authHeaders(), 'content-type': 'application/json' }, body });
+        if (response.ok) return;
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+    }
+  })();
 };
 
-/** POST with bearer auth, returning parsed JSON or null on non-2xx. */
 async function apiCall(url, body = null) {
-  const headers = { 'content-type': 'application/json' };
-  if (eventToken) headers['authorization'] = `Bearer ${eventToken}`;
-  const opts = { method: 'POST', headers };
-  if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(url, opts);
-  if (res.status === 204) return null;
-  if (!res.ok) return null;
-  return res.json();
+  const headers = { ...authHeaders(), 'content-type': 'application/json' };
+  const options = { method: 'POST', headers };
+  if (body) options.body = JSON.stringify(body);
+  const response = await fetch(url, options);
+  if (response.status === 204) return null;
+  if (!response.ok) throw new Error(`BACKEND_REQUEST_FAILED:${response.status}`);
+  return response.json();
 }
 
-/** Report plan outcome back to the backend. */
 async function reportOutcome(planId, outcome, detail) {
   if (!completeUrl) return;
-  const url = completeUrl.replace('{id}', planId);
-  await apiCall(url, { outcome, detail }).catch(() => {});
+  await apiCall(completeUrl.replace('{id}', encodeURIComponent(planId)), { outcome, detail });
 }
 
-/** Send heartbeat for a running plan. */
 async function sendHeartbeat(planId) {
   if (!heartbeatUrl) return;
-  const url = heartbeatUrl.replace('{id}', planId);
-  await apiCall(url).catch(() => {});
+  await apiCall(heartbeatUrl.replace('{id}', encodeURIComponent(planId)));
 }
 
-// ── execution modes ──────────────────────────────────────────────
+async function downloadArtifact(baseUrl, artifact, destination) {
+  const url = new URL(artifact.url, baseUrl);
+  if (url.origin !== new URL(baseUrl).origin || !url.pathname.startsWith('/api/v1/automation/plans/')) {
+    throw new Error(`ARTIFACT_URL_REJECTED:${artifact.kind}`);
+  }
+  const response = await fetch(url, { headers: authHeaders() });
+  if (!response.ok) throw new Error(`ARTIFACT_DOWNLOAD_FAILED:${artifact.kind}:${response.status}`);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  const expected = artifact.sha256;
+  const actual = crypto.createHash('sha256').update(bytes).digest('hex');
+  if (!expected || actual !== expected) throw new Error(`ARTIFACT_CHECKSUM_MISMATCH:${artifact.kind}`);
+  if (Number.isSafeInteger(artifact.byteSize) && bytes.length !== artifact.byteSize) throw new Error(`ARTIFACT_SIZE_MISMATCH:${artifact.kind}`);
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  const temporary = `${destination}.tmp-${process.pid}`;
+  fs.writeFileSync(temporary, bytes, { mode: 0o600 });
+  fs.renameSync(temporary, destination);
+  return destination;
+}
+
+async function materializeArtifacts(plan, backendBase) {
+  const artifacts = plan.package?.artifacts ?? [];
+  if (!Array.isArray(artifacts)) throw new Error('INVALID_GREENHOUSE_ARTIFACT_LIST');
+  const seenKinds = new Set();
+  for (const artifact of artifacts) {
+    if (!['cv', 'coverLetter'].includes(artifact.kind) || seenKinds.has(artifact.kind)
+        || artifact.versionId !== plan.package[artifact.kind === 'cv' ? 'cv' : 'coverLetter']?.versionId
+        || artifact.url !== plan.package[artifact.kind === 'cv' ? 'cv' : 'coverLetter']?.url) {
+      throw new Error('GREENHOUSE_ARTIFACT_METADATA_MISMATCH');
+    }
+    seenKinds.add(artifact.kind);
+    const safeName = path.basename(artifact.fileName ?? '');
+    if (!safeName || safeName !== artifact.fileName) throw new Error('UNSAFE_ARTIFACT_FILENAME');
+    const destination = path.join(artifactDir, 'package', plan.correlation.applicationId, safeName);
+    await downloadArtifact(backendBase, artifact, destination);
+    plan.package[artifact.kind === 'cv' ? 'cv' : 'coverLetter'].path = destination;
+  }
+}
+
+function planFromClaim(planId, claimed) {
+  const stored = claimed.plan ?? {};
+  return {
+    planId,
+    planType: stored.planType ?? 'FULL',
+    version: stored.version ?? 1,
+    correlation: stored.correlation ?? {
+      jobId: stored.jobId ?? '',
+      applicationId: String(claimed.applicationId ?? stored.applicationId ?? ''),
+    },
+    package: stored.package,
+    targetUrl: stored.targetUrl ?? claimed.targetUrl,
+    steps: stored.steps ?? [],
+    safetyContract: stored.safetyContract,
+    fields: stored.fields ?? [],
+    requiredGaps: stored.requiredGaps ?? [],
+  };
+}
 
 if (planFile) {
-  // File-driven mode: existing behavior for tests and local dev.
   const plan = JSON.parse(fs.readFileSync(path.resolve(planFile), 'utf8'));
   const worker = new BrowserWorker({ statePath, artifactDir, eventSink });
   worker.execute(plan, { approve, headless: true })
-    .then((result) => { process.stdout.write(`${JSON.stringify({ type: 'WORKER_RESULT', status: result.status })}\n`); })
+    .then((result) => process.stdout.write(`${JSON.stringify({ type: 'WORKER_RESULT', status: result.status })}\n`))
     .catch((error) => { process.stderr.write(`${JSON.stringify({ type: 'WORKER_ERROR', error: error.message })}\n`); process.exitCode = 1; });
 } else if (pollUrl) {
-  // Queue-polling mode: claim and execute plans from the backend.
   console.log(JSON.stringify({ type: 'WORKER_READY', mode: 'POLLING', pollUrl, pollIntervalMs }));
   let executing = false;
 
   async function poll() {
     if (executing) return;
+    let planId = null;
+    let heartbeat;
     try {
       const claimed = await apiCall(pollUrl);
-      if (!claimed || !claimed.id) return; // 204 or empty — no work available
+      if (!claimed?.id) return;
       executing = true;
-      const planId = String(claimed.id);
-
-      // Build the plan object the worker expects from the claimed row.
-      const storedPlan = claimed.plan ?? {};
-      const plan = {
-        planId,
-        planType: storedPlan.planType ?? 'FULL',
-        version: storedPlan.version ?? 1,
-        correlation: storedPlan.correlation ?? {
-          jobId: storedPlan.jobId ?? '',
-          applicationId: String(claimed.applicationId ?? storedPlan.applicationId ?? ''),
-        },
-        package: storedPlan.package ?? undefined,
-        steps: storedPlan.steps ?? [],
-        safetyContract: storedPlan.safetyContract,
-      };
-
-      // Heartbeat on an interval while executing.
-      const hbInterval = setInterval(() => sendHeartbeat(planId), 30_000);
-
-      const worker = new BrowserWorker({ statePath, artifactDir, eventSink });
-      try {
-        const result = await worker.execute(plan, { approve: false, headless: true });
-        await reportOutcome(planId, 'COMPLETED', 'Inspection completed');
-        console.log(JSON.stringify({ type: 'PLAN_COMPLETED', planId }));
-      } catch (error) {
-        const outcome = error.name === 'HardStopError' ? 'BLOCKED_ANTI_BOT' : 'FAILED';
-        await reportOutcome(planId, outcome, String(error.message));
-        console.error(JSON.stringify({ type: 'PLAN_FAILED', planId, error: error.message }));
-      } finally {
-        clearInterval(hbInterval);
-        executing = false;
+      planId = String(claimed.id);
+      const plan = planFromClaim(planId, claimed);
+      if (plan.planType === 'GREENHOUSE') {
+        const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
+        if (apiRoot === pollUrl) throw new Error('INVALID_WORKER_POLL_URL');
+        const backendBase = new URL(apiRoot);
+        const packageUrl = new URL(`${backendBase.pathname.replace(/\/$/, '')}/plans/${encodeURIComponent(planId)}/package`, backendBase);
+        const baseUrl = backendBase.origin;
+        const response = await fetch(packageUrl, { headers: authHeaders() });
+        if (!response.ok) throw new Error(`GREENHOUSE_PACKAGE_FAILED:${response.status}`);
+        plan.package = await response.json();
+        plan.fields = plan.package.fields ?? [];
+        if (plan.package.planId !== planId || plan.package.applicationId !== plan.correlation.applicationId
+            || plan.package.jobId !== plan.correlation.jobId || plan.package.expectedUrl !== plan.targetUrl) {
+          throw new Error('GREENHOUSE_PACKAGE_CORRELATION_MISMATCH');
+        }
+        plan.requiredGaps = plan.package.requiredGaps ?? [];
+        await materializeArtifacts(plan, baseUrl);
       }
+
+      heartbeat = setInterval(() => sendHeartbeat(planId).catch(() => {}), 30_000);
+      const worker = new BrowserWorker({ statePath, artifactDir, eventSink });
+      await worker.execute(plan, { approve: false, headless: true });
+      const outcome = plan.planType === 'GREENHOUSE' ? 'HUMAN_REQUIRED' : 'COMPLETED';
+      if (plan.planType === 'GREENHOUSE') await Promise.allSettled([
+        eventSink({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
+          applicationId: plan.correlation.applicationId, requiredGaps: plan.requiredGaps }),
+      ]);
+      const detail = plan.planType === 'GREENHOUSE'
+        ? `Form preparation finished; human review required (${plan.requiredGaps.length} outstanding field(s))`
+        : 'Inspection completed';
+      await reportOutcome(planId, outcome, detail);
+      console.log(JSON.stringify({ type: 'PLAN_ENDED', planId, outcome }));
     } catch (error) {
-      console.error(JSON.stringify({ type: 'POLL_ERROR', error: error.message }));
+      const outcome = error.name === 'HardStopError'
+        ? (/CAPTCHA|ANTI_BOT|ACCESS_DENIED/i.test(String(error.reason)) ? 'BLOCKED_ANTI_BOT' : 'FAILED')
+        : 'FAILED';
+      console.error(JSON.stringify({ type: 'POLL_ERROR', planId, outcome, error: error.message }));
+      if (planId) await reportOutcome(planId, outcome, String(error.message)).catch(() => {});
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
+      executing = false;
     }
   }
 
   setInterval(poll, pollIntervalMs);
-  poll(); // immediate first poll
-
+  poll();
 } else {
-  // Idle mode: no plan file, no poll URL. Wait for external orchestration.
   console.log(JSON.stringify({ type: 'WORKER_READY', mode: 'IDLE', statePath, artifactDir }));
   setInterval(() => {}, 60_000);
 }

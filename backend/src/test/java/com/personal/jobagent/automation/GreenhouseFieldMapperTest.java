@@ -36,7 +36,8 @@ class GreenhouseFieldMapperTest {
     private final UUID answerId = UUID.randomUUID();
 
     private List<GreenhouseFieldMapper.Answer> answers(String question, String text, String status) {
-        return List.of(new GreenhouseFieldMapper.Answer(answerId, question, text, status));
+        return List.of(new GreenhouseFieldMapper.Answer(answerId, question, text, status,
+                "ANSWERED".equals(status)));
     }
 
     @Test
@@ -96,11 +97,26 @@ class GreenhouseFieldMapperTest {
                 field("question_2", "How did you hear about us?", "text", false));
 
         var result = GreenhouseFieldMapper.classify(fields, FULL_CANDIDATE,
-                answers(question, "Because the role fits my skills.", "ANSWERED"));
+                List.of(new GreenhouseFieldMapper.Answer(answerId, question,
+                        "Because the role fits my skills.", "ANSWERED", true)));
 
         assertThat(result.mapped()).hasSize(1);
         assertThat(result.mapped().get(0).classification()).isEqualTo(GreenhouseFieldMapper.AUTO);
         assertThat(result.mapped().get(0).value()).isEqualTo("Because the role fits my skills.");
+        assertThat(result.humanRequired()).singleElement().satisfies(item ->
+                assertThat(item.classification()).isEqualTo(GreenhouseFieldMapper.HUMAN));
+    }
+
+    @Test
+    void generatedAnsweredDraftIsNotAutofilledUntilHumanConfirmed() {
+        String question = "Why do you want to work at Acme?";
+        var field = field("question_1", question, "textarea", true);
+
+        var result = GreenhouseFieldMapper.classify(List.of(field), FULL_CANDIDATE,
+                List.of(new GreenhouseFieldMapper.Answer(UUID.randomUUID(), question,
+                        "Generated draft", "ANSWERED")));
+
+        assertThat(result.mapped()).isEmpty();
         assertThat(result.humanRequired()).singleElement().satisfies(item ->
                 assertThat(item.classification()).isEqualTo(GreenhouseFieldMapper.HUMAN));
     }
@@ -126,7 +142,7 @@ class GreenhouseFieldMapperTest {
         var fields = List.of(field("627", question, "text", false));
 
         var result = GreenhouseFieldMapper.classify(fields, FULL_CANDIDATE,
-                answers(question, "nonbinary", "ANSWERED"));
+                List.of(new GreenhouseFieldMapper.Answer(answerId, question, "nonbinary", "ANSWERED", true)));
 
         assertThat(result.unsupported()).singleElement().satisfies(item ->
                 assertThat(item.classification()).isEqualTo(GreenhouseFieldMapper.UNSUPPORTED));
@@ -142,9 +158,14 @@ class GreenhouseFieldMapperTest {
         assertThat(withoutAnswer.humanRequired()).singleElement().satisfies(item ->
                 assertThat(item.classification()).isEqualTo(GreenhouseFieldMapper.HUMAN));
 
-        var withAnswer = GreenhouseFieldMapper.classify(fields, FULL_CANDIDATE,
-                answers("Are you legally authorized to work in the UK?", "Yes", "ANSWERED"));
-        assertThat(withAnswer.mapped()).singleElement().satisfies(m ->
+        var unconfirmedAnswer = GreenhouseFieldMapper.classify(fields, FULL_CANDIDATE,
+                List.of(new GreenhouseFieldMapper.Answer(UUID.randomUUID(),
+                        "Are you legally authorized to work in the UK?", "Yes", "ANSWERED", false)));
+        assertThat(unconfirmedAnswer.mapped()).isEmpty();
+        var confirmedAnswer = GreenhouseFieldMapper.classify(fields, FULL_CANDIDATE,
+                List.of(new GreenhouseFieldMapper.Answer(UUID.randomUUID(),
+                        "Are you legally authorized to work in the UK?", "Yes", "ANSWERED", true)));
+        assertThat(confirmedAnswer.mapped()).singleElement().satisfies(m ->
                 assertThat(m.classification()).isEqualTo(GreenhouseFieldMapper.AUTO));
     }
 

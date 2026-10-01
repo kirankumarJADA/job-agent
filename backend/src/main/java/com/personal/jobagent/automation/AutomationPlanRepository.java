@@ -175,7 +175,12 @@ public class AutomationPlanRepository {
 
     /** Internal read of the plan's job id (worker package/artifact endpoints). */
     public Optional<UUID> jobIdOf(UUID planId) {
-        return db.query("select job_id from automation_plans where id=?", (rs, n) -> (UUID) rs.getObject(1), planId)
+        return db.query("""
+                        select a.job_id
+                        from automation_plans p join applications a
+                          on a.id = p.application_id and a.profile_id = p.profile_id
+                        where p.id = ?
+                        """, (rs, n) -> (UUID) rs.getObject(1), planId)
                 .stream().filter(java.util.Objects::nonNull).findFirst();
     }
 

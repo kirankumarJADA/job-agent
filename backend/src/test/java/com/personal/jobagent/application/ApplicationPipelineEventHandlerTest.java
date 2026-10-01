@@ -1,6 +1,7 @@
 package com.personal.jobagent.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.personal.jobagent.automation.GreenhouseExecutionPlanService;
 import com.personal.jobagent.automation.InspectionPlanService;
 import com.personal.jobagent.coverletter.CoverLetterService;
 import com.personal.jobagent.events.Envelope;
@@ -50,6 +51,7 @@ class ApplicationPipelineEventHandlerTest {
 
     private final ApplicationPipelineService pipeline = mock(ApplicationPipelineService.class);
     private final InspectionPlanService inspectionPlanService = mock(InspectionPlanService.class);
+    private final GreenhouseExecutionPlanService greenhousePlanService = mock(GreenhouseExecutionPlanService.class);
     private final ResumeAtsIntelligenceService resumeService = mock(ResumeAtsIntelligenceService.class);
     private final CoverLetterService coverLetterService = mock(CoverLetterService.class);
     private final ApplicationAnswerService answerService = mock(ApplicationAnswerService.class);
@@ -60,9 +62,10 @@ class ApplicationPipelineEventHandlerTest {
 
     @BeforeEach
     void setUp() {
-        reset(pipeline, inspectionPlanService, resumeService, coverLetterService, answerService, jobRepository, notifications, db);
-        handler = new ApplicationPipelineEventHandler(pipeline, inspectionPlanService, resumeService,
-                coverLetterService, answerService, jobRepository, notifications, db, new ObjectMapper());
+        reset(pipeline, inspectionPlanService, greenhousePlanService, resumeService, coverLetterService,
+                answerService, jobRepository, notifications, db);
+        handler = new ApplicationPipelineEventHandler(pipeline, inspectionPlanService, greenhousePlanService,
+                resumeService, coverLetterService, answerService, jobRepository, notifications, db, new ObjectMapper());
         when(db.queryForObject(contains("count(*) from applications"), eq(Integer.class), eq(APPLICATION)))
                 .thenReturn(1);
         when(db.update(contains("application_events"), any(UUID.class), eq(APPLICATION), any(String.class)))
@@ -167,6 +170,25 @@ class ApplicationPipelineEventHandlerTest {
                 .containsEntry("ANSWERS", "OK");
         // No prepared event when preparation is incomplete:
         verify(notifications, never()).emit(any());
+    }
+
+    @Test
+    void greenhouseApplicationUsesControlledPlanInsteadOfInspectionPlan() {
+        String greenhouseUrl = "https://boards.greenhouse.io/acme/jobs/42";
+        when(jobRepository.findById(JOB)).thenReturn(java.util.Optional.of(
+                new JobRecord(JOB, UUID.randomUUID(), "gh-1", null, "Acme", "Java Engineer",
+                        "London", null, null, null, null, null,
+                        new BigDecimal("40000"), new BigDecimal("60000"), "GBP",
+                        "Java role", List.of("Java"), greenhouseUrl, greenhouseUrl, Instant.now(), "DISCOVERED")));
+        when(greenhousePlanService.handles(greenhouseUrl)).thenReturn(true);
+        when(greenhousePlanService.createExecutionPlan(PROFILE, APPLICATION, JOB))
+                .thenReturn(java.util.Optional.of(UUID.randomUUID()));
+
+        handler.handle(envelope(NotificationEvents.APPLICATION_CREATED, Map.of(
+                "application_id", APPLICATION.toString(), "profile_id", PROFILE.toString(), "job_id", JOB.toString())));
+
+        verify(greenhousePlanService).createExecutionPlan(PROFILE, APPLICATION, JOB);
+        verify(inspectionPlanService, never()).createInspectionPlan(any(), any(), any());
     }
 
     @Test

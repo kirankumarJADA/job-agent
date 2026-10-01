@@ -60,6 +60,17 @@ class GreenhouseAdapterTest {
     // 2. Non-Greenhouse URL rejected
 
     @Test
+    void onlyHttpsGreenhouseBoardHostsMatch() {
+        GreenhouseAdapter adapter = fixtureAdapter();
+        assertThat(adapter.matchesUrl("https://boards.greenhouse.io/acme/jobs/42")).isTrue();
+        assertThat(adapter.matchesUrl("https://job-boards.greenhouse.io/acme/jobs/42")).isTrue();
+        assertThat(adapter.matchesUrl("http://boards.greenhouse.io/acme/jobs/42")).isFalse();
+        assertThat(adapter.matchesUrl("https://greenhouse.io.evil.example/acme")).isFalse();
+        assertThat(adapter.matchesUrl("https://boards.greenhouse.io.evil.example/acme")).isFalse();
+        assertThat(adapter.matchesUrl("https://user@boards.greenhouse.io/acme")).isFalse();
+    }
+
+    @Test
     void nonGreenhouseUrlIsRejectedBeforeAnyFetch() {
         Function<String, String> countingFetch = url -> {
             throw new AssertionError("fetch must not run for a non-Greenhouse URL");
@@ -123,8 +134,11 @@ class GreenhouseAdapterTest {
     void selectRadioAndCheckboxOptionsAreDetectedWhenStaticallyPresent() {
         FormDescriptor descriptor = inspectFixture();
         assertThat(field(descriptor, "work_auth").options()).containsExactly("yes", "no");
-        // Greenhouse renders radio groups per-option with individual ids:
+        // Greenhouse renders radio groups per-option with individual ids;
+        // the adapter emits one group descriptor keyed to the first control.
+        assertThat(descriptor.fields().stream().filter(f -> f.htmlType().equals("radio"))).hasSize(1);
         assertThat(field(descriptor, "emp_full").options()).containsExactly("FULL_TIME", "PART_TIME");
+        assertThat(field(descriptor, "emp_full").label()).isEqualTo("Employment type");
         assertThat(field(descriptor, "emp_full").htmlType()).isEqualTo("radio");
         assertThat(field(descriptor, "relocate").options()).containsExactly("yes");
     }

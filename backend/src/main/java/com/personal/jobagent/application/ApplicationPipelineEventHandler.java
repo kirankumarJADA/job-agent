@@ -8,6 +8,7 @@ import com.personal.jobagent.events.EventHandler;
 import com.personal.jobagent.jobs.JobMatchService;
 import com.personal.jobagent.jobs.JobRepository;
 import com.personal.jobagent.jobs.JobRecord;
+import com.personal.jobagent.automation.GreenhouseExecutionPlanService;
 import com.personal.jobagent.automation.InspectionPlanService;
 import com.personal.jobagent.notifications.NotificationEvents;
 import com.personal.jobagent.notifications.NotificationService;
@@ -58,6 +59,7 @@ public class ApplicationPipelineEventHandler implements EventHandler {
 
     private final ApplicationPipelineService pipeline;
     private final InspectionPlanService inspectionPlanService;
+    private final GreenhouseExecutionPlanService greenhousePlanService;
     private final ResumeAtsIntelligenceService resumeService;
     private final CoverLetterService coverLetterService;
     private final ApplicationAnswerService answerService;
@@ -68,6 +70,7 @@ public class ApplicationPipelineEventHandler implements EventHandler {
 
     public ApplicationPipelineEventHandler(ApplicationPipelineService pipeline,
                                            InspectionPlanService inspectionPlanService,
+                                           GreenhouseExecutionPlanService greenhousePlanService,
                                            ResumeAtsIntelligenceService resumeService,
                                            CoverLetterService coverLetterService,
                                            ApplicationAnswerService answerService,
@@ -77,6 +80,7 @@ public class ApplicationPipelineEventHandler implements EventHandler {
                                            ObjectMapper json) {
         this.pipeline = pipeline;
         this.inspectionPlanService = inspectionPlanService;
+        this.greenhousePlanService = greenhousePlanService;
         this.resumeService = resumeService;
         this.coverLetterService = coverLetterService;
         this.answerService = answerService;
@@ -167,21 +171,30 @@ public class ApplicationPipelineEventHandler implements EventHandler {
                     ),
                     UuidV7.generate(),
                     null));
-            // Phase 2: create an inspection-only automation plan so the worker
-            // can navigate to the application URL and take a screenshot. This
-            // does not fill forms or submit anything — it proves the queue →
-            // claim → execute path works end-to-end.
+            // Greenhouse applications use the controlled, allowlisted form
+            // plan; every other connector retains the inspection-only path.
             try {
-                inspectionPlanService.createInspectionPlan(profileId, applicationId, jobId)
-                        .ifPresent(planId -> {
-                            record(applicationId, "INSPECTION_PLAN_CREATED",
-                                    Map.of("plan_id", planId.toString()));
-                            log.info("Inspection plan {} queued for application {}", planId, applicationId);
-                        });
+                String applicationUrl = jobRepository.findById(jobId)
+                        .map(JobRecord::applicationUrl).orElse(null);
+                if (greenhousePlanService.handles(applicationUrl)) {
+                    greenhousePlanService.createExecutionPlan(profileId, applicationId, jobId)
+                            .ifPresent(planId -> {
+                                record(applicationId, "GREENHOUSE_PLAN_CREATED",
+                                        Map.of("plan_id", planId.toString()));
+                                log.info("Greenhouse plan {} queued for application {}", planId, applicationId);
+                            });
+                } else {
+                    inspectionPlanService.createInspectionPlan(profileId, applicationId, jobId)
+                            .ifPresent(planId -> {
+                                record(applicationId, "INSPECTION_PLAN_CREATED",
+                                        Map.of("plan_id", planId.toString()));
+                                log.info("Inspection plan {} queued for application {}", planId, applicationId);
+                            });
+                }
             } catch (Exception e) {
-                record(applicationId, "INSPECTION_PLAN_FAILED",
+                record(applicationId, "AUTOMATION_PLAN_FAILED",
                         Map.of("error", e.getClass().getSimpleName()));
-                log.warn("Inspection plan creation failed for application {}: {}",
+                log.warn("Automation plan creation failed for application {}: {}",
                         applicationId, e.getMessage());
             }
 

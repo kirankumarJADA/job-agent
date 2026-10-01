@@ -159,6 +159,9 @@ public class AutomationController {
         if (!mayActOnPlan(e.planId())) {
             return notFound();
         }
+        if (ownerContext.isWorkerRequest() && !workerEventCorrelates(e)) {
+            return ResponseEntity.badRequest().body(Map.of("error", "worker event correlation does not match its plan"));
+        }
         boolean fresh = plans.recordWorkerEvent(e.eventId(), e.planId(), e.applicationId(), e.jobId(), e.type(),
                 e.payload() == null ? Map.of() : e.payload());
         return ResponseEntity.ok(Map.of("accepted", fresh, "replayed", !fresh));
@@ -219,7 +222,8 @@ public class AutomationController {
      * package, so the worker can verify after download.
      */
     @GetMapping("/plans/{id}/artifacts/{kind}")
-    public ResponseEntity<?> artifact(@PathVariable UUID id, @PathVariable String kind) {
+    public ResponseEntity<?> artifact(@PathVariable UUID id, @PathVariable String kind,
+                                      @RequestParam UUID versionId) {
         if (!mayActOnPlan(id)) {
             return notFound();
         }
@@ -235,7 +239,14 @@ public class AutomationController {
         if (!kind.equals("cv") && !kind.equals("cover-letter")) {
             return ResponseEntity.badRequest().body(Map.of("error", "unknown artifact kind"));
         }
-        var bytes = executionPackages.artifactBytes(id, profileId, plan.applicationId(), jobId, kind);
+        ExecutionPackageService.ArtifactBytes bytes;
+        try {
+            bytes = executionPackages.artifactBytes(id, profileId, plan.applicationId(), jobId, kind, versionId);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(409).body(Map.of("error", e.getMessage()));
+        }
         if (bytes == null) {
             return notFound();
         }
@@ -260,6 +271,14 @@ public class AutomationController {
      * The single authorization rule for anything addressed by plan id: the worker
      * may act on any plan, a user session only on a plan it owns.
      */
+    private boolean workerEventCorrelates(WorkerEvent event) {
+        var plan = plans.findById(event.planId()).orElse(null);
+        if (plan == null || !Objects.equals(plan.applicationId(), event.applicationId())) return false;
+        UUID owner = plans.ownerOfPlan(event.planId()).orElse(null);
+        if (owner == null || event.jobId() == null) return false;
+        return plans.jobIdOf(event.planId()).filter(event.jobId()::equals).isPresent();
+    }
+
     private boolean mayActOnPlan(UUID planId) {
         if (ownerContext.isWorkerRequest()) {
             return true;
