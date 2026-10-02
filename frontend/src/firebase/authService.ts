@@ -206,7 +206,18 @@ export async function signOutOfFirebase(): Promise<void> {
   }
 }
 
-/** A fresh ID token for a signed-in Firebase user. */
+/**
+ * The ID token for the session exchange with the backend.
+ *
+ * `forceRefresh` is REQUIRED here: the exchange runs exactly when account
+ * state has just changed (an email verified moments ago at the verification
+ * gate, a Google identity fresh from the provider). Without it the SDK serves
+ * the cached token minted at sign-in, which still carries
+ * `email_verified: false` — the backend then rightly refuses the exchange
+ * with 403 and the visitor is stuck on the verification screen forever. One
+ * forced refresh per session exchange is the correct cost; the per-request
+ * token path (`currentIdToken`) deliberately keeps the cached token.
+ */
 export async function idTokenFor(user: User): Promise<string> {
-  return user.getIdToken();
+  return user.getIdToken(true);
 }
