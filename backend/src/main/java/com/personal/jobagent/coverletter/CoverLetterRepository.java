@@ -93,13 +93,15 @@ public class CoverLetterRepository {
     }
 
     public UUID insert(UUID profileId, UUID jobId, UUID applicationId, int version,
-                       String title, String bodyMarkdown, Map<String, Object> claimsValidation, boolean isApproved) {
+                       String title, String bodyMarkdown, String contentSha256,
+                       Map<String, Object> claimsValidation, boolean isApproved) {
         UUID id = UuidV7.generate();
         jdbcTemplate.update("""
-                insert into cover_letters (id, profile_id, job_id, application_id, version, title, body_markdown, claims_validation, is_approved, created_at, updated_at)
-                values (?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, now(), now())
+                insert into cover_letters (id, profile_id, job_id, application_id, version, title, body_markdown,
+                                           content_sha256, claims_validation, is_approved, created_at, updated_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, now(), now())
                 """,
-                id, profileId, jobId, applicationId, version, title, bodyMarkdown,
+                id, profileId, jobId, applicationId, version, title, bodyMarkdown, contentSha256,
                 JdbcConversions.toJson(claimsValidation, objectMapper), isApproved);
         return id;
     }

@@ -76,7 +76,7 @@ class CoverLetterServiceTest {
         ));
 
         when(coverLetterRepository.getNextVersion(eq(jobId), eq(profileId))).thenReturn(1);
-        when(coverLetterRepository.insert(eq(profileId), eq(jobId), any(), eq(1), anyString(), anyString(), anyMap(), anyBoolean()))
+        when(coverLetterRepository.insert(eq(profileId), eq(jobId), any(), eq(1), anyString(), anyString(), anyString(), anyMap(), anyBoolean()))
                 .thenReturn(coverLetterId);
 
         String generatedText = "Dear Monzo Team,\n\nI am thrilled to apply for the Senior Backend Engineer role. At Deliveroo, I built resilient backend systems using Java.\n\nBest regards,\nCandidate";
@@ -120,7 +120,7 @@ class CoverLetterServiceTest {
         when(profileRepository.findProjects(profileId)).thenReturn(List.of());
 
         when(coverLetterRepository.getNextVersion(eq(jobId), eq(profileId))).thenReturn(1);
-        when(coverLetterRepository.insert(eq(profileId), eq(jobId), any(), eq(1), anyString(), anyString(), anyMap(), anyBoolean()))
+        when(coverLetterRepository.insert(eq(profileId), eq(jobId), any(), eq(1), anyString(), anyString(), anyString(), anyMap(), anyBoolean()))
                 .thenReturn(coverLetterId);
 
         String hallucinatedText = "I have active top secret security clearance and a PhD in Quantum Computing.";

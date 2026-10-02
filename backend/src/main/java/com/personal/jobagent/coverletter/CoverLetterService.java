@@ -94,8 +94,13 @@ public class CoverLetterService {
         int nextVersion = coverLetterRepository.getNextVersion(jobId, profileId);
         String title = "Cover Letter v" + nextVersion + " - " + job.title();
 
+        // Bind the exact bytes generated to the row: the automation approval
+        // gate later re-verifies the artifact against this digest.
+        String contentSha256 = sha256Hex(rawContent);
+        claimsValidation.put("content_sha256", contentSha256);
+
         UUID clId = coverLetterRepository.insert(profileId, jobId, applicationId, nextVersion,
-                title, rawContent, claimsValidation, passedValidation);
+                title, rawContent, contentSha256, claimsValidation, passedValidation);
 
         // Feature 8: fan out a notification for every generated cover letter.
         // Emitted AFTER the row insert within the same service call so the
@@ -149,6 +154,52 @@ public class CoverLetterService {
                 issues.add("Fabrication detected: Claimed unverified PhD/Doctorate degree");
             }
         }
+        issues.addAll(groundDateClaims(content, experiences, education));
         return issues;
+    }
+
+    /**
+     * Every year the letter cites must be covered by a dated entry the
+     * candidate actually owns (a work-experience span, an education span, or
+     * the current year as the date of writing). This is the one class of
+     * factual claim that can be verified deterministically: a letter saying
+     * "since 2019" when no profile entry reaches 2019 is a fabrication the
+     * candidate then sees flagged instead of silently sending.
+     */
+    private List<String> groundDateClaims(String content,
+                                          List<WorkExperienceRecord> experiences,
+                                          List<EducationRecord> education) {
+        List<String> issues = new ArrayList<>();
+        java.util.Set<Integer> coveredYears = new java.util.HashSet<>();
+        coveredYears.add(java.time.LocalDate.now().getYear());
+        for (WorkExperienceRecord e : experiences) {
+            if (e.startMonth() != null) coveredYears.add(e.startMonth().getYear());
+            if (e.endMonth() != null) coveredYears.add(e.endMonth().getYear());
+        }
+        for (EducationRecord ed : education) {
+            if (ed.startYear() != null) coveredYears.add(ed.startYear());
+            if (ed.endYear() != null) coveredYears.add(ed.endYear());
+        }
+        java.util.regex.Matcher years = java.util.regex.Pattern.compile("\\b(19|20)\\d{2}\\b").matcher(content);
+        while (years.find()) {
+            int year = Integer.parseInt(years.group());
+            if (!coveredYears.contains(year)) {
+                issues.add("Unverifiable date claim: " + year
+                        + " is not covered by any dated work experience or education entry in your profile");
+            }
+        }
+        return issues;
+    }
+
+    private static String sha256Hex(String content) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder();
+            for (byte b : digest) hex.append(String.format("%02x", b));
+            return hex.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 not available", e);
+        }
     }
 }

@@ -74,11 +74,18 @@ public class ExecutionPackageService {
                   and v.immutable = true and f.content is not null
                 """, cvVersionId, profileId, applicationId, jobId);
         List<Map<String, Object>> coverRows = db.queryForList("""
-                select id::text as version_id, body_markdown from cover_letters
+                select id::text as version_id, body_markdown, content_sha256 from cover_letters
                 where profile_id = ? and job_id = ? and application_id = ?
                 order by version desc limit 1
                 """, profileId, jobId, applicationId);
         String coverText = coverRows.isEmpty() ? null : (String) coverRows.getFirst().get("body_markdown");
+        // The generation-time digest (V027) must match the bytes being bound
+        // into this package — a mismatch means the stored letter drifted from
+        // what was generated and reviewed, and the package must not ship it.
+        if (coverText != null && coverRows.getFirst().get("content_sha256") instanceof String storedSha
+                && !storedSha.equals(Sha256.of(coverText.getBytes(StandardCharsets.UTF_8)))) {
+            throw new IllegalStateException("COVER_LETTER_CHECKSUM_MISMATCH");
+        }
         var candidate = new GreenhouseFieldMapper.CandidateData(
                 (String) candidateRow.get("email"), (String) candidateRow.get("display_name"),
                 (String) candidateRow.get("phone"), (String) candidateRow.get("location"),

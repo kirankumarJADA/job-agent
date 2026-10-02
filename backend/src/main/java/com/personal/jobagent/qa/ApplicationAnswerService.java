@@ -87,10 +87,26 @@ public class ApplicationAnswerService {
         var executionResult = modelRouter.execute(TaskType.APPLICATION_QA, request, Duration.ofSeconds(30));
         String rawAnswer = executionResult.completion().text();
 
-        // Validation against fabrication
+        // Validation against fabrication: sensitive-claim guards plus the same
+        // deterministic date grounding the cover letter uses — any year the
+        // answer cites must be covered by a dated profile entry.
         List<String> issues = new ArrayList<>();
         if (rawAnswer.toLowerCase().contains("top secret") || rawAnswer.toLowerCase().contains("quantum computing")) {
             issues.add("Potential fabrication of unverified credential or domain");
+        }
+        java.util.Set<Integer> coveredYears = new java.util.HashSet<>();
+        coveredYears.add(java.time.LocalDate.now().getYear());
+        for (WorkExperienceRecord e : experiences) {
+            if (e.startMonth() != null) coveredYears.add(e.startMonth().getYear());
+            if (e.endMonth() != null) coveredYears.add(e.endMonth().getYear());
+        }
+        java.util.regex.Matcher citedYears = java.util.regex.Pattern.compile("\\b(19|20)\\d{2}\\b").matcher(rawAnswer);
+        while (citedYears.find()) {
+            int year = Integer.parseInt(citedYears.group());
+            if (!coveredYears.contains(year)) {
+                issues.add("Unverifiable date claim: " + year
+                        + " is not covered by any dated work experience entry in your profile");
+            }
         }
 
         String status = "ANSWERED";
