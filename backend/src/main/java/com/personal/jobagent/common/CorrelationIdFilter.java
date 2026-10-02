@@ -32,7 +32,7 @@ public class CorrelationIdFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request,
                                      HttpServletResponse response,
                                      FilterChain filterChain) throws ServletException, IOException {
-        String correlationId = request.getHeader(HEADER_NAME);
+        String correlationId = sanitize(request.getHeader(HEADER_NAME));
         if (correlationId == null || correlationId.isBlank()) {
             correlationId = UuidV7.generate().toString();
         }
@@ -44,5 +44,18 @@ public class CorrelationIdFilter extends OncePerRequestFilter {
         } finally {
             MDC.remove(MDC_KEY);
         }
+    }
+
+    /**
+     * The caller-supplied id lands in every structured log line for the
+     * request, so it is constrained to a safe alphabet and a sane length —
+     * control characters (log-forging via newlines) and oversized values are
+     * dropped in favour of a freshly minted id.
+     */
+    private String sanitize(String value) {
+        if (value == null || value.isBlank()) return null;
+        String trimmed = value.trim();
+        if (trimmed.length() > 128) return null;
+        return trimmed.matches("[A-Za-z0-9._\\-]+") ? trimmed : null;
     }
 }
