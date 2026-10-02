@@ -12,6 +12,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -74,11 +75,11 @@ public class JobMatchService {
         JobRecord job = jobRepository.findById(jobId)
                 .orElseThrow(() -> new IllegalArgumentException("Job not found: " + jobId));
 
-        double skillOverlap = computeSkillOverlap(job, profileId);
+        SkillOverlap skillOverlap = computeSkillOverlap(job, profileId);
         double remoteFit = computeRemoteFit(job, desiredRemoteType);
         double salaryFit = computeSalaryFit(job, desiredSalaryMin);
 
-        int overall = (int) Math.round(100 * (0.6 * skillOverlap + 0.2 * remoteFit + 0.2 * salaryFit));
+        int overall = (int) Math.round(100 * (0.6 * skillOverlap.ratio() + 0.2 * remoteFit + 0.2 * salaryFit));
         String recommendation = overall >= APPLY_THRESHOLD ? "APPLY"
                 : overall >= REVIEW_THRESHOLD ? "REVIEW" : "SKIP";
 
@@ -102,7 +103,8 @@ public class JobMatchService {
                     jobId,
                     overall,
                     recommendation,
-                    breakdownJson(skillOverlap, remoteFit, salaryFit));
+                    breakdownJson(job, overall, recommendation, skillOverlap, remoteFit, salaryFit,
+                            desiredSalaryMin, desiredRemoteType));
 
             // Catalogue-level marker only: "this posting has been evaluated".
             // Shared on purpose and carrying no candidate data, which is why it
@@ -130,7 +132,7 @@ public class JobMatchService {
             payload.put("message", "New job match — " + job.title()
                     + (job.companyNameRaw() != null ? " at " + job.companyNameRaw() : ""));
             payload.put("detail", "Scored " + overall + "/100 (skills "
-                    + Math.round(skillOverlap * 100) + "%, remote " + Math.round(remoteFit * 100)
+                    + Math.round(skillOverlap.ratio() * 100) + "%, remote " + Math.round(remoteFit * 100)
                     + "%, salary " + Math.round(salaryFit * 100) + "%)");
 
             notificationService.emit(new NotificationService.NotificationCommand(
@@ -144,24 +146,28 @@ public class JobMatchService {
         }));
 
         log.info("Job {} matched: score={} recommendation={} notified={}", jobId, overall, recommendation, notified);
-        return new MatchResult(jobId, overall, recommendation, skillOverlap, remoteFit, salaryFit, notified);
+        return new MatchResult(jobId, overall, recommendation, skillOverlap.ratio(), remoteFit, salaryFit, notified);
     }
 
-    private double computeSkillOverlap(JobRecord job, UUID profileId) {
+    /** Deterministic skill overlap plus the evidence behind it. */
+    private record SkillOverlap(double ratio, List<String> matchedSkills, int listedSkills, boolean candidateHasSkills) {}
+
+    private SkillOverlap computeSkillOverlap(JobRecord job, UUID profileId) {
         if (job.skillsExtracted() == null || job.skillsExtracted().isEmpty()) {
-            return 0.5; // unknown requirements — neutral, not zero
+            return new SkillOverlap(0.5, List.of(), 0, true); // unknown requirements — neutral, not zero
         }
         Set<String> candidateSkills = profileRepository.findSkills(profileId).stream()
                 .map(s -> s.name() == null ? "" : s.name().trim().toLowerCase(Locale.ROOT))
                 .filter(s -> !s.isEmpty())
                 .collect(java.util.stream.Collectors.toSet());
         if (candidateSkills.isEmpty()) {
-            return 0.0;
+            return new SkillOverlap(0.0, List.of(), job.skillsExtracted().size(), false);
         }
-        long matched = job.skillsExtracted().stream()
+        List<String> matched = job.skillsExtracted().stream()
                 .filter(s -> s != null && candidateSkills.contains(s.trim().toLowerCase(Locale.ROOT)))
-                .count();
-        return (double) matched / job.skillsExtracted().size();
+                .toList();
+        return new SkillOverlap((double) matched.size() / job.skillsExtracted().size(), matched,
+                job.skillsExtracted().size(), true);
     }
 
     private double computeRemoteFit(JobRecord job, String desiredRemoteType) {
@@ -187,9 +193,71 @@ public class JobMatchService {
         return Math.max(0.0, Math.min(1.0, (ratio - 0.8) / 0.2)); // 0 below 80%, 1 at 100%
     }
 
-    private String breakdownJson(double skillOverlap, double remoteFit, double salaryFit) {
-        return "{\"skill_overlap\":" + Math.round(skillOverlap * 100)
+    /**
+     * Persisted, human-readable decision record. Scoring itself is untouched
+     * — this adds the evidence trail the product requires: which factors
+     * contributed what, which weights and thresholds produced the
+     * recommendation, and an honest sentence about every neutral or missing
+     * input. Everything is derived from the same deterministic inputs as the
+     * score, so a replay produces an identical explanation.
+     */
+    private String breakdownJson(JobRecord job, int overall, String recommendation,
+                                 SkillOverlap skillOverlap, double remoteFit, double salaryFit,
+                                 Number desiredSalaryMin, String desiredRemoteType) {
+        StringBuilder why = new StringBuilder();
+        if (skillOverlap.listedSkills() == 0) {
+            why.append("The job lists no skills, so skill match was scored neutral (50%). ");
+        } else if (!skillOverlap.candidateHasSkills()) {
+            why.append("Your profile lists no skills yet, so skill match scored 0% of the ")
+                    .append(skillOverlap.listedSkills()).append(" skills the job asks for. ");
+        } else if (skillOverlap.matchedSkills().isEmpty()) {
+            why.append("None of the ").append(skillOverlap.listedSkills())
+                    .append(" skills the job asks for are on your profile. ");
+        } else {
+            why.append("Robin matched ").append(skillOverlap.matchedSkills().size())
+                    .append(" of the ").append(skillOverlap.listedSkills())
+                    .append(" skills the job lists (")
+                    .append(String.join(", ", skillOverlap.matchedSkills())).append("). ");
+        }
+        if (desiredRemoteType == null || desiredRemoteType.isBlank()) {
+            why.append("No remote preference is set on your profile — remote fit was scored neutral. ");
+        } else {
+            why.append(desiredRemoteType.trim().equalsIgnoreCase(job.remoteType())
+                    ? "The job's workplace type matches your preference. "
+                    : "The job's workplace type (" + job.remoteType() + ") does not match your preference ("
+                      + desiredRemoteType.trim() + "). ");
+        }
+        if (desiredSalaryMin == null) {
+            why.append("No salary minimum is set — salary fit was scored neutral.");
+        } else if (job.salaryMax() == null) {
+            why.append("The job declares no salary, so salary fit was scored neutral.");
+        } else if (job.salaryMax().doubleValue() >= desiredSalaryMin.doubleValue()) {
+            why.append("The offered salary meets your stated minimum.");
+        } else {
+            why.append("The offered salary is below your stated minimum.");
+        }
+
+        String decision = switch (recommendation) {
+            case "APPLY" -> "Score " + overall + " is at or above the APPLY threshold of "
+                    + APPLY_THRESHOLD + " — an application was created automatically.";
+            case "REVIEW" -> "Score " + overall + " is below the APPLY threshold of " + APPLY_THRESHOLD
+                    + " but at or above the REVIEW threshold of " + REVIEW_THRESHOLD
+                    + " — nothing was created; you decide from here.";
+            default -> "Score " + overall + " is below the REVIEW threshold of " + REVIEW_THRESHOLD
+                    + " — no application was created.";
+        };
+
+        String matchedJson = skillOverlap.matchedSkills().stream()
+                .map(s -> "\"" + s.replace("\"", "'") + "\"")
+                .reduce((a, b) -> a + "," + b).orElse("");
+        return "{\"skill_overlap\":" + Math.round(skillOverlap.ratio() * 100)
                 + ",\"remote_fit\":" + Math.round(remoteFit * 100)
-                + ",\"salary_fit\":" + Math.round(salaryFit * 100) + "}";
+                + ",\"salary_fit\":" + Math.round(salaryFit * 100)
+                + ",\"weights\":{\"skill_overlap\":60,\"remote_fit\":20,\"salary_fit\":20}"
+                + ",\"thresholds\":{\"apply\":" + APPLY_THRESHOLD + ",\"review\":" + REVIEW_THRESHOLD + "}"
+                + ",\"matched_skills\":[" + matchedJson + "]"
+                + ",\"why\":\"" + why.toString().replace("\"", "'") + "\""
+                + ",\"decision\":\"" + decision.replace("\"", "'") + "\""
+                + "}";
     }
 }

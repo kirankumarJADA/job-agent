@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { apiFetch } from '../api/client';
 import { ApplicationAnswer, CoverLetter, JobDetailResponse, ResumeAtsAnalysis } from '../types';
@@ -34,15 +34,44 @@ export const JobDetailPage: React.FC = () => {
   const [data, setData] = useState<JobDetailResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [creatingApplication, setCreatingApplication] = useState(false);
+  const [applyState, setApplyState] = useState<{ ok: boolean; message: string } | null>(null);
 
-  useEffect(() => {
-    if (!id) return;
+  const fetchJob = useCallback((jobId: string) => {
     setLoading(true);
-    apiFetch<JobDetailResponse>(`/jobs/${id}`)
+    apiFetch<JobDetailResponse>(`/jobs/${jobId}`)
       .then(setData)
       .catch((err: unknown) => setError(err instanceof Error ? err.message : 'Job not found'))
       .finally(() => setLoading(false));
-  }, [id]);
+  }, []);
+
+  useEffect(() => {
+    if (!id) return;
+    setApplyState(null);
+    fetchJob(id);
+  }, [id, fetchJob]);
+
+  // The human half of the decision engine: REVIEW matches never auto-create
+  // an application — this button is the explicit owner decision.
+  const createApplication = async () => {
+    if (!id) return;
+    setCreatingApplication(true);
+    setApplyState(null);
+    try {
+      const result = await apiFetch<{ created: boolean; status: string }>(`/jobs/${id}/apply`, { method: 'POST' });
+      setApplyState({
+        ok: true,
+        message: result.created
+          ? 'Application created — it will be prepared and shown on your Applications page.'
+          : `You already have an application for this job (status: ${result.status}).`,
+      });
+      fetchJob(id);
+    } catch (err: unknown) {
+      setApplyState({ ok: false, message: err instanceof Error ? err.message : 'Could not create the application' });
+    } finally {
+      setCreatingApplication(false);
+    }
+  };
 
   if (loading) {
     return (
@@ -63,7 +92,7 @@ export const JobDetailPage: React.FC = () => {
     );
   }
 
-  const { job, analysis, score, decision_trace } = data;
+  const { job, analysis, match, decision_trace } = data;
 
   return (
     <PageShell>
@@ -185,31 +214,53 @@ export const JobDetailPage: React.FC = () => {
 
           <div className="space-y-6">
             {/* Score */}
-            <SectionCard title="Compatibility score">
-              {score ? (
+            <SectionCard title="Robin's match decision">
+              {match ? (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
                     <span className="text-3xl font-extrabold tracking-tight text-ink">
-                      {score.overall}
+                      {match.score}
                       <span className="text-base font-semibold text-ink-faint">/100</span>
                     </span>
-                    <StatusPill tone={score.recommendation === 'APPLY' ? 'emerald' : score.recommendation === 'REVIEW' ? 'amber' : 'slate'}>
-                      {score.recommendation}
+                    <StatusPill tone={match.recommendation === 'APPLY' ? 'emerald' : match.recommendation === 'REVIEW' ? 'amber' : 'slate'}>
+                      {match.recommendation}
                     </StatusPill>
                   </div>
-                  <ScoreBar value={score.overall} />
+                  <ScoreBar value={match.score} />
                   <div className="space-y-1.5 text-xs">
-                    {Object.entries(score.breakdown).map(([cat, val]) => (
-                      <div key={cat} className="flex items-center justify-between text-ink-soft">
-                        <span className="capitalize">{cat.replace(/_/g, ' ').toLowerCase()}</span>
-                        <span className="font-mono font-semibold text-ink">{val} pts</span>
+                    {(['skill_overlap', 'remote_fit', 'salary_fit'] as const).map((factor) => (
+                      <div key={factor} className="flex items-center justify-between text-ink-soft">
+                        <span className="capitalize">{factor.replace(/_/g, ' ')}</span>
+                        <span className="font-mono font-semibold text-ink">
+                          {match.breakdown?.[factor] ?? '—'} pts
+                        </span>
                       </div>
                     ))}
                   </div>
-                  {score.explanation && (
+                  {match.breakdown?.why && (
                     <p className="border-t border-line pt-3 text-xs leading-relaxed text-ink-muted">
-                      {score.explanation}
+                      {match.breakdown.why}
                     </p>
+                  )}
+                  {match.breakdown?.decision && (
+                    <p className="text-xs font-medium leading-relaxed text-ink-soft">{match.breakdown.decision}</p>
+                  )}
+                  {match.recommendation !== 'APPLY' && (
+                    <div className="border-t border-line pt-3">
+                      <button
+                        type="button"
+                        disabled={creatingApplication}
+                        onClick={createApplication}
+                        className="w-full rounded-lg bg-forest-900 px-4 py-2 text-sm font-semibold text-cream-50 shadow-raise transition-colors hover:bg-forest-800 disabled:opacity-50"
+                      >
+                        {creatingApplication ? 'Creating…' : 'Create application anyway'}
+                      </button>
+                      {applyState && (
+                        <p className={`mt-2 text-xs leading-relaxed ${applyState.ok ? 'text-emerald-600' : 'text-red-600'}`} role="status">
+                          {applyState.message}
+                        </p>
+                      )}
+                    </div>
                   )}
                 </div>
               ) : (

@@ -27,13 +27,43 @@ public class JobsController {
     private final JobRepository jobRepository;
     private final JobSeedService jobSeedService;
     private final com.personal.jobagent.security.OwnerContext ownerContext;
+    private final com.personal.jobagent.application.ApplicationPipelineService pipeline;
 
     public JobsController(JobRepository jobRepository,
                           @org.springframework.beans.factory.annotation.Autowired(required = false) JobSeedService jobSeedService,
-                          com.personal.jobagent.security.OwnerContext ownerContext) {
+                          com.personal.jobagent.security.OwnerContext ownerContext,
+                          com.personal.jobagent.application.ApplicationPipelineService pipeline) {
         this.jobRepository = jobRepository;
         this.jobSeedService = jobSeedService;
         this.ownerContext = ownerContext;
+        this.pipeline = pipeline;
+    }
+
+    /**
+     * The human half of the decision engine: REVIEW matches are stored but
+     * never auto-acted on, so the owner needs an explicit way to convert one
+     * into an application. Creation is the same idempotent path the APPLY
+     * flow uses (pre-check + partial unique index), so double clicks and
+     * replays cannot create a second application.
+     */
+    @PostMapping("/{id}/apply")
+    public ResponseEntity<?> applyToJob(@PathVariable UUID id) {
+        UUID profileId = ownerContext.profileIdOrNull();
+        if (profileId == null) {
+            return ResponseEntity.badRequest().body(Map.of("error", "a profile is required to apply"));
+        }
+        try {
+            var created = pipeline.createApplicationFromMatch(profileId, id);
+            if (created == null || created.applicationId() == null) {
+                return ResponseEntity.status(409).body(Map.of("error", "application could not be created"));
+            }
+            return ResponseEntity.status(created.created() ? 201 : 200).body(Map.of(
+                    "application_id", created.applicationId().toString(),
+                    "created", created.created(),
+                    "status", created.status()));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.notFound().build();
+        }
     }
 
     @GetMapping

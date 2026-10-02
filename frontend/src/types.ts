@@ -46,11 +46,22 @@ export interface JobDetailResponse {
     match_explanation?: string;
     skills_required?: Record<string, string[]>;
   } | null;
-  score: {
-    overall: number;
+  // The CALLER's own match decision (job_matches), including the persisted
+  // explanation of why the score came out the way it did.
+  match: {
+    score: number;
     recommendation: 'APPLY' | 'REVIEW' | 'SKIP';
-    breakdown: Record<string, number>;
-    explanation?: string;
+    breakdown: {
+      skill_overlap?: number;
+      remote_fit?: number;
+      salary_fit?: number;
+      weights?: Record<string, number>;
+      thresholds?: { apply: number; review: number };
+      matched_skills?: string[];
+      why?: string;
+      decision?: string;
+    } | null;
+    scored_at: string;
   } | null;
   decision_trace: Array<{ step: string; outcome: string; reason?: string }>;
 }
