@@ -181,7 +181,7 @@ public class JobDiscoveryService {
         return sha256(raw);
     }
 
-    private static String sha256(String input) {
+    public static String sha256(String input) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] hash = digest.digest(input.getBytes(StandardCharsets.UTF_8));

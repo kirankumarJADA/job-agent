@@ -10,10 +10,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.UUID;
 
 /**
@@ -294,8 +290,8 @@ public class JobSeedService {
                           int salaryMin, int salaryMax, String currency,
                           String description, String[] skills, String appUrl, String status) {
 
-        String dedupKey = md5(companyName.toLowerCase() + "|" + title.toLowerCase() + "|" + locationRaw.toLowerCase());
-        String contentHash = md5(title + "|" + description);
+        String dedupKey = com.personal.jobagent.discovery.JobDiscoveryService.computeDedupKey(companyName, title, locationRaw);
+        String contentHash = com.personal.jobagent.discovery.JobDiscoveryService.sha256(title + "\n" + description);
         UUID jobId = UuidV7.generate();
 
         return jdbcTemplate.execute((java.sql.Connection conn) -> {
@@ -346,14 +342,5 @@ public class JobSeedService {
             }
         });
     }
-
-    private static String md5(String input) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("MD5");
-            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest);
-        } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException(e);
-        }
-    }
 }
+
