@@ -71,6 +71,41 @@ export interface WorkEligibility {
   visa_status: string;
 }
 
+/** READ-ONLY execution package: Robin's per-field form decision record. */
+export interface AutomationPackageView {
+  planId: string;
+  applicationId: string;
+  jobId: string;
+  expectedUrl: string;
+  candidate: { email: string; fullName: string; phone: string; location: string };
+  cv?: { versionId: string; sha256: string; fileName: string } | null;
+  coverLetter?: { versionId: string; sha256: string; fileName: string } | null;
+  artifacts: Array<{ kind: string; versionId: string; sha256: string; fileName: string }>;
+  answers: Array<{ questionText: string; answerText: string; source: string }>;
+  fields: Array<{
+    key: string | null;
+    label: string;
+    htmlType: string;
+    required: boolean;
+    classification: string;
+    valueSource: string;
+    value: string;
+    reason: string;
+  }>;
+  human: Array<{ key: string; label: string; classification: string; reason: string }>;
+  unsupported: Array<{ key: string; label: string; classification: string; reason: string }>;
+  requiredGaps: Array<{ key: string; label: string; classification: string; reason: string }>;
+  safetyContract: string;
+}
+
+export interface ApplicationTimelineEvent {
+  id: string;
+  type: string;
+  payload: Record<string, unknown>;
+  actor: string;
+  occurred_at: string;
+}
+
 export interface WorkExperience {
   id: string;
   company: string;

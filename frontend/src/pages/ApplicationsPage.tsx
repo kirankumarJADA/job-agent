@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../api/client';
-import { ApplicationSummary } from '../types';
+import { ApplicationSummary, ApplicationTimelineEvent, AutomationPackageView } from '../types';
 import {
   EmptyState,
   Loading,
@@ -189,6 +189,9 @@ export const ApplicationsPage: React.FC = () => {
                       </div>
                     )}
                   </div>
+                  {application.planId && application.id && (
+                    <RobinDecisionPanel planId={application.planId} applicationId={application.id} />
+                  )}
                 </div>
               )}
             </SectionCard>
@@ -199,8 +202,148 @@ export const ApplicationsPage: React.FC = () => {
   );
 };
 
-function PlanStatusBadge({ status }: { status?: string | null }) {
-  if (!status) return null;
+/**
+ * The human-in-the-loop decision record for one automation plan, answering
+ * the five questions the product owes the candidate: what Robin knows, what
+ * it filled, what it could not determine, what it needs from the user, and
+ * why anything was blocked. Data is owner-scoped: the read-only execution
+ * package plus the application's own timeline.
+ */
+const RobinDecisionPanel: React.FC<{ planId: string; applicationId: string }> = ({ planId, applicationId }) => {
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<{ pkg: AutomationPackageView; timeline: ApplicationTimelineEvent[] } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    setError(null);
+    Promise.all([
+      apiFetch<AutomationPackageView>(`/automation/plans/${planId}/package`),
+      apiFetch<{ items: ApplicationTimelineEvent[] }>(`/applications/${applicationId}/timeline`),
+    ])
+      .then(([pkg, timeline]) => setData({ pkg, timeline: timeline.items ?? [] }))
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : 'Could not load the decision record'));
+  }, [planId, applicationId]);
+
+  useEffect(() => {
+    if (open && !data && !error) load();
+  }, [open, data, error, load]);
+
+  const blockedEvents = (data?.timeline ?? []).filter((event) =>
+    event.type === 'AUTOMATION_PLAN_FAILED'
+    || event.type === 'HARD_STOP'
+    || (event.type === 'PREPARATION' && event.payload?.status === 'FAILED'));
+
+  return (
+    <div className="mt-2 border-t border-line pt-2">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="text-xs font-semibold text-ink-muted hover:text-ink"
+      >
+        {open ? '▾' : '▸'} What Robin did, could not determine, and needs from you
+      </button>
+      {open && (
+        <div className="mt-2 space-y-3 text-xs">
+          {error && <p className="text-red-400">{error}</p>}
+          {!data && !error && <Loading>Loading decision record…</Loading>}
+          {data && (
+            <>
+              <div>
+                <p className="font-semibold text-ink-soft">What Robin knows about you</p>
+                <p className="mt-1 text-ink-muted">
+                  {data.pkg.candidate.fullName || '—'} · {data.pkg.candidate.email || '—'}
+                  {data.pkg.candidate.phone ? ` · ${data.pkg.candidate.phone}` : ''}
+                  {data.pkg.candidate.location ? ` · ${data.pkg.candidate.location}` : ''}
+                  {data.pkg.cv ? ' · tailored CV attached' : ' · no CV attached'}
+                  {data.pkg.coverLetter ? ' · cover letter attached' : ''}
+                </p>
+              </div>
+              <div>
+                <p className="font-semibold text-ink-soft">What Robin filled (deterministic, verified data only)</p>
+                {(() => {
+                  const filled = (data.pkg.fields ?? []).filter(
+                    (field) => field.classification === 'SUPPORTED_AUTO' && field.value);
+                  return filled.length > 0 ? (
+                    <ul className="mt-1 space-y-0.5 text-ink-muted">
+                      {filled.map((field) => (
+                        <li key={field.key ?? field.label}>
+                          {field.label}: <span className="font-mono text-ink">{field.value}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-1 text-ink-faint">Nothing was auto-filled.</p>
+                  );
+                })()}
+              </div>
+              <div>
+                <p className="font-semibold text-ink-soft">What Robin could not determine</p>
+                {(() => {
+                  const undetermined = [
+                    ...(data.pkg.human ?? []),
+                    ...(data.pkg.unsupported ?? []),
+                    ...(data.pkg.fields ?? [])
+                      .filter((field) => field.classification === 'REQUIRES_HUMAN' || field.classification === 'UNSUPPORTED')
+                      .map((field) => ({ key: field.key ?? '', label: field.label, classification: field.classification, reason: field.reason })),
+                  ];
+                  const seen = new Set<string>();
+                  const unique = undetermined.filter((item) => {
+                    const dedupKey = `${item.key}|${item.reason}`;
+                    if (seen.has(dedupKey)) return false;
+                    seen.add(dedupKey);
+                    return true;
+                  });
+                  return unique.length > 0 ? (
+                    <ul className="mt-1 space-y-0.5 text-ink-muted">
+                      {unique.map((item) => (
+                        <li key={`${item.key}-${item.reason}`}>
+                          {item.label || item.key || 'Field'} — {item.reason || item.classification}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-1 text-ink-faint">Every field was determined.</p>
+                  );
+                })()}
+              </div>
+              <div>
+                <p className="font-semibold text-ink-soft">What Robin needs from you</p>
+                {(data.pkg.requiredGaps ?? []).length > 0 ? (
+                  <ul className="mt-1 space-y-0.5 text-amber-300">
+                    {data.pkg.requiredGaps.map((gap) => (
+                      <li key={`${gap.key}-${gap.reason}`}>
+                        {gap.label || gap.key}: {gap.reason}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-1 text-ink-faint">
+                    No required gaps. Review the filled fields above and use “Approve for submission” when ready
+                    (submission itself stays disabled).
+                  </p>
+                )}
+              </div>
+              {blockedEvents.length > 0 && (
+                <div>
+                  <p className="font-semibold text-ink-soft">Why actions were blocked</p>
+                  <ul className="mt-1 space-y-0.5 text-red-300">
+                    {blockedEvents.map((event) => (
+                      <li key={event.id}>
+                        {String(event.payload?.step ?? event.type)}: {String(event.payload?.error ?? event.payload?.detail ?? 'blocked by safety rules')}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+function PlanStatusBadge({ status }: { status?: string | null }) {  if (!status) return null;
   const colors: Record<string, string> = {
     PREPARED: 'bg-blue-500/20 text-blue-300',
     RUNNING: 'bg-yellow-500/20 text-yellow-300',
