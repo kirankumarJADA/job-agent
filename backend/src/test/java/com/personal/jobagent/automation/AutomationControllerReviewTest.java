@@ -1,6 +1,8 @@
 package com.personal.jobagent.automation;
 
 import com.personal.jobagent.audit.AuditLogWriter;
+import com.personal.jobagent.notifications.NotificationEvents;
+import com.personal.jobagent.notifications.NotificationService;
 import com.personal.jobagent.security.OwnerContext;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -32,6 +34,7 @@ class AutomationControllerReviewTest {
     private final String coverSha = "b".repeat(64);
     private AutomationPlanRepository plans;
     private ExecutionPackageService executionPackages;
+    private NotificationService notifications;
     private OwnerContext owner;
     private AutomationController controller;
 
@@ -39,13 +42,39 @@ class AutomationControllerReviewTest {
     void setUp() {
         plans = mock(AutomationPlanRepository.class);
         executionPackages = mock(ExecutionPackageService.class);
+        notifications = mock(NotificationService.class);
         owner = mock(OwnerContext.class);
         when(owner.profileIdOrNull()).thenReturn(profileId);
         when(owner.isWorkerRequest()).thenReturn(false);
         when(owner.actorOr(anyString())).thenReturn("candidate@example.test");
         when(plans.owns(profileId, planId)).thenReturn(true);
         controller = new AutomationController(plans, mock(AuditLogWriter.class), owner, "worker-secret",
-                executionPackages);
+                executionPackages, notifications);
+    }
+
+    /** A failed run must not silently disappear: the owner is notified. */
+    @Test
+    void failedOutcomeNotifiesThePlanOwner() {
+        when(plans.transition(planId, "RUNNING", "FAILED")).thenReturn(true);
+        when(plans.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
+        when(plans.findById(planId)).thenReturn(Optional.of(row("FAILED", planPayload())));
+
+        assertThat(controller.complete(planId, new AutomationController.OutcomeRequest("FAILED", "step crashed"))
+                .getStatusCode().value()).isEqualTo(204);
+        verify(notifications).emit(argThat(cmd ->
+                NotificationEvents.AUTOMATION_FAILURE.equals(cmd.eventType())
+                        && String.valueOf(((Map<?, ?>) cmd.payload()).get("profile_id")).equals(profileId.toString())));
+    }
+
+    @Test
+    void completedOutcomeStaysSilent() {
+        when(plans.transition(planId, "RUNNING", "COMPLETED")).thenReturn(true);
+        when(plans.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
+        when(plans.findById(planId)).thenReturn(Optional.of(row("COMPLETED", planPayload())));
+
+        assertThat(controller.complete(planId, new AutomationController.OutcomeRequest("COMPLETED", "done"))
+                .getStatusCode().value()).isEqualTo(204);
+        verify(notifications, never()).emit(any());
     }
 
     /** Case 1: review alone never completes and never readies the plan. */

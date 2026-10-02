@@ -2,7 +2,11 @@ package com.personal.jobagent.automation;
 
 import com.personal.jobagent.audit.*;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.notifications.NotificationEvents;
+import com.personal.jobagent.notifications.NotificationService;
 import com.personal.jobagent.security.OwnerContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -39,22 +43,27 @@ import java.util.*;
 @RequestMapping("/api/v1/automation")
 public class AutomationController {
 
+    private static final Logger log = LoggerFactory.getLogger(AutomationController.class);
+
     private final AutomationPlanRepository plans;
     private final ExecutionPackageService executionPackages;
     private final AuditLogWriter audit;
     private final OwnerContext ownerContext;
     private final String workerToken;
+    private final NotificationService notifications;
 
     public AutomationController(AutomationPlanRepository plans,
                                 AuditLogWriter audit,
                                 OwnerContext ownerContext,
                                 @Value("${app.worker-event-token:}") String workerToken,
-                                ExecutionPackageService executionPackages) {
+                                ExecutionPackageService executionPackages,
+                                NotificationService notifications) {
         this.plans = plans;
         this.audit = audit;
         this.ownerContext = ownerContext;
         this.workerToken = workerToken == null ? "" : workerToken;
         this.executionPackages = executionPackages;
+        this.notifications = notifications;
     }
 
     public record CreateRequest(UUID applicationId, UUID jobId, String targetUrl, String idempotencyKey, List<AutomationPlan.Step> steps) {}
@@ -166,7 +175,48 @@ public class AutomationController {
         }
         audit.write(new AuditEntry(ownerContext.actorOr("worker"), "AUTOMATION_PLAN_" + outcome, "AUTOMATION_PLAN", id,
                 null, Map.of("detail", r.detail() == null ? "" : r.detail()), null, UuidV7.generate()));
+        notifyPlanOutcome(id, outcome, r.detail());
         return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * Failures and human gates must not silently disappear in the worker
+     * event log: the plan owner gets a notification through the standard
+     * outbox fan-out. COMPLETED is deliberately silent — a finished
+     * inspection is routine, and greenhouse runs never report COMPLETED
+     * (they end at AWAITING_APPROVAL).
+     */
+    private void notifyPlanOutcome(UUID planId, String outcome, String detail) {
+        String eventType = switch (outcome) {
+            case "HUMAN_REQUIRED" -> NotificationEvents.APPROVAL_REQUIRED;
+            case "FAILED" -> NotificationEvents.AUTOMATION_FAILURE;
+            case "BLOCKED_ANTI_BOT" -> NotificationEvents.HARD_STOP;
+            default -> null;
+        };
+        if (eventType == null) return;
+        UUID profileId = plans.ownerOfPlan(planId).orElse(null);
+        if (profileId == null) return;
+        var plan = plans.findById(planId).orElse(null);
+        Object jobId = "";
+        if (plan != null && plan.plan() instanceof Map<?, ?> stored
+                && stored.get("correlation") instanceof Map<?, ?> correlation) {
+            jobId = String.valueOf(correlation.get("jobId"));
+        }
+        try {
+            notifications.emit(new NotificationService.NotificationCommand(
+                    eventType,
+                    "AUTOMATION_PLAN",
+                    planId,
+                    Map.of("plan_id", planId.toString(),
+                            "application_id", plan == null ? "" : String.valueOf(plan.applicationId()),
+                            "job_id", String.valueOf(jobId),
+                            "profile_id", profileId.toString(),
+                            "detail", detail == null ? "" : detail),
+                    UuidV7.generate(),
+                    null));
+        } catch (Exception e) {
+            log.warn("Could not enqueue {} notification for plan {}: {}", eventType, planId, e.getMessage());
+        }
     }
 
     @PostMapping("/events")

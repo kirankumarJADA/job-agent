@@ -20,6 +20,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -95,15 +96,20 @@ public class ApplicationPipelineEventHandler implements EventHandler {
     @Override
     public boolean supports(String eventType) {
         return NotificationEvents.JOB_MATCHED.equals(eventType)
-                || NotificationEvents.APPLICATION_CREATED.equals(eventType);
+                || NotificationEvents.APPLICATION_CREATED.equals(eventType)
+                || NotificationEvents.JOB_DISCOVERED.equals(eventType)
+                || NotificationEvents.APPLICATION_REPREPARATION_REQUESTED.equals(eventType);
     }
 
     @Override
     public void handle(Envelope envelope) {
         Map<String, Object> payload = asMap(envelope.payload());
         switch (envelope.type()) {
+            case NotificationEvents.JOB_DISCOVERED -> pipeline.onJobIngested(
+                    uuid(payload.get("job_id")), String.valueOf(payload.getOrDefault("action", "INSERTED")));
             case NotificationEvents.JOB_MATCHED -> handleMatched(payload);
-            case NotificationEvents.APPLICATION_CREATED -> handleCreated(payload);
+            case NotificationEvents.APPLICATION_CREATED,
+                 NotificationEvents.APPLICATION_REPREPARATION_REQUESTED -> handleCreated(payload);
             default -> log.debug("Ignoring unsupported event {}", envelope.type());
         }
     }
@@ -149,10 +155,18 @@ public class ApplicationPipelineEventHandler implements EventHandler {
                 .orElse("the company");
 
         log.info("Preparing application {} (profile={} job={})", applicationId, profileId, jobId);
-        boolean cv = step(applicationId, "CV", () -> resumeService.tailor(profileId, jobId, applicationId));
-        boolean cover = step(applicationId, "COVER_LETTER",
+        // Retry safety: on a re-preparation replay (or an outbox redelivery of
+        // application.created), a step whose latest timeline status is OK has
+        // already committed its artifact and MUST NOT run again — cover
+        // letters, for instance, are append-only versions, so re-running the
+        // step would silently produce a duplicate. Only never-run or FAILED
+        // steps execute.
+        Map<String, String> lastStatus = lastPreparationStatusByStep(applicationId);
+        boolean cv = runStep(applicationId, "CV", lastStatus,
+                () -> resumeService.tailor(profileId, jobId, applicationId));
+        boolean cover = runStep(applicationId, "COVER_LETTER", lastStatus,
                 () -> coverLetterService.generateCoverLetter(profileId, jobId, applicationId));
-        boolean answer = step(applicationId, "ANSWERS",
+        boolean answer = runStep(applicationId, "ANSWERS", lastStatus,
                 () -> answerService.draftAnswer(profileId, jobId, applicationId,
                         "Why do you want to work at " + company + "?"));
 
@@ -220,6 +234,45 @@ public class ApplicationPipelineEventHandler implements EventHandler {
             record(applicationId, "PREPARATION", payload);
             log.warn("Preparation step {} failed for application {}: {}", step, applicationId, e.getMessage());
             return false;
+        }
+    }
+
+    /** Runs one preparation step unless its latest timeline status is already OK. */
+    private boolean runStep(UUID applicationId, String step, Map<String, String> lastStatus, Runnable action) {
+        if ("OK".equals(lastStatus.get(step))) {
+            log.info("Preparation step {} already succeeded for application {} — skipping", step, applicationId);
+            return true;
+        }
+        return step(applicationId, step, action);
+    }
+
+    /**
+     * Latest PREPARATION outcome per step (CV / COVER_LETTER / ANSWERS) from
+     * the application timeline. Empty on a first preparation; after a
+     * re-preparation it carries the surviving OK statuses and the FAILED ones
+     * that must be retried.
+     */
+    private Map<String, String> lastPreparationStatusByStep(UUID applicationId) {
+        try {
+            List<Map<String, Object>> rows = db.queryForList("""
+                    select distinct on (payload->>'step') payload->>'step' as step, payload->>'status' as status
+                    from application_events
+                    where application_id = ? and type = 'PREPARATION'
+                    order by payload->>'step', occurred_at desc
+                    """, applicationId);
+            Map<String, String> result = new LinkedHashMap<>();
+            for (Map<String, Object> row : rows) {
+                Object step = row.get("step");
+                Object status = row.get("status");
+                if (step != null && status != null) result.put(String.valueOf(step), String.valueOf(status));
+            }
+            return result;
+        } catch (Exception e) {
+            // If the timeline cannot be read, the safe behaviour is to run the
+            // steps: every preparation service is itself idempotent or
+            // append-only, so a redundant run never loses data.
+            log.warn("Could not read preparation timeline for {}: {}", applicationId, e.getMessage());
+            return Map.of();
         }
     }
 

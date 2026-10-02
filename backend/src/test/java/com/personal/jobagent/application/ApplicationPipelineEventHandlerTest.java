@@ -28,6 +28,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -70,6 +71,7 @@ class ApplicationPipelineEventHandlerTest {
                 .thenReturn(1);
         when(db.update(contains("application_events"), any(UUID.class), eq(APPLICATION), any(String.class)))
                 .thenReturn(1);
+        when(db.queryForList(anyString(), any(Object.class))).thenReturn(List.of());
         when(jobRepository.findById(JOB)).thenReturn(java.util.Optional.of(job()));
     }
 
@@ -204,9 +206,36 @@ class ApplicationPipelineEventHandlerTest {
     }
 
     @Test
-    void unsupportedEventTypesAreIgnored() {
-        handler.handle(envelope(NotificationEvents.JOB_DISCOVERED, Map.of()));
+    void aDiscoveredJobTriggersPipelineMatchingForEveryProfile() {
+        handler.handle(envelope(NotificationEvents.JOB_DISCOVERED, Map.of(
+                "job_id", JOB.toString(), "action", "INSERTED")));
 
+        verify(pipeline).onJobIngested(JOB, "INSERTED");
+        verify(pipeline, never()).createApplicationFromMatch(any(), any());
+    }
+
+    @Test
+    void repreparationSkipsStepsThatAlreadySucceededAndRetriesOnlyFailedOnes() {
+        when(db.queryForList(anyString(), any(Object.class))).thenReturn(List.of(
+                Map.of("step", "CV", "status", "OK"),
+                Map.of("step", "COVER_LETTER", "status", "FAILED")));
+
+        handler.handle(envelope(NotificationEvents.APPLICATION_REPREPARATION_REQUESTED, Map.of(
+                "application_id", APPLICATION.toString(), "profile_id", PROFILE.toString(), "job_id", JOB.toString())));
+
+        // CV already succeeded — must NOT run again (cover letters and CV
+        // artifacts are append-only/immutble; a re-run would duplicate them):
+        verify(resumeService, never()).tailor(any(), any(), any());
+        // The failed step and the never-run step do run:
+        verify(coverLetterService).generateCoverLetter(PROFILE, JOB, APPLICATION);
+        verify(answerService).draftAnswer(eq(PROFILE), eq(JOB), eq(APPLICATION), any());
+    }
+
+    @Test
+    void unsupportedEventTypesAreIgnored() {
+        handler.handle(envelope("nonexistent.event", Map.of()));
+
+        verify(pipeline, never()).onJobIngested(any(), any());
         verify(pipeline, never()).createApplicationFromMatch(any(), any());
         verify(resumeService, never()).tailor(any(), any(), any());
     }

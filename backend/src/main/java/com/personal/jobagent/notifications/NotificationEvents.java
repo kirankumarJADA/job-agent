@@ -27,6 +27,8 @@ public final class NotificationEvents {
     public static final String APPLICATION_PREPARED = "application.prepared";
     public static final String APPLICATION_SUBMITTED = "application.submitted";
     public static final String APPLICATION_STATUS_CHANGED = "application.status_changed";
+    /** Owner-requested re-run of a preparation whose steps partially failed. */
+    public static final String APPLICATION_REPREPARATION_REQUESTED = "application.repreparation_requested";
 
     // ── employer signup / verification (Phase 6 contract names) ─────
     public static final String SIGNUP_STARTED = "signup.started";

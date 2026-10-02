@@ -1,11 +1,14 @@
 package com.personal.jobagent.discovery;
 
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.events.OutboxWriter;
+import com.personal.jobagent.notifications.NotificationEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -22,9 +25,11 @@ public class JobDiscoveryService {
     private static final Logger log = LoggerFactory.getLogger(JobDiscoveryService.class);
 
     private final JdbcTemplate jdbcTemplate;
+    private final OutboxWriter outboxWriter;
 
-    public JobDiscoveryService(JdbcTemplate jdbcTemplate) {
+    public JobDiscoveryService(JdbcTemplate jdbcTemplate, OutboxWriter outboxWriter) {
         this.jdbcTemplate = jdbcTemplate;
+        this.outboxWriter = outboxWriter;
     }
 
     public record IngestJobCommand(
@@ -62,6 +67,15 @@ public class JobDiscoveryService {
 
     public record IngestResult(UUID jobId, String action, String dedupKey, String contentHash) {}
 
+    /**
+     * Persists one discovered job and publishes {@code job.discovered} on the
+     * outbox IN THE SAME TRANSACTION, so the matching pipeline sees exactly
+     * what ingestion committed. TOUCHED is emitted too, not just
+     * INSERTED/UPDATED: a previous pipeline run may have failed after the job
+     * row landed, and every successful re-ingestion is the self-heal that
+     * re-triggers idempotent matching.
+     */
+    @Transactional
     public IngestResult ingestJob(IngestJobCommand cmd) {
         String dedupKey = computeDedupKey(cmd.companyNameRaw(), cmd.title(), cmd.locationRaw());
         // JDBC cannot infer a type for java.time.Instant via setObject(); bind
@@ -88,6 +102,7 @@ public class JobDiscoveryService {
                             postedAtTs, existingId);
                 }
                 recordObservation(existingId, cmd, contentHash);
+                emitDiscovered(existingId, "TOUCHED", cmd.sourceId());
                 return new IngestResult(existingId, "TOUCHED", dedupKey, contentHash);
             } else {
                 // Repost or content updated
@@ -98,6 +113,7 @@ public class JobDiscoveryService {
                         where id = ?
                         """, contentHash, postedAtTs, postedAtTs, existingId);
                 recordObservation(existingId, cmd, contentHash);
+                emitDiscovered(existingId, "UPDATED", cmd.sourceId());
                 return new IngestResult(existingId, "UPDATED", dedupKey, contentHash);
             }
         }
@@ -122,7 +138,20 @@ public class JobDiscoveryService {
                 postedAtTs, postedAtTs, contentHash);
 
         recordObservation(id, cmd, contentHash);
+        emitDiscovered(id, "INSERTED", cmd.sourceId());
         return new IngestResult(id, "INSERTED", dedupKey, contentHash);
+    }
+
+    /**
+     * Publishes {@code job.discovered} on the outbox. Same transaction as the
+     * job write, so the event can never describe a job row that did not
+     * commit, and the row can never commit without its pipeline trigger.
+     */
+    private void emitDiscovered(UUID jobId, String action, UUID sourceId) {
+        outboxWriter.append("JOB", jobId, NotificationEvents.JOB_DISCOVERED,
+                Map.of("job_id", jobId.toString(), "action", action,
+                        "source_id", sourceId == null ? "" : sourceId.toString()),
+                UuidV7.generate(), null);
     }
 
     private void recordObservation(UUID jobId, IngestJobCommand cmd, String contentHash) {
