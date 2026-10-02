@@ -45,7 +45,21 @@ async function apiCall(url, body = null) {
 
 async function reportOutcome(planId, outcome, detail) {
   if (!completeUrl) return;
-  await apiCall(completeUrl.replace('{id}', encodeURIComponent(planId)), { outcome, detail });
+  // The completion report is the single most important call the worker makes:
+  // a transient backend blip must not end with the plan stranded in RUNNING
+  // (which the backend sweeper would then reclaim for re-execution). Retry a
+  // few times before giving up — the sweeper is the backstop either way.
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await apiCall(completeUrl.replace('{id}', encodeURIComponent(planId)), { outcome, detail });
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+    }
+  }
+  throw lastError ?? new Error('REPORT_OUTCOME_FAILED');
 }
 
 async function sendHeartbeat(planId) {
@@ -148,9 +162,26 @@ if (planFile) {
         await materializeArtifacts(plan, baseUrl);
       }
 
-      heartbeat = setInterval(() => sendHeartbeat(planId).catch(() => {}), 30_000);
-      const worker = new BrowserWorker({ statePath, artifactDir, eventSink });
-      await worker.execute(plan, { approve: false, headless: true });
+      // Heartbeat on an interval while executing. A single missed beat is
+      // tolerated (network jitter), but if the backend stays unreachable the
+      // run must STOP: the backend's stale-plan sweeper will reclaim the plan
+      // for re-execution, and continuing to drive a real employer form with
+      // no live lease risks two workers operating the same application at
+      // once. Stopping is always the safe direction.
+      const runner = new BrowserWorker({ statePath, artifactDir, eventSink });
+      let missedHeartbeats = 0;
+      heartbeat = setInterval(() => {
+        sendHeartbeat(planId)
+          .then(() => { missedHeartbeats = 0; })
+          .catch(() => {
+            missedHeartbeats += 1;
+            if (missedHeartbeats >= 3) {
+              console.error(JSON.stringify({ type: 'WORKER_LEASE_LOST', planId, missedHeartbeats }));
+              runner.requestAbort();
+            }
+          });
+      }, 30_000);
+      await runner.execute(plan, { approve: false, headless: true });
       const outcome = plan.planType === 'GREENHOUSE' ? 'HUMAN_REQUIRED' : 'COMPLETED';
       if (plan.planType === 'GREENHOUSE') await Promise.allSettled([
         eventSink({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,

@@ -24,6 +24,19 @@ export class BrowserWorker {
     this.store = new StateStore(statePath);
     this.artifactDir = artifactDir;
     this.eventSink = eventSink;
+    /** Set by requestAbort(): the run stops at the next step boundary. */
+    this.abortRequested = false;
+  }
+
+  /**
+   * Cooperative abort for lease loss: when the backend stops acknowledging
+   * heartbeats, the orchestrator will reclaim this plan for re-execution.
+   * Continuing to drive a live employer form without a lease risks two
+   * workers on one application, so the run stops at the next step boundary.
+   * Completed steps stay durable and are skipped on the re-execution.
+   */
+  requestAbort() {
+    this.abortRequested = true;
   }
 
   async execute(plan, { approve = false, failAfterStep = null, headless = true } = {}) {
@@ -58,6 +71,9 @@ export class BrowserWorker {
 
     try {
       for (const step of plan.steps) {
+        if (this.abortRequested) {
+          throw new HardStopError('WORKER_LEASE_LOST', { stepId: step.id });
+        }
         this.store.heartbeat(plan.planId);
         const prior = this.store.step(plan.planId, step.id);
         if (prior?.status === 'COMPLETED') continue;

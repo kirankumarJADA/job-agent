@@ -82,3 +82,23 @@ test('Greenhouse human review never transitions to submission and no submit step
   return assert.rejects(() => instance.execute(plan), (error) => error instanceof HardStopError
     && error.reason === 'FORBIDDEN_GREENHOUSE_STEP');
 });
+
+test('A lease-loss abort stops the run at the next step boundary with a hard stop', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'greenhouse-lease-'));
+  const fill = { id: 'fill-email', type: StepType.FILL_FIELD, policy: 'AUTO',
+    params: { selector: '#email', value: 'candidate@example.test' } };
+  const plan = greenhousePlan(root, {
+    fields: [
+      field('email', { value: 'candidate@example.test', classification: 'SUPPORTED_AUTO', source: 'users.email' }),
+      field('phone', { value: '+44 20 7946 0000', classification: 'SUPPORTED_AUTO', source: 'profiles.phone' }),
+    ],
+    extraSteps: [fill, { id: 'fill-phone', type: StepType.FILL_FIELD, policy: 'AUTO',
+      params: { selector: '#phone', value: '+44 20 7946 0000' } }],
+  });
+  const instance = worker(root);
+  // Simulate the orchestrator losing its lease mid-run: the abort is observed
+  // at the NEXT step boundary and raises the stable hard-stop reason.
+  instance.requestAbort();
+  await assert.rejects(() => instance.execute(plan), (error) => error instanceof HardStopError
+    && error.reason === 'WORKER_LEASE_LOST');
+});
