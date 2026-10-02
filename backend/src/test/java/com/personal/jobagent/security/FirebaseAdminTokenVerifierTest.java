@@ -177,6 +177,50 @@ class FirebaseAdminTokenVerifierTest {
         assertThat(thrown.getCause()).as("the SDK's parse failure must be kept as the cause").isNotNull();
     }
 
+    /**
+     * A production credential fault must be DIAGNOSABLE from the server log:
+     * the client response is deliberately generic, so the underlying cause
+     * (exception class + scrubbed message) is logged at ERROR without ever
+     * echoing the rejected key material. Before this test existed, a Render
+     * deployment failing credential load produced NOTHING in the server logs —
+     * the operator's only clue was the browser's opaque CORS/500 symptom.
+     */
+    @Test
+    void aCredentialLoadFailureIsLoggedWithItsCauseButNeverWithKeyMaterial() throws Exception {
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                        .getLogger(FirebaseAdminTokenVerifier.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> events =
+                new ch.qos.logback.core.read.ListAppender<>();
+        events.start();
+        logger.addAppender(events);
+        try {
+            // A truncated PEM is a genuine parse failure with distinctive
+            // key material that must NOT surface in any log line.
+            String truncated = SYNTHETIC_PEM.substring(0, SYNTHETIC_PEM.length() / 2);
+            String secretMaterial = truncated.trim();
+
+            FirebaseAdminTokenVerifier verifier = verifier(PROJECT_ID, CLIENT_EMAIL, truncated);
+            Throwable thrown = catchThrowable(() -> verifier.verifyIdToken("a-firebase-id-token"));
+
+            assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.Unavailable.class);
+            assertThat(thrown.getMessage())
+                    .contains("credentials are malformed")
+                    .doesNotContain(secretMaterial);
+
+            assertThat(events.list).as("the credential failure must be logged for the operator").isNotEmpty();
+            assertThat(events.list.stream().anyMatch(event ->
+                    event.getLevel() == ch.qos.logback.classic.Level.ERROR
+                            && event.getFormattedMessage().contains("Firebase Admin credential configuration is malformed")
+                            && event.getFormattedMessage().contains("IllegalArgumentException"))).isTrue();
+            // The rejected key material never reaches the log.
+            assertThat(events.list.stream().map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage))
+                    .allSatisfy(message -> assertThat(message).doesNotContain(secretMaterial));
+        } finally {
+            logger.detachAppender(events);
+        }
+    }
+
     private static FirebaseAdminTokenVerifier verifier(String projectId, String clientEmail, String privateKey) {
         FirebaseProperties properties = new FirebaseProperties();
         properties.setProjectId(projectId);

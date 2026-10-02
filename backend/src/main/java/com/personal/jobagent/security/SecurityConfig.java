@@ -211,7 +211,12 @@ public class SecurityConfig {
         configuration.setAllowCredentials(true);
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-        source.registerCorsConfiguration("/api/**", configuration);
+        // Registered for EVERY path, not just /api/**: a request that misses
+        // the API (a frontend base-URL mistake, a typo'd route) previously
+        // got a 404 with NO CORS headers, which the browser reports as the
+        // opaque "No Access-Control-Allow-Origin" error instead of the clear
+        // 404 it actually is. The origin allowlist stays exactly as strict.
+        source.registerCorsConfiguration("/**", configuration);
         return source;
     }
 

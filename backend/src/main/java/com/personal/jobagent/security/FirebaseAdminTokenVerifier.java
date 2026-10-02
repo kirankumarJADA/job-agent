@@ -222,11 +222,19 @@ public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
                     properties.getProjectId());
             return FirebaseAuth.getInstance(app);
         } catch (IOException e) {
-            // Note: the exception message from the credential parser can echo
-            // key material in pathological cases, so it is deliberately not
-            // included in the message surfaced to the client.
+            // The client gets a deliberately generic message (the parser can
+            // echo key material in pathological cases), but the OPERATOR is
+            // the one who must fix FIREBASE_PRIVATE_KEY — so the underlying
+            // cause is logged server-side: exception class plus the scrubbed
+            // message, never the key itself.
+            log.error("Firebase Admin credential loading failed: {}: {}",
+                    e.getClass().getSimpleName(),
+                    com.personal.jobagent.common.LogScrubber.scrub(String.valueOf(e.getMessage())));
             throw new Unavailable("Firebase service-account credentials could not be read.", e);
         } catch (IllegalStateException | IllegalArgumentException e) {
+            log.error("Firebase Admin credential configuration is malformed: {}: {}",
+                    e.getClass().getSimpleName(),
+                    com.personal.jobagent.common.LogScrubber.scrub(String.valueOf(e.getMessage())));
             throw new Unavailable("Firebase service-account credentials are malformed.", e);
         }
     }

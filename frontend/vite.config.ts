@@ -1,6 +1,7 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 
+import { assertDeployableApiBase } from "./src/apiBaseContract";
 import { assertNoLocalInspectionEnv } from "./src/localInspection";
 
 /**
@@ -11,10 +12,17 @@ import { assertNoLocalInspectionEnv } from "./src/localInspection";
  * given any of the VITE_LOCAL_INSPECTION_* variables fails outright: a loud
  * error at build time is the only protection that survives a misconfigured CI
  * or hosting environment.
+ *
+ * The same principle guards VITE_API_BASE_URL: it must end with /api/v1,
+ * because the client prefixes it to every relative endpoint (see
+ * src/apiBaseContract.ts — this is how the first production deployment
+ * misrouted every request into opaque CORS failures).
  */
 export default defineConfig(({ command, mode }) => {
   if (command === "build") {
-    assertNoLocalInspectionEnv(loadEnv(mode, process.cwd(), ""));
+    const env = loadEnv(mode, process.cwd(), "");
+    assertNoLocalInspectionEnv(env);
+    assertDeployableApiBase(env);
   }
 
   return {
