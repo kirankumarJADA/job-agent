@@ -24,6 +24,29 @@ jobs:
         working-directory: backend
         run: mvn -B verify
 
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        working-directory: worker
+        run: npm install
+
+      # The safety tests drive a real Chromium against the local mock employer.
+      - name: Install Playwright browser
+        working-directory: worker
+        run: npx playwright install --with-deps chromium
+
+      - name: Worker tests
+        working-directory: worker
+        run: npm test
+
   frontend:
     runs-on: ubuntu-latest
     steps:

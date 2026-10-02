@@ -33,7 +33,7 @@ import java.util.List;
  */
 public class WorkerEventTokenFilter extends OncePerRequestFilter {
 
-    static final String EVENTS_PATH = "/api/v1/automation/events";
+    public static final String EVENTS_PATH = "/api/v1/automation/events";
 
     private final String expectedToken;
 
