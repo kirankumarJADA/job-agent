@@ -23,16 +23,16 @@ public class AtsController {
 
     @GetMapping("/adapters")
     public List<Map<String, Object>> listAdapters() {
+        // Declarative and side-effect free: the listing must never probe live
+        // services (a probe once 500'd the whole endpoint on the real
+        // Greenhouse inspector). Each adapter reports whether its inspection
+        // is LIVE (deterministic real inspection) or not — a mock or
+        // client-rendered boundary is labelled, never passed off as a scan.
         return adapterRegistry.getAdapters().stream()
-                .map(a -> {
-                    var desc = a.inspectForm("https://example.com");
-                    return Map.<String, Object>of(
-                            "kind", a.kind().name(),
-                            "requiresAuth", desc.requiresAuth(),
-                            "multiStep", desc.multiStep(),
-                            "supportedFields", desc.supportedFields()
-                    );
-                })
+                .<Map<String, Object>>map(a -> Map.of(
+                        "kind", a.kind().name(),
+                        "supportsLiveInspection", a.supportsLiveInspection(),
+                        "inspection", a.supportsLiveInspection() ? "live" : "unavailable"))
                 .toList();
     }
 

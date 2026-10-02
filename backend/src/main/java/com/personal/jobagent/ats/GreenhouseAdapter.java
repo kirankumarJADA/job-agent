@@ -118,6 +118,11 @@ public class GreenhouseAdapter extends BaseAtsAdapter {
     }
 
     @Override
+    public boolean supportsLiveInspection() {
+        return true;
+    }
+
+    @Override
     public FormDescriptor inspectForm(String url) {
         if (url == null || url.isBlank() || !matchesUrl(url)) {
             throw new IllegalArgumentException("URL is not a Greenhouse board URL");

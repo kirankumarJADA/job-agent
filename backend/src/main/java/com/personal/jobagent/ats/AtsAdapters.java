@@ -6,20 +6,14 @@ import java.util.regex.Pattern;
 
 public final class AtsAdapters {
 
-    // Greenhouse is implemented as a real read-only form inspector:
-    // see GreenhouseAdapter (top-level, real inspectForm).
+    // Greenhouse (real read-only inspection) and Ashby (honest detection
+    // boundary — its apply forms are client-rendered) are top-level real
+    // adapters; see GreenhouseAdapter and AshbyAdapter.
 
     @Component
     public static class LeverAdapter extends BaseAtsAdapter {
         public LeverAdapter() {
             super(AtsKind.LEVER, Pattern.compile("jobs\\.lever\\.co|lever\\.co"), false, false);
-        }
-    }
-
-    @Component
-    public static class AshbyAdapter extends BaseAtsAdapter {
-        public AshbyAdapter() {
-            super(AtsKind.ASHBY, Pattern.compile("jobs\\.ashbyhq\\.com|ashbyhq\\.com"), false, false);
         }
     }
 

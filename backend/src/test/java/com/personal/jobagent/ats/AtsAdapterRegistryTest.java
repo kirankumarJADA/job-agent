@@ -12,8 +12,8 @@ class AtsAdapterRegistryTest {
 
     private final List<AtsAdapter> allAdapters = List.of(
             new GreenhouseAdapter(),
+            new AshbyAdapter(),
             new AtsAdapters.LeverAdapter(),
-            new AtsAdapters.AshbyAdapter(),
             new AtsAdapters.WorkdayAdapter(),
             new AtsAdapters.IcimsAdapter(),
             new AtsAdapters.BambooHrAdapter(),

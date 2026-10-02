@@ -9,6 +9,16 @@ public interface AtsAdapter {
 
     boolean matchesUrl(String url);
 
+    /**
+     * Whether {@link #inspectForm(String)} performs REAL, deterministic
+     * inspection of a matching URL. Adapters that would return a static or
+     * mock descriptor report false so listings never present a simulation as
+     * an inspection capability. Default false — real inspectors opt in.
+     */
+    default boolean supportsLiveInspection() {
+        return false;
+    }
+
     record FormDescriptor(
             AtsKind kind,
             String endpoint,
