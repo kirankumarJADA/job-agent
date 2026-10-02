@@ -227,16 +227,48 @@ public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
             // the one who must fix FIREBASE_PRIVATE_KEY — so the underlying
             // cause is logged server-side: exception class plus the scrubbed
             // message, never the key itself.
-            log.error("Firebase Admin credential loading failed: {}: {}",
+            log.error("Firebase Admin credential loading failed: {}: {} | {}",
                     e.getClass().getSimpleName(),
-                    com.personal.jobagent.common.LogScrubber.scrub(String.valueOf(e.getMessage())));
+                    com.personal.jobagent.common.LogScrubber.scrub(String.valueOf(e.getMessage())),
+                    configurationDiagnostic(e));
             throw new Unavailable("Firebase service-account credentials could not be read.", e);
         } catch (IllegalStateException | IllegalArgumentException e) {
-            log.error("Firebase Admin credential configuration is malformed: {}: {}",
+            log.error("Firebase Admin credential configuration is malformed: {}: {} | {}",
                     e.getClass().getSimpleName(),
-                    com.personal.jobagent.common.LogScrubber.scrub(String.valueOf(e.getMessage())));
+                    com.personal.jobagent.common.LogScrubber.scrub(String.valueOf(e.getMessage())),
+                    configurationDiagnostic(e));
             throw new Unavailable("Firebase service-account credentials are malformed.", e);
         }
+    }
+
+    /**
+     * Presence-and-shape diagnostic for the three FIREBASE_* variables,
+     * logged when Admin initialisation fails. Reports ONLY booleans and a
+     * shape verdict — never the project id, client email, or any part of the
+     * private key. {@code normalizedPemShapeValid} is false when the stored
+     * value does not look like a PKCS#8 PEM after newline normalisation,
+     * which catches the two common operator mistakes: the value wrapped in
+     * quotation marks, and the whole service-account JSON pasted instead of
+     * the key alone.
+     */
+    private String configurationDiagnostic(Exception cause) {
+        boolean projectIdPresent = isPresent(properties.getProjectId());
+        boolean clientEmailPresent = isPresent(properties.getClientEmail());
+        String normalised = properties.normalisedPrivateKey();
+        boolean privateKeyPresent = normalised != null;
+        boolean pemShapeValid = privateKeyPresent
+                && normalised.startsWith("-----BEGIN PRIVATE KEY-----")
+                && normalised.endsWith("-----END PRIVATE KEY-----")
+                && normalised.contains("\n");
+        return "diagnostic: projectIdPresent=" + projectIdPresent
+                + ", clientEmailPresent=" + clientEmailPresent
+                + ", privateKeyPresent=" + privateKeyPresent
+                + ", normalizedPemShapeValid=" + pemShapeValid
+                + ", at=" + cause.getClass().getSimpleName();
+    }
+
+    private static boolean isPresent(String value) {
+        return value != null && !value.isBlank();
     }
 
     /**

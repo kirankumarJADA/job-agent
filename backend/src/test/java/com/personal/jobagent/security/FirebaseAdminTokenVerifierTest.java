@@ -213,9 +213,96 @@ class FirebaseAdminTokenVerifierTest {
                     event.getLevel() == ch.qos.logback.classic.Level.ERROR
                             && event.getFormattedMessage().contains("Firebase Admin credential configuration is malformed")
                             && event.getFormattedMessage().contains("IllegalArgumentException"))).isTrue();
+            // The diagnostic must report presence booleans plus the shape
+            // verdict (a truncated PEM loses its END marker) and never any
+            // key material.
+            String diagnostic = events.list.stream()
+                    .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                    .filter(message -> message.contains("diagnostic:"))
+                    .findFirst().orElse("");
+            assertThat(diagnostic)
+                    .contains("projectIdPresent=true")
+                    .contains("clientEmailPresent=true")
+                    .contains("privateKeyPresent=true")
+                    .contains("normalizedPemShapeValid=false")
+                    .doesNotContain(secretMaterial);
             // The rejected key material never reaches the log.
             assertThat(events.list.stream().map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage))
                     .allSatisfy(message -> assertThat(message).doesNotContain(secretMaterial));
+        } finally {
+            logger.detachAppender(events);
+        }
+    }
+
+    /**
+     * The two operator mistakes the production incident could not distinguish
+     * from a code bug: the key pasted wrapped in quotation marks, and the
+     * whole service-account JSON pasted instead of the key alone. Both must
+     * surface as {@code normalizedPemShapeValid=false} in the diagnostic.
+     */
+    @Test
+    void theDiagnosticNamesOperatorMistakesAsShapeFailures() {
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                        .getLogger(FirebaseAdminTokenVerifier.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> events =
+                new ch.qos.logback.core.read.ListAppender<>();
+        events.start();
+        logger.addAppender(events);
+        try {
+            // Quoted value (Render env var saved with surrounding quotes):
+            FirebaseAdminTokenVerifier quoted = verifier(PROJECT_ID, CLIENT_EMAIL, '"' + SYNTHETIC_PEM + '"');
+            catchThrowable(() -> quoted.verifyIdToken("a-firebase-id-token"));
+            // Whole service-account JSON pasted as the key:
+            FirebaseAdminTokenVerifier jsonPasted = verifier(PROJECT_ID, CLIENT_EMAIL,
+                    "{\"type\":\"service_account\",\"private_key\":\"-----BEGIN PRIVATE KEY-----\\\\n...\"}");
+            catchThrowable(() -> jsonPasted.verifyIdToken("a-firebase-id-token"));
+
+            java.util.List<String> diagnostics = events.list.stream()
+                    .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                    .filter(message -> message.contains("diagnostic:"))
+                    .toList();
+            assertThat(diagnostics).hasSize(2);
+            assertThat(diagnostics).allSatisfy(diagnostic -> {
+                assertThat(diagnostic)
+                        .contains("projectIdPresent=true")
+                        .contains("clientEmailPresent=true")
+                        .contains("privateKeyPresent=true")
+                        .contains("normalizedPemShapeValid=false");
+                // The botched values themselves never reach the log:
+                assertThat(diagnostic).doesNotContain(SYNTHETIC_PEM).doesNotContain("service_account");
+            });
+        } finally {
+            logger.detachAppender(events);
+        }
+    }
+
+    /**
+     * Discriminates case D (shape looks right, content is not): a PEM with
+     * correct markers but an invalid base64 body logs
+     * {@code normalizedPemShapeValid=true} on the credential-loading path.
+     */
+    @Test
+    void theDiagnosticReportsAValidShapeWhenOnlyTheContentIsBroken() {
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                        .getLogger(FirebaseAdminTokenVerifier.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> events =
+                new ch.qos.logback.core.read.ListAppender<>();
+        events.start();
+        logger.addAppender(events);
+        try {
+            String shapedButBroken = "-----BEGIN PRIVATE KEY-----\nnot-valid-base64!!!\n-----END PRIVATE KEY-----\n";
+            FirebaseAdminTokenVerifier verifier = verifier(PROJECT_ID, CLIENT_EMAIL, shapedButBroken);
+            catchThrowable(() -> verifier.verifyIdToken("a-firebase-id-token"));
+
+            String diagnostic = events.list.stream()
+                    .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                    .filter(message -> message.contains("diagnostic:"))
+                    .findFirst().orElse("");
+            assertThat(diagnostic)
+                    .contains("normalizedPemShapeValid=true")
+                    .doesNotContain(shapedButBroken);
         } finally {
             logger.detachAppender(events);
         }
