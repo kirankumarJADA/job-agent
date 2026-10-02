@@ -1,5 +1,6 @@
 package com.personal.jobagent.discovery;
 
+import com.personal.jobagent.common.AutomationMetrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -43,12 +44,15 @@ public class DiscoveryScheduler {
     private final JdbcTemplate db;
     private final DiscoveryOrchestrator orchestrator;
     private final int circuitOpenAfterFailures;
+    private final AutomationMetrics metrics;
 
     public DiscoveryScheduler(JdbcTemplate db, DiscoveryOrchestrator orchestrator,
-                              @Value("${app.discovery.circuit-open-after-failures:10}") int circuitOpenAfterFailures) {
+                              @Value("${app.discovery.circuit-open-after-failures:10}") int circuitOpenAfterFailures,
+                              AutomationMetrics metrics) {
         this.db = db;
         this.orchestrator = orchestrator;
         this.circuitOpenAfterFailures = circuitOpenAfterFailures;
+        this.metrics = metrics;
     }
 
     private record SchedulableSource(UUID id, String kind, String orgIdentifier,
@@ -78,6 +82,7 @@ public class DiscoveryScheduler {
                 run(source);
             } catch (Exception e) {
                 // One broken source must never starve the others in the sweep.
+                metrics.scheduledDiscoveryRun("failed");
                 log.warn("Scheduled discovery for source {} failed: {}", source.id(), e.getMessage());
                 recordFailure(source, e.getClass().getSimpleName());
             }
@@ -122,6 +127,7 @@ public class DiscoveryScheduler {
         DiscoveryOrchestrator.DiscoveryRun run = "ASHBY".equals(source.kind())
                 ? orchestrator.discoverAshbyBoard(source.id(), source.orgIdentifier())
                 : orchestrator.discoverGreenhouseBoard(source.id(), source.orgIdentifier());
+        metrics.scheduledDiscoveryRun(run.errors() == null || run.errors().isEmpty() ? "ok" : "failed");
         if (run.errors() == null || run.errors().isEmpty()) {
             log.info("Scheduled discovery for source {} ({}) ingested {} job(s)",
                     source.id(), source.kind(), run.ingested().size());

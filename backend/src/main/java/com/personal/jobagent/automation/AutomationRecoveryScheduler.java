@@ -1,5 +1,6 @@
 package com.personal.jobagent.automation;
 
+import com.personal.jobagent.common.AutomationMetrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -27,16 +28,20 @@ public class AutomationRecoveryScheduler {
 
     private final AutomationPlanRepository plans;
     private final long stalePlanMinutes;
+    private final AutomationMetrics metrics;
 
     public AutomationRecoveryScheduler(AutomationPlanRepository plans,
-                                       @Value("${app.automation.stale-plan-minutes:15}") long stalePlanMinutes) {
+                                       @Value("${app.automation.stale-plan-minutes:15}") long stalePlanMinutes,
+                                       AutomationMetrics metrics) {
         this.plans = plans;
         this.stalePlanMinutes = stalePlanMinutes;
+        this.metrics = metrics;
     }
 
     @Scheduled(fixedDelayString = "${app.automation.stale-sweep-interval-ms:60000}")
     public void recoverStalePlans() {
         int recovered = plans.recoverStale(Instant.now().minusSeconds(stalePlanMinutes * 60));
+        metrics.stalePlansRecovered(recovered);
         if (recovered > 0) {
             log.warn("Recovered {} automation plan(s) with no heartbeat for over {} minute(s) — returned to PREPARED",
                     recovered, stalePlanMinutes);

@@ -1,6 +1,7 @@
 package com.personal.jobagent.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.personal.jobagent.common.AutomationMetrics;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.coverletter.CoverLetterService;
 import com.personal.jobagent.events.Envelope;
@@ -68,6 +69,7 @@ public class ApplicationPipelineEventHandler implements EventHandler {
     private final NotificationService notifications;
     private final JdbcTemplate db;
     private final ObjectMapper json;
+    private final AutomationMetrics metrics;
 
     public ApplicationPipelineEventHandler(ApplicationPipelineService pipeline,
                                            InspectionPlanService inspectionPlanService,
@@ -78,7 +80,8 @@ public class ApplicationPipelineEventHandler implements EventHandler {
                                            JobRepository jobRepository,
                                            NotificationService notifications,
                                            JdbcTemplate db,
-                                           ObjectMapper json) {
+                                           ObjectMapper json,
+                                           AutomationMetrics metrics) {
         this.pipeline = pipeline;
         this.inspectionPlanService = inspectionPlanService;
         this.greenhousePlanService = greenhousePlanService;
@@ -89,6 +92,7 @@ public class ApplicationPipelineEventHandler implements EventHandler {
         this.notifications = notifications;
         this.db = db;
         this.json = json;
+        this.metrics = metrics;
     }
 
     @Override public String consumerName() { return CONSUMER_NAME; }
@@ -108,8 +112,11 @@ public class ApplicationPipelineEventHandler implements EventHandler {
             case NotificationEvents.JOB_DISCOVERED -> pipeline.onJobIngested(
                     uuid(payload.get("job_id")), String.valueOf(payload.getOrDefault("action", "INSERTED")));
             case NotificationEvents.JOB_MATCHED -> handleMatched(payload);
-            case NotificationEvents.APPLICATION_CREATED,
-                 NotificationEvents.APPLICATION_REPREPARATION_REQUESTED -> handleCreated(payload);
+            case NotificationEvents.APPLICATION_CREATED -> handleCreated(payload);
+            case NotificationEvents.APPLICATION_REPREPARATION_REQUESTED -> {
+                metrics.rePreparationRequested();
+                handleCreated(payload);
+            }
             default -> log.debug("Ignoring unsupported event {}", envelope.type());
         }
     }
@@ -169,6 +176,9 @@ public class ApplicationPipelineEventHandler implements EventHandler {
         boolean answer = runStep(applicationId, "ANSWERS", lastStatus,
                 () -> answerService.draftAnswer(profileId, jobId, applicationId,
                         "Why do you want to work at " + company + "?"));
+        metrics.preparationStep("CV", cv ? "OK" : "FAILED");
+        metrics.preparationStep("COVER_LETTER", cover ? "OK" : "FAILED");
+        metrics.preparationStep("ANSWERS", answer ? "OK" : "FAILED");
 
         if (cv && cover && answer) {
             notifications.emit(new NotificationService.NotificationCommand(

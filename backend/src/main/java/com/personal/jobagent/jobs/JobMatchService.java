@@ -1,5 +1,6 @@
 package com.personal.jobagent.jobs;
 
+import com.personal.jobagent.common.AutomationMetrics;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.notifications.NotificationEvents;
 import com.personal.jobagent.notifications.NotificationService;
@@ -48,17 +49,20 @@ public class JobMatchService {
     private final JdbcTemplate jdbcTemplate;
     private final NotificationService notificationService;
     private final TransactionTemplate transactionTemplate;
+    private final AutomationMetrics metrics;
 
     public JobMatchService(JobRepository jobRepository,
                            ProfileRepository profileRepository,
                            JdbcTemplate jdbcTemplate,
                            NotificationService notificationService,
-                           PlatformTransactionManager transactionManager) {
+                           PlatformTransactionManager transactionManager,
+                           AutomationMetrics metrics) {
         this.jobRepository = jobRepository;
         this.profileRepository = profileRepository;
         this.jdbcTemplate = jdbcTemplate;
         this.notificationService = notificationService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
+        this.metrics = metrics;
     }
 
     public record MatchResult(UUID jobId, int overall, String recommendation,
@@ -145,6 +149,7 @@ public class JobMatchService {
             return true;
         }));
 
+        metrics.matchRecorded(recommendation);
         log.info("Job {} matched: score={} recommendation={} notified={}", jobId, overall, recommendation, notified);
         return new MatchResult(jobId, overall, recommendation, skillOverlap.ratio(), remoteFit, salaryFit, notified);
     }

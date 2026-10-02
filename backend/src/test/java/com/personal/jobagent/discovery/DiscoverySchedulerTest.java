@@ -1,5 +1,6 @@
 package com.personal.jobagent.discovery;
 
+import com.personal.jobagent.common.AutomationMetrics;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -38,7 +39,7 @@ class DiscoverySchedulerTest {
     @BeforeEach
     void setUp() {
         reset(db, orchestrator);
-        scheduler = new DiscoveryScheduler(db, orchestrator, 10);
+        scheduler = new DiscoveryScheduler(db, orchestrator, 10, new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
     }
 
     private void dueSource(String cron, Integer rateLimitPerMin, Instant lastRunAt) {

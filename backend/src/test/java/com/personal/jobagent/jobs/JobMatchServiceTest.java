@@ -1,5 +1,6 @@
 package com.personal.jobagent.jobs;
 
+import com.personal.jobagent.common.AutomationMetrics;
 import com.personal.jobagent.notifications.NotificationEvents;
 import com.personal.jobagent.notifications.NotificationService;
 import com.personal.jobagent.profile.ProfileRepository;
@@ -49,7 +50,7 @@ class JobMatchServiceTest {
     void setUp() {
         PlatformTransactionManager tm = mock(PlatformTransactionManager.class);
         when(tm.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
-        service = new JobMatchService(jobRepository, profileRepository, jdbc, notifications, tm);
+        service = new JobMatchService(jobRepository, profileRepository, jdbc, notifications, tm, new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
         when(jdbc.update(anyString(), any(Object[].class))).thenReturn(1);
     }
 

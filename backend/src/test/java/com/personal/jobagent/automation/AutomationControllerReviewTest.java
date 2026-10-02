@@ -1,5 +1,6 @@
 package com.personal.jobagent.automation;
 
+import com.personal.jobagent.common.AutomationMetrics;
 import com.personal.jobagent.audit.AuditLogWriter;
 import com.personal.jobagent.notifications.NotificationEvents;
 import com.personal.jobagent.notifications.NotificationService;
@@ -49,7 +50,7 @@ class AutomationControllerReviewTest {
         when(owner.actorOr(anyString())).thenReturn("candidate@example.test");
         when(plans.owns(profileId, planId)).thenReturn(true);
         controller = new AutomationController(plans, mock(AuditLogWriter.class), owner, "worker-secret",
-                executionPackages, notifications);
+                executionPackages, notifications, new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
     }
 
     /** A failed run must not silently disappear: the owner is notified. */

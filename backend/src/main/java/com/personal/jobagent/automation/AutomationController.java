@@ -1,6 +1,7 @@
 package com.personal.jobagent.automation;
 
 import com.personal.jobagent.audit.*;
+import com.personal.jobagent.common.AutomationMetrics;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.notifications.NotificationEvents;
 import com.personal.jobagent.notifications.NotificationService;
@@ -51,19 +52,22 @@ public class AutomationController {
     private final OwnerContext ownerContext;
     private final String workerToken;
     private final NotificationService notifications;
+    private final AutomationMetrics metrics;
 
     public AutomationController(AutomationPlanRepository plans,
                                 AuditLogWriter audit,
                                 OwnerContext ownerContext,
                                 @Value("${app.worker-event-token:}") String workerToken,
                                 ExecutionPackageService executionPackages,
-                                NotificationService notifications) {
+                                NotificationService notifications,
+                                AutomationMetrics metrics) {
         this.plans = plans;
         this.audit = audit;
         this.ownerContext = ownerContext;
         this.workerToken = workerToken == null ? "" : workerToken;
         this.executionPackages = executionPackages;
         this.notifications = notifications;
+        this.metrics = metrics;
     }
 
     public record CreateRequest(UUID applicationId, UUID jobId, String targetUrl, String idempotencyKey, List<AutomationPlan.Step> steps) {}
@@ -153,6 +157,7 @@ public class AutomationController {
         }
         audit.write(new AuditEntry(ownerContext.actorOr("user"), "GREENHOUSE_SUBMIT_APPROVED", "AUTOMATION_PLAN", id,
                 null, Map.of("approvedForSubmission", true, "submissionEnabled", false), null, UuidV7.generate()));
+        metrics.submitApproved();
         // Approval records intent only: READY_TO_SUBMIT plans are never served
         // to a worker again and no endpoint transitions them to SUBMITTED.
         return ResponseEntity.ok(Map.of("status", "READY_TO_SUBMIT", "submissionEnabled", false));
@@ -175,6 +180,7 @@ public class AutomationController {
         }
         audit.write(new AuditEntry(ownerContext.actorOr("worker"), "AUTOMATION_PLAN_" + outcome, "AUTOMATION_PLAN", id,
                 null, Map.of("detail", r.detail() == null ? "" : r.detail()), null, UuidV7.generate()));
+        metrics.planOutcome(outcome);
         notifyPlanOutcome(id, outcome, r.detail());
         return ResponseEntity.noContent().build();
     }

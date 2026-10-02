@@ -70,7 +70,8 @@ class InspectionPlanBridgeTest {
         handler = new ApplicationPipelineEventHandler(
                 pipelineService, inspectionPlanService, greenhousePlanService,
                 resumeService, coverLetterService, answerService,
-                jobRepository, notifications, db, new ObjectMapper());
+                jobRepository, notifications, db, new ObjectMapper(),
+                new com.personal.jobagent.common.AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
 
         // Application exists
         when(db.queryForObject(contains("count(*) from applications"), eq(Integer.class), eq(APP_ID)))
