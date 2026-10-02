@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { apiFetch } from '../api/client';
-import { Job } from '../types';
+import { ApplicationSummary, Job } from '../types';
 import {
   Alert,
   EmptyState,
@@ -31,6 +31,7 @@ export const DashboardPage: React.FC = () => {
   const [seedMessage, setSeedMessage] = useState<string | null>(null);
   const [pingResult, setPingResult] = useState<any>(null);
   const [pinging, setPinging] = useState(false);
+  const [applications, setApplications] = useState<ApplicationSummary[]>([]);
 
   useEffect(() => {
     apiFetch<{ status: string; components?: Record<string, string> }>('/system/health')
@@ -40,6 +41,10 @@ export const DashboardPage: React.FC = () => {
     apiFetch<{ items: Job[] }>('/jobs?limit=5')
       .then((res) => setJobs(res.items || []))
       .catch(() => setJobs([]));
+
+    apiFetch<{ items: ApplicationSummary[] }>('/applications')
+      .then((res) => setApplications(res.items || []))
+      .catch(() => setApplications([]));
   }, []);
 
   const handleSeedJobs = async () => {
@@ -115,6 +120,55 @@ export const DashboardPage: React.FC = () => {
             hint="Empirical failover + usage ledger"
           />
         </div>
+
+        {/* Automation & human tasks — one owner-scoped call, plan statuses only */}
+        <section className="rounded-xl border border-line bg-surface shadow-card">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-3.5">
+            <div>
+              <h2 className="text-sm font-semibold text-ink">Automation &amp; human tasks</h2>
+              <p className="mt-0.5 text-xs text-ink-muted">
+                Where your applications stand and what is waiting on you. Robin never claims an application was submitted.
+              </p>
+            </div>
+            <SecondaryButton href="/applications">Open Applications</SecondaryButton>
+          </div>
+          <div className="grid grid-cols-2 gap-3 px-5 py-4 sm:grid-cols-5">
+            {(() => {
+              const count = (status: string) =>
+                applications.filter((a) => a.planStatus === status).length;
+              const prepared = applications.filter((a) => a.status === 'READY_TO_APPLY').length;
+              return (
+                <>
+                  <MetricCard label="Prepared" value={String(prepared)} hint="Queued for automation" />
+                  <MetricCard label="Running" value={String(count('RUNNING'))} hint="Worker executing" />
+                  <MetricCard label="Needs review" value={String(count('AWAITING_APPROVAL'))} hint="Awaiting your review" />
+                  <MetricCard label="Ready to submit" value={String(count('READY_TO_SUBMIT'))} hint="Approved; submission disabled" />
+                  <MetricCard
+                    label="Failed / blocked"
+                    value={String(count('FAILED') + count('BLOCKED_ANTI_BOT'))}
+                    hint="Needs attention"
+                  />
+                </>
+              );
+            })()}
+          </div>
+          {applications.filter((a) => a.planStatus === 'AWAITING_APPROVAL' || a.planStatus === 'FAILED' || a.planStatus === 'BLOCKED_ANTI_BOT').length > 0 && (
+            <ul className="space-y-1.5 border-t border-line px-5 py-4 text-sm">
+              {applications
+                .filter((a) => a.planStatus === 'AWAITING_APPROVAL' || a.planStatus === 'FAILED' || a.planStatus === 'BLOCKED_ANTI_BOT')
+                .map((a) => (
+                  <li key={a.id} className="flex items-center justify-between gap-3">
+                    <span className="truncate text-ink-soft">{a.jobTitle || a.id}</span>
+                    <span className="shrink-0 text-xs font-medium text-ink-muted">
+                      {a.planStatus === 'AWAITING_APPROVAL' ? 'Review & approve on the Applications page'
+                        : a.planStatus === 'BLOCKED_ANTI_BOT' ? 'Blocked by anti-bot checks'
+                        : 'Automation failed — see the decision record'}
+                    </span>
+                  </li>
+                ))}
+            </ul>
+          )}
+        </section>
 
         {/* Quick actions — same endpoints and handlers as before */}
         <section className="rounded-xl border border-line bg-surface shadow-card">
