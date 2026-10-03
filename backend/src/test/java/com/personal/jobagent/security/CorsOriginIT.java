@@ -38,7 +38,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest(properties = {
         "app.cors.allowed-origins=https://job-agent-beige.vercel.app",
         "app.cors.allow-localhost=false"
-})
+, "app.discovery.scheduler-enabled=false"})
 @AutoConfigureMockMvc
 @Testcontainers
 class CorsOriginIT {

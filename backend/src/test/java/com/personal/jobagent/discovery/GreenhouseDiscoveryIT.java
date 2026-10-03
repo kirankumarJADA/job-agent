@@ -49,7 +49,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * UPDATED with repost_count) exercises the existing {@code
  * JobDiscoveryService.ingestJob} behavior unchanged.
  */
-@SpringBootTest(properties = "spring.flyway.placeholders.remove_seed_dev_account=false")
+@SpringBootTest(properties = {"spring.flyway.placeholders.remove_seed_dev_account=false", "app.discovery.scheduler-enabled=false"})
 @AutoConfigureMockMvc
 @Testcontainers
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)

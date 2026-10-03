@@ -62,7 +62,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * project already supplies a database URL, and Testcontainers would make the
  * class unrunnable precisely where a real PostgreSQL is available.
  */
-@SpringBootTest
+@SpringBootTest(properties = "app.discovery.scheduler-enabled=false")
 @EnabledIfSystemProperty(named = "it.postgres.url", matches = ".+",
         disabledReason = "Set -Dit.postgres.url to run the PostgreSQL isolation tests")
 class UserDataIsolationIT {

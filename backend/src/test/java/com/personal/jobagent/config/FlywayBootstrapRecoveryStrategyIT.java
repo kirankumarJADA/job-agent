@@ -36,7 +36,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * -Dflyway.it.jdbcUrl / flyway.it.username / flyway.it.password (the tests
  * wipe and rebuild the schema between scenarios, so it must be disposable).
  */
-@SpringBootTest
+@SpringBootTest(properties = "app.discovery.scheduler-enabled=false")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class FlywayBootstrapRecoveryStrategyIT {
 

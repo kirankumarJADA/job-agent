@@ -49,7 +49,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * job creates no duplicate application, and an owner-requested re-preparation
  * does NOT duplicate any artifact.
  */
-@SpringBootTest(properties = "spring.flyway.placeholders.remove_seed_dev_account=false")
+@SpringBootTest(properties = {"spring.flyway.placeholders.remove_seed_dev_account=false", "app.discovery.scheduler-enabled=false"})
 @AutoConfigureMockMvc
 @Testcontainers
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)

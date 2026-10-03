@@ -33,7 +33,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * development stops being able to sign in and this test says so, instead of the
  * first symptom being a developer staring at a 401.
  */
-@SpringBootTest
+@SpringBootTest(properties = "app.discovery.scheduler-enabled=false")
 @ActiveProfiles("local")
 @AutoConfigureMockMvc
 @Testcontainers

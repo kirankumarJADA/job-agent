@@ -49,7 +49,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * seeded profile/preferences rows the UI talks to are under test. Runs under
  * failsafe ({@code *IT} naming); needs Docker via Testcontainers.
  */
-@SpringBootTest(properties = "spring.flyway.placeholders.remove_seed_dev_account=false")
+@SpringBootTest(properties = {"spring.flyway.placeholders.remove_seed_dev_account=false", "app.discovery.scheduler-enabled=false"})
 @AutoConfigureMockMvc
 @Testcontainers
 class PreferencesApiIT {

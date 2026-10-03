@@ -37,7 +37,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * configuration that keeps a usable development credential and the configuration
  * that removes it are both covered.
  */
-@SpringBootTest(properties = "spring.flyway.placeholders.remove_seed_dev_account=true")
+@SpringBootTest(properties = {"spring.flyway.placeholders.remove_seed_dev_account=true", "app.discovery.scheduler-enabled=false"})
 @AutoConfigureMockMvc
 @Testcontainers
 class SeededDevCredentialRemovalIT {

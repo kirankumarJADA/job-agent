@@ -39,7 +39,7 @@ class DiscoverySchedulerTest {
     @BeforeEach
     void setUp() {
         reset(db, orchestrator);
-        scheduler = new DiscoveryScheduler(db, orchestrator, 10, new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
+        scheduler = new DiscoveryScheduler(db, orchestrator, 10, true, new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
     }
 
     private void dueSource(String cron, Integer rateLimitPerMin, Instant lastRunAt) {

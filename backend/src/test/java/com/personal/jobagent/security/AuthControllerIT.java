@@ -39,7 +39,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * pair of classes is deliberate — one keeps the seeded local login working,
  * the other proves a deployment cannot use it.
  */
-@SpringBootTest(properties = "spring.flyway.placeholders.remove_seed_dev_account=false")
+@SpringBootTest(properties = {"spring.flyway.placeholders.remove_seed_dev_account=false", "app.discovery.scheduler-enabled=false"})
 @AutoConfigureMockMvc
 @Testcontainers
 // The two purge tests share state (the seeded profile): the wrong-password

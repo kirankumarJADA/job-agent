@@ -45,13 +45,16 @@ public class DiscoveryScheduler {
     private final DiscoveryOrchestrator orchestrator;
     private final int circuitOpenAfterFailures;
     private final AutomationMetrics metrics;
+    private final boolean enabled;
 
     public DiscoveryScheduler(JdbcTemplate db, DiscoveryOrchestrator orchestrator,
                               @Value("${app.discovery.circuit-open-after-failures:10}") int circuitOpenAfterFailures,
+                              @Value("${app.discovery.scheduler-enabled:true}") boolean enabled,
                               AutomationMetrics metrics) {
         this.db = db;
         this.orchestrator = orchestrator;
         this.circuitOpenAfterFailures = circuitOpenAfterFailures;
+        this.enabled = enabled;
         this.metrics = metrics;
     }
 
@@ -60,6 +63,9 @@ public class DiscoveryScheduler {
 
     @Scheduled(fixedDelayString = "${app.discovery.schedule-sweep-interval-ms:60000}")
     public void runDueSources() {
+        if (!enabled) {
+            return; // integration tests disable live board polling entirely
+        }
         List<Map<String, Object>> rows = db.queryForList("""
                 select id, kind, org_identifier, schedule_cron, rate_limit_per_min, last_run_at
                 from job_sources

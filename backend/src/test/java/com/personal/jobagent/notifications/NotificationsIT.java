@@ -32,7 +32,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   - negative paths: unknown event types / malformed payloads don't crash
  *   - read-state endpoints behave
  */
-@SpringBootTest
+@SpringBootTest(properties = "app.discovery.scheduler-enabled=false")
 @Testcontainers
 class NotificationsIT {
 

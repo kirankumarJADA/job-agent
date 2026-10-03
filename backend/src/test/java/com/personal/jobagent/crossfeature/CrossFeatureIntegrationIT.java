@@ -38,7 +38,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * inviting an unverifiable claim produces a HARD_STOP answer and its WARN
  * notification, not a confident fabricated answer.
  */
-@SpringBootTest
+@SpringBootTest(properties = "app.discovery.scheduler-enabled=false")
 @Testcontainers
 class CrossFeatureIntegrationIT {
 

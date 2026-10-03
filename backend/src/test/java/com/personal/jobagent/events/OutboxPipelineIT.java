@@ -38,7 +38,7 @@ import static org.awaitility.Awaitility.await;
  * validated with a synthetic/test event type" since the first real event
  * types aren't emitted until P1-g.
  */
-@SpringBootTest
+@SpringBootTest(properties = "app.discovery.scheduler-enabled=false")
 @Testcontainers
 class OutboxPipelineIT {
 

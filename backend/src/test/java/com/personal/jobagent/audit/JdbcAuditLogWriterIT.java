@@ -25,7 +25,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * has NOT been executed in that environment (no Maven Central access there).
  * Run this for real via `mvn verify` before treating AuditLogWriter as done.
  */
-@SpringBootTest
+@SpringBootTest(properties = "app.discovery.scheduler-enabled=false")
 @Testcontainers
 class JdbcAuditLogWriterIT {
 
