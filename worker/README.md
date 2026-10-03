@@ -51,3 +51,44 @@ without a plan it remains in safe idle mode.
   is rejected before browser launch.
 - Duplicate plans and duplicate verification/submission are controlled by the
   durable plan state and completed-step replay behavior.
+
+---
+
+## Production deployment (Phase 16 — Render worker service / OCI container)
+
+The image is built from `worker/Dockerfile` (official Playwright base pinned
+to the dependency major, non-root `pwuser`, graceful-shutdown entrypoint).
+
+### Environment variables (Render worker service)
+
+| Variable | Value |
+|---|---|
+| `WORKER_POLL_URL` | `https://<backend>/api/v1/automation/plans/claim-next` |
+| `WORKER_HEARTBEAT_URL` | `https://<backend>/api/v1/automation/plans/{id}/heartbeat` (literal `{id}` is replaced per plan) |
+| `WORKER_COMPLETE_URL` | `https://<backend>/api/v1/automation/plans/{id}/complete` |
+| `WORKER_EVENT_URL` | `https://<backend>/api/v1/automation/events` |
+| `WORKER_EVENT_TOKEN` | same value as the backend's `WORKER_EVENT_TOKEN` (sent as Bearer) |
+| `WORKER_POLL_INTERVAL_MS` | optional, default `10000` |
+
+`WORKER_POLL_URL` is also the base the worker derives package and artifact
+URLs from, so it must keep the `/api/v1/automation` prefix.
+
+### Behaviour notes
+
+- Empty queue: the claim endpoint returns 204 (or 404 on some gateways) — the
+  worker sleeps for `WORKER_POLL_INTERVAL_MS` and polls again.
+- Heartbeat: every 30s while a plan is executing. Three consecutive failures
+  abort the run cooperatively (the plan stays RUNNING and the backend's
+  stale-plan sweeper reclaims it).
+- Shutdown: SIGTERM/SIGINT stop polling and abort the active run at the next
+  step boundary; the outcome report is skipped so the plan is re-claimed and
+  re-executed after restart. Completed steps are never redone.
+- Artifacts: downloaded under `/data/artifacts`, sha256- and size-verified
+  before use; `/data` must be writable by uid 1000.
+
+### Local production-like check
+
+```
+docker compose -f infra/docker-compose.yml -f infra/docker-compose.prod-like.yml \
+  --profile worker up -d --build
+```

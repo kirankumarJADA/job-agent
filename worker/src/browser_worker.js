@@ -53,7 +53,15 @@ export class BrowserWorker {
     plan.planFingerprint = planFingerprint(plan);
     const state = this.store.begin(plan);
     if (state.status === 'COMPLETED') return { status: 'COMPLETED', recovered: true, state };
-    const browser = await chromium.launch({ headless });
+    // Container-safe Chromium flags: Render/OCI instances expose a tiny
+    // /dev/shm where the default shared-memory ring buffer crashes the
+    // renderer, and the hardened images run without the user-namespace
+    // sandbox. Both flags are required for reliable headless execution in
+    // the production container (worker/Dockerfile).
+    const browser = await chromium.launch({
+      headless,
+      args: ['--disable-dev-shm-usage', '--no-sandbox', '--disable-gpu'],
+    });
     const sessionDir = path.join(this.artifactDir, 'sessions', plan.correlation.applicationId);
     fs.mkdirSync(sessionDir, { recursive: true });
     const context = await browser.newContext({ storageState: fs.existsSync(path.join(sessionDir, 'storage.json')) ? path.join(sessionDir, 'storage.json') : undefined });
