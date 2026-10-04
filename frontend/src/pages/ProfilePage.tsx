@@ -41,7 +41,13 @@ export const ProfilePage: React.FC = () => {
     setLoading(true); setError(null);
     try {
       const response = await apiFetch<any>('/profile');
-      setProfile(normalizeProfile(response.profile ?? response));
+      // GET /profile returns the profile record NESTED under `profile`, with
+      // the evidence arrays (skills, experiences, education, projects,
+      // certifications) as TOP-LEVEL siblings. Merging both is required:
+      // normalizing `response.profile` alone always rendered empty sections,
+      // which looked like added records were never persisted.
+      const raw = { ...response, ...(response.profile ?? {}) };
+      setProfile(normalizeProfile(raw));
       setEvidenceCount((response.evidence ?? []).length);
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to load Master Profile'); }
     finally { setLoading(false); }
@@ -51,12 +57,16 @@ export const ProfilePage: React.FC = () => {
   const saveProfile = async (event: React.FormEvent) => {
     event.preventDefault(); if (!profile) return;
     try {
-      const saved = await apiFetch<Profile>('/profile', { method: 'PUT', body: JSON.stringify({
+      await apiFetch<Profile>('/profile', { method: 'PUT', body: JSON.stringify({
         headline: profile.headline, phone: profile.phone, location: profile.location,
         professionalSummary: profile.professional_summary, links: profile.links ?? {},
         workEligibility: profile.work_eligibility, careerGoals: profile.career_goals,
       }) });
-      setProfile(normalizeProfile(saved)); setMessage('Master Profile saved. Future jobs will reuse this verified evidence.');
+      // Re-fetch instead of normalizing the PUT response: it returns only the
+      // flat profile record, and normalizing it here would blank out the
+      // rendered evidence sections (same shape mismatch as fetchProfile).
+      await fetchProfile();
+      setMessage('Master Profile saved. Future jobs will reuse this verified evidence.');
     } catch (e) { setError(e instanceof Error ? e.message : 'Save failed'); }
   };
 
