@@ -130,8 +130,10 @@ public class SecurityConfig {
                         // (no cookies involved), so CSRF does not apply there.
                         customizer.ignoringRequestMatchers(
                                 "/api/v1/auth/login",
-                                "/api/v1/auth/firebase/session",
-                                WorkerEventTokenFilter.EVENTS_PATH);
+                                "/api/v1/auth/firebase/session");
+                        customizer.ignoringRequestMatchers(
+                                request -> Boolean.TRUE.equals(
+                                        request.getAttribute(WorkerEventTokenFilter.WORKER_AUTH_ATTRIBUTE)));
                     }
                 })
                 .addFilterBefore(new WorkerEventTokenFilter(workerEventToken), CsrfFilter.class)
