@@ -134,6 +134,25 @@ public class SecurityConfig {
                         customizer.ignoringRequestMatchers(
                                 request -> Boolean.TRUE.equals(
                                         request.getAttribute(WorkerEventTokenFilter.WORKER_AUTH_ATTRIBUTE)));
+                        // Cross-origin SPA requests that authenticate with an
+                        // explicit `Authorization: Bearer <token>` header are
+                        // stateless and inherently immune to CSRF: they do not
+                        // rely on ambient cookies for identity, and a cross-site
+                        // attacker can never make a browser attach a custom
+                        // Authorization header (custom headers force a CORS
+                        // preflight, which the strict origin allowlist blocks).
+                        // Without this, CsrfFilter - which runs BEFORE
+                        // FirebaseAuthenticationFilter - rejects every such
+                        // request with 403 before the ID token can even be
+                        // verified. Requests WITHOUT the header (cookie
+                        // sessions) keep full CSRF enforcement.
+                        customizer.ignoringRequestMatchers(
+                                request -> {
+                                    String authorization =
+                                            request.getHeader(org.springframework.http.HttpHeaders.AUTHORIZATION);
+                                    return authorization != null
+                                            && authorization.toLowerCase().startsWith("bearer ");
+                                });
                     }
                 })
                 .addFilterBefore(new WorkerEventTokenFilter(workerEventToken), CsrfFilter.class)
