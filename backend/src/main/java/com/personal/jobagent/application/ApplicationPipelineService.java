@@ -1,11 +1,17 @@
 package com.personal.jobagent.application;
 
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.jobs.HardFilterResult;
+import com.personal.jobagent.jobs.HardFilterService;
 import com.personal.jobagent.jobs.JobMatchService;
+import com.personal.jobagent.jobs.JobRecord;
+import com.personal.jobagent.jobs.JobRepository;
 import com.personal.jobagent.notifications.NotificationEvents;
 import com.personal.jobagent.notifications.NotificationService;
 import com.personal.jobagent.preferences.PreferenceSetRepository;
 import com.personal.jobagent.profile.ProfileRepository;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -54,24 +60,33 @@ public class ApplicationPipelineService {
 
     private static final Logger log = LoggerFactory.getLogger(ApplicationPipelineService.class);
 
+    private final HardFilterService hardFilterService;
     private final JobMatchService jobMatchService;
+    private final JobRepository jobRepository;
     private final PreferenceSetRepository preferenceSets;
     private final ProfileRepository profileRepository;
     private final JdbcTemplate db;
     private final NotificationService notifications;
+    private final ObjectMapper objectMapper;
     private final TransactionTemplate transactionTemplate;
 
-    public ApplicationPipelineService(JobMatchService jobMatchService,
+    public ApplicationPipelineService(HardFilterService hardFilterService,
+                                      JobMatchService jobMatchService,
+                                      JobRepository jobRepository,
                                       PreferenceSetRepository preferenceSets,
                                       ProfileRepository profileRepository,
                                       JdbcTemplate db,
                                       NotificationService notifications,
+                                      ObjectMapper objectMapper,
                                       PlatformTransactionManager transactionManager) {
+        this.hardFilterService = hardFilterService;
         this.jobMatchService = jobMatchService;
+        this.jobRepository = jobRepository;
         this.preferenceSets = preferenceSets;
         this.profileRepository = profileRepository;
         this.db = db;
         this.notifications = notifications;
+        this.objectMapper = objectMapper;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
@@ -85,10 +100,27 @@ public class ApplicationPipelineService {
      * ingestion re-triggers matching, and matching is idempotent).
      */
     public void onJobIngested(UUID jobId, String action) {
+        JobRecord job = jobRepository.findById(jobId).orElse(null);
+        if (job == null) {
+            log.warn("Pipeline skip: job {} not found", jobId);
+            return;
+        }
+
         List<UUID> profiles = profileRepository.findAllIds();
         for (UUID profileId : profiles) {
             try {
                 var preferences = preferenceSets.findActiveByProfileId(profileId).orElse(null);
+
+                // Hard filters run FIRST, before expensive scoring
+                HardFilterResult filterResult = hardFilterService.evaluate(job, preferences);
+                if (!filterResult.passed()) {
+                    persistFilterRejection(jobId, filterResult);
+                    log.debug("Pipeline hard-filter REJECT job={} profile={} reasons={}",
+                            jobId, profileId, filterResult.reasons().size());
+                    continue; // skip scoring entirely
+                }
+
+                // Scoring only runs for jobs that pass all hard filters
                 Number desiredSalaryMin = preferences == null ? null : preferences.salaryMinGbp();
                 var match = jobMatchService.evaluateMatch(jobId, profileId, desiredSalaryMin, null);
                 log.debug("Pipeline match job={} profile={} score={} recommendation={}",
@@ -96,6 +128,28 @@ public class ApplicationPipelineService {
             } catch (Exception e) {
                 log.error("Automatic matching failed for job={} profile={}", jobId, profileId, e);
             }
+        }
+    }
+
+    /**
+     * Persists the hard-filter rejection: writes structured filter_reasons
+     * to the jobs table and sets status to FILTERED_OUT.
+     */
+    private void persistFilterRejection(UUID jobId, HardFilterResult result) {
+        try {
+            String reasonsJson = objectMapper.writeValueAsString(
+                    result.reasons().stream().map(r -> java.util.Map.of(
+                            "criterion", r.criterion(),
+                            "expected", r.expected(),
+                            "actual", r.actual(),
+                            "message", r.message()
+                    )).toList());
+
+            db.update(
+                    "update jobs set filter_reasons = ?::jsonb, status = 'FILTERED_OUT' where id = ? and status = 'DISCOVERED'",
+                    reasonsJson, jobId);
+        } catch (JsonProcessingException e) {
+            log.error("Failed to serialize filter reasons for job={}", jobId, e);
         }
     }
 

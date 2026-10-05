@@ -1,6 +1,11 @@
 package com.personal.jobagent.application;
 
+import com.personal.jobagent.jobs.HardFilterResult;
+import com.personal.jobagent.jobs.HardFilterService;
 import com.personal.jobagent.jobs.JobMatchService;
+import com.personal.jobagent.jobs.JobRecord;
+import com.personal.jobagent.jobs.JobRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.notifications.NotificationEvents;
 import com.personal.jobagent.notifications.NotificationService;
 import com.personal.jobagent.preferences.PreferenceSetRecord;
@@ -43,7 +48,10 @@ class ApplicationPipelineServiceTest {
     private static final UUID PROFILE_B = UUID.randomUUID();
     private static final UUID EXISTING_APP = UUID.randomUUID();
 
+    private final HardFilterService hardFilterService = mock(HardFilterService.class);
     private final JobMatchService matchService = mock(JobMatchService.class);
+    private final JobRepository jobRepository = mock(JobRepository.class);
+    private final ObjectMapper objectMapper = new ObjectMapper();
     private final PreferenceSetRepository preferenceSets = mock(PreferenceSetRepository.class);
     private final ProfileRepository profileRepository = mock(ProfileRepository.class);
     private final JdbcTemplate db = mock(JdbcTemplate.class);
@@ -53,11 +61,19 @@ class ApplicationPipelineServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new ApplicationPipelineService(matchService, preferenceSets, profileRepository,
-                db, notifications, transactionManager);
+        service = new ApplicationPipelineService(hardFilterService, matchService, jobRepository,
+                preferenceSets, profileRepository, db, notifications, objectMapper, transactionManager);
         when(profileRepository.findAllIds()).thenReturn(List.of(PROFILE_A, PROFILE_B));
         when(preferenceSets.findActiveByProfileId(PROFILE_A)).thenReturn(Optional.of(preferences("CONTROLLED_AUTO", 60000L)));
         when(preferenceSets.findActiveByProfileId(PROFILE_B)).thenReturn(Optional.empty());
+
+        // Provide a default job and make hard filters pass by default
+        JobRecord defaultJob = new JobRecord(JOB, UUID.randomUUID(), "ext-1", null, "Acme", "Engineer",
+                "London", null, null, null, null, null,
+                null, null, null, "A role.", List.of(), "https://example.com", "https://example.com",
+                java.time.Instant.now(), "DISCOVERED");
+        when(jobRepository.findById(JOB)).thenReturn(Optional.of(defaultJob));
+        when(hardFilterService.evaluate(any(JobRecord.class), any())).thenReturn(HardFilterResult.pass());
     }
 
     private static PreferenceSetRecord preferences(String mode, Long salaryMinGbp) {
