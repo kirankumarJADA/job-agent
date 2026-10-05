@@ -3,6 +3,7 @@ package com.personal.jobagent.application;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.common.AutomationMetrics;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.application.ApplicationDecisionService;
 import com.personal.jobagent.coverletter.CoverLetterService;
 import com.personal.jobagent.events.Envelope;
 import com.personal.jobagent.events.EventHandler;
@@ -70,6 +71,7 @@ public class ApplicationPipelineEventHandler implements EventHandler {
     private final JdbcTemplate db;
     private final ObjectMapper json;
     private final AutomationMetrics metrics;
+    private final ApplicationDecisionService decisionService;
 
     public ApplicationPipelineEventHandler(ApplicationPipelineService pipeline,
                                            InspectionPlanService inspectionPlanService,
@@ -81,7 +83,8 @@ public class ApplicationPipelineEventHandler implements EventHandler {
                                            NotificationService notifications,
                                            JdbcTemplate db,
                                            ObjectMapper json,
-                                           AutomationMetrics metrics) {
+                                           AutomationMetrics metrics,
+                                           ApplicationDecisionService decisionService) {
         this.pipeline = pipeline;
         this.inspectionPlanService = inspectionPlanService;
         this.greenhousePlanService = greenhousePlanService;
@@ -93,6 +96,7 @@ public class ApplicationPipelineEventHandler implements EventHandler {
         this.db = db;
         this.json = json;
         this.metrics = metrics;
+        this.decisionService = decisionService;
     }
 
     @Override public String consumerName() { return CONSUMER_NAME; }
@@ -135,6 +139,34 @@ public class ApplicationPipelineEventHandler implements EventHandler {
             log.warn("job.matched event without usable ids (profile_id/job_id) — skipping creation");
             return;
         }
+        // Phase 5: the decision engine sits between the scorer and the
+        // creator. Mode (MANUAL/ASSISTED/CONTROLLED_AUTO) and the per-profile
+        // quota decide whether an APPLY match auto-applies or queues for
+        // human review; every outcome is persisted in application_decisions.
+        int score = payload.get("score") instanceof Number n ? n.intValue() : 0;
+        var decision = decisionService.decide(profileId, jobId, score, "APPLY");
+
+        if (!"AUTO_APPLY".equals(decision.decision())) {
+            log.info("Match profile={} job={} queued for review ({}): {}",
+                    profileId, jobId, decision.decision(), decision.reason());
+            try {
+                notifications.emit(new NotificationService.NotificationCommand(
+                        NotificationEvents.APPROVAL_REQUIRED,
+                        "APPLICATION_DECISION",
+                        jobId,
+                        Map.of("profile_id", profileId.toString(),
+                                "job_id", jobId.toString(),
+                                "score", score,
+                                "decision", decision.decision(),
+                                "reason", decision.reason()),
+                        UuidV7.generate(),
+                        null));
+            } catch (Exception e) {
+                log.warn("Failed to emit {} notification: {}", NotificationEvents.APPROVAL_REQUIRED, e.getMessage());
+            }
+            return;
+        }
+
         var created = pipeline.createApplicationFromMatch(profileId, jobId);
         if (created == null || created.applicationId() == null) {
             log.warn("Pipeline returned no application for profile={} job={} — skipping", profileId, jobId);

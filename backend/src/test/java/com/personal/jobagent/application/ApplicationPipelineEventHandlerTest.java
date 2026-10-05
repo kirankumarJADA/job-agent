@@ -1,6 +1,7 @@
 package com.personal.jobagent.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.personal.jobagent.application.ApplicationDecisionService;
 import com.personal.jobagent.common.AutomationMetrics;
 import com.personal.jobagent.automation.GreenhouseExecutionPlanService;
 import com.personal.jobagent.automation.InspectionPlanService;
@@ -60,6 +61,7 @@ class ApplicationPipelineEventHandlerTest {
     private final JobRepository jobRepository = mock(JobRepository.class);
     private final NotificationService notifications = mock(NotificationService.class);
     private final JdbcTemplate db = mock(JdbcTemplate.class);
+    private final ApplicationDecisionService decisionService = mock(ApplicationDecisionService.class);
     private ApplicationPipelineEventHandler handler;
 
     @BeforeEach
@@ -68,12 +70,16 @@ class ApplicationPipelineEventHandlerTest {
                 answerService, jobRepository, notifications, db);
         handler = new ApplicationPipelineEventHandler(pipeline, inspectionPlanService, greenhousePlanService,
                 resumeService, coverLetterService, answerService, jobRepository, notifications, db, new ObjectMapper(),
-                new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
+                new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()), decisionService);
         when(db.queryForObject(contains("count(*) from applications"), eq(Integer.class), eq(APPLICATION)))
                 .thenReturn(1);
         when(db.update(contains("application_events"), any(UUID.class), eq(APPLICATION), any(String.class)))
                 .thenReturn(1);
         when(db.queryForList(anyString(), any(Object.class))).thenReturn(List.of());
+        // Default: APPLY matches auto-apply (the decision-engine tests cover
+        // the mode/quota branches themselves).
+        when(decisionService.decide(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any()))
+                .thenReturn(new ApplicationDecisionService.DecisionResult("AUTO_APPLY", "test", 90));
         when(jobRepository.findById(JOB)).thenReturn(java.util.Optional.of(job()));
     }
 
@@ -205,6 +211,26 @@ class ApplicationPipelineEventHandlerTest {
 
         verify(resumeService, never()).tailor(any(), any(), any());
         verify(db, never()).update(contains("application_events"), any(), any(), any());
+    }
+
+    @Test
+    void needsReviewDecisionQueuesWithoutCreatingAnApplication() {
+        when(decisionService.decide(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any()))
+                .thenReturn(new ApplicationDecisionService.DecisionResult("NEEDS_REVIEW",
+                        "below auto-apply threshold", 75));
+
+        handler.handle(envelope(NotificationEvents.JOB_MATCHED, Map.of(
+                "job_id", JOB.toString(), "profile_id", PROFILE.toString(),
+                "recommendation", "APPLY", "score", 75)));
+
+        // No application, but the candidate IS notified that review is pending:
+        verify(pipeline, never()).createApplicationFromMatch(any(), any());
+        ArgumentCaptor<NotificationService.NotificationCommand> event =
+                ArgumentCaptor.forClass(NotificationService.NotificationCommand.class);
+        verify(notifications).emit(event.capture());
+        assertThat(event.getValue().eventType()).isEqualTo(NotificationEvents.APPROVAL_REQUIRED);
+        assertThat(String.valueOf(((Map<?, ?>) event.getValue().payload()).get("decision")))
+                .isEqualTo("NEEDS_REVIEW");
     }
 
     @Test

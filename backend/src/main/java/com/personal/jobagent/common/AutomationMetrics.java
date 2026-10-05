@@ -52,6 +52,12 @@ public class AutomationMetrics {
                 "outcome", outcome).increment();
     }
 
+    /** One per automatic application decision, tagged AUTO_APPLY / NEEDS_REVIEW / SKIP. */
+    public void decisionRecorded(String decision) {
+        counter("robin_application_decisions_total", "Automatic application decisions",
+                "decision", decision).increment();
+    }
+
     /** One per explicit owner approval (APPROVED_FOR_SUBMISSION). */
     public void submitApproved() {
         counter("robin_submit_approvals_total", "Explicit human approvals for submission").increment();

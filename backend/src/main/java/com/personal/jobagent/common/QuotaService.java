@@ -46,6 +46,7 @@ public class QuotaService {
     private final double discoveryDailyLimit;
     private final boolean enabled;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public QuotaService(JdbcTemplate db,
                         @Value("${app.quota.llm-daily-calls:500}") double llmDailyLimit,
                         @Value("${app.quota.discovery-daily-calls:200}") double discoveryDailyLimit,
