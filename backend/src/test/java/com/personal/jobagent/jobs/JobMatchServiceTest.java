@@ -29,6 +29,8 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.personal.jobagent.llm.ModelRouter;
+
 /**
  * Decision transparency: the recommendation thresholds are unchanged and the
  * scoring is untouched — what this locks in is that every decision persists
@@ -50,7 +52,12 @@ class JobMatchServiceTest {
     void setUp() {
         PlatformTransactionManager tm = mock(PlatformTransactionManager.class);
         when(tm.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
-        service = new JobMatchService(jobRepository, profileRepository, jdbc, notifications, tm, new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
+        // Use a real SemanticSkillMatcher with mock deps — exact+synonym matching
+        // works; LLM path fails gracefully (mock ModelRouter not healthy).
+        JdbcTemplate cacheDb = mock(JdbcTemplate.class);
+        ModelRouter router = mock(ModelRouter.class);
+        SemanticSkillMatcher semanticMatcher = new SemanticSkillMatcher(cacheDb, router);
+        service = new JobMatchService(jobRepository, semanticMatcher, profileRepository, jdbc, notifications, tm, new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
         when(jdbc.update(anyString(), any(Object[].class))).thenReturn(1);
     }
 
@@ -82,7 +89,7 @@ class JobMatchServiceTest {
                 eq("APPLY"), breakdown.capture());
         assertThat(breakdown.getValue())
                 .contains("\"matched_skills\":[\"Java\",\"Spring\"]")
-                .contains("Robin matched 2 of the 2 skills")
+                .contains("Robin semantically matched 2 of the 2 skills")
                 .contains("The offered salary meets your stated minimum.")
                 .contains("was created automatically");
         verify(notifications).emit(any(NotificationService.NotificationCommand.class));
@@ -101,7 +108,7 @@ class JobMatchServiceTest {
         verify(jdbc).update(contains("job_matches"), eq(PROFILE), eq(JOB), eq(60),
                 eq("REVIEW"), breakdown.capture());
         assertThat(breakdown.getValue())
-                .contains("Robin matched 1 of the 2 skills")
+                .contains("Robin semantically matched 1 of the 2 skills")
                 .contains("below the APPLY threshold of 70")
                 .contains("you decide from here");
         verify(notifications, never()).emit(any(NotificationService.NotificationCommand.class));

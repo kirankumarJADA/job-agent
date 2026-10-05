@@ -50,8 +50,10 @@ public class JobMatchService {
     private final NotificationService notificationService;
     private final TransactionTemplate transactionTemplate;
     private final AutomationMetrics metrics;
+    private final SemanticSkillMatcher semanticSkillMatcher;
 
     public JobMatchService(JobRepository jobRepository,
+                           SemanticSkillMatcher semanticSkillMatcher,
                            ProfileRepository profileRepository,
                            JdbcTemplate jdbcTemplate,
                            NotificationService notificationService,
@@ -63,6 +65,7 @@ public class JobMatchService {
         this.notificationService = notificationService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.metrics = metrics;
+        this.semanticSkillMatcher = semanticSkillMatcher;
     }
 
     public record MatchResult(UUID jobId, int overall, String recommendation,
@@ -161,18 +164,26 @@ public class JobMatchService {
         if (job.skillsExtracted() == null || job.skillsExtracted().isEmpty()) {
             return new SkillOverlap(0.5, List.of(), 0, true); // unknown requirements — neutral, not zero
         }
+        // Collect candidate skills as their original names (not lower-cased)
+        // so the semantic matcher can report them meaningfully.
         Set<String> candidateSkills = profileRepository.findSkills(profileId).stream()
-                .map(s -> s.name() == null ? "" : s.name().trim().toLowerCase(Locale.ROOT))
+                .map(s -> s.name() == null ? "" : s.name().trim())
                 .filter(s -> !s.isEmpty())
                 .collect(java.util.stream.Collectors.toSet());
         if (candidateSkills.isEmpty()) {
             return new SkillOverlap(0.0, List.of(), job.skillsExtracted().size(), false);
         }
-        List<String> matched = job.skillsExtracted().stream()
-                .filter(s -> s != null && candidateSkills.contains(s.trim().toLowerCase(Locale.ROOT)))
+
+        // Delegate to the three-tier semantic matcher (exact → synonym → LLM).
+        SemanticSkillMatcher.SemanticOverlap overlap =
+                semanticSkillMatcher.computeOverlap(job.skillsExtracted(), candidateSkills);
+
+        List<String> matchedSkillNames = overlap.matches().stream()
+                .map(m -> m.candidateSkill())
                 .toList();
-        return new SkillOverlap((double) matched.size() / job.skillsExtracted().size(), matched,
-                job.skillsExtracted().size(), true);
+
+        return new SkillOverlap(overlap.ratio(), matchedSkillNames,
+                overlap.jobSkillCount(), overlap.candidateHasSkills());
     }
 
     private double computeRemoteFit(JobRecord job, String desiredRemoteType) {
@@ -219,7 +230,7 @@ public class JobMatchService {
             why.append("None of the ").append(skillOverlap.listedSkills())
                     .append(" skills the job asks for are on your profile. ");
         } else {
-            why.append("Robin matched ").append(skillOverlap.matchedSkills().size())
+            why.append("Robin semantically matched ").append(skillOverlap.matchedSkills().size())
                     .append(" of the ").append(skillOverlap.listedSkills())
                     .append(" skills the job lists (")
                     .append(String.join(", ", skillOverlap.matchedSkills())).append("). ");

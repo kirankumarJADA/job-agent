@@ -91,10 +91,11 @@ class ArchModuleBoundaryTest {
                     // exclude the base package directly via resideOutsideOfPackage(BASE_PKG).
                     //
                     // Llm may be reached by System (the /system/llm/ping diagnostic
-                    // endpoint) and Benchmark (§C6's "real router seam" requirement,
-                    // confirmed during P1-f implementation) — Orchestrator will be added
-                    // here once it exists in a later phase and actually calls into Llm.
-                    .whereLayer("Llm").mayOnlyBeAccessedByLayers("System", "Benchmark")
+                    // endpoint), Benchmark (§C6's "real router seam" requirement,
+                    // confirmed during P1-f implementation), and Jobs (Phase 2:
+                    // SemanticSkillMatcher delegates to ModelRouter for LLM-based
+                    // skill similarity scoring).
+                    .whereLayer("Llm").mayOnlyBeAccessedByLayers("System", "Benchmark", "Jobs")
                     .as("business modules communicate via events/ports, not direct imports of each other");
 
     // Smoke test: make sure the import scope itself is non-empty, so a
