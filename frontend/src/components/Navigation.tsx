@@ -58,6 +58,17 @@ const MAIN_NAV: NavItem[] = [
     ),
   },
   {
+    name: 'Review Queue',
+    path: '/review-queue',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" className={iconClass} aria-hidden="true">
+        <rect x="4.5" y="4.5" width="15" height="15" rx="2" stroke="currentColor" strokeWidth="1.6" />
+        <path d="M8.5 9h7M8.5 12h7M8.5 15h4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+        <path d="M15.5 16.5l2 2 3.5-3.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+  {
     name: 'Profile',
     path: '/profile',
     icon: (

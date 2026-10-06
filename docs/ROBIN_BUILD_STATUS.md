@@ -4,7 +4,7 @@ Persistent engineering handoff. Update this file after EVERY completed phase
 and at the end of every session. Never rely on chat memory.
 
 ## Current Date
-2026-10-05
+2026-10-06
 
 ## Current Git HEAD
 `a32c2da` (Phase 4) + Phase 5 working tree — see "Last Verified Commit"
@@ -16,14 +16,15 @@ and at the end of every session. Never rely on chat memory.
 | 2 — Semantic skill matching (three-tier) + V029 cache | `f8008c3` | ✅ 496 tests |
 | 3 — Secondary provider parallel fan-out | `aecc7e9` | ✅ 499 tests |
 | 4 — Rate-limit / cost / quota engine + V030 | `a32c2da` | ✅ 512 tests |
+| 5 — Automatic application decision + V031 | `48b7d56` | ✅ 621 tests |
+| 6 — Human review queue + V032 | (this commit) | ✅ 628 tests |
 | (earlier production milestones) | `d64f92e`…`f33f410` | CSRF Bearer exemption, worker auth, Phase 16 worker container, Phase 17 Stripe source (V028), NIM priority tests |
 
 ## Current Phase
-**Phase 5 — Automatic Application Decision** — implemented in the working
-tree (uncommitted at the time of writing; see "Last Verified Commit" after
-the commit lands).
+**Phase 6 — Human Review Queue** — committed (see Last Verified Commit).
+Next: Phase 7 (auto-approval rule engine).
 
-## Exact Implemented Features (Phase 5, this working tree)
+## Exact Implemented Features (Phase 5, commit 48b7d56)
 - `V031__application_decisions.sql` — decision audit table (upsert on
   profile+job; partial index for the Phase 6 review queue).
 - `application/ApplicationDecisionService.java` — decision engine:
@@ -38,10 +39,10 @@ the commit lands).
 - `AutomationMetrics.decisionRecorded` — `robin_application_decisions_total{decision}`.
 
 ## Test Counts
-- Backend full suite: **517+ tests, 0 failures, 0 errors** at Phase 4
-  (`a32c2da`); Phase 5 adds 8 decision-engine unit tests + 1 handler
-  integration test (verify the exact count with the final `mvn verify`).
-- Worker: 19/19. Frontend: 170/170 + build green (unchanged since `d64f92e`).
+- Backend: **628 tests, 0 failures, 0 errors** (Phase 6 full verify).
+- Worker: 19/19. Frontend: **173/173** + build green.
+- New in Phase 6: `CsrfBearerExemptionIT` 5/5, `ReviewQueueIT` 7/7,
+  `ReviewQueuePage.test.tsx` 3/3.
 
 ## Known Limitations
 - NEEDS_REVIEW decisions currently only produce a notification + audit row;
@@ -69,20 +70,17 @@ intelligence · 19 Follow-ups · 20 Analytics · 21 Dashboard completion ·
 22 Bulk ops · 23 Webhooks · 24 PWA/extension/MCP.
 
 ## Next Exact Task
-Phase 6 — Application Review Queue: backend
-`GET /api/v1/application-decisions?decision=NEEDS_REVIEW` (owner-scoped) over
-`application_decisions`, approve/reject actions, and a frontend review page
-consuming the payload shape already emitted by
-`ApplicationPipelineEventHandler` (profile_id/job_id/score/reason).
+Phase 7 — Auto-approval rule engine: configurable per-user rules evaluated in
+`ApplicationDecisionService.decide` (threshold, quota, mode) plus the plan
+safety preconditions (no HARD_STOP, required fields SUPPORTED_AUTO, artifact
+integrity) before any AUTO_APPLY is permitted. Persist user preferences and
+respect MANUAL/ASSISTED/CONTROLLED_AUTO.
 
 ## Last Verified Commit
-`a32c2da` (Phases 1–4) + Phase 5 working tree — run `git status --short` and
-`mvn -q verify` before continuing; the last full-suite run on the Phase 5
-tree must show 0 failures before committing `feat: complete automatic
-application decision`.
+`feat: complete automatic application decision` + Phase 6 review queue
+commit (see git log). Verify with `git status --short` (must be clean) and
+`mvn -q verify` (must be 0 failures).
 
 ## Last Verified Test Result
-Backend 517/0/0 at Phase 4. Phase 5 focused suites green:
-`ApplicationDecisionServiceTest` 8/8, handler suite green including the
-NEEDS_REVIEW integration test. Re-run `mvn -q verify` for the authoritative
-count after pulling this tree.
+Backend **628/0/0**, worker 19/19, frontend **173/173** + build — all on the
+current HEAD.

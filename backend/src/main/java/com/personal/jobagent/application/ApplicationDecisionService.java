@@ -9,6 +9,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -123,6 +125,79 @@ public class ApplicationDecisionService {
         // ── 5. CONTROLLED_AUTO: all APPLY recommendations auto-apply ──
         return record(profileId, jobId, matchScore, recommendation, mode,
                 "AUTO_APPLY", "Controlled-auto mode with APPLY recommendation (score " + matchScore + ")");
+    }
+
+    // ── Phase 6: human review queue ──────────────────────────────────
+
+    public record ReviewItem(UUID decisionId, UUID jobId, String jobTitle, String companyName,
+                             String location, String applicationUrl, Integer matchScore,
+                             String decision, String reason, java.time.Instant createdAt) {}
+
+    /**
+     * Lazily expires NEEDS_REVIEW items older than the configured window, then
+     * lists the owner's open review items (NEEDS_REVIEW and PAUSED) with the
+     * job details needed to act on them. Owner-scoped by profile_id.
+     */
+    public List<ReviewItem> listForReview(UUID profileId, int expireDays) {
+        expireStale(profileId, expireDays);
+        return db.query("""
+                select d.id, d.job_id, j.title, j.company_name_raw, j.location_raw,
+                       j.application_url, d.match_score, d.decision, d.reason, d.created_at
+                from application_decisions d
+                join jobs j on j.id = d.job_id
+                where d.profile_id = ? and d.decision = 'NEEDS_REVIEW'
+                order by d.created_at desc
+                """, (rs, n) -> new ReviewItem(
+                (UUID) rs.getObject("id"), (UUID) rs.getObject("job_id"),
+                rs.getString("title"), rs.getString("company_name_raw"),
+                rs.getString("location_raw"), rs.getString("application_url"),
+                (Integer) rs.getObject("match_score"), rs.getString("decision"),
+                rs.getString("reason"),
+                rs.getTimestamp("created_at") != null
+                        ? rs.getTimestamp("created_at").toInstant() : null),
+                profileId);
+    }
+
+    /** Moves unreviewed items past the expiry window to EXPIRED (idempotent). */
+    public void expireStale(UUID profileId, int expireDays) {
+        db.update("""
+                update application_decisions
+                set decision = 'EXPIRED', reviewed_at = now()
+                where profile_id = ? and decision = 'NEEDS_REVIEW'
+                  and created_at < now() - make_interval(days => ?)
+                """, profileId, expireDays);
+    }
+
+    /** Loads one owner-scoped decision with its job. Null when not found/not owned. */
+    public Map<String, Object> loadOwned(UUID profileId, UUID decisionId) {
+        List<Map<String, Object>> rows = db.queryForList("""
+                select d.id, d.profile_id, d.job_id, d.match_score, d.decision, d.reason,
+                       d.application_mode, d.created_at, d.application_id,
+                       j.title, j.company_name_raw, j.location_raw, j.application_url,
+                       j.remote_type, j.salary_min, j.salary_max, j.salary_currency
+                from application_decisions d
+                join jobs j on j.id = d.job_id
+                where d.id = ? and d.profile_id = ?
+                """, decisionId, profileId);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    /** Guarded lifecycle transition; returns false when the row moved already. */
+    public boolean transition(UUID profileId, UUID decisionId, String from, String to) {
+        return db.update("""
+                update application_decisions
+                set decision = ?, reviewed_at = now()
+                where id = ? and profile_id = ? and decision = ?
+                """, to, decisionId, profileId, from) == 1;
+    }
+
+    /** Links the application created by an approval to the decision row. */
+    public void linkApplication(UUID profileId, UUID decisionId, UUID applicationId) {
+        db.update("""
+                update application_decisions
+                set application_id = ?, reviewed_at = now()
+                where id = ? and profile_id = ?
+                """, applicationId, decisionId, profileId);
     }
 
     /**

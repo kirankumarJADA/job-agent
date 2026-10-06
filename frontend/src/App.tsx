@@ -15,6 +15,7 @@ import { ModelsPage } from './pages/ModelsPage';
 import { SourcesPage } from './pages/SourcesPage';
 import { LogsPage } from './pages/LogsPage';
 import { ApplicationsPage } from './pages/ApplicationsPage';
+import { ReviewQueuePage } from './pages/ReviewQueuePage';
 
 import { LoginPage } from './pages/LoginPage';
 import { SignUpPage } from './pages/SignUpPage';
@@ -107,6 +108,7 @@ export default function App() {
             <Route path="/sources" element={<SourcesPage />} />
             <Route path="/logs" element={<LogsPage />} />
             <Route path="/applications" element={<ApplicationsPage />} />
+            <Route path="/review-queue" element={<ReviewQueuePage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>
