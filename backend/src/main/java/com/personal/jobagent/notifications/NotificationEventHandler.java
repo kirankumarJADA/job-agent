@@ -71,7 +71,9 @@ public class NotificationEventHandler implements EventHandler {
                  NotificationEvents.OFFER_RECEIVED,
                  NotificationEvents.AUTOMATION_FAILURE,
                  NotificationEvents.HARD_STOP,
-                 NotificationEvents.APPROVAL_REQUIRED -> true;
+                 NotificationEvents.APPROVAL_REQUIRED,
+                 NotificationEvents.REVIEW_APPROVED,
+                 NotificationEvents.REVIEW_REJECTED -> true;
             default -> false;
         };
     }
@@ -198,6 +200,8 @@ public class NotificationEventHandler implements EventHandler {
             case NotificationEvents.AUTOMATION_FAILURE -> "AUTOMATION_FAILURE";
             case NotificationEvents.HARD_STOP -> "HARD_STOP";
             case NotificationEvents.APPROVAL_REQUIRED -> "APPROVAL_REQUIRED";
+            case NotificationEvents.REVIEW_APPROVED -> "REVIEW_APPROVED";
+            case NotificationEvents.REVIEW_REJECTED -> "REVIEW_REJECTED";
             default -> "EVENT";
         };
     }
@@ -205,7 +209,8 @@ public class NotificationEventHandler implements EventHandler {
     private static String severityFor(String eventType) {
         return switch (eventType) {
             case NotificationEvents.AUTOMATION_FAILURE, NotificationEvents.HARD_STOP -> "ERROR";
-            case NotificationEvents.APPROVAL_REQUIRED,
+            case NotificationEvents.REVIEW_REJECTED,
+                 NotificationEvents.APPROVAL_REQUIRED,
                  NotificationEvents.REJECTION_RECEIVED,
                  NotificationEvents.APPLICATION_STATUS_CHANGED -> "WARN";
             default -> "INFO";
@@ -236,6 +241,8 @@ public class NotificationEventHandler implements EventHandler {
             case NotificationEvents.AUTOMATION_FAILURE -> "Automation step failed" + suffix;
             case NotificationEvents.HARD_STOP -> "Hard stop — human attention required" + suffix;
             case NotificationEvents.APPROVAL_REQUIRED -> "Approval required" + suffix;
+            case NotificationEvents.REVIEW_APPROVED -> "Review approved" + suffix;
+            case NotificationEvents.REVIEW_REJECTED -> "Review rejected" + suffix;
             default -> "Pipeline event" + suffix;
         };
     }
@@ -272,6 +279,8 @@ public class NotificationEventHandler implements EventHandler {
                     "cover-letter-generated:" + orAggregate(payload.get("cover_letter_id"), envelope);
             case NotificationEvents.APPLICATION_ANSWER_DRAFTED ->
                     "answer-drafted:" + orAggregate(payload.get("answer_id"), envelope);
+            case NotificationEvents.REVIEW_APPROVED -> "review-approved:" + envelope.aggregateId();
+            case NotificationEvents.REVIEW_REJECTED -> "review-rejected:" + envelope.aggregateId();
             case NotificationEvents.APPLICATION_PREPARED -> "app-prepared:" + envelope.aggregateId();
             case NotificationEvents.APPLICATION_SUBMITTED -> "app-submitted:" + envelope.aggregateId();
             case NotificationEvents.APPLICATION_STATUS_CHANGED ->

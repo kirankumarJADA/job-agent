@@ -146,6 +146,11 @@ class ReviewQueueIT {
                 .andExpect(jsonPath("$.items[0].jobTitle").value("Backend Engineer"))
                 .andExpect(jsonPath("$.items[0].companyName").value("AcmeA"))
                 .andExpect(jsonPath("$.items[0].matchScore").value(78))
+                .andExpect(jsonPath("$.items[0].recommendation").value("APPLY"))
+                .andExpect(jsonPath("$.items[0].hardFilterOutcome").value("PASSED"))
+                .andExpect(jsonPath("$.items[0].applicationExists").value(false))
+                .andExpect(jsonPath("$.items[0].preparationExists").value(false))
+                .andExpect(jsonPath("$.pendingCount").value(1))
                 .andReturn();
         String body = result.getResponse().getContentAsString();
         assertThat(body).doesNotContain("Platform Engineer");
@@ -195,8 +200,19 @@ class ReviewQueueIT {
         UUID decisionId = seed.decisionId();
         UUID jobId = seed.jobId();
         mockMvc.perform(post("/api/v1/review-queue/{id}/reject", decisionId)
-                        .with(csrf()).session(login("review-a@example.com", "PasswordA1!")))
+                        .with(csrf()).session(login("review-a@example.com", "PasswordA1!"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reason\":\"Not a fit for my preferences\"}"))
                 .andExpect(status().isNoContent());
+
+        assertThat(jdbc.queryForObject("select decision from application_decisions where id = ?",
+                String.class, decisionId)).isEqualTo("REJECTED");
+        assertThat(jdbc.queryForObject("select review_reason from application_decisions where id = ?",
+                String.class, decisionId)).isEqualTo("Not a fit for my preferences");
+        assertThat(jdbc.queryForObject("select reviewed_by from application_decisions where id = ?",
+                String.class, decisionId)).isEqualTo("review-a@example.com");
+        assertThat(jdbc.queryForObject("select count(*) from outbox_events where event_type = ? and payload->>'decision_id' = ?",
+                Integer.class, "review.rejected", decisionId.toString())).isEqualTo(1);
 
         mockMvc.perform(post("/api/v1/review-queue/{id}/approve", decisionId)
                         .with(csrf()).session(login("review-a@example.com", "PasswordA1!")))

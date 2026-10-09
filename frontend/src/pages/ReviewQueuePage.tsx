@@ -26,6 +26,7 @@ export const ReviewQueuePage: React.FC = () => {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ReviewDetail | null>(null);
+  const [rejectReasons, setRejectReasons] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     setError(null);
@@ -54,7 +55,10 @@ export const ReviewQueuePage: React.FC = () => {
     setBusyId(id + action);
     setError(null);
     try {
-      await apiFetch(`/review-queue/${id}/${action}`, { method: 'POST' });
+      await apiFetch(`/review-queue/${id}/${action}`, {
+        method: 'POST',
+        ...(action === 'reject' ? { body: JSON.stringify({ reason: rejectReasons[id] || '' }) } : {}),
+      });
       if (action === 'approve') setExpandedId(null);
       await load();
       if (expandedId === id && action !== 'pause' && action !== 'resume') setExpandedId(null);
@@ -85,6 +89,12 @@ export const ReviewQueuePage: React.FC = () => {
           />
         )}
 
+        {items !== null && (
+          <p className="text-xs font-semibold text-ink-muted" aria-live="polite">
+            {items.length} pending review {items.length === 1 ? 'item' : 'items'}
+          </p>
+        )}
+
         {items !== null && items.length > 0 && (
           <div className="space-y-3">
             {items.map((item) => (
@@ -97,6 +107,9 @@ export const ReviewQueuePage: React.FC = () => {
                     </div>
                     <p className="truncate text-xs text-ink-muted">{item.companyName}</p>
                     <p className="text-xs text-ink-muted">{item.reason}</p>
+                    <p className="text-[11px] text-ink-faint">
+                      {item.recommendation || 'Match'} · {item.applicationMode || 'Default'} mode · Hard filters: {item.hardFilterOutcome || 'unknown'}
+                    </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     <button
@@ -127,6 +140,17 @@ export const ReviewQueuePage: React.FC = () => {
                           Decision reason: {detail.reason}
                         </p>
                         <p className="text-ink-muted">
+                          Hard-filter outcome: {detail.hardFilterOutcome || 'Unknown'}.
+                          {detail.hardFilterReasons && detail.hardFilterReasons !== '[]' ? ` Reasons: ${detail.hardFilterReasons}` : ' No stored hard-filter rejection reasons.'}
+                        </p>
+                        <p className="text-ink-muted">
+                          Application: {detail.applicationExists ? 'exists' : 'not created'} ·
+                          Preparation events: {detail.preparationExists ? 'recorded' : 'not started'}
+                        </p>
+                        <p className="text-ink-faint">
+                          Decision updated: {detail.updatedAt ? new Date(detail.updatedAt).toLocaleString() : '—'}
+                        </p>
+                        <p className="text-ink-muted">
                           Full posting on the{' '}
                           <Link className="font-semibold text-forest-700 hover:text-forest-900" to={`/jobs/${detail.jobId}`}>
                             job detail page
@@ -144,6 +168,17 @@ export const ReviewQueuePage: React.FC = () => {
                               >
                                 {busyId === item.decisionId + 'approve' ? 'Approving…' : 'Approve & create application'}
                               </button>
+                              <label className="flex min-w-[220px] flex-1 flex-col gap-1 text-ink-muted">
+                                Rejection reason (optional)
+                                <textarea
+                                  value={rejectReasons[item.decisionId] || ''}
+                                  onChange={(event) => setRejectReasons((previous) => ({ ...previous, [item.decisionId]: event.target.value }))}
+                                  maxLength={1000}
+                                  rows={2}
+                                  className="rounded-md border border-line bg-white px-2 py-1 text-xs text-ink"
+                                  placeholder="Why are you skipping this role?"
+                                />
+                              </label>
                               <button
                                 type="button"
                                 disabled={busyId === item.decisionId + 'reject'}
@@ -198,9 +233,16 @@ interface ReviewItem {
   location: string;
   applicationUrl: string;
   matchScore: number;
+  recommendation?: string;
+  hardFilterOutcome?: string;
+  hardFilterReasons?: string;
+  applicationMode?: string;
+  applicationExists?: boolean;
+  preparationExists?: boolean;
   decision: 'NEEDS_REVIEW' | 'PAUSED';
   reason: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 interface ReviewDetail extends ReviewItem {
@@ -210,4 +252,11 @@ interface ReviewDetail extends ReviewItem {
   salaryCurrency: string;
   descriptionText: string;
   applicationId: string | null;
+  hardFilterOutcome?: string;
+  hardFilterReasons?: string;
+  applicationMode?: string;
+  recommendation?: string;
+  applicationExists?: boolean;
+  preparationExists?: boolean;
+  updatedAt?: string;
 }
