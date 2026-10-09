@@ -111,20 +111,98 @@ public class ApplicationDecisionService {
                             (int) quotaCheck.used() + "/" + (int) quotaCheck.limit() + ")");
         }
 
-        // ── 4. ASSISTED mode: high-confidence only ──
+        // ── 4. Per-user auto-approval rule (Phase 7) ──
+        // Loads the owner's configurable rule. This can only TOGGLE automatic
+        // application creation and RAISE or LOWER the score threshold; it can
+        // never bypass a hard stop, a required-field failure or an
+        // artifact-integrity failure — those are enforced downstream at plan
+        // build, worker execution and the submit-approval precondition, and
+        // no decision recorded here changes them.
+        UserApprovalRule rule = loadRule(profileId);
+
+        // An explicit opt-out disables AUTO_APPLY even in CONTROLLED_AUTO.
+        if (rule != null && !rule.autoApproveEnabled()) {
+            return record(profileId, jobId, matchScore, recommendation, mode,
+                    "NEEDS_REVIEW", "Automatic approval disabled by user rule");
+        }
+
+        // ── 5. ASSISTED mode: threshold applies ──
+        int assistedThreshold = rule != null ? rule.minScore() : HIGH_CONFIDENCE_THRESHOLD;
         if ("ASSISTED".equals(mode)) {
-            if (matchScore >= HIGH_CONFIDENCE_THRESHOLD) {
+            if (matchScore >= assistedThreshold) {
                 return record(profileId, jobId, matchScore, recommendation, mode,
-                        "AUTO_APPLY", "High-confidence match in assisted mode (score " + matchScore + ")");
+                        "AUTO_APPLY", "High-confidence match in assisted mode (score " + matchScore
+                                + " >= " + assistedThreshold + ")");
             }
             return record(profileId, jobId, matchScore, recommendation, mode,
                     "NEEDS_REVIEW", "Score " + matchScore + " below auto-apply threshold ("
-                            + HIGH_CONFIDENCE_THRESHOLD + ") for assisted mode");
+                            + assistedThreshold + ") for assisted mode");
         }
 
-        // ── 5. CONTROLLED_AUTO: all APPLY recommendations auto-apply ──
+        // ── 6. CONTROLLED_AUTO: all APPLY recommendations auto-apply ──
+        // (subject to the opt-out above and the per-user minimum, if set,
+        //  which can only make the bar stricter for this mode)
+        if (rule != null && matchScore < rule.minScore()) {
+            return record(profileId, jobId, matchScore, recommendation, mode,
+                    "NEEDS_REVIEW", "Score " + matchScore + " below user threshold ("
+                            + rule.minScore() + ")");
+        }
         return record(profileId, jobId, matchScore, recommendation, mode,
                 "AUTO_APPLY", "Controlled-auto mode with APPLY recommendation (score " + matchScore + ")");
+    }
+
+    // ── Phase 7: per-user auto-approval rules ────────────────────────
+
+    /** The owner's configurable auto-approval rule. Null = Phase 5 defaults. */
+    public record UserApprovalRule(boolean autoApproveEnabled, int minScore) {}
+
+    private static final String RULE_COLUMNS = "auto_approve_enabled, min_score";
+
+    private UserApprovalRule loadRule(UUID profileId) {
+        try {
+            List<Map<String, Object>> rows = db.queryForList(
+                    "select " + RULE_COLUMNS + " from user_approval_rules where profile_id = ?",
+                    profileId);
+            if (rows.isEmpty()) return null;
+            return new UserApprovalRule(
+                    Boolean.TRUE.equals(rows.get(0).get("auto_approve_enabled")),
+                    ((Number) rows.get(0).get("min_score")).intValue());
+        } catch (Exception e) {
+            // A missing/unreadable rule must fall back to the safe defaults,
+            // never block the pipeline and never widen auto-apply.
+            log.warn("Could not load approval rule for profile {}: {}", profileId, e.getMessage());
+            return null;
+        }
+    }
+
+    /** Reads the owner's rule for the API. Null when none is configured. */
+    public UserApprovalRule ruleFor(UUID profileId) {
+        return loadRule(profileId);
+    }
+
+    /**
+     * Creates or updates the owner's rule (upsert on profile_id). Returns the
+     * persisted rule. Validation happens here so every caller gets the same
+     * guarantees: the score must be a whole number 1–100.
+     */
+    public UserApprovalRule saveRule(UUID profileId, Boolean autoApproveEnabled, Integer minScore) {
+        UserApprovalRule existing = loadRule(profileId);
+        boolean enabled = autoApproveEnabled != null ? autoApproveEnabled
+                : existing != null && existing.autoApproveEnabled();
+        int score = minScore != null ? minScore
+                : existing != null ? existing.minScore() : HIGH_CONFIDENCE_THRESHOLD;
+        if (score < 1 || score > 100) {
+            throw new IllegalArgumentException("min_score must be between 1 and 100");
+        }
+        db.update("""
+                insert into user_approval_rules (id, profile_id, auto_approve_enabled, min_score, updated_at)
+                values (?, ?, ?, ?, now())
+                on conflict (profile_id) do update set
+                    auto_approve_enabled = excluded.auto_approve_enabled,
+                    min_score = excluded.min_score,
+                    updated_at = now()
+                """, UuidV7.generate(), profileId, enabled, score);
+        return new UserApprovalRule(enabled, score);
     }
 
     // ── Phase 6: human review queue ──────────────────────────────────
