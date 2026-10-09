@@ -146,8 +146,8 @@ public class ApplicationDecisionService {
         return db.query("""
                 select d.id, d.job_id, j.title, j.company_name_raw, j.location_raw, j.application_url,
                        d.match_score, d.recommendation,
-                       case when j.filter_reasons is null then 'PASSED' else 'FAILED' end as hard_filter_outcome,
-                       coalesce(j.filter_reasons::text, '[]') as hard_filter_reasons,
+                       'PASSED' as hard_filter_outcome,
+                       '[]' as hard_filter_reasons,
                        d.application_mode, d.decision, d.reason, d.created_at, d.updated_at,
                        (app.id is not null) as application_exists,
                        (j.last_seen_at < now() - interval '30 days') as job_stale,
@@ -203,8 +203,8 @@ public class ApplicationDecisionService {
                        j.remote_type as "remoteType", j.salary_min as "salaryMin",
                        j.salary_max as "salaryMax", j.salary_currency as "salaryCurrency",
                        j.status as "jobStatus",
-                       case when j.filter_reasons is null then 'PASSED' else 'FAILED' end as "hardFilterOutcome",
-                       coalesce(j.filter_reasons::text, '[]') as "hardFilterReasons",
+                       'PASSED' as "hardFilterOutcome",
+                       '[]' as "hardFilterReasons",
                        (app.id is not null) as "applicationExists",
                        (j.last_seen_at < now() - interval '30 days') as "jobStale",
                        exists(select 1 from application_events ae
@@ -267,7 +267,7 @@ public class ApplicationDecisionService {
                                   application_mode = EXCLUDED.application_mode,
                                   decision = EXCLUDED.decision,
                                   reason = EXCLUDED.reason,
-                                  created_at = now(), updated_at = now()
+                                  updated_at = now()
                     WHERE application_decisions.decision IN ('AUTO_APPLY','NEEDS_REVIEW','SKIP')
                     """, UuidV7.generate(), profileId, jobId, matchScore,
                     recommendation, applicationMode, decision, reason);

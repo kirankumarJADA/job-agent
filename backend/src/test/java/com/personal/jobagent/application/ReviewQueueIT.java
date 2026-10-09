@@ -138,7 +138,9 @@ class ReviewQueueIT {
     @Order(2)
     void listingIsOwnerScopedAndShowsOnlyOpenItems() throws Exception {
         var own = seedDecision(PROFILE_A, "Backend Engineer", "AcmeA", "NEEDS_REVIEW");
-        seedDecision(PROFILE_B, "Platform Engineer", "AcmeB", "NEEDS_REVIEW");
+        var foreign = seedDecision(PROFILE_B, "Platform Engineer", "AcmeB", "NEEDS_REVIEW");
+        jdbc.update("update jobs set filter_reasons = jsonb_build_object('message', 'FOREIGN_PROFILE_PRIVATE_REASON') where id = ?",
+                foreign.jobId());
 
         MvcResult result = mockMvc.perform(get("/api/v1/review-queue")
                         .session(login("review-a@example.com", "PasswordA1!")))
@@ -155,7 +157,7 @@ class ReviewQueueIT {
                 .andReturn();
         String body = result.getResponse().getContentAsString();
         assertThat(body).doesNotContain("Platform Engineer");
-        assertThat(body).doesNotContain("Platform Engineer");
+        assertThat(body).doesNotContain("FOREIGN_PROFILE_PRIVATE_REASON");
 
         // Detail is also owner-scoped:
         mockMvc.perform(get("/api/v1/review-queue/{id}", own.decisionId())

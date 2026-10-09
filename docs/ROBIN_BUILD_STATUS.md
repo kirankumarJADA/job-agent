@@ -25,7 +25,7 @@ Persistent engineering handoff. Update this file after every completed phase and
 ## Phase 6 Implementation and Hardening
 - `V032__review_queue_lifecycle.sql` adds `APPROVED`, `REJECTED`, `PAUSED`, and `EXPIRED`, plus `reviewed_at` and `application_id`.
 - `V033__review_decision_audit_metadata.sql` additively records reviewer attribution, rejection rationale, update timestamps, and an owner/update index. Earlier migrations are not rewritten.
-- The owner-scoped review API returns a pending count and score, recommendation, hard-filter outcome/reasons, mode/reason, application/preparation state, and timestamps.
+- The owner-scoped review API returns a pending count and score, recommendation, hard-filter outcome/reasons, mode/reason, application/preparation state, and timestamps. Since filter-rejection reasons are stored on a global job row rather than per profile, the queue reports that its decision passed the owner's filters and never exposes another profile's rejection reasons. Replayed decisions update `updated_at` without resetting the original `created_at`, so the review expiry window remains meaningful.
 - Approval uses the existing idempotent application preparation pipeline, links the application, and writes audit/outbox outcome events. It does not submit to the employer.
 - Rejection records terminal state, acting account, timestamp and reason, plus audit and outbox notification events. State transitions check owner and expected state.
 - Replayed match events cannot overwrite already-resolved decisions or emit redundant approval-required notifications for terminal decisions, including paused rows. Soft-deleted jobs are excluded; postings not seen for 30 days are flagged and approval is refused until refreshed, as is approval when the application URL is missing.
@@ -33,7 +33,7 @@ Persistent engineering handoff. Update this file after every completed phase and
 - Authentication, owner isolation, worker auth, CSRF rules and the `REAL_SUBMIT` hard stop must remain intact.
 
 ## Verification
-- The Phase 6 test counts above are reported results from the previous coding session; not rerun by the GitHub connector. As of 9 October 2026, no GitHub Actions run was associated with this connector-created branch/PR. Vercel reported a successful frontend check, but backend and worker tests remain unverified for the hardening series.
+- The Phase 6 test counts above are reported results from the previous coding session; not rerun by the GitHub connector. As of the latest check for commit `836d614`, GitHub Actions frontend (TypeScript, 173/173 tests, Vite production build) and worker (19/19 tests) jobs passed; the backend `mvn -B verify` integration/unit test job was still running. The hardening series therefore remains pending full backend verification. Vercel's check succeeded for that commit.
 - Added integration assertions check the queue data, persisted rejection actor/reason and outbox outcome. Verify this hardening commit's CI before treating it as passing.
 - `.github/workflows/ci.yml` runs backend `mvn -B verify`, worker `npm test`, frontend `npx tsc -b`, `npm test`, and `npm run build`.
 - A successful CI run does not prove production deployment.
