@@ -36,7 +36,7 @@ Persistent engineering handoff. Update this file after every completed phase and
 - Phase 6 baseline results (backend 628/0/0, frontend 173/173 + build, worker 19/19) were reported by the prior coding session.
 - GitHub Actions run [37956342224](https://github.com/kirankumarJADA/job-agent/actions/runs/37956342224) for commit `836d614` passed all three jobs: backend `mvn -B verify`, frontend type-check + 173/173 unit tests + production build, and worker tests 19/19. `ReviewQueueIT` passed 8/8.
 - GitHub Actions run [37956839152](https://github.com/kirankumarJADA/job-agent/actions/runs/37956839152) for functional source revision `1b87d02` also passed all jobs. Backend verification reported `BUILD SUCCESS`, 521 unit tests and 108 integration tests, zero failures and zero errors (25 skipped); `ReviewQueueIT` passed 8/8. Frontend passed type-check, 173/173 tests, and production build; worker passed 19/19. Vercel reported success for `1b87d02`.
-- Current branch head `095021d` is a documentation-only update after the verified source commit `1b87d02`. Its workflow is running because GitHub Actions also runs on documentation changes; the functional code revision above is fully verified. A CI success does not prove deployment.
+- Commits after functional source revision `1b87d02` are documentation-only status updates. GitHub Actions also runs on documentation changes, so their workflows may be in progress even though the functional code revision above has a green full CI run. A CI success does not prove production deployment.
 - Integration assertions cover owner isolation, rejection actor/reason and outbox notification, stale-posting refusal, filter-reason privacy, and decision replay preservation.
 - `.github/workflows/ci.yml` runs backend `mvn -B verify`, worker `npm test`, frontend `npx tsc -b`, `npm test`, and `npm run build`.
 - A successful CI run does not prove production deployment.
@@ -56,4 +56,4 @@ Phase 6 hardening is verified on functional source revision `1b87d02`. Stop here
 ## Last Verified Baseline
 - Original Phase 6 commit: `f0511fb`; latest fully verified functional source revision: `1b87d02`.
 - CI on `1b87d02`: backend `mvn -B verify` success (521 unit + 108 integration test cases reported; 0 failures/errors, 25 skipped), `ReviewQueueIT` 8/8, frontend 173/173 + type-check/build, worker 19/19.
-- Current branch head `095021d` adds only this status update. Check the Windows checkout before merge/deploy.
+- Commits after the tested functional source revision only update this status record. Check the Windows checkout before merge/deploy.
