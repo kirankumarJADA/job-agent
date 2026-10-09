@@ -153,3 +153,24 @@ Phase 7.3 is verified locally. Commit and push on `phase7-approval-rules-ui`, th
 - Phase 7.1 frontend files changed: `ApprovalRulesPage.tsx`, `ApprovalRulesPage.test.tsx`, `App.tsx`, `Navigation.tsx`, `types.ts`, `vite.config.ts`, `package.json`, `package-lock.json`, `ROBIN_BUILD_STATUS.md`.
 - Phase 7.2 files changed: `ApplicationDecisionService.java`, `ApplicationDecisionServiceTest.java`, `ApplicationPipelineIT.java`, `DiscoveryToApplicationIT.java`, `AutomationLifecycleIT.java`, `ApprovalRulesPage.tsx`, `ApprovalRulesPage.test.tsx`, `vite.config.ts`, `ROBIN_BUILD_STATUS.md`. No schema/migration change.
 - Phase 7.3 files changed: `ApprovalRuleHealthMonitor.java` (new), `ApplicationDecisionService.java`, `ApprovalRulesController.java`, `AutomationMetrics.java`, `NotificationEvents.java`, `NotificationEventHandler.java`, `ApprovalRuleHealthMonitorTest.java` (new), `ApprovalRulesControllerTest.java`, `ApplicationDecisionServiceTest.java`, `ApplicationPipelineIT.java`, `NotificationEventHandlerTest.java`, `frontend/src/types.ts`, `ApprovalRulesPage.tsx`, `ApprovalRulesPage.test.tsx`, `ROBIN_BUILD_STATUS.md`. **No schema/migration change.**
+
+
+## Phase 8.0 Implementation: Four-Stage Dashboard and FIND Vertical Slice
+
+- Starting revision: phase7-approval-rules-ui at d57f498 (remote verified); implementation branch: phase8-find-workflow (created from that exact commit).
+- Added frontend dashboard and Jobs Feed regression tests. Rebuilt the dashboard summary around FIND / PREP / APPLY / TRACK. Each count comes from the existing authenticated API; unavailable calls are shown as unavailable rather than zero.
+- The FIND dashboard count reads the indexed jobs endpoint at limit 100 and indicates there are more results only when the response contains next_cursor. PREP uses the existing application status READY_TO_APPLY; APPLY uses pendingCount from the review queue; TRACK is explicitly labelled as application records, not confirmed submissions.
+- frontend/src/pages/JobsFeedPage.tsx now loads the source registry and supports discovery from enabled Greenhouse/Ashby sources using the existing POST /sources/{id}/health-check endpoint. This endpoint invokes the existing board connector and persists source health. Job results are refreshed after the source call, including partial-failure responses.
+- Jobs Feed now surfaces job-catalogue load failures rather than incorrectly displaying the empty-results state. Source API failures are shown separately. Search/status filters continue to use the existing /jobs endpoint parameters.
+- URL-import copy is corrected: /jobs/import-url returns RESOLUTION_PENDING and currently validates URL syntax only; it does not resolve or ingest a job. The UI no longer claims the job was imported.
+- Added frontend regression tests for API-derived stage data, source discovery and feed refresh, visible API failure, and honest URL-resolution copy.
+- Added docs/PHASE8_FIND_WORKFLOW.md with the architecture map, reused API contracts, stage classifications, deferred Phase 8.1–8.3 sequence and known limitations.
+- No backend endpoint, migration, or schema change was introduced. REAL_SUBMIT remains hard-stopped.
+- Verification limitation: the implementation environment cannot resolve github.com for a local clone and does not have the user's Windows checkout, so this session could not execute Maven, Vitest, TypeScript, worker tests or the production build. Do not label the changes verified until CI or the local checkout runs all required commands. The branch is pushed for review/CI; this is not a production deployment.
+
+### Phase 8.0 exact next steps
+
+1. Run npm test, npx tsc -b, and npm run build in frontend/.
+2. Run mvn -B verify in backend/ and the existing worker tests.
+3. Review the diff for the dashboard and FIND source action before merging any branch.
+4. Only after all required checks pass, integrate Phase 6 and Phase 7 in the correct ancestry order. Do not enable real ATS submission in this phase.

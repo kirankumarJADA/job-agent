@@ -6,268 +6,272 @@ import {
   Alert,
   EmptyState,
   JobStatusPill,
-  MetricCard,
+  Loading,
   PageHeader,
   PageShell,
-  PrimaryButton,
   SecondaryButton,
-  TraceBlock,
   WorkplacePill,
 } from '../components/ui';
 
+interface ReviewQueueSummary {
+  items?: Array<{ decision?: string }>;
+  pendingCount?: number;
+}
+
+interface WorkflowStageCardProps {
+  step: string;
+  title: string;
+  description: string;
+  value: string;
+  detail: string;
+  href: string;
+  action: string;
+  accent: string;
+}
+
+const WorkflowStageCard: React.FC<WorkflowStageCardProps> = ({
+  step, title, description, value, detail, href, action, accent,
+}) => (
+  <Link
+    to={href}
+    className="group block rounded-xl border border-line bg-surface p-5 shadow-card transition-all hover:-translate-y-0.5 hover:border-forest-300 hover:shadow-raise focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600"
+  >
+    <article>
+      <div className="flex items-center justify-between gap-3">
+        <span className="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-forest-50 text-xs font-bold tracking-wide text-forest-800">
+          {step}
+        </span>
+        <span className={"rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider " + accent}>
+          {title}
+        </span>
+      </div>
+      <p className="mt-4 text-lg font-bold text-ink">{description}</p>
+      <p className="mt-3 text-3xl font-extrabold tracking-tight text-ink">{value}</p>
+      <p className="mt-1 min-h-8 text-xs leading-relaxed text-ink-muted">{detail}</p>
+      <div className="mt-5 flex items-center justify-between border-t border-line pt-3 text-sm font-semibold text-forest-800">
+        <span>{action}</span>
+        <span aria-hidden="true" className="transition-transform group-hover:translate-x-1">→</span>
+      </div>
+    </article>
+  </Link>
+);
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
 /**
- * Dashboard — Robin's landing page.
+ * Robin workflow dashboard.
  *
- * Presentation-only redesign of the old dark "Mission Control": the same real
- * API data (system health, the five most recent jobs) and the same handlers
- * (seed UK jobs, LLM failover ping, benchmark link), under the light design
- * system with metric cards, a proper actions section and polished empty
- * states.
+ * Counts are drawn from authenticated APIs. No stage is reported as complete
+ * merely because a later-stage record exists: "Prepared" uses the current
+ * READY_TO_APPLY application state, "Apply" uses the review queue's pending
+ * count, and "Track" is the count of application records (not claimed
+ * submissions). The Jobs API is cursor-paginated, so a next cursor is shown
+ * with a plus sign rather than claiming the loaded page is the total catalogue.
  */
 export const DashboardPage: React.FC = () => {
-  const [health, setHealth] = useState<{ status: string; components?: Record<string, string> } | null>(null);
-  const [jobs, setJobs] = useState<Job[]>([]);
-  const [seeding, setSeeding] = useState(false);
-  const [seedMessage, setSeedMessage] = useState<string | null>(null);
-  const [pingResult, setPingResult] = useState<any>(null);
-  const [pinging, setPinging] = useState(false);
-  const [applications, setApplications] = useState<ApplicationSummary[]>([]);
+  const [health, setHealth] = useState<{ status: string } | null>(null);
+  const [jobs, setJobs] = useState<Job[] | null>(null);
+  const [jobsHasMore, setJobsHasMore] = useState(false);
+  const [jobsError, setJobsError] = useState<string | null>(null);
+  const [applications, setApplications] = useState<ApplicationSummary[] | null>(null);
+  const [applicationsError, setApplicationsError] = useState<string | null>(null);
+  const [reviewQueue, setReviewQueue] = useState<ReviewQueueSummary | null>(null);
+  const [reviewQueueError, setReviewQueueError] = useState<string | null>(null);
 
   useEffect(() => {
-    apiFetch<{ status: string; components?: Record<string, string> }>('/system/health')
+    apiFetch<{ status: string }>('/system/health')
       .then(setHealth)
       .catch(() => setHealth({ status: 'DOWN' }));
 
-    apiFetch<{ items: Job[] }>('/jobs?limit=5')
-      .then((res) => setJobs(res.items || []))
-      .catch(() => setJobs([]));
+    apiFetch<{ items: Job[]; next_cursor?: string }>('/jobs?limit=100')
+      .then((result) => {
+        setJobs(result.items || []);
+        setJobsHasMore(Boolean(result.next_cursor));
+      })
+      .catch((error: unknown) => {
+        setJobs(null);
+        setJobsError(errorMessage(error, 'Could not load the job catalogue.'));
+      });
 
     apiFetch<{ items: ApplicationSummary[] }>('/applications')
-      .then((res) => setApplications(res.items || []))
-      .catch(() => setApplications([]));
+      .then((result) => setApplications(result.items || []))
+      .catch((error: unknown) => {
+        setApplications(null);
+        setApplicationsError(errorMessage(error, 'Could not load application records.'));
+      });
+
+    apiFetch<ReviewQueueSummary>('/review-queue?includePaused=true')
+      .then(setReviewQueue)
+      .catch((error: unknown) => {
+        setReviewQueue(null);
+        setReviewQueueError(errorMessage(error, 'Could not load the review queue.'));
+      });
   }, []);
 
-  const handleSeedJobs = async () => {
-    setSeeding(true);
-    setSeedMessage(null);
-    try {
-      const res = await apiFetch<{ status: string; count?: number }>('/jobs/seed-uk', { method: 'POST' });
-      setSeedMessage(`Successfully seeded ${res.count || 25} real UK tech jobs!`);
-      const refreshed = await apiFetch<{ items: Job[] }>('/jobs?limit=5');
-      setJobs(refreshed.items || []);
-    } catch (err: unknown) {
-      setSeedMessage(err instanceof Error ? err.message : 'Seeding failed');
-    } finally {
-      setSeeding(false);
-    }
-  };
-
-  const handlePingFailover = async () => {
-    setPinging(true);
-    setPingResult(null);
-    try {
-      const res = await apiFetch('/system/llm/ping?forceFallback=true');
-      setPingResult(res);
-    } catch (err: unknown) {
-      setPingResult({ error: err instanceof Error ? err.message : 'Ping failed' });
-    } finally {
-      setPinging(false);
-    }
-  };
-
+  const preparedCount = applications
+    ? applications.filter((application) => application.status === 'READY_TO_APPLY').length
+    : 0;
+  const pendingReviewCount = reviewQueue
+    ? reviewQueue.pendingCount ?? (reviewQueue.items || []).filter((item) => item.decision === 'NEEDS_REVIEW').length
+    : 0;
+  const jobCount = jobs === null
+    ? (jobsError ? 'Unavailable' : '…')
+    : String(jobs.length) + (jobsHasMore ? '+' : '');
+  const prepCount = applications === null
+    ? (applicationsError ? 'Unavailable' : '…')
+    : String(preparedCount);
+  const reviewCount = reviewQueue === null
+    ? (reviewQueueError ? 'Unavailable' : '…')
+    : String(pendingReviewCount);
+  const trackingCount = applications === null
+    ? (applicationsError ? 'Unavailable' : '…')
+    : String(applications.length);
   const backendUp = health?.status === 'UP';
 
   return (
     <PageShell>
-      <div className="space-y-6">
+      <div className="space-y-7">
         <PageHeader
-          eyebrow="Overview"
-          title="Dashboard"
-          subtitle="Your AI job agent at a glance: system health, the latest discovered postings, and the levers that drive discovery."
+          eyebrow="Your job search"
+          title="Robin workflow"
+          subtitle="One connected workspace to find relevant jobs, prepare applications, make decisions and track progress."
           actions={
             <span
-              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold ${
+              className={"inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold " + (
                 backendUp
                   ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
                   : 'border-amber-300 bg-amber-50 text-amber-800'
-              }`}
+              )}
             >
-              <span
-                aria-hidden="true"
-                className={`h-2 w-2 rounded-full ${backendUp ? 'animate-pulse bg-emerald-500' : 'bg-amber-500'}`}
-              />
+              <span aria-hidden="true" className={"h-2 w-2 rounded-full " + (backendUp ? 'bg-emerald-500' : 'bg-amber-500')} />
               Backend {health?.status || 'checking…'}
             </span>
           }
         />
 
-        {/* Metric cards — same real values as before */}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <MetricCard
-            label="Jobs in pipeline"
-            value={jobs.length > 0 ? `${jobs.length}+` : '0'}
-            hint="Most recently ingested (top 5)"
-          />
-          <MetricCard
-            label="Application mode"
-            value="Assisted"
-            hint="Human-in-the-loop gate active"
-          />
-          <MetricCard label="Target market" value="United Kingdom" hint="GBP (£) salary data" />
-          <MetricCard
-            label="Model router"
-            value="Multi-provider"
-            hint="Empirical failover + usage ledger"
-          />
-        </div>
+        <section aria-labelledby="workflow-stages-title" className="space-y-3">
+          <div>
+            <h2 id="workflow-stages-title" className="text-base font-bold text-ink">Four stages. One workflow.</h2>
+            <p className="mt-1 text-sm text-ink-muted">
+              The figures below come from Robin's APIs. Unavailable data is shown as unavailable, not as zero.
+            </p>
+          </div>
 
-        {/* Automation & human tasks — one owner-scoped call, plan statuses only */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <WorkflowStageCard
+              step="01"
+              title="FIND"
+              description="Discover relevant jobs"
+              value={jobCount}
+              detail={jobsError || (jobs === null ? 'Loading the job catalogue…' : 'Recent indexed jobs' + (jobsHasMore ? '; more results are available' : ''))}
+              href="/jobs"
+              action="Browse jobs"
+              accent="bg-emerald-50 text-emerald-800"
+            />
+            <WorkflowStageCard
+              step="02"
+              title="PREP"
+              description="Prepare your application"
+              value={prepCount}
+              detail={applicationsError || 'Application records currently marked READY_TO_APPLY'}
+              href="/jobs"
+              action="Open job preparation"
+              accent="bg-sky-50 text-sky-800"
+            />
+            <WorkflowStageCard
+              step="03"
+              title="APPLY"
+              description="Review before applying"
+              value={reviewCount}
+              detail={reviewQueueError || 'Pending human-review items; approval does not submit an application'}
+              href="/review-queue"
+              action="Open review queue"
+              accent="bg-amber-50 text-amber-900"
+            />
+            <WorkflowStageCard
+              step="04"
+              title="TRACK"
+              description="Track application progress"
+              value={trackingCount}
+              detail={applicationsError || 'Application records available to your account; not a submitted-application count'}
+              href="/applications"
+              action="Open tracker"
+              accent="bg-violet-50 text-violet-800"
+            />
+          </div>
+        </section>
+
+        {jobsError && (
+          <Alert tone="error">
+            The job catalogue could not be loaded: {jobsError} Open the Jobs Feed to retry.
+          </Alert>
+        )}
+        {applicationsError && (
+          <Alert tone="error">
+            Application metrics are unavailable: {applicationsError}
+          </Alert>
+        )}
+        {reviewQueueError && (
+          <Alert tone="error">
+            Review queue metrics are unavailable: {reviewQueueError}
+          </Alert>
+        )}
+
         <section className="rounded-xl border border-line bg-surface shadow-card">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-3.5">
             <div>
-              <h2 className="text-sm font-semibold text-ink">Automation &amp; human tasks</h2>
+              <h2 className="text-sm font-semibold text-ink">Recently discovered jobs</h2>
               <p className="mt-0.5 text-xs text-ink-muted">
-                Where your applications stand and what is waiting on you. Robin never claims an application was submitted.
+                Select a posting to inspect its description and your own match result.
               </p>
             </div>
-            <SecondaryButton href="/applications">Open Applications</SecondaryButton>
+            <SecondaryButton href="/jobs">Open Jobs Feed</SecondaryButton>
           </div>
-          <div className="grid grid-cols-2 gap-3 px-5 py-4 sm:grid-cols-5">
-            {(() => {
-              const count = (status: string) =>
-                applications.filter((a) => a.planStatus === status).length;
-              const prepared = applications.filter((a) => a.status === 'READY_TO_APPLY').length;
-              return (
-                <>
-                  <MetricCard label="Prepared" value={String(prepared)} hint="Queued for automation" />
-                  <MetricCard label="Running" value={String(count('RUNNING'))} hint="Worker executing" />
-                  <MetricCard label="Needs review" value={String(count('AWAITING_APPROVAL'))} hint="Awaiting your review" />
-                  <MetricCard label="Ready to submit" value={String(count('READY_TO_SUBMIT'))} hint="Approved; submission disabled" />
-                  <MetricCard
-                    label="Failed / blocked"
-                    value={String(count('FAILED') + count('BLOCKED_ANTI_BOT'))}
-                    hint="Needs attention"
-                  />
-                </>
-              );
-            })()}
-          </div>
-          {applications.filter((a) => a.planStatus === 'AWAITING_APPROVAL' || a.planStatus === 'FAILED' || a.planStatus === 'BLOCKED_ANTI_BOT').length > 0 && (
-            <ul className="space-y-1.5 border-t border-line px-5 py-4 text-sm">
-              {applications
-                .filter((a) => a.planStatus === 'AWAITING_APPROVAL' || a.planStatus === 'FAILED' || a.planStatus === 'BLOCKED_ANTI_BOT')
-                .map((a) => (
-                  <li key={a.id} className="flex items-center justify-between gap-3">
-                    <span className="truncate text-ink-soft">{a.jobTitle || a.id}</span>
-                    <span className="shrink-0 text-xs font-medium text-ink-muted">
-                      {a.planStatus === 'AWAITING_APPROVAL' ? 'Review & approve on the Applications page'
-                        : a.planStatus === 'BLOCKED_ANTI_BOT' ? 'Blocked by anti-bot checks'
-                        : 'Automation failed — see the decision record'}
-                    </span>
-                  </li>
-                ))}
-            </ul>
-          )}
-        </section>
 
-        {/* Quick actions — same endpoints and handlers as before */}
-        <section className="rounded-xl border border-line bg-surface shadow-card">
-          <div className="border-b border-line px-5 py-3.5">
-            <h2 className="text-sm font-semibold text-ink">Quick actions</h2>
-            <p className="mt-0.5 text-xs text-ink-muted">
-              Populate the feed and verify the LLM routing stack without leaving the dashboard.
-            </p>
-          </div>
-          <div className="space-y-4 px-5 py-4">
-            <div className="flex flex-wrap gap-3">
-              <PrimaryButton onClick={handleSeedJobs} disabled={seeding}>
-                {seeding ? 'Seeding UK jobs…' : 'Seed 25 UK tech jobs'}
-              </PrimaryButton>
-              <SecondaryButton onClick={handlePingFailover} disabled={pinging}>
-                {pinging ? 'Testing failover…' : 'Test LLM failover ping'}
-              </SecondaryButton>
-              <SecondaryButton href="/models">Run benchmark suite</SecondaryButton>
+          {jobs === null && !jobsError ? (
+            <Loading>Loading recent jobs…</Loading>
+          ) : jobsError ? (
+            <div className="p-5">
+              <EmptyState title="Job listings are unavailable" body="Robin could not retrieve the job catalogue. The dashboard has not interpreted this as an empty feed." actions={<SecondaryButton href="/jobs">Retry in Jobs Feed</SecondaryButton>} />
             </div>
-
-            {seedMessage && <Alert tone="info">{seedMessage}</Alert>}
-
-            {pingResult && (
-              <div>
-                <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-faint">
-                  Live router trace output
-                </p>
-                <TraceBlock>{JSON.stringify(pingResult, null, 2)}</TraceBlock>
-              </div>
-            )}
-          </div>
-        </section>
-
-        {/* Recent postings — same /jobs?limit=5 data */}
-        <section className="rounded-xl border border-line bg-surface shadow-card">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-3.5">
-            <h2 className="text-sm font-semibold text-ink">Recently ingested postings</h2>
-            <Link
-              to="/jobs"
-              className="text-xs font-semibold text-forest-700 hover:text-forest-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600"
-            >
-              View all jobs →
-            </Link>
-          </div>
-          <div className="divide-y divide-line">
-            {jobs.length === 0 ? (
-              <div className="p-5">
-                <EmptyState
-                  title="No jobs discovered yet"
-                  body="Seed the feed with 25 real UK tech jobs, or add a posting directly from the Jobs Feed page."
-                  actions={<PrimaryButton onClick={handleSeedJobs} disabled={seeding}>Seed UK tech jobs</PrimaryButton>}
-                />
-              </div>
-            ) : (
-              jobs.map((job) => (
-                <div
-                  key={job.id}
-                  className="flex flex-col gap-3 px-5 py-4 transition-colors hover:bg-cream-50/70 sm:flex-row sm:items-center sm:justify-between"
-                >
+          ) : jobs && jobs.length === 0 ? (
+            <div className="p-5">
+              <EmptyState title="No jobs in the current index" body="Open the Jobs Feed to search the existing catalogue or run discovery from an enabled Greenhouse or Ashby source." actions={<SecondaryButton href="/jobs">Open FIND</SecondaryButton>} />
+            </div>
+          ) : (
+            <div className="divide-y divide-line">
+              {(jobs || []).slice(0, 5).map((job) => (
+                <div key={job.id} className="flex flex-col gap-2 px-5 py-4 transition-colors hover:bg-cream-50/70 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <Link
-                        to={`/jobs/${job.id}`}
-                        className="truncate text-sm font-semibold text-ink hover:text-forest-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600"
-                      >
+                      <Link to={'/jobs/' + job.id} className="truncate text-sm font-semibold text-ink hover:text-forest-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600">
                         {job.title}
                       </Link>
                       <WorkplacePill type={job.remote_type} />
                     </div>
                     <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-ink-muted">
-                      <span className="font-medium text-ink-soft">
-                        {job.company_name_raw || 'Unknown company'}
-                      </span>
+                      <span className="font-medium text-ink-soft">{job.company_name_raw || 'Unknown company'}</span>
                       <span aria-hidden="true">·</span>
-                      <span>{job.location_raw || 'UK'}</span>
-                      {job.salary_min && (
-                        <>
-                          <span aria-hidden="true">·</span>
-                          <span className="font-semibold text-forest-700">
-                            £{job.salary_min.toLocaleString()} – £{job.salary_max?.toLocaleString()}
-                          </span>
-                        </>
-                      )}
+                      <span>{job.location_raw || 'Location not listed'}</span>
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     <JobStatusPill status={job.status} />
-                    <Link
-                      to={`/jobs/${job.id}`}
-                      className="rounded-lg border border-line bg-surface px-3 py-1.5 text-xs font-semibold text-ink-soft transition-colors hover:border-forest-300 hover:bg-forest-50 hover:text-forest-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600"
-                    >
-                      View
+                    <Link to={'/jobs/' + job.id} className="rounded-lg border border-line bg-surface px-3 py-1.5 text-xs font-semibold text-ink-soft hover:border-forest-300 hover:bg-forest-50">
+                      Inspect
                     </Link>
                   </div>
                 </div>
-              ))
-            )}
-          </div>
+              ))}
+            </div>
+          )}
         </section>
+
+        <p className="text-xs leading-relaxed text-ink-faint">
+          Safety note: an approval or prepared application is not proof of submission. Live ATS submission remains disabled until a separate safety-reviewed release.
+        </p>
       </div>
     </PageShell>
   );
