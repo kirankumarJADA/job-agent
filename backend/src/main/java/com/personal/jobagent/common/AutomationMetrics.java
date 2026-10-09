@@ -58,6 +58,41 @@ public class AutomationMetrics {
                 "decision", decision).increment();
     }
 
+    /**
+     * One per decision-time resolution of the owner's auto-approval rule,
+     * tagged by the bounded availability outcome (CONFIGURED / ABSENT /
+     * UNREADABLE). The owner's identity is deliberately not a label: it would
+     * be unbounded and is not ours to export.
+     */
+    public void approvalRuleLookup(String availability) {
+        counter("robin_approval_rule_lookups_total", "Decision-time auto-approval rule lookups",
+                "availability", availability).increment();
+    }
+
+    /**
+     * One each time an available rule withheld automatic approval, tagged by a
+     * bounded rule-level reason (the quota and score-threshold withholdings are
+     * not counted here — they are already visible in
+     * {@link #decisionRecorded}).
+     */
+    public void approvalWithheldByRule(String reason) {
+        counter("robin_auto_approval_withheld_total",
+                "Automatic approvals withheld because of the owner's rule",
+                "reason", reason).increment();
+    }
+
+    /**
+     * One per attempt to raise a durable owner alert about an unreadable rule,
+     * tagged EMITTED / DEDUPED / PERSIST_FAILED. PERSIST_FAILED is the honest
+     * signal that metrics and logs recorded the failure but the durable
+     * notification could not be written (typically because the same database
+     * outage that broke the lookup also blocks the outbox write).
+     */
+    public void approvalRuleAlert(String outcome) {
+        counter("robin_approval_rule_alerts_total", "Owner alerts about an unreadable approval rule",
+                "outcome", outcome).increment();
+    }
+
     /** One per explicit owner approval (APPROVED_FOR_SUBMISSION). */
     public void submitApproved() {
         counter("robin_submit_approvals_total", "Explicit human approvals for submission").increment();

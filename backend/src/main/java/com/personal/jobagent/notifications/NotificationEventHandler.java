@@ -72,6 +72,7 @@ public class NotificationEventHandler implements EventHandler {
                  NotificationEvents.AUTOMATION_FAILURE,
                  NotificationEvents.HARD_STOP,
                  NotificationEvents.APPROVAL_REQUIRED,
+                 NotificationEvents.APPROVAL_RULE_UNAVAILABLE,
                  NotificationEvents.REVIEW_APPROVED,
                  NotificationEvents.REVIEW_REJECTED -> true;
             default -> false;
@@ -200,6 +201,7 @@ public class NotificationEventHandler implements EventHandler {
             case NotificationEvents.AUTOMATION_FAILURE -> "AUTOMATION_FAILURE";
             case NotificationEvents.HARD_STOP -> "HARD_STOP";
             case NotificationEvents.APPROVAL_REQUIRED -> "APPROVAL_REQUIRED";
+            case NotificationEvents.APPROVAL_RULE_UNAVAILABLE -> "APPROVAL_RULE_UNAVAILABLE";
             case NotificationEvents.REVIEW_APPROVED -> "REVIEW_APPROVED";
             case NotificationEvents.REVIEW_REJECTED -> "REVIEW_REJECTED";
             default -> "EVENT";
@@ -211,6 +213,7 @@ public class NotificationEventHandler implements EventHandler {
             case NotificationEvents.AUTOMATION_FAILURE, NotificationEvents.HARD_STOP -> "ERROR";
             case NotificationEvents.REVIEW_REJECTED,
                  NotificationEvents.APPROVAL_REQUIRED,
+                 NotificationEvents.APPROVAL_RULE_UNAVAILABLE,
                  NotificationEvents.REJECTION_RECEIVED,
                  NotificationEvents.APPLICATION_STATUS_CHANGED -> "WARN";
             default -> "INFO";
@@ -241,6 +244,8 @@ public class NotificationEventHandler implements EventHandler {
             case NotificationEvents.AUTOMATION_FAILURE -> "Automation step failed" + suffix;
             case NotificationEvents.HARD_STOP -> "Hard stop — human attention required" + suffix;
             case NotificationEvents.APPROVAL_REQUIRED -> "Approval required" + suffix;
+            case NotificationEvents.APPROVAL_RULE_UNAVAILABLE ->
+                    "Auto-approval paused: your approval rule could not be read" + suffix;
             case NotificationEvents.REVIEW_APPROVED -> "Review approved" + suffix;
             case NotificationEvents.REVIEW_REJECTED -> "Review rejected" + suffix;
             default -> "Pipeline event" + suffix;
@@ -301,6 +306,7 @@ public class NotificationEventHandler implements EventHandler {
                     "automation-failure:" + envelope.aggregateId() + ":" + safe(step);
             case NotificationEvents.HARD_STOP -> "hard-stop:" + envelope.aggregateId() + ":" + safe(reason);
             case NotificationEvents.APPROVAL_REQUIRED -> "approval-required:" + safe(approvalId) + ":" + envelope.aggregateId();
+            case NotificationEvents.APPROVAL_RULE_UNAVAILABLE -> "approval-rule-unavailable:" + envelope.aggregateId();
             default -> "event:" + envelope.id();
         };
     }

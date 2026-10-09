@@ -46,6 +46,8 @@ public final class NotificationEvents {
     public static final String AUTOMATION_FAILURE = "automation.failure";
     public static final String HARD_STOP = "policy.hard_stop";
     public static final String APPROVAL_REQUIRED = "approval.required";
+    /** Phase 7.3: the owner's auto-approval rule could not be read at decision time. */
+    public static final String APPROVAL_RULE_UNAVAILABLE = "approval_rule.unavailable";
     public static final String REVIEW_APPROVED = "review.approved";
     public static final String REVIEW_REJECTED = "review.rejected";
 }

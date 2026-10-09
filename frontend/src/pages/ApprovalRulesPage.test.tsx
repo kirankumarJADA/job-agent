@@ -6,7 +6,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { ApprovalRulesPage } from './ApprovalRulesPage';
-import { apiFetch } from '../api/client';
+import { ApiError, apiFetch } from '../api/client';
 
 vi.mock('../api/client', () => ({
   ApiError: class ApiError extends Error {
@@ -23,23 +23,24 @@ vi.mock('../api/client', () => ({
 
 const mockedApiFetch = vi.mocked(apiFetch);
 
-const enabledRule = {
+/** A readable rule body as GET returns it for the CONFIGURED / ABSENT states. */
+const readableBody = (over: Partial<Record<string, unknown>> = {}) => ({
+  availability: 'CONFIGURED',
+  configured: true,
   autoApproveEnabled: true,
   minScore: 85,
-  configured: true,
-};
+  applicationMode: 'ASSISTED',
+  assistedFloor: 85,
+  ...over,
+});
 
-const disabledRule = {
-  autoApproveEnabled: false,
-  minScore: 85,
-  configured: true,
-};
-
-const unconfiguredRule = {
-  autoApproveEnabled: false,
-  minScore: 85,
+const enabledRule = readableBody();
+const disabledRule = readableBody({ autoApproveEnabled: false });
+const absentRule = readableBody({
+  availability: 'ABSENT',
   configured: false,
-};
+  autoApproveEnabled: false,
+});
 
 function renderPage() {
   return render(
@@ -65,50 +66,41 @@ describe('ApprovalRulesPage', () => {
     mockedApiFetch.mockResolvedValueOnce(enabledRule);
     renderPage();
 
-    // Loading state shown first
     expect(screen.getByText('Loading approval rules…')).toBeTruthy();
 
-    // After load, the page renders with rule values
     await waitFor(() => expect(screen.getByText('Auto-Approval Rules')).toBeTruthy());
     expect(screen.getByText('Enabled')).toBeTruthy();
 
-    // Score is displayed
     const scoreInput = screen.getByLabelText('Minimum score input') as HTMLInputElement;
     expect(scoreInput.value).toBe('85');
 
-    // Decision mode explainer cards are present
     expect(screen.getByText('Manual')).toBeTruthy();
     expect(screen.getByText('Assisted')).toBeTruthy();
     expect(screen.getByText('Controlled Auto')).toBeTruthy();
-
-    // Safety notice is present
     expect(screen.getByText('Safety guarantees')).toBeTruthy();
   });
 
-  // ── 2. Editing: toggle and score changes update form state ──
+  // ── 2. Editing ──
   it('allows toggling auto-approval and changing the score', async () => {
     mockedApiFetch.mockResolvedValueOnce(enabledRule);
     renderPage();
 
     await waitFor(() => expect(screen.getByText('Enabled')).toBeTruthy());
 
-    // Toggle auto-approval off
-    const toggle = screen.getByRole('switch');
-    await userEvent.click(toggle);
+    await userEvent.click(screen.getByRole('switch'));
     expect(screen.getByText('Disabled')).toBeTruthy();
 
-    // Change score via the number input
     const scoreInput = screen.getByLabelText('Minimum score input') as HTMLInputElement;
     await userEvent.clear(scoreInput);
     await userEvent.type(scoreInput, '90');
     expect(scoreInput.value).toBe('90');
   });
 
-  // ── 3. Saving: calls PUT and shows success message ──
+  // ── 3. Saving ──
   it('saves the rule and shows a success message', async () => {
     mockedApiFetch
       .mockResolvedValueOnce(enabledRule) // GET
-      .mockResolvedValueOnce({ autoApproveEnabled: true, minScore: 85 }); // PUT
+      .mockResolvedValueOnce(readableBody()); // PUT
 
     renderPage();
     await waitFor(() => expect(screen.getByText('Auto-Approval Rules')).toBeTruthy());
@@ -127,7 +119,7 @@ describe('ApprovalRulesPage', () => {
     );
   });
 
-  // ── 4. Validation: rejects invalid score values ──
+  // ── 4. Validation ──
   it('shows a validation error for out-of-range scores', async () => {
     mockedApiFetch.mockResolvedValueOnce(enabledRule);
     renderPage();
@@ -137,27 +129,20 @@ describe('ApprovalRulesPage', () => {
     await userEvent.clear(scoreInput);
     await userEvent.type(scoreInput, '0');
 
-    // Validation message appears
     expect(screen.getByText('Score must be a whole number between 1 and 100.')).toBeTruthy();
-
-    // Save button is disabled
     expect(saveButton().disabled).toBe(true);
   });
 
-  // ── 5. Unconfigured state is distinct from a disabled rule ──
+  // ── 5. ABSENT is distinct from DISABLED ──
   it('distinguishes an unconfigured rule from a disabled one', async () => {
-    mockedApiFetch.mockResolvedValueOnce(unconfiguredRule);
+    mockedApiFetch.mockResolvedValueOnce(absentRule);
     renderPage();
 
     await waitFor(() => expect(screen.getByText('Auto-Approval Rules')).toBeTruthy());
 
-    // A distinct status, not "Disabled"
     expect(screen.getByText('Not configured')).toBeTruthy();
     expect(screen.queryByText('Disabled')).toBeNull();
-
-    // Explains the effective behaviour per mode
     expect(screen.getByText('No custom rule is saved yet.')).toBeTruthy();
-    expect(screen.getByText(/requires an enabled rule/)).toBeTruthy();
   });
 
   it('marks a saved-but-off rule as disabled, not unconfigured', async () => {
@@ -173,16 +158,14 @@ describe('ApprovalRulesPage', () => {
 
   // ── 6. An untouched unconfigured form cannot save a disabled rule ──
   it('blocks saving an untouched unconfigured form', async () => {
-    mockedApiFetch.mockResolvedValueOnce(unconfiguredRule);
+    mockedApiFetch.mockResolvedValueOnce(absentRule);
     renderPage();
 
     await waitFor(() => expect(screen.getByText('Auto-Approval Rules')).toBeTruthy());
 
-    // Save is disabled and explains why
     expect(saveButton().disabled).toBe(true);
     expect(screen.getByText(/Adjust a setting to save a rule/)).toBeTruthy();
 
-    // Clicking cannot issue a PUT (only the initial GET happened)
     await userEvent.click(saveButton());
     expect(mockedApiFetch).toHaveBeenCalledTimes(1);
     expect(mockedApiFetch).toHaveBeenCalledWith('/approval-rules');
@@ -190,13 +173,12 @@ describe('ApprovalRulesPage', () => {
 
   it('saves only after the owner makes an explicit choice', async () => {
     mockedApiFetch
-      .mockResolvedValueOnce(unconfiguredRule) // GET
-      .mockResolvedValueOnce({ autoApproveEnabled: true, minScore: 85 }); // PUT
+      .mockResolvedValueOnce(absentRule) // GET
+      .mockResolvedValueOnce(readableBody()); // PUT
 
     renderPage();
     await waitFor(() => expect(screen.getByText('Auto-Approval Rules')).toBeTruthy());
 
-    // Make a deliberate choice: enable the rule
     await userEvent.click(screen.getByRole('switch'));
     expect(saveButton().disabled).toBe(false);
 
@@ -210,56 +192,117 @@ describe('ApprovalRulesPage', () => {
     );
   });
 
-  it('allows an explicit disabled rule once the owner has touched the form', async () => {
-    mockedApiFetch
-      .mockResolvedValueOnce(unconfiguredRule) // GET
-      .mockResolvedValueOnce({ autoApproveEnabled: false, minScore: 90 }); // PUT
-
+  // ── 7. The absent-state explanation follows the real decision mode ──
+  it('explains the actual default behaviour for the current mode', async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      readableBody({ availability: 'ABSENT', configured: false, autoApproveEnabled: false, applicationMode: 'CONTROLLED_AUTO' }),
+    );
     renderPage();
+
     await waitFor(() => expect(screen.getByText('Auto-Approval Rules')).toBeTruthy());
 
-    const scoreInput = screen.getByLabelText('Minimum score input') as HTMLInputElement;
-    await userEvent.clear(scoreInput);
-    await userEvent.type(scoreInput, '90');
+    expect(screen.getByText(/Controlled Auto needs an enabled rule/)).toBeTruthy();
+    expect(screen.getByText('Needs enabled rule')).toBeTruthy();
+    // The current mode is called out rather than leaving the owner to guess.
+    expect(screen.getByText('current')).toBeTruthy();
+  });
 
-    await userEvent.click(saveButton());
-
-    await waitFor(() =>
-      expect(mockedApiFetch).toHaveBeenCalledWith('/approval-rules', {
-        method: 'PUT',
-        body: JSON.stringify({ autoApproveEnabled: false, minScore: 90 }),
+  it('uses the backend floor in the Assisted explanation when no rule is saved', async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      readableBody({
+        availability: 'ABSENT',
+        configured: false,
+        autoApproveEnabled: false,
+        applicationMode: 'ASSISTED',
+        assistedFloor: 91,
       }),
     );
-  });
-
-  // ── 7. Mode explainer reflects the fail-closed backend behaviour ──
-  it('describes Controlled Auto as requiring an enabled rule', async () => {
-    mockedApiFetch.mockResolvedValueOnce(enabledRule);
     renderPage();
+
     await waitFor(() => expect(screen.getByText('Auto-Approval Rules')).toBeTruthy());
 
-    expect(screen.getByText('Needs enabled rule')).toBeTruthy();
-    expect(
-      screen.getByText(/Matches auto-approve only while your rule is enabled/),
-    ).toBeTruthy();
-    // Enabling a rule never overrides quotas or safety checks
-    expect(screen.getByText(/Enabling a rule never overrides a safety check/)).toBeTruthy();
+    expect(screen.getByText(/auto-approves matches scoring 91 or higher/)).toBeTruthy();
   });
 
-  // ── 8. Error handling ──
-  it('shows an error when the API call fails', async () => {
+  it('explains that Manual mode ignores the rule', async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      readableBody({ availability: 'ABSENT', configured: false, autoApproveEnabled: false, applicationMode: 'MANUAL' }),
+    );
+    renderPage();
+
+    await waitFor(() => expect(screen.getByText('Auto-Approval Rules')).toBeTruthy());
+
+    expect(screen.getByText(/Manual mode sends every match to the review queue/)).toBeTruthy();
+  });
+
+  // ── 8. UNREADABLE: an explicit failure state, never stale settings ──
+  it('shows a warning and hides the form when the rule is unreadable', async () => {
+    mockedApiFetch.mockRejectedValueOnce(
+      new ApiError(503, 'Your approval rule could not be read, so automatic approval is paused for safety.'),
+    );
+    renderPage();
+
+    await waitFor(() => expect(screen.getByText('Your approval rule could not be read')).toBeTruthy());
+
+    // The safety consequence is stated plainly.
+    expect(screen.getByText(/Automatic approval has been disabled for safety/)).toBeTruthy();
+    expect(screen.getByText(/require human review/)).toBeTruthy();
+
+    // No editable form and no score that could be mistaken for loaded state.
+    expect(screen.queryByText('Save approval rules')).toBeNull();
+    expect(screen.queryByLabelText('Minimum score input')).toBeNull();
+    expect(screen.queryByRole('switch')).toBeNull();
+  });
+
+  it('offers a retry that reloads an unreadable rule', async () => {
+    mockedApiFetch
+      .mockRejectedValueOnce(new ApiError(503, 'Your approval rule could not be read.'))
+      .mockResolvedValueOnce(enabledRule);
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText('Your approval rule could not be read')).toBeTruthy());
+
+    await userEvent.click(screen.getByText('Refresh'));
+
+    await waitFor(() => expect(screen.getByText('Enabled')).toBeTruthy());
+    expect(screen.queryByText('Your approval rule could not be read')).toBeNull();
+    expect(mockedApiFetch).toHaveBeenCalledTimes(2);
+  });
+
+  // ── 9. A load failure is also unresolved: no form, no stale settings ──
+  it('shows an error and hides the form when loading fails outright', async () => {
     mockedApiFetch.mockRejectedValueOnce(new Error('Network error'));
     renderPage();
 
-    await waitFor(() =>
-      expect(screen.getByText('Failed to load approval rules.')).toBeTruthy(),
-    );
+    await waitFor(() => expect(screen.getByText(/Network error/)).toBeTruthy());
+
+    expect(screen.queryByText('Save approval rules')).toBeNull();
+    expect(screen.getByText('Refresh')).toBeTruthy();
   });
 
+  it('does not report a generic outage as an unreadable rule', async () => {
+    mockedApiFetch.mockRejectedValueOnce(new ApiError(500, 'Internal server error'));
+    renderPage();
+
+    await waitFor(() => expect(screen.getByText(/Internal server error/)).toBeTruthy());
+
+    expect(screen.queryByText('Your approval rule could not be read')).toBeNull();
+  });
+
+  // ── 10. Safety copy covers the notification ──
+  it('tells the owner they are notified when a rule cannot be read', async () => {
+    mockedApiFetch.mockResolvedValueOnce(enabledRule);
+    renderPage();
+    await waitFor(() => expect(screen.getByText('Safety guarantees')).toBeTruthy());
+
+    expect(screen.getByText(/every match falls back to human review and you are notified/)).toBeTruthy();
+  });
+
+  // ── 11. Save failure ──
   it('shows an error when saving fails', async () => {
     mockedApiFetch
-      .mockResolvedValueOnce(enabledRule) // GET
-      .mockRejectedValueOnce(new Error('min_score must be between 1 and 100')); // PUT
+      .mockResolvedValueOnce(enabledRule)
+      .mockRejectedValueOnce(new Error('min_score must be between 1 and 100'));
 
     renderPage();
     await waitFor(() => expect(screen.getByText('Auto-Approval Rules')).toBeTruthy());

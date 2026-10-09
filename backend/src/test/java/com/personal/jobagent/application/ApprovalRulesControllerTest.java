@@ -21,11 +21,13 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Phase 7: REST API for per-user auto-approval rules.
+ * Phase 7 / 7.3: REST API for per-user auto-approval rules.
  *
- * <p>Every operation is owner-scoped via OwnerContext. The controller
- * validates input, delegates to ApplicationDecisionService for persistence,
- * and writes an audit trail on mutations.
+ * <p>The whole point of the 7.3 contract is that the three availability states
+ * are distinguishable, and that an unreadable rule is never reported as a
+ * successfully loaded unconfigured one. Every operation is owner-scoped via
+ * OwnerContext; the controller validates input, delegates to
+ * ApplicationDecisionService, and writes an audit trail on mutations.
  */
 class ApprovalRulesControllerTest {
 
@@ -43,40 +45,109 @@ class ApprovalRulesControllerTest {
         when(ownerContext.profileIdOrNull()).thenReturn(PROFILE);
         when(ownerContext.actorOr("user")).thenReturn("test@example.com");
         when(httpRequest.getRemoteAddr()).thenReturn("127.0.0.1");
+        when(decisions.effectiveApplicationMode(PROFILE)).thenReturn("ASSISTED");
         controller = new ApprovalRulesController(decisions, audit, ownerContext);
+    }
+
+    private void ruleStateIs(ApplicationDecisionService.RuleAvailability availability,
+                             ApplicationDecisionService.UserApprovalRule rule,
+                             ApplicationDecisionService.RuleUnavailableCause cause) {
+        when(decisions.ruleState(PROFILE))
+                .thenReturn(new ApplicationDecisionService.RuleState(availability, rule, cause));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> bodyOf(ResponseEntity<?> response) {
+        return (Map<String, Object>) response.getBody();
     }
 
     @Nested
     class GetRule {
 
         @Test
-        void returnsDefaultsWhenNoRuleConfigured() {
-            when(decisions.ruleFor(PROFILE)).thenReturn(null);
+        void reportsConfiguredRule() {
+            ruleStateIs(ApplicationDecisionService.RuleAvailability.CONFIGURED,
+                    new ApplicationDecisionService.UserApprovalRule(true, 72), null);
 
             ResponseEntity<?> response = controller.get();
 
             assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-            @SuppressWarnings("unchecked")
-            Map<String, Object> body = (Map<String, Object>) response.getBody();
-            assertThat(body).containsEntry("autoApproveEnabled", false);
-            assertThat(body).containsEntry("minScore",
-                    ApplicationDecisionService.HIGH_CONFIDENCE_THRESHOLD);
-            assertThat(body).containsEntry("configured", false);
+            assertThat(bodyOf(response))
+                    .containsEntry("availability", "CONFIGURED")
+                    .containsEntry("configured", true)
+                    .containsEntry("autoApproveEnabled", true)
+                    .containsEntry("minScore", 72)
+                    .containsEntry("applicationMode", "ASSISTED")
+                    .containsEntry("assistedFloor", ApplicationDecisionService.HIGH_CONFIDENCE_THRESHOLD);
         }
 
         @Test
-        void returnsSavedRule() {
-            when(decisions.ruleFor(PROFILE)).thenReturn(
-                    new ApplicationDecisionService.UserApprovalRule(true, 72));
+        void reportsAbsentRuleWithTheAssistedFloor() {
+            ruleStateIs(ApplicationDecisionService.RuleAvailability.ABSENT, null, null);
 
             ResponseEntity<?> response = controller.get();
 
             assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-            @SuppressWarnings("unchecked")
-            Map<String, Object> body = (Map<String, Object>) response.getBody();
-            assertThat(body).containsEntry("autoApproveEnabled", true);
-            assertThat(body).containsEntry("minScore", 72);
-            assertThat(body).containsEntry("configured", true);
+            assertThat(bodyOf(response))
+                    .containsEntry("availability", "ABSENT")
+                    .containsEntry("configured", false)
+                    .containsEntry("autoApproveEnabled", false)
+                    .containsEntry("minScore", ApplicationDecisionService.HIGH_CONFIDENCE_THRESHOLD);
+        }
+
+        @Test
+        void reportsAConfiguredButDisabledRuleAsSuch() {
+            ruleStateIs(ApplicationDecisionService.RuleAvailability.CONFIGURED,
+                    new ApplicationDecisionService.UserApprovalRule(false, 60), null);
+
+            ResponseEntity<?> response = controller.get();
+
+            assertThat(bodyOf(response))
+                    .containsEntry("availability", "CONFIGURED")
+                    .containsEntry("configured", true)
+                    .containsEntry("autoApproveEnabled", false)
+                    .containsEntry("minScore", 60);
+        }
+
+        /**
+         * The core 7.3 guarantee: an unreadable rule is an explicit failure, not
+         * a successful "unconfigured" response, and it carries no settings a
+         * client could mistake for loaded state.
+         */
+        @Test
+        void reportsUnreadableRuleAs503WithExplicitStatusAndNoSettings() {
+            ruleStateIs(ApplicationDecisionService.RuleAvailability.UNREADABLE, null,
+                    ApplicationDecisionService.RuleUnavailableCause.QUERY_FAILED);
+
+            ResponseEntity<?> response = controller.get();
+
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+            Map<String, Object> body = bodyOf(response);
+            assertThat(body).containsEntry("availability", "UNREADABLE");
+            assertThat(body).containsEntry("reason", "QUERY_FAILED");
+            assertThat(body).doesNotContainKeys("autoApproveEnabled", "minScore", "configured");
+            assertThat(String.valueOf(body.get("message"))).doesNotContain("QUERY_FAILED");
+        }
+
+        @Test
+        void reportsAnInvalidStoredThresholdWithItsOwnBoundedReason() {
+            ruleStateIs(ApplicationDecisionService.RuleAvailability.UNREADABLE, null,
+                    ApplicationDecisionService.RuleUnavailableCause.INVALID_THRESHOLD);
+
+            ResponseEntity<?> response = controller.get();
+
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+            assertThat(bodyOf(response)).containsEntry("reason", "INVALID_THRESHOLD");
+        }
+
+        @Test
+        void surfacesTheEffectiveApplicationModeSoClientsCanDescribeDefaults() {
+            ruleStateIs(ApplicationDecisionService.RuleAvailability.ABSENT, null, null);
+            when(decisions.effectiveApplicationMode(PROFILE)).thenReturn("CONTROLLED_AUTO");
+
+            ResponseEntity<?> response = controller.get();
+
+            assertThat(bodyOf(response)).containsEntry("applicationMode", "CONTROLLED_AUTO");
         }
 
         @Test
@@ -86,6 +157,7 @@ class ApprovalRulesControllerTest {
             ResponseEntity<?> response = controller.get();
 
             assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+            verify(decisions, never()).ruleState(any());
         }
     }
 
@@ -93,7 +165,7 @@ class ApprovalRulesControllerTest {
     class PutRule {
 
         @Test
-        void upsertsRuleAndWritesAudit() {
+        void upsertsRuleWritesAuditAndReportsConfiguredAvailability() {
             when(decisions.saveRule(PROFILE, true, 75))
                     .thenReturn(new ApplicationDecisionService.UserApprovalRule(true, 75));
 
@@ -101,10 +173,10 @@ class ApprovalRulesControllerTest {
             ResponseEntity<?> response = controller.put(request, httpRequest);
 
             assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-            @SuppressWarnings("unchecked")
-            Map<String, Object> body = (Map<String, Object>) response.getBody();
-            assertThat(body).containsEntry("autoApproveEnabled", true);
-            assertThat(body).containsEntry("minScore", 75);
+            assertThat(bodyOf(response))
+                    .containsEntry("availability", "CONFIGURED")
+                    .containsEntry("autoApproveEnabled", true)
+                    .containsEntry("minScore", 75);
             verify(audit).write(any());
         }
 

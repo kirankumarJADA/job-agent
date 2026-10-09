@@ -485,5 +485,67 @@ class ApplicationPipelineIT {
         });
         assertThat(countLiveApplications(profileC, jobC)).isZero();
     }
+
+    /**
+     * Phase 7.3 end to end: an unreadable rule must (a) queue for human review
+     * rather than auto-apply, and (b) raise one durable, owner-scoped alert so
+     * the owner learns their auto-approval has stopped working.
+     *
+     * <p>The failure is injected by renaming the column the lookup selects, which
+     * makes the decision-time SELECT fail exactly as a real schema/database fault
+     * would. The column is restored in a finally block.
+     */
+    @Test
+    @Order(9)
+    void anUnreadableRuleQueuesForReviewAndRaisesOneOwnerAlert() {
+        UUID userD = UUID.fromString("00000000-0000-7000-8000-00000000ac10");
+        UUID profileD = UUID.fromString("00000000-0000-7000-8000-00000000ac11");
+        UUID jobD = UUID.fromString("00000000-0000-7000-8000-00000000ac31");
+
+        seedUser(userD, profileD, "pipeline-d@example.com", "PasswordD1!");
+        seedSkills(profileD, List.of("Java", "Spring"));
+        seedPreference(profileD, "CONTROLLED_AUTO");
+        // An enabled rule exists, so the only reason not to auto-apply is that it
+        // cannot be read.
+        seedEnabledApprovalRule(profileD, 70);
+        jdbc.update("""
+                insert into jobs (id, source_id, external_id, dedup_key, company_name_raw, title,
+                                  location_raw, description_text, skills_extracted, status, content_hash,
+                                  application_url)
+                values (?, ?, ?, ?, 'Pipeline Corp', 'Java Platform Engineer', 'London',
+                        'Java platform role', '{Java,Spring}'::text[], 'DISCOVERED', ?, ?)
+                on conflict (id) do nothing
+                """, jobD, SOURCE, "ext-" + jobD, "dedup-" + jobD, "hash-" + jobD,
+                "https://example.com/apply/" + jobD);
+
+        jdbc.execute("alter table user_approval_rules rename column min_score to min_score_p73_probe");
+        try {
+            pipeline.onJobIngested(jobD, "INSERTED");
+
+            Awaitility.await().atMost(Duration.ofSeconds(25)).untilAsserted(() -> {
+                List<Map<String, Object>> decisions = jdbc.queryForList("""
+                        select decision, reason from application_decisions
+                        where profile_id = ? and job_id = ?
+                        """, profileD, jobD);
+                assertThat(decisions).hasSize(1);
+                assertThat(decisions.get(0).get("decision")).isEqualTo("NEEDS_REVIEW");
+                assertThat(String.valueOf(decisions.get(0).get("reason")))
+                        .contains("could not be loaded");
+            });
+            assertThat(countLiveApplications(profileD, jobD)).isZero();
+
+            // The alert is emitted through the outbox fan-out, so it lands a moment
+            // after the decision itself.
+            Awaitility.await().atMost(Duration.ofSeconds(25)).untilAsserted(() -> {
+                Integer alerts = jdbc.queryForObject("""
+                        select count(*) from notifications
+                        where profile_id = ? and category = 'APPROVAL_RULE_UNAVAILABLE'
+                        """, Integer.class, profileD);
+                assertThat(alerts).isEqualTo(1);
+            });
+        } finally {
+            jdbc.execute("alter table user_approval_rules rename column min_score_p73_probe to min_score");
+        }
+    }
 }
 

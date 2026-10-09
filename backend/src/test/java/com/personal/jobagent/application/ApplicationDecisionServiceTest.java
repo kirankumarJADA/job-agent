@@ -20,6 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -51,16 +52,17 @@ class ApplicationDecisionServiceTest {
     private final QuotaService quotaService = mock(QuotaService.class);
     private final JdbcTemplate db = mock(JdbcTemplate.class);
     private final AutomationMetrics metrics = mock(AutomationMetrics.class);
+    private final ApprovalRuleHealthMonitor health = mock(ApprovalRuleHealthMonitor.class);
     private ApplicationDecisionService service;
 
     @BeforeEach
     void setUp() {
-        Mockito.reset(preferenceSets, quotaService, db, metrics);
+        Mockito.reset(preferenceSets, quotaService, db, metrics, health);
         when(db.update(anyString(), any(Object[].class))).thenReturn(1);
         // Default: no per-user rule configured (Phase 5 defaults)
         when(db.queryForList(contains("user_approval_rules"), eq(PROFILE)))
                 .thenReturn(Collections.emptyList());
-        service = new ApplicationDecisionService(preferenceSets, quotaService, db, metrics);
+        service = new ApplicationDecisionService(preferenceSets, quotaService, db, metrics, health);
     }
 
     private void mode(String applicationMode) {
@@ -523,6 +525,103 @@ class ApplicationDecisionServiceTest {
 
             verify(metrics).decisionRecorded("NEEDS_REVIEW");
         }
+
+        // ── Phase 7.3: observability does not change any decision ──
+
+        @Test
+        void everyDecisionTimeLookupIsReportedWithItsResolvedState() {
+            mode("ASSISTED");
+            quotaAllowed(true);
+            ruleExists(true, 80);
+
+            service.decide(PROFILE, JOB, 90, "APPLY");
+
+            verify(health).ruleResolvedAtDecisionTime(
+                    eq(PROFILE),
+                    argThat(state -> state.availability()
+                            == ApplicationDecisionService.RuleAvailability.CONFIGURED));
+        }
+
+        @Test
+        void unreadableRuleIsReportedAsUnreadableAndStillWithheld() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+            when(db.queryForList(contains("user_approval_rules"), eq(PROFILE)))
+                    .thenThrow(new RuntimeException("connection lost"));
+
+            var decision = service.decide(PROFILE, JOB, 100, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            verify(health).ruleResolvedAtDecisionTime(
+                    eq(PROFILE),
+                    argThat(state -> state.availability()
+                                    == ApplicationDecisionService.RuleAvailability.UNREADABLE
+                            && state.unreadableCause()
+                                    == ApplicationDecisionService.RuleUnavailableCause.QUERY_FAILED));
+            verify(health).approvalWithheld(ApprovalRuleHealthMonitor.WithheldReason.RULE_UNREADABLE);
+        }
+
+        @Test
+        void disabledRuleIsReportedAsAWithholding() {
+            mode("ASSISTED");
+            quotaAllowed(true);
+            ruleExists(false, 85);
+
+            service.decide(PROFILE, JOB, 99, "APPLY");
+
+            verify(health).approvalWithheld(ApprovalRuleHealthMonitor.WithheldReason.RULE_DISABLED);
+        }
+
+        @Test
+        void absentRuleInControlledAutoIsReportedAsAWithholding() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+
+            service.decide(PROFILE, JOB, 99, "APPLY");
+
+            verify(health).approvalWithheld(
+                    ApprovalRuleHealthMonitor.WithheldReason.NO_RULE_IN_CONTROLLED_AUTO);
+        }
+
+        @Test
+        void assistedAutoApplyIsReportedAsConfiguredAndNotWithheld() {
+            mode("ASSISTED");
+            quotaAllowed(true);
+            ruleExists(true, 80);
+
+            var decision = service.decide(PROFILE, JOB, 95, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("AUTO_APPLY");
+            verify(health, org.mockito.Mockito.never())
+                    .approvalWithheld(any(ApprovalRuleHealthMonitor.WithheldReason.class));
+        }
+
+        @Test
+        void manualModeReportsTheLookupButNeverAWithholding() {
+            mode("MANUAL");
+            quotaAllowed(true);
+            ruleExists(true, 1);
+
+            service.decide(PROFILE, JOB, 100, "APPLY");
+
+            // MANUAL returns before the rule step, so no lookup is even made.
+            verify(health, org.mockito.Mockito.never())
+                    .ruleResolvedAtDecisionTime(any(UUID.class), any());
+            verify(health, org.mockito.Mockito.never())
+                    .approvalWithheld(any(ApprovalRuleHealthMonitor.WithheldReason.class));
+        }
+
+        @Test
+        void quotaWithholdingIsNotAttributedToTheRule() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(false);
+            ruleExists(true, 1);
+
+            service.decide(PROFILE, JOB, 100, "APPLY");
+
+            verify(health, org.mockito.Mockito.never())
+                    .approvalWithheld(any(ApprovalRuleHealthMonitor.WithheldReason.class));
+        }
     }
 
     // ── Phase 7: saveRule validation ───────────────────────────────────
@@ -604,6 +703,69 @@ class ApplicationDecisionServiceTest {
             assertThat(rule).isNotNull();
             assertThat(rule.autoApproveEnabled()).isTrue();
             assertThat(rule.minScore()).isEqualTo(72);
+        }
+
+        // ── Phase 7.3: ruleState exposes the tri-state the API needs ──
+
+        @Test
+        void ruleStateReportsConfigured() {
+            ruleExists(false, 60);
+
+            var state = service.ruleState(PROFILE);
+
+            assertThat(state.availability())
+                    .isEqualTo(ApplicationDecisionService.RuleAvailability.CONFIGURED);
+            assertThat(state.rule().minScore()).isEqualTo(60);
+            assertThat(state.unreadableCause()).isNull();
+        }
+
+        @Test
+        void ruleStateReportsAbsent() {
+            var state = service.ruleState(PROFILE);
+
+            assertThat(state.availability())
+                    .isEqualTo(ApplicationDecisionService.RuleAvailability.ABSENT);
+            assertThat(state.rule()).isNull();
+            assertThat(state.unreadableCause()).isNull();
+        }
+
+        @Test
+        void ruleStateReportsUnreadableWithBoundedCause() {
+            when(db.queryForList(contains("user_approval_rules"), eq(PROFILE)))
+                    .thenThrow(new RuntimeException("connection to db-host:5432 refused"));
+
+            var state = service.ruleState(PROFILE);
+
+            assertThat(state.availability())
+                    .isEqualTo(ApplicationDecisionService.RuleAvailability.UNREADABLE);
+            assertThat(state.unreadableCause())
+                    .isEqualTo(ApplicationDecisionService.RuleUnavailableCause.QUERY_FAILED);
+        }
+
+        @Test
+        void ruleStateReportsInvalidThresholdAsUnreadable() {
+            ruleExists(true, 500);
+
+            var state = service.ruleState(PROFILE);
+
+            assertThat(state.availability())
+                    .isEqualTo(ApplicationDecisionService.RuleAvailability.UNREADABLE);
+            assertThat(state.unreadableCause())
+                    .isEqualTo(ApplicationDecisionService.RuleUnavailableCause.INVALID_THRESHOLD);
+        }
+
+        @Test
+        void effectiveApplicationModeMirrorsTheDecisionEngineDefault() {
+            when(preferenceSets.findActiveByProfileId(PROFILE)).thenReturn(Optional.empty());
+            assertThat(service.effectiveApplicationMode(PROFILE)).isEqualTo("ASSISTED");
+
+            mode("CONTROLLED_AUTO");
+            assertThat(service.effectiveApplicationMode(PROFILE)).isEqualTo("CONTROLLED_AUTO");
+
+            PreferenceSetRecord blank = mock(PreferenceSetRecord.class);
+            when(blank.applicationMode()).thenReturn("  ");
+            when(preferenceSets.findActiveByProfileId(PROFILE)).thenReturn(Optional.of(blank));
+            assertThat(service.effectiveApplicationMode(PROFILE)).isEqualTo("ASSISTED");
         }
     }
 

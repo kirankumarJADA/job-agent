@@ -85,15 +85,18 @@ public class ApplicationDecisionService {
     private final QuotaService quotaService;
     private final JdbcTemplate db;
     private final AutomationMetrics metrics;
+    private final ApprovalRuleHealthMonitor health;
 
     public ApplicationDecisionService(PreferenceSetRepository preferenceSets,
                                       QuotaService quotaService,
                                       JdbcTemplate db,
-                                      AutomationMetrics metrics) {
+                                      AutomationMetrics metrics,
+                                      ApprovalRuleHealthMonitor health) {
         this.preferenceSets = preferenceSets;
         this.quotaService = quotaService;
         this.db = db;
         this.metrics = metrics;
+        this.health = health;
     }
 
     /** The outcome of the decision engine for one (profile, job) pair. */
@@ -112,10 +115,7 @@ public class ApplicationDecisionService {
     public DecisionResult decide(UUID profileId, UUID jobId,
                                  int matchScore, String recommendation) {
 
-        String mode = preferenceSets.findActiveByProfileId(profileId)
-                .map(p -> p.applicationMode() == null || p.applicationMode().isBlank()
-                        ? "ASSISTED" : p.applicationMode())
-                .orElse("ASSISTED");
+        String mode = effectiveApplicationMode(profileId);
 
         // ── 1. Non-APPLY recommendations never auto-apply ──
         // (Defensive: only APPLY matches emit JOB_MATCHED events, but guard
@@ -150,19 +150,24 @@ public class ApplicationDecisionService {
         // enforced downstream at plan build, worker execution and the
         // submit-approval precondition, and no decision recorded here changes
         // them.
-        RuleLookup lookup = lookupRule(profileId);
+        RuleState rule = lookupRule(profileId);
+        // Reporting only: the health monitor takes no decision, and every
+        // branch below is reached with or without it.
+        health.ruleResolvedAtDecisionTime(profileId, rule);
 
         // A rule we could not read must never widen auto-approval. Fail closed
         // to human review rather than silently reverting to a default that
         // could auto-approve a match the owner disabled.
-        if (lookup.availability() == RuleAvailability.UNREADABLE) {
+        if (rule.availability() == RuleAvailability.UNREADABLE) {
+            health.approvalWithheld(ApprovalRuleHealthMonitor.WithheldReason.RULE_UNREADABLE);
             return record(profileId, jobId, matchScore, recommendation, mode,
                     "NEEDS_REVIEW", "Approval rule could not be loaded; awaiting human review");
         }
 
         // An explicit opt-out disables AUTO_APPLY in every automatic mode.
-        if (lookup.availability() == RuleAvailability.CONFIGURED
-                && !lookup.rule().autoApproveEnabled()) {
+        if (rule.availability() == RuleAvailability.CONFIGURED
+                && !rule.rule().autoApproveEnabled()) {
+            health.approvalWithheld(ApprovalRuleHealthMonitor.WithheldReason.RULE_DISABLED);
             return record(profileId, jobId, matchScore, recommendation, mode,
                     "NEEDS_REVIEW", "Automatic approval disabled by user rule");
         }
@@ -172,8 +177,8 @@ public class ApplicationDecisionService {
         // which is stricter than the APPLY threshold and is the documented
         // Phase 5 default. A configured, enabled rule may move it.
         if ("ASSISTED".equals(mode)) {
-            int assistedThreshold = lookup.availability() == RuleAvailability.CONFIGURED
-                    ? lookup.rule().minScore() : HIGH_CONFIDENCE_THRESHOLD;
+            int assistedThreshold = rule.availability() == RuleAvailability.CONFIGURED
+                    ? rule.rule().minScore() : HIGH_CONFIDENCE_THRESHOLD;
             if (matchScore >= assistedThreshold) {
                 return record(profileId, jobId, matchScore, recommendation, mode,
                         "AUTO_APPLY", "High-confidence match in assisted mode (score " + matchScore
@@ -187,19 +192,34 @@ public class ApplicationDecisionService {
         // ── 6. CONTROLLED_AUTO requires an explicitly enabled, loaded rule ──
         // No rule means no authorisation: "auto-apply everything" must be an
         // explicit opt-in, never the silent default.
-        if (lookup.availability() == RuleAvailability.ABSENT) {
+        if (rule.availability() == RuleAvailability.ABSENT) {
+            health.approvalWithheld(ApprovalRuleHealthMonitor.WithheldReason.NO_RULE_IN_CONTROLLED_AUTO);
             return record(profileId, jobId, matchScore, recommendation, mode,
                     "NEEDS_REVIEW", "Controlled-auto mode requires an enabled approval rule; "
                             + "none is configured");
         }
-        if (matchScore < lookup.rule().minScore()) {
+        if (matchScore < rule.rule().minScore()) {
             return record(profileId, jobId, matchScore, recommendation, mode,
                     "NEEDS_REVIEW", "Score " + matchScore + " below user threshold ("
-                            + lookup.rule().minScore() + ")");
+                            + rule.rule().minScore() + ")");
         }
         return record(profileId, jobId, matchScore, recommendation, mode,
                 "AUTO_APPLY", "Controlled-auto mode with an enabled user rule (score "
-                        + matchScore + " >= " + lookup.rule().minScore() + ")");
+                        + matchScore + " >= " + rule.rule().minScore() + ")");
+    }
+
+    /**
+     * The mode the decision engine applies for this profile. Mirrors
+     * {@link #decide}: an unset or blank preference, or no preferences at all,
+     * resolves to ASSISTED. Exposed so the settings API can describe the
+     * behaviour a user without a rule will actually get, instead of a generic
+     * description of all three modes.
+     */
+    public String effectiveApplicationMode(UUID profileId) {
+        return preferenceSets.findActiveByProfileId(profileId)
+                .map(p -> p.applicationMode() == null || p.applicationMode().isBlank()
+                        ? "ASSISTED" : p.applicationMode())
+                .orElse("ASSISTED");
     }
 
     // ── Phase 7: per-user auto-approval rules ────────────────────────
@@ -213,18 +233,32 @@ public class ApplicationDecisionService {
      * the decision engine fail closed on the latter without treating it as an
      * explicit (and therefore trustworthy) absence.
      */
-    enum RuleAvailability { CONFIGURED, ABSENT, UNREADABLE }
+    public enum RuleAvailability { CONFIGURED, ABSENT, UNREADABLE }
 
-    /** The resolved rule plus how it was resolved. */
-    private record RuleLookup(RuleAvailability availability, UserApprovalRule rule) {
-        static RuleLookup of(UserApprovalRule rule) {
-            return new RuleLookup(RuleAvailability.CONFIGURED, rule);
+    /**
+     * Why a rule was {@code UNREADABLE}. Bounded on purpose: it is exposed
+     * through the API and carried on the owner's alert, so it must never be a
+     * raw database message (those can name a host, port or role).
+     */
+    public enum RuleUnavailableCause { QUERY_FAILED, INVALID_THRESHOLD }
+
+    /**
+     * The resolved rule plus how it was resolved — the single shape the
+     * decision engine, the settings API and the health monitor all read, so
+     * "no rule" and "a rule we could not read" can never drift apart between
+     * them.
+     */
+    public record RuleState(RuleAvailability availability,
+                            UserApprovalRule rule,
+                            RuleUnavailableCause unreadableCause) {
+        static RuleState of(UserApprovalRule rule) {
+            return new RuleState(RuleAvailability.CONFIGURED, rule, null);
         }
-        static RuleLookup absent() {
-            return new RuleLookup(RuleAvailability.ABSENT, null);
+        static RuleState absent() {
+            return new RuleState(RuleAvailability.ABSENT, null, null);
         }
-        static RuleLookup unreadable() {
-            return new RuleLookup(RuleAvailability.UNREADABLE, null);
+        static RuleState unreadable(RuleUnavailableCause cause) {
+            return new RuleState(RuleAvailability.UNREADABLE, null, cause);
         }
     }
 
@@ -235,38 +269,50 @@ public class ApplicationDecisionService {
      * A query failure, a missing/unparseable threshold, or a threshold outside
      * 1–100 is reported as {@code UNREADABLE} so callers fail closed.
      */
-    private RuleLookup lookupRule(UUID profileId) {
+    private RuleState lookupRule(UUID profileId) {
         try {
             List<Map<String, Object>> rows = db.queryForList(
                     "select " + RULE_COLUMNS + " from user_approval_rules where profile_id = ?",
                     profileId);
-            if (rows.isEmpty()) return RuleLookup.absent();
+            if (rows.isEmpty()) return RuleState.absent();
             Object rawScore = rows.get(0).get("min_score");
             if (!(rawScore instanceof Number number)) {
                 log.warn("Approval rule for profile {} has no readable threshold; failing closed",
                         profileId);
-                return RuleLookup.unreadable();
+                return RuleState.unreadable(RuleUnavailableCause.INVALID_THRESHOLD);
             }
             int minScore = number.intValue();
             if (minScore < MIN_SCORE || minScore > MAX_SCORE) {
                 log.warn("Approval rule for profile {} has an out-of-range threshold ({}); "
                         + "failing closed", profileId, minScore);
-                return RuleLookup.unreadable();
+                return RuleState.unreadable(RuleUnavailableCause.INVALID_THRESHOLD);
             }
-            return RuleLookup.of(new UserApprovalRule(
+            return RuleState.of(new UserApprovalRule(
                     Boolean.TRUE.equals(rows.get(0).get("auto_approve_enabled")), minScore));
         } catch (Exception e) {
             // A rule we cannot read must never widen auto-apply: report it as
-            // UNREADABLE so every caller fails closed to human review.
+            // UNREADABLE so every caller fails closed to human review. The
+            // exception message is logged here only — never returned to a
+            // client and never placed on the owner's alert.
             log.warn("Could not load approval rule for profile {}: {}; failing closed",
                     profileId, e.getMessage());
-            return RuleLookup.unreadable();
+            return RuleState.unreadable(RuleUnavailableCause.QUERY_FAILED);
         }
+    }
+
+    /**
+     * The owner's rule resolution for API and UI consumers, so they can tell a
+     * rule from no rule from an unreadable rule. Distinct from
+     * {@link #ruleFor}, which cannot express that distinction.
+     */
+    public RuleState ruleState(UUID profileId) {
+        return lookupRule(profileId);
     }
 
     /**
      * Reads the owner's rule for the API. Null when none is configured (or when
      * the stored rule is unreadable — decisions then fail closed to review).
+     * Prefer {@link #ruleState} when the caller must distinguish those cases.
      */
     public UserApprovalRule ruleFor(UUID profileId) {
         return lookupRule(profileId).rule();

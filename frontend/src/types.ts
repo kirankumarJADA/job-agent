@@ -196,18 +196,38 @@ export interface PreferenceSet {
   experienceLevels?: string[];
   salaryMinGbp?: number;
   sponsorshipPolicy: 'SPONSORSHIP_REQUIRED' | 'SPONSORSHIP_PREFERRED' | 'SPONSORSHIP_NOT_REQUIRED' | 'SHOW_ALL';
-  applicationMode: 'MANUAL' | 'ASSISTED' | 'CONTROLLED_AUTO';
+  applicationMode: ApplicationMode;
   scoringWeights: ScoringWeights;
   isActive: boolean;
 }
 
+// The decision engine's application modes (mirrors ApplicationDecisionService).
+export type ApplicationMode = 'MANUAL' | 'ASSISTED' | 'CONTROLLED_AUTO';
+
+/**
+ * How well the backend could resolve the owner's auto-approval rule (Phase 7.3).
+ *
+ *  - CONFIGURED: a valid saved rule was loaded.
+ *  - ABSENT: no custom rule exists, so the decision mode's defaults apply.
+ *  - UNREADABLE: the rule could not be retrieved or validated. The backend
+ *    fails closed: automatic approval is paused and matches wait for review.
+ *    This is returned as HTTP 503, never as a successful response, so a
+ *    database or validation error can never be mistaken for "no rule".
+ */
+export type ApprovalRuleAvailability = 'CONFIGURED' | 'ABSENT' | 'UNREADABLE';
+
 // Per-user auto-approval rule from GET/PUT /api/v1/approval-rules (Phase 7).
 // The rule can toggle automatic approval and set a minimum score threshold;
-// it can never bypass hard stops, quotas, or safety gates.
+// it can never bypass hard stops, quotas, or safety gates. Only returned for
+// the CONFIGURED and ABSENT states; an unreadable rule returns 503 instead.
 export interface ApprovalRule {
+  availability: ApprovalRuleAvailability;
+  configured: boolean;
   autoApproveEnabled: boolean;
   minScore: number;
-  configured: boolean;
+  applicationMode: ApplicationMode;
+  /** ASSISTED-mode score floor the backend applies when no rule is saved. */
+  assistedFloor: number;
 }
 
 // Owner-scoped application row from GET /api/v1/applications (camelCase wire

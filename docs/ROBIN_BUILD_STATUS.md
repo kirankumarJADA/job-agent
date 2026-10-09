@@ -11,7 +11,8 @@ Persistent engineering handoff. Update this file after every completed phase and
 - Phase 6 hardening is isolated on branch `phase6-review-queue-hardening`, based on `f0511fb`. The current hardening series includes `f1bae6c`, `5fa1a01`, `beda52c`, `b0e574c`, `4faa250`, `836d614`, and `1b87d02`. `095021d` was a status-document-only follow-up.
 - Phase 7 (auto-approval rule engine + V034): `568994a`.
 - Phase 7.1 (Approval Rules Settings UI): `daa848d`, on branch `phase7-approval-rules-ui`.
-- Phase 7.2 (auto-approval safety audit + fail-closed correction): `bb449a4`, on branch `phase7-approval-rules-ui`.
+- Phase 7.2 (auto-approval safety audit + fail-closed correction): `bb449a4`; status record `9f2f4e2`.
+- Phase 7.3 (approval-rule health and observability): commit pending on `phase7-approval-rules-ui`.
 - `ROBIN_PROJECT_HANDOFF.md` does not exist in this repository (checked all branches and history). This file is the persistent engineering handoff.
 - Do not infer the state of a separate Windows working tree from this GitHub branch.
 
@@ -28,6 +29,7 @@ Persistent engineering handoff. Update this file after every completed phase and
 | 7 — Auto-approval rule engine + V034 | `568994a` | Local verify: 559 unit (0 fail, 1 skip) + 108 IT (0 fail, 19 skip) = 667 total |
 | 7.1 — Approval Rules Settings UI | `daa848d` | Frontend: 178 tests pass, tsc clean, build clean (one pre-existing suite failure, fixed in 7.2) |
 | 7.2 — Auto-approval safety audit (fail-closed) | `bb449a4` | Backend: 564 unit (0 fail, 1 skip) + 109 IT (0 fail, 19 skip) = 673. Frontend: 185 tests, tsc clean, build clean. Worker: 19/19 |
+| 7.3 — Approval-rule health & observability | pending | Backend: 592 unit (0 fail, 1 skip) + 110 IT (0 fail, 19 skip) = 702. Frontend: 190 tests, tsc clean, build clean. Worker: 19/19 |
 
 ## Phase 7 Implementation: Auto-Approval Rule Engine (corrected here in 7.2)
 - `V034__approval_rules.sql` creates `user_approval_rules` with exactly three value columns: `auto_approve_enabled` (boolean, default false) and `min_score` (integer, default 85, `CHECK (min_score BETWEEN 1 AND 100)`), plus `updated_at`. (Earlier drafts of this document invented `max_daily_auto` and `require_cover_letter` columns that were never created; they do not exist.) Owner-isolated by `profile_id` with a unique constraint.
@@ -53,6 +55,25 @@ Persistent engineering handoff. Update this file after every completed phase and
 - **Migration strategy (explicit, not silent).** No schema change is needed: existing rows keep their meaning. What changes is the *absence* of a row in `CONTROLLED_AUTO`. Any deployment that relied on the old "no rule → auto-apply everything" default must now save an explicitly enabled rule, or matches queue for human review. This was chosen over preserving the old default because the old default is exactly the fail-open behaviour the audit required removing. The three pipelines that asserted the old default (`ApplicationPipelineIT`, `DiscoveryToApplicationIT`, `AutomationLifecycleIT`) now seed an explicitly enabled rule to represent the opted-in posture, and a new IT (`controlledAutoWithoutARuleQueuesForReviewInsteadOfAutoApplying`) proves the fail-closed path end to end.
 - **Safeguards unchanged.** Hard stops, required-field validation, artifact-integrity checks, duplicate protection, idempotent upserts, owner isolation, and the `REAL_SUBMIT` hard stop are untouched by this change.
 
+## Phase 7.3 Implementation: Approval Rule Health and Observability (this phase)
+- **The gap.** Phase 7.2 made an unreadable rule fail closed, but silently. The API reported it as an ordinary unconfigured rule, the UI showed no settings at all, and nothing told the owner their automatic approval had stopped working.
+- **API — availability, not a boolean.** `GET /api/v1/approval-rules` now reports `availability`:
+  - `CONFIGURED` / `ABSENT` → **200** with `{availability, configured, autoApproveEnabled, minScore, applicationMode, assistedFloor}`. `configured` is retained for existing consumers and is exactly `availability == CONFIGURED`.
+  - `UNREADABLE` → **503** with `{availability: "UNREADABLE", reason, message, applicationMode, assistedFloor}` and deliberately no `autoApproveEnabled`/`minScore`: there are no settings that can be honestly reported, and echoing defaults would invite a client to treat them as loaded state. A database or validation error can no longer be represented as a successfully loaded, unconfigured rule.
+  - `reason` is the bounded enum `QUERY_FAILED` / `INVALID_THRESHOLD`. The raw database message is never returned or alerted on — a JDBC failure message can name a host, port and role.
+  - `applicationMode` is the mode `ApplicationDecisionService` would actually apply (ASSISTED when unset or blank), and `assistedFloor` is sourced from the engine's own constant, so clients describe the real default behaviour instead of guessing.
+  - `PUT` is unchanged apart from reporting `availability: CONFIGURED` on success.
+- **Decision engine.** The private `RuleLookup` became the public `RuleState(availability, rule, unreadableCause)`; `ruleState(profileId)` exposes it to the API, and `effectiveApplicationMode(profileId)` centralises the mode default `decide()` uses. Decision semantics are unchanged — the reporting is strictly additive and is called *after* the fail-closed branch is chosen.
+- **Metrics** (through the existing `AutomationMetrics` Micrometer seam, all labels bounded):
+  - `robin_approval_rule_lookups_total{availability}` — one per decision-time lookup; CONFIGURED / ABSENT / UNREADABLE.
+  - `robin_auto_approval_withheld_total{reason}` — RULE_UNREADABLE / RULE_DISABLED / NO_RULE_IN_CONTROLLED_AUTO. Threshold and quota withholdings are excluded on purpose: they are already visible in `robin_application_decisions_total`.
+  - `robin_approval_rule_alerts_total{outcome}` — EMITTED / DEDUPED / PERSIST_FAILED.
+  - No profile id, job id, or email address is ever a metric label; those appear only in server-side log lines and in the owner's own notification.
+- **Owner-visible alert.** A new `ApprovalRuleHealthMonitor` raises the alert through the existing outbox fan-out, so it reuses the whole notification mechanism (`outbox_events` → `NotificationEventHandler` → `notifications`) with a new event type `approval_rule.unavailable` (severity WARN, category APPROVAL_RULE_UNAVAILABLE, link `/approval-rules`, owner resolved from the payload `profile_id`). **No new persistence and no migration were required** — the existing table is already durable, owner-scoped and de-duplicated.
+  - Noise control is two-layered: an in-process guard permits at most one *attempt* per owner per UTC hour (a burst of matched jobs produces one alert, not one per job), and the `dedup_key` carries a UTC-day bucket, so the partial unique index on `notifications.dedup_key` holds the owner to at most one row per day across processes and restarts. The guard map is capped at 10 000 windows and is cleared on overflow; clearing can only cause a few extra collapsed attempts, never a duplicate notification.
+- **Honest about database-outage limits.** The durable alert is *attempted*, never guaranteed: the same outage that makes the rule unreadable usually blocks the outbox write too. When the emit fails, the failure is logged and counted as `PERSIST_FAILED` and no durable alert is claimed. Metrics and logs still record it because neither touches the database. A failed attempt is still rate-limited, so a sustained outage costs one log line and one metric increment per owner per hour instead of one per matched job.
+  - Known limitation: a failed attempt is not retried until the next hour window, so a transient outage can delay the owner's alert by up to an hour.
+
 ## Phase 7 / 7.2 Test Coverage
 - `ApplicationDecisionServiceTest` (unit): 44 tests — the original Phase 5 baseline plus rule-engine, threshold-boundary, quota, owner-isolation, save-validation, and idempotency coverage. Phase 7.2 adds `ruleLoadExceptionInControlledAutoNeverAutoApproves`, `outOfRangeStoredThresholdFailsClosed`, `nonNumericStoredThresholdFailsClosed`, `anotherProfilesDisabledRuleCannotForceReviewOnThisProfile`, and `quotaIsCheckedEvenWhenAnEnabledRuleWouldOtherwiseApprove`, and rewrites the two tests that previously asserted the fail-open default (`missingRuleInControlledAutoQueuesForReview`, `ruleLoadExceptionFailsClosedInBothAutomaticModes`).
 - `ApprovalRulesControllerTest` (unit): 7 tests. GET returns `configured=false` with the default score when no rule exists, and the stored rule otherwise; PUT validates and audits; both are owner-scoped.
@@ -71,6 +92,9 @@ Persistent engineering handoff. Update this file after every completed phase and
 - Authentication, owner isolation, worker auth, CSRF rules and the `REAL_SUBMIT` hard stop must remain intact.
 
 ## Verification
+- Phase 7.3 local `mvn -B -o verify` on Windows: BUILD SUCCESS. Unit tests: 592 run, 0 failures, 0 errors, 1 skipped. Integration tests: 110 run, 0 failures, 0 errors, 19 skipped. Total 702 test cases, 0 failures/errors.
+- Phase 7.3 frontend: `npx tsc -b` clean; `npm test` 190 passed (17 files); `npm run build` clean.
+- Phase 7.3 worker: `npm test` 19 passed, 0 failed.
 - Phase 7 local `mvn verify` on Windows: BUILD SUCCESS in 6:43 min. Unit tests: 559 run, 0 failures, 0 errors, 1 skipped. Integration tests: 108 run, 0 failures, 0 errors, 19 skipped. V034 migration applied successfully in every Testcontainers context.
 - Phase 7.2 local `mvn -B -o verify` on Windows: BUILD SUCCESS. Unit tests: 564 run, 0 failures, 0 errors, 1 skipped. Integration tests: 109 run, 0 failures, 0 errors, 19 skipped. Total 673 test cases, 0 failures/errors.
 - Phase 7.2 frontend: `npx tsc -b` clean; `npm test` 185 passed (17 files); `npm run build` clean.
@@ -103,19 +127,29 @@ Persistent engineering handoff. Update this file after every completed phase and
 - **`vite.config.ts` cleaned up.** The Phase 7.1 additions were removed: the global `test.environment: "jsdom"` (which broke `devCredentialsBundle.test.ts`, whose esbuild run asserts `new TextEncoder().encode("") instanceof Uint8Array` and cannot run under jsdom) and the `process.env.NODE_ENV = "test"` guard (which fired during `npm run dev` too, mutating the environment for normal development, and was redundant once the test script sets `NODE_ENV=test`). The suites that need a DOM opt in with `// @vitest-environment jsdom`; everything else runs on the default node environment. No global override remains.
 - No backend API change was required: GET `/api/v1/approval-rules` already returns a `configured` flag, which is what distinguishes an unconfigured rule from a configured one. One known limitation: a rule row that exists but is unreadable is reported as `configured=false`, because `ruleFor()` returns `null` for both absent and unreadable rules. This is safe (decisions already fail closed to review) but is not yet surfaced distinctly in the API.
 
-## Phase 7.1 / 7.2 Test Coverage
-- `ApprovalRulesPage.test.tsx`: 12 tests — loading/display, editing, save success, score validation, unconfigured-vs-disabled distinction, the saved-but-off state, blocked save on an untouched unconfigured form, save only after an explicit choice, explicit disabled save after touching the form, Controlled Auto requiring an enabled rule, and API load/save error handling. All pass.
-- Full frontend suite: 17 files, 185 tests, 0 failures. This includes `devCredentialsBundle.test.ts` (2 tests), which failed before this phase and now passes.
-- TypeScript: clean (`tsc -b`, 0 errors). Production build: clean (`vite build`, 477.85 kB JS + 30.65 kB CSS).
+## Phase 7.1 / 7.2 / 7.3 Test Coverage
+- `ApprovalRulesPage.test.tsx`: 17 tests — loading/display, editing, save success, score validation, unconfigured-vs-disabled distinction, the saved-but-off state, blocked save on an untouched unconfigured form, save only after an explicit choice, the absent-state explanation following the real decision mode (Manual / Assisted / Controlled Auto), the unreadable warning with the form hidden and a working retry, a generic load failure reported as an outage rather than an unreadable rule, the notification promise in the safety copy, and load/save error handling. All pass.
+- Full frontend suite: 17 files, 190 tests, 0 failures. This includes `devCredentialsBundle.test.ts` (2 tests), which failed before Phase 7.2 and now passes.
+- TypeScript: clean (`tsc -b`, 0 errors). Production build: clean (`vite build`, 480.35 kB JS + 30.79 kB CSS).
+
+## Phase 7.3 Test Coverage
+- `ApprovalRulesControllerTest` (unit, 11 tests): the configured, absent and unreadable GET responses; that an unreadable rule is a 503 with an explicit status and carries no settings; the bounded reason; the effective mode; PUT validation, audit and owner scoping.
+- `ApprovalRuleHealthMonitorTest` (unit, 11 tests): one bounded label per availability; a captor assertion that every label is a member of the enum set and never the profile id; withheld-reason labels; a 25-decision burst collapsing to one alert; per-owner isolation; no alert on healthy lookups; no raw failure text in the alert; the invalid-threshold wording; and `PERSIST_FAILED` reported (without throwing, and without claiming delivery) when the outbox write fails, including rate-limiting of failed attempts.
+- `NotificationEventHandlerTest` (+1 test): the new `approval_rule.unavailable` event maps to an owner-scoped WARN notification that honours the producer's `dedup_key`.
+- `ApplicationDecisionServiceTest` (+8 tests): every decision-time lookup reported with its resolved state; unreadable disabled-rule and absent-rule withholdings attributed to the rule; a healthy auto-apply attributed to no withholding; MANUAL and quota paths not attributed to the rule; `ruleState` for all three states; and `effectiveApplicationMode` matching the engine's default.
+- `ApplicationPipelineIT` (+1 test, 9 total): with the rule genuinely unreadable, the match queues for review, no application is created, and exactly one durable `APPROVAL_RULE_UNAVAILABLE` notification lands for that owner.
 
 ## Next Exact Task
-Phase 7.2 is verified locally. Commit and push on `phase7-approval-rules-ui`, then stop unless Phase 8 is explicitly requested. Phase 8 (production PDF generation for tailored CVs/cover letters) must not begin until explicitly requested. Phase 6 hardening PR #1 against `phase5-ready` remains open and was not touched.
+Phase 7.3 is verified locally. Commit and push on `phase7-approval-rules-ui`, then stop unless Phase 8 is explicitly requested. Phase 8 (production PDF generation for tailored CVs/cover letters) must not begin until explicitly requested. Phase 6 hardening PR #1 against `phase5-ready` remains open and was not touched.
 
 ## Last Verified Baseline
-- Phase 7.2 backend local verify: 564 unit + 109 integration = 673 test cases, 0 failures, 0 errors (1 + 19 skipped). BUILD SUCCESS.
+- Phase 7.3 backend local verify: 592 unit + 110 integration = 702 test cases, 0 failures, 0 errors (1 + 19 skipped). BUILD SUCCESS.
+- Phase 7.3 frontend verify: 190 tests pass (17 files), tsc clean, build clean.
+- Phase 7.3 worker verify: 19/19 pass.
+- Phase 7.2 backend local verify: 564 unit + 109 integration = 673 test cases, 0 failures, 0 errors. BUILD SUCCESS.
 - Phase 7.2 frontend verify: 185 tests pass (17 files), tsc clean, build clean.
-- Phase 7.2 worker verify: 19/19 pass.
 - Previous CI-verified functional source revision: `1b87d02` (Phase 6 hardening). Phase 7 and 7.1 have not been through GitHub Actions yet.
 - Phase 7 backend files changed: `V034__approval_rules.sql`, `ApplicationDecisionService.java`, `ApprovalRulesController.java`, `ApplicationDecisionServiceTest.java`, `ApprovalRulesControllerTest.java`.
 - Phase 7.1 frontend files changed: `ApprovalRulesPage.tsx`, `ApprovalRulesPage.test.tsx`, `App.tsx`, `Navigation.tsx`, `types.ts`, `vite.config.ts`, `package.json`, `package-lock.json`, `ROBIN_BUILD_STATUS.md`.
 - Phase 7.2 files changed: `ApplicationDecisionService.java`, `ApplicationDecisionServiceTest.java`, `ApplicationPipelineIT.java`, `DiscoveryToApplicationIT.java`, `AutomationLifecycleIT.java`, `ApprovalRulesPage.tsx`, `ApprovalRulesPage.test.tsx`, `vite.config.ts`, `ROBIN_BUILD_STATUS.md`. No schema/migration change.
+- Phase 7.3 files changed: `ApprovalRuleHealthMonitor.java` (new), `ApplicationDecisionService.java`, `ApprovalRulesController.java`, `AutomationMetrics.java`, `NotificationEvents.java`, `NotificationEventHandler.java`, `ApprovalRuleHealthMonitorTest.java` (new), `ApprovalRulesControllerTest.java`, `ApplicationDecisionServiceTest.java`, `ApplicationPipelineIT.java`, `NotificationEventHandlerTest.java`, `frontend/src/types.ts`, `ApprovalRulesPage.tsx`, `ApprovalRulesPage.test.tsx`, `ROBIN_BUILD_STATUS.md`. **No schema/migration change.**
