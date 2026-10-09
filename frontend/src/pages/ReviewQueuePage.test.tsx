@@ -44,7 +44,7 @@ describe('ReviewQueuePage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockedApiFetch.mockImplementation(async (path: string) => {
-      if (String(path) === '/review-queue') return { items: items.items };
+      if (String(path) === '/review-queue?includePaused=true') return { items: items.items, pendingCount: items.items.filter((item) => item.decision === 'NEEDS_REVIEW').length };
       if (String(path).includes('/review-queue/d-1')) {
         return { ...items.items[0], applicationId: null };
       }
@@ -67,8 +67,8 @@ describe('ReviewQueuePage', () => {
 
   it('approving calls the approve endpoint and removes the item from the queue', async () => {
     mockedApiFetch.mockImplementation(async (path: string, init?: { method?: string }) => {
-      if (String(path) === '/review-queue') {
-        return { items: init?.method === 'POST' ? { items: [] } : items.items };
+      if (String(path) === '/review-queue?includePaused=true') {
+        return { items: items.items, pendingCount: items.items.filter((item) => item.decision === 'NEEDS_REVIEW').length };
       }
       if (String(path) === '/review-queue/d-1/approve') {
         return { application_id: 'app-1', created: true, status: 'READY_TO_APPLY' };
@@ -92,7 +92,7 @@ describe('ReviewQueuePage', () => {
 
   it('shows the empty state when the queue is clear', async () => {
     mockedApiFetch.mockImplementation(async (path: string) => {
-      if (String(path) === '/review-queue') return { items: [] };
+      if (String(path) === '/review-queue?includePaused=true') return { items: [], pendingCount: 0 };
       throw new Error('unexpected ' + String(path));
     });
 
