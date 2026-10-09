@@ -22,6 +22,7 @@ import {
  */
 export const ReviewQueuePage: React.FC = () => {
   const [items, setItems] = useState<ReviewItem[] | null>(null);
+  const [pendingCount, setPendingCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -31,8 +32,10 @@ export const ReviewQueuePage: React.FC = () => {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const res = await apiFetch<{ items: ReviewItem[] }>('/review-queue');
-      setItems(res.items || []);
+      const res = await apiFetch<{ items: ReviewItem[]; pendingCount?: number }>('/review-queue?includePaused=true');
+      const nextItems = res.items || [];
+      setItems(nextItems);
+      setPendingCount(res.pendingCount ?? nextItems.filter((item) => item.decision === 'NEEDS_REVIEW').length);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load the review queue');
     }
@@ -85,13 +88,13 @@ export const ReviewQueuePage: React.FC = () => {
         {items !== null && items.length === 0 && (
           <EmptyState
             title="Nothing needs your review"
-            body="Matches that the decision engine queues for human review will appear here. Everything else is already handled automatically."
+            body="Matches awaiting your decision appear here. Paused items remain available so you can resume them. Approval creates a prepared application; it does not submit it."
           />
         )}
 
         {items !== null && (
           <p className="text-xs font-semibold text-ink-muted" aria-live="polite">
-            {items.length} pending review {items.length === 1 ? 'item' : 'items'}
+            {pendingCount} pending review {pendingCount === 1 ? 'item' : 'items'}
           </p>
         )}
 

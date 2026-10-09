@@ -40,11 +40,13 @@ public class ReviewQueueController {
     public record ReviewActionRequest(String reason) {}
 
     @GetMapping
-    public ResponseEntity<?> list() {
+    public ResponseEntity<?> list(@RequestParam(defaultValue = "false") boolean includePaused) {
         UUID profileId = ownerContext.profileIdOrNull();
         if (profileId == null) return ResponseEntity.badRequest().body(Map.of("error", "a profile is required"));
-        var items = decisions.listForReview(profileId, expireDays);
-        return ResponseEntity.ok(Map.of("items", items, "pendingCount", items.size()));
+        var items = decisions.listForReview(profileId, expireDays, includePaused);
+        long pendingCount = items.stream().filter(item -> "NEEDS_REVIEW".equals(item.decision())).count();
+        long pausedCount = items.stream().filter(item -> "PAUSED".equals(item.decision())).count();
+        return ResponseEntity.ok(Map.of("items", items, "pendingCount", pendingCount, "pausedCount", pausedCount));
     }
 
     @GetMapping("/{id}")

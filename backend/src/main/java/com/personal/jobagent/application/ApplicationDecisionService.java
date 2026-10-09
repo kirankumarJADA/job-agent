@@ -135,8 +135,13 @@ public class ApplicationDecisionService {
                              boolean applicationExists, boolean preparationExists, boolean jobStale,
                              java.time.Instant createdAt, java.time.Instant updatedAt) {}
 
-    /** Owner-scoped active queue; deleted jobs are intentionally not actionable. */
+    /** Default active queue. Paused items are separately opt-in so clients can resume them. */
     public List<ReviewItem> listForReview(UUID profileId, int expireDays) {
+        return listForReview(profileId, expireDays, false);
+    }
+
+    /** Owner-scoped queue; includePaused is an explicit choice by the caller. */
+    public List<ReviewItem> listForReview(UUID profileId, int expireDays, boolean includePaused) {
         expireStale(profileId, expireDays);
         return db.query("""
                 select d.id, d.job_id, j.title, j.company_name_raw, j.location_raw, j.application_url,
@@ -156,7 +161,8 @@ public class ApplicationDecisionService {
                       and a.status not in ('FAILED','WITHDRAWN')
                     order by a.created_at desc limit 1
                 ) app on true
-                where d.profile_id = ? and d.decision = 'NEEDS_REVIEW'
+                where d.profile_id = ?
+                  and (d.decision = 'NEEDS_REVIEW' or (? and d.decision = 'PAUSED'))
                 order by d.created_at desc
                 """, (rs, n) -> new ReviewItem(
                 (UUID) rs.getObject("id"), (UUID) rs.getObject("job_id"), rs.getString("title"),
@@ -167,7 +173,7 @@ public class ApplicationDecisionService {
                 rs.getBoolean("application_exists"), rs.getBoolean("preparation_exists"), rs.getBoolean("job_stale"),
                 rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").toInstant() : null,
                 rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toInstant() : null),
-                profileId);
+                profileId, includePaused);
     }
 
     /** Expire only unresolved decisions belonging to the requested profile. */

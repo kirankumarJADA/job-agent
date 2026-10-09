@@ -65,6 +65,7 @@ class ReviewQueueIT {
     @Autowired private MockMvc mockMvc;
     @Autowired private JdbcTemplate jdbc;
     @Autowired private PasswordEncoder passwordEncoder;
+    @Autowired private ApplicationDecisionService decisionService;
 
     private final Map<String, MockHttpSession> sessions = new ConcurrentHashMap<>();
 
@@ -211,6 +212,11 @@ class ReviewQueueIT {
                 String.class, decisionId)).isEqualTo("Not a fit for my preferences");
         assertThat(jdbc.queryForObject("select reviewed_by from application_decisions where id = ?",
                 String.class, decisionId)).isEqualTo("review-a@example.com");
+
+        // A redelivered match may not reopen the terminal rejection.
+        assertThat(decisionService.decide(PROFILE_A, jobId, 95, "APPLY").decision()).isEqualTo("REJECTED");
+        assertThat(jdbc.queryForObject("select decision from application_decisions where id = ?",
+                String.class, decisionId)).isEqualTo("REJECTED");
         assertThat(jdbc.queryForObject("select count(*) from outbox_events where event_type = ? and payload->>'decision_id' = ?",
                 Integer.class, "review.rejected", decisionId.toString())).isEqualTo(1);
 

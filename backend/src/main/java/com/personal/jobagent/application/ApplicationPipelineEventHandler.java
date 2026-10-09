@@ -146,6 +146,12 @@ public class ApplicationPipelineEventHandler implements EventHandler {
         int score = payload.get("score") instanceof Number n ? n.intValue() : 0;
         var decision = decisionService.decide(profileId, jobId, score, "APPLY");
 
+        if (java.util.Set.of("APPROVED", "REJECTED", "EXPIRED", "SKIP").contains(decision.decision())) {
+            log.debug("Match replay for profile={} job={} ignored because decision is terminal ({})",
+                    profileId, jobId, decision.decision());
+            return;
+        }
+
         if (!"AUTO_APPLY".equals(decision.decision())) {
             log.info("Match profile={} job={} queued for review ({}): {}",
                     profileId, jobId, decision.decision(), decision.reason());
