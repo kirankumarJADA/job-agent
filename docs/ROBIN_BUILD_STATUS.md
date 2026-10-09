@@ -20,7 +20,7 @@ Persistent engineering handoff. Update this file after every completed phase and
 | 4 — Rate-limit / cost / quota engine + V030 | `a32c2da` | Previously reported passing: 512 tests |
 | 5 — Automatic application decision + V031 | `48b7d56` | Previously reported passing: 621 backend tests |
 | 6 — Human review queue + V032 | `f0511fb` | Previous session reported backend 628/0/0, frontend 173/173 + build, worker 19/19 |
-| 6 — Review lifecycle hardening + V033 | Latest commit on hardening branch | Await CI verification |
+| 6 — Review lifecycle hardening + V033 | `1b87d02` | Prior revision `836d614` full CI green; latest backend CI pending |
 
 ## Phase 6 Implementation and Hardening
 - `V032__review_queue_lifecycle.sql` adds `APPROVED`, `REJECTED`, `PAUSED`, and `EXPIRED`, plus `reviewed_at` and `application_id`.
@@ -33,7 +33,9 @@ Persistent engineering handoff. Update this file after every completed phase and
 - Authentication, owner isolation, worker auth, CSRF rules and the `REAL_SUBMIT` hard stop must remain intact.
 
 ## Verification
-- The Phase 6 test counts above are reported results from the previous coding session; not rerun by the GitHub connector. As of the latest check for commit `836d614`, GitHub Actions frontend (TypeScript, 173/173 tests, Vite production build) and worker (19/19 tests) jobs passed; the backend `mvn -B verify` integration/unit test job was still running. The hardening series therefore remains pending full backend verification. Vercel's check succeeded for that commit.
+- Phase 6 baseline results (backend 628/0/0, frontend 173/173 + build, worker 19/19) were reported by the prior coding session.
+- GitHub Actions run [37956342224](https://github.com/kirankumarJADA/job-agent/actions/runs/37956342224) for commit `836d614` completed successfully: backend `mvn -B verify` succeeded (including `ReviewQueueIT` 8/8), frontend type-check + 173/173 unit tests + production build passed, and worker tests passed 19/19. This verifies that code revision.
+- Current branch HEAD is `1b87d02`, which adds the final profile-filter-reason privacy and decision-age fixes. Its Vercel status is success, and frontend/worker jobs passed in [Actions run 37956839152](https://github.com/kirankumarJADA/job-agent/actions/runs/37956839152). The backend `mvn -B verify` step has remained `in_progress` since 2026-10-09 16:07:55 UTC at the latest check, with no final result available. Therefore the latest backend result is **pending**, not assumed green.
 - Added integration assertions check the queue data, persisted rejection actor/reason and outbox outcome. Verify this hardening commit's CI before treating it as passing.
 - `.github/workflows/ci.yml` runs backend `mvn -B verify`, worker `npm test`, frontend `npx tsc -b`, `npm test`, and `npm run build`.
 - A successful CI run does not prove production deployment.
