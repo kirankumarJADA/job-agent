@@ -65,6 +65,7 @@ class ReviewQueueIT {
     @Autowired private MockMvc mockMvc;
     @Autowired private JdbcTemplate jdbc;
     @Autowired private PasswordEncoder passwordEncoder;
+    @Autowired private ApplicationDecisionService decisionService;
 
     private final Map<String, MockHttpSession> sessions = new ConcurrentHashMap<>();
 
@@ -137,7 +138,9 @@ class ReviewQueueIT {
     @Order(2)
     void listingIsOwnerScopedAndShowsOnlyOpenItems() throws Exception {
         var own = seedDecision(PROFILE_A, "Backend Engineer", "AcmeA", "NEEDS_REVIEW");
-        seedDecision(PROFILE_B, "Platform Engineer", "AcmeB", "NEEDS_REVIEW");
+        var foreign = seedDecision(PROFILE_B, "Platform Engineer", "AcmeB", "NEEDS_REVIEW");
+        jdbc.update("update jobs set filter_reasons = jsonb_build_object('message', 'FOREIGN_PROFILE_PRIVATE_REASON') where id = ?",
+                foreign.jobId());
 
         MvcResult result = mockMvc.perform(get("/api/v1/review-queue")
                         .session(login("review-a@example.com", "PasswordA1!")))
@@ -146,10 +149,15 @@ class ReviewQueueIT {
                 .andExpect(jsonPath("$.items[0].jobTitle").value("Backend Engineer"))
                 .andExpect(jsonPath("$.items[0].companyName").value("AcmeA"))
                 .andExpect(jsonPath("$.items[0].matchScore").value(78))
+                .andExpect(jsonPath("$.items[0].recommendation").value("APPLY"))
+                .andExpect(jsonPath("$.items[0].hardFilterOutcome").value("PASSED"))
+                .andExpect(jsonPath("$.items[0].applicationExists").value(false))
+                .andExpect(jsonPath("$.items[0].preparationExists").value(false))
+                .andExpect(jsonPath("$.pendingCount").value(1))
                 .andReturn();
         String body = result.getResponse().getContentAsString();
         assertThat(body).doesNotContain("Platform Engineer");
-        assertThat(body).doesNotContain("Platform Engineer");
+        assertThat(body).doesNotContain("FOREIGN_PROFILE_PRIVATE_REASON");
 
         // Detail is also owner-scoped:
         mockMvc.perform(get("/api/v1/review-queue/{id}", own.decisionId())
@@ -195,8 +203,24 @@ class ReviewQueueIT {
         UUID decisionId = seed.decisionId();
         UUID jobId = seed.jobId();
         mockMvc.perform(post("/api/v1/review-queue/{id}/reject", decisionId)
-                        .with(csrf()).session(login("review-a@example.com", "PasswordA1!")))
+                        .with(csrf()).session(login("review-a@example.com", "PasswordA1!"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reason\":\"Not a fit for my preferences\"}"))
                 .andExpect(status().isNoContent());
+
+        assertThat(jdbc.queryForObject("select decision from application_decisions where id = ?",
+                String.class, decisionId)).isEqualTo("REJECTED");
+        assertThat(jdbc.queryForObject("select review_reason from application_decisions where id = ?",
+                String.class, decisionId)).isEqualTo("Not a fit for my preferences");
+        assertThat(jdbc.queryForObject("select reviewed_by from application_decisions where id = ?",
+                String.class, decisionId)).isEqualTo("review-a@example.com");
+
+        // A redelivered match may not reopen the terminal rejection.
+        assertThat(decisionService.decide(PROFILE_A, jobId, 95, "APPLY").decision()).isEqualTo("REJECTED");
+        assertThat(jdbc.queryForObject("select decision from application_decisions where id = ?",
+                String.class, decisionId)).isEqualTo("REJECTED");
+        assertThat(jdbc.queryForObject("select count(*) from outbox_events where event_type = ? and payload->>'decision_id' = ?",
+                Integer.class, "review.rejected", decisionId.toString())).isEqualTo(1);
 
         mockMvc.perform(post("/api/v1/review-queue/{id}/approve", decisionId)
                         .with(csrf()).session(login("review-a@example.com", "PasswordA1!")))
@@ -252,6 +276,22 @@ class ReviewQueueIT {
         String decision = jdbc.queryForObject(
                 "select decision from application_decisions where id = ?", String.class, decisionId);
         assertThat(decision).isEqualTo("EXPIRED");
+    }
+
+    @Test
+    @Order(8)
+    void stalePostingCannotBeApproved() throws Exception {
+        var seed = seedDecision(PROFILE_A, "Stale Engineer", "StaleCo", "NEEDS_REVIEW");
+        jdbc.update("update jobs set last_seen_at = now() - interval '60 days' where id = ?", seed.jobId());
+
+        mockMvc.perform(post("/api/v1/review-queue/{id}/approve", seed.decisionId())
+                        .with(csrf()).session(login("review-a@example.com", "PasswordA1!")))
+                .andExpect(status().isConflict());
+
+        assertThat(jdbc.queryForObject("select decision from application_decisions where id = ?",
+                String.class, seed.decisionId())).isEqualTo("NEEDS_REVIEW");
+        assertThat(jdbc.queryForObject("select count(*) from applications where profile_id = ? and job_id = ?",
+                Integer.class, PROFILE_A, seed.jobId())).isZero();
     }
 
     @Test

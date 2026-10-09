@@ -22,16 +22,20 @@ import {
  */
 export const ReviewQueuePage: React.FC = () => {
   const [items, setItems] = useState<ReviewItem[] | null>(null);
+  const [pendingCount, setPendingCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ReviewDetail | null>(null);
+  const [rejectReasons, setRejectReasons] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const res = await apiFetch<{ items: ReviewItem[] }>('/review-queue');
-      setItems(res.items || []);
+      const res = await apiFetch<{ items: ReviewItem[]; pendingCount?: number }>('/review-queue?includePaused=true');
+      const nextItems = res.items || [];
+      setItems(nextItems);
+      setPendingCount(res.pendingCount ?? nextItems.filter((item) => item.decision === 'NEEDS_REVIEW').length);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load the review queue');
     }
@@ -54,7 +58,10 @@ export const ReviewQueuePage: React.FC = () => {
     setBusyId(id + action);
     setError(null);
     try {
-      await apiFetch(`/review-queue/${id}/${action}`, { method: 'POST' });
+      await apiFetch(`/review-queue/${id}/${action}`, {
+        method: 'POST',
+        ...(action === 'reject' ? { body: JSON.stringify({ reason: rejectReasons[id] || '' }) } : {}),
+      });
       if (action === 'approve') setExpandedId(null);
       await load();
       if (expandedId === id && action !== 'pause' && action !== 'resume') setExpandedId(null);
@@ -81,8 +88,14 @@ export const ReviewQueuePage: React.FC = () => {
         {items !== null && items.length === 0 && (
           <EmptyState
             title="Nothing needs your review"
-            body="Matches that the decision engine queues for human review will appear here. Everything else is already handled automatically."
+            body="Matches awaiting your decision appear here. Paused items remain available so you can resume them. Approval creates a prepared application; it does not submit it."
           />
+        )}
+
+        {items !== null && (
+          <p className="text-xs font-semibold text-ink-muted" aria-live="polite">
+            {pendingCount} pending review {pendingCount === 1 ? 'item' : 'items'}
+          </p>
         )}
 
         {items !== null && items.length > 0 && (
@@ -97,6 +110,10 @@ export const ReviewQueuePage: React.FC = () => {
                     </div>
                     <p className="truncate text-xs text-ink-muted">{item.companyName}</p>
                     <p className="text-xs text-ink-muted">{item.reason}</p>
+                    <p className="text-[11px] text-ink-faint">
+                      {item.recommendation || 'Match'} · {item.applicationMode || 'Default'} mode · Hard filters: {item.hardFilterOutcome || 'unknown'}
+                      {item.jobStale ? ' · Posting may be stale' : ''}
+                    </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     <button
@@ -127,6 +144,18 @@ export const ReviewQueuePage: React.FC = () => {
                           Decision reason: {detail.reason}
                         </p>
                         <p className="text-ink-muted">
+                          Hard-filter outcome: {detail.hardFilterOutcome || 'Unknown'}.
+                          {detail.hardFilterReasons && detail.hardFilterReasons !== '[]' ? ` Reasons: ${detail.hardFilterReasons}` : ' No stored hard-filter rejection reasons.'}
+                        </p>
+                        <p className="text-ink-muted">
+                          Application: {detail.applicationExists ? 'exists' : 'not created'} ·
+                          Preparation events: {detail.preparationExists ? 'recorded' : 'not started'}
+                          {detail.jobStale ? ' · Posting is stale; approval is blocked until refreshed.' : ''}
+                        </p>
+                        <p className="text-ink-faint">
+                          Decision updated: {detail.updatedAt ? new Date(detail.updatedAt).toLocaleString() : '—'}
+                        </p>
+                        <p className="text-ink-muted">
                           Full posting on the{' '}
                           <Link className="font-semibold text-forest-700 hover:text-forest-900" to={`/jobs/${detail.jobId}`}>
                             job detail page
@@ -144,6 +173,17 @@ export const ReviewQueuePage: React.FC = () => {
                               >
                                 {busyId === item.decisionId + 'approve' ? 'Approving…' : 'Approve & create application'}
                               </button>
+                              <label className="flex min-w-[220px] flex-1 flex-col gap-1 text-ink-muted">
+                                Rejection reason (optional)
+                                <textarea
+                                  value={rejectReasons[item.decisionId] || ''}
+                                  onChange={(event) => setRejectReasons((previous) => ({ ...previous, [item.decisionId]: event.target.value }))}
+                                  maxLength={1000}
+                                  rows={2}
+                                  className="rounded-md border border-line bg-white px-2 py-1 text-xs text-ink"
+                                  placeholder="Why are you skipping this role?"
+                                />
+                              </label>
                               <button
                                 type="button"
                                 disabled={busyId === item.decisionId + 'reject'}
@@ -198,9 +238,17 @@ interface ReviewItem {
   location: string;
   applicationUrl: string;
   matchScore: number;
+  recommendation?: string;
+  hardFilterOutcome?: string;
+  hardFilterReasons?: string;
+  applicationMode?: string;
+  applicationExists?: boolean;
+  preparationExists?: boolean;
+  jobStale?: boolean;
   decision: 'NEEDS_REVIEW' | 'PAUSED';
   reason: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 interface ReviewDetail extends ReviewItem {
@@ -210,4 +258,12 @@ interface ReviewDetail extends ReviewItem {
   salaryCurrency: string;
   descriptionText: string;
   applicationId: string | null;
+  hardFilterOutcome?: string;
+  hardFilterReasons?: string;
+  applicationMode?: string;
+  recommendation?: string;
+  applicationExists?: boolean;
+  preparationExists?: boolean;
+  jobStale?: boolean;
+  updatedAt?: string;
 }
