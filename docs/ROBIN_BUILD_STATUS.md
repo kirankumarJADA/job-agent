@@ -8,7 +8,7 @@ Persistent engineering handoff. Update this file after every completed phase and
 ## Repository State
 - Phase 1–5 commits: `72d18fd`, `f8008c3`, `aecc7e9`, `a32c2da`, `48b7d56`.
 - Phase 6 original implementation: `f0511fb` (`feat: add human review queue for application decisions`).
-- Phase 6 hardening is isolated on branch `phase6-review-queue-hardening`, based on `f0511fb`.
+- Phase 6 hardening is isolated on branch `phase6-review-queue-hardening`, based on `f0511fb`. The current hardening series includes `f1bae6c`, `5fa1a01`, `beda52c`, `b0e574c`, and `4faa250`.
 - Do not infer the state of a separate Windows working tree from this GitHub branch.
 
 ## Completed Phases
@@ -28,12 +28,12 @@ Persistent engineering handoff. Update this file after every completed phase and
 - The owner-scoped review API returns a pending count and score, recommendation, hard-filter outcome/reasons, mode/reason, application/preparation state, and timestamps.
 - Approval uses the existing idempotent application preparation pipeline, links the application, and writes audit/outbox outcome events. It does not submit to the employer.
 - Rejection records terminal state, acting account, timestamp and reason, plus audit and outbox notification events. State transitions check owner and expected state.
-- Replayed match events cannot overwrite already-resolved decisions or emit redundant approval-required notifications for terminal decisions. Soft-deleted jobs are excluded; postings not seen for 30 days are flagged and approval is refused until refreshed, as is approval when the application URL is missing.
+- Replayed match events cannot overwrite already-resolved decisions or emit redundant approval-required notifications for terminal decisions, including paused rows. Soft-deleted jobs are excluded; postings not seen for 30 days are flagged and approval is refused until refreshed, as is approval when the application URL is missing.
 - The UI includes pending count, job/filter/application/preparation details, and an optional rejection reason. It opts into showing paused rows so Resume remains available; pending count excludes paused rows.
 - Authentication, owner isolation, worker auth, CSRF rules and the `REAL_SUBMIT` hard stop must remain intact.
 
 ## Verification
-- The Phase 6 test counts above are reported results from the previous coding session; not rerun by the GitHub connector.
+- The Phase 6 test counts above are reported results from the previous coding session; not rerun by the GitHub connector. As of 9 October 2026, no GitHub Actions run was associated with this connector-created branch/PR. Vercel reported a successful frontend check, but backend and worker tests remain unverified for the hardening series.
 - Added integration assertions check the queue data, persisted rejection actor/reason and outbox outcome. Verify this hardening commit's CI before treating it as passing.
 - `.github/workflows/ci.yml` runs backend `mvn -B verify`, worker `npm test`, frontend `npx tsc -b`, `npm test`, and `npm run build`.
 - A successful CI run does not prove production deployment.
