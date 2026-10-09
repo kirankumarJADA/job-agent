@@ -23,6 +23,7 @@ Persistent engineering handoff. Update this file after every completed phase and
 | 6 — Human review queue + V032 | `f0511fb` | Previous session reported backend 628/0/0, frontend 173/173 + build, worker 19/19 |
 | 6 — Review lifecycle hardening + V033 | `1b87d02` | Full GitHub Actions CI passed on source revision `1b87d02` |
 | 7 — Auto-approval rule engine + V034 | pending | Local verify: 559 unit (0 fail, 1 skip) + 108 IT (0 fail, 19 skip) = 667 total |
+| 7.1 — Approval Rules Settings UI | pending | Frontend: 178 tests pass, tsc clean, vite build clean |
 
 ## Phase 7 Implementation: Auto-Approval Rule Engine
 - `V034__approval_rules.sql` creates `user_approval_rules` table with per-profile configurable thresholds: `auto_approve_enabled` (boolean), `min_score` (integer 0–100), `max_daily_auto` (integer), and `require_cover_letter` (boolean). Owner-isolated by `profile_id` with unique constraint.
@@ -68,10 +69,29 @@ Persistent engineering handoff. Update this file after every completed phase and
 ## Remaining Phases
 8 Production PDF · 9 Real Greenhouse submission (gated) · 10 Cross-source dedup · 11 Workday · 12 Lever · 13 Real mailbox/OTP · 14 User search · 15 URL extraction · 16 Source catalogue · 17 Region-aware discovery · 18 Recruiter email intelligence · 19 Follow-ups · 20 Analytics · 21 Dashboard completion · 22 Bulk ops · 23 Webhooks · 24 PWA/extension/MCP.
 
+## Phase 7.1 Implementation: Approval Rules Settings UI
+- `ApprovalRulesPage.tsx` (275 lines): Settings page with toggle switch for auto-approve enable/disable, range slider and number input for minimum score (0–100), decision mode explainer (MANUAL / ASSISTED / CONTROLLED_AUTO), safety notice confirming REAL_SUBMIT remains hard-stopped.
+- Uses `apiFetch` from `api/client.ts` with Firebase token, CSRF, request IDs for GET/PUT to `/api/v1/approval-rules`.
+- Route added at `/approval-rules` in `App.tsx`.
+- Navigation item added in `Navigation.tsx` with shield+checkmark icon.
+- `ApprovalRule` interface added to `types.ts`.
+- `ApprovalRulesPage.test.tsx` (179 lines): 7 tests covering loading, editing, saving, validation, disabled rules, error handling, and save failure.
+- `cross-env` added to devDependencies; test script updated to `cross-env NODE_ENV=test npx vitest run` to fix pre-existing React production-build `act()` error caused by Vitest dep optimizer inlining `process.env.NODE_ENV` as production on Windows.
+- `vite.config.ts` updated with `test` section (jsdom environment) and NODE_ENV guard for belt-and-suspenders fix.
+- Fail-closed: absent, disabled, or invalid user rules never silently enable auto-approval. REAL_SUBMIT remains hard-stopped.
+
+## Phase 7.1 Test Coverage
+- `ApprovalRulesPage.test.tsx`: 7 tests — loads and displays current rule, toggle + score editing, save success, validation error for out-of-range scores, unconfigured rule notice, API load error, save error. All pass.
+- Full frontend test suite: 178 tests pass, 0 failures (1 pre-existing suite-level failure in `devCredentialsBundle.test.ts` due to esbuild/TextEncoder jsdom incompatibility — not related to Phase 7.1).
+- TypeScript compilation: clean (`tsc --noEmit`, 0 errors).
+- Production build: clean (`vite build`, 476 kB JS + 31 kB CSS).
+
 ## Next Exact Task
-Phase 7 is verified locally. Commit and push, then stop unless Phase 8 is explicitly requested. If requested, implement production PDF generation for tailored CVs/cover letters.
+Phase 7.1 is verified locally. Commit and push on `phase7-approval-rules-ui`, then stop unless Phase 8 is explicitly requested. If requested, implement production PDF generation for tailored CVs/cover letters.
 
 ## Last Verified Baseline
-- Phase 7 local verify: 559 unit + 108 integration = 667 test cases, 0 failures, 0 errors (1 + 19 skipped). BUILD SUCCESS.
+- Phase 7 backend local verify: 559 unit + 108 integration = 667 test cases, 0 failures, 0 errors (1 + 19 skipped). BUILD SUCCESS.
+- Phase 7.1 frontend verify: 178 tests pass, tsc clean, vite build clean.
 - Previous CI-verified functional source revision: `1b87d02` (Phase 6 hardening).
-- Phase 7 files changed: `V034__approval_rules.sql`, `ApplicationDecisionService.java`, `ApprovalRulesController.java`, `ApplicationDecisionServiceTest.java`, `ApprovalRulesControllerTest.java`, `ROBIN_BUILD_STATUS.md`.
+- Phase 7 backend files changed: `V034__approval_rules.sql`, `ApplicationDecisionService.java`, `ApprovalRulesController.java`, `ApplicationDecisionServiceTest.java`, `ApprovalRulesControllerTest.java`.
+- Phase 7.1 frontend files changed: `ApprovalRulesPage.tsx`, `ApprovalRulesPage.test.tsx`, `App.tsx`, `Navigation.tsx`, `types.ts`, `vite.config.ts`, `package.json`, `package-lock.json`, `ROBIN_BUILD_STATUS.md`.

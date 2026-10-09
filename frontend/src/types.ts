@@ -201,6 +201,15 @@ export interface PreferenceSet {
   isActive: boolean;
 }
 
+// Per-user auto-approval rule from GET/PUT /api/v1/approval-rules (Phase 7).
+// The rule can toggle automatic approval and set a minimum score threshold;
+// it can never bypass hard stops, quotas, or safety gates.
+export interface ApprovalRule {
+  autoApproveEnabled: boolean;
+  minScore: number;
+  configured: boolean;
+}
+
 // Owner-scoped application row from GET /api/v1/applications (camelCase wire
 // format). Match fields come from the candidate's own job_matches decision.
 export interface ApplicationSummary {

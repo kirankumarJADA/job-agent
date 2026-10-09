@@ -94,6 +94,16 @@ const MAIN_NAV: NavItem[] = [
       </svg>
     ),
   },
+  {
+    name: 'Approval Rules',
+    path: '/approval-rules',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" className={iconClass} aria-hidden="true">
+        <path d="M12 3.5L4 7.5v5c0 4.7 3.4 9 8 10 4.6-1 8-5.3 8-10v-5l-8-4Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+        <path d="M9 12l2 2 4-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    ),
+  },
 ];
 
 const SYSTEM_NAV: NavItem[] = [
