@@ -73,6 +73,10 @@ public class ReviewQueueController {
         if (!"NEEDS_REVIEW".equals(current) && !"PAUSED".equals(current)) {
             return ResponseEntity.status(409).body(Map.of("error", "the decision is no longer awaiting review"));
         }
+        if (Boolean.TRUE.equals(item.get("jobStale"))) {
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "job posting has not been refreshed in 30 days; refresh it before approving"));
+        }
         Object applicationUrl = item.get("applicationUrl");
         if (applicationUrl == null || String.valueOf(applicationUrl).isBlank()) {
             return ResponseEntity.status(409).body(Map.of("error", "job posting has no application URL"));

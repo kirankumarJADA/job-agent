@@ -109,6 +109,7 @@ export const ReviewQueuePage: React.FC = () => {
                     <p className="text-xs text-ink-muted">{item.reason}</p>
                     <p className="text-[11px] text-ink-faint">
                       {item.recommendation || 'Match'} · {item.applicationMode || 'Default'} mode · Hard filters: {item.hardFilterOutcome || 'unknown'}
+                      {item.jobStale ? ' · Posting may be stale' : ''}
                     </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
@@ -146,6 +147,7 @@ export const ReviewQueuePage: React.FC = () => {
                         <p className="text-ink-muted">
                           Application: {detail.applicationExists ? 'exists' : 'not created'} ·
                           Preparation events: {detail.preparationExists ? 'recorded' : 'not started'}
+                          {detail.jobStale ? ' · Posting is stale; approval is blocked until refreshed.' : ''}
                         </p>
                         <p className="text-ink-faint">
                           Decision updated: {detail.updatedAt ? new Date(detail.updatedAt).toLocaleString() : '—'}
@@ -239,6 +241,7 @@ interface ReviewItem {
   applicationMode?: string;
   applicationExists?: boolean;
   preparationExists?: boolean;
+  jobStale?: boolean;
   decision: 'NEEDS_REVIEW' | 'PAUSED';
   reason: string;
   createdAt: string;
@@ -258,5 +261,6 @@ interface ReviewDetail extends ReviewItem {
   recommendation?: string;
   applicationExists?: boolean;
   preparationExists?: boolean;
+  jobStale?: boolean;
   updatedAt?: string;
 }

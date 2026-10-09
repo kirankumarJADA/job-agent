@@ -28,7 +28,7 @@ Persistent engineering handoff. Update this file after every completed phase and
 - The owner-scoped review API returns a pending count and score, recommendation, hard-filter outcome/reasons, mode/reason, application/preparation state, and timestamps.
 - Approval uses the existing idempotent application preparation pipeline, links the application, and writes audit/outbox outcome events. It does not submit to the employer.
 - Rejection records terminal state, acting account, timestamp and reason, plus audit and outbox notification events. State transitions check owner and expected state.
-- Replayed match events cannot overwrite already-resolved decisions. Soft-deleted jobs are excluded; approval is refused when the application URL is missing.
+- Replayed match events cannot overwrite already-resolved decisions. Soft-deleted jobs are excluded; postings not seen for 30 days are flagged and approval is refused until refreshed, as is approval when the application URL is missing.
 - The UI includes pending count, job/filter/application/preparation details, and an optional rejection reason.
 - Authentication, owner isolation, worker auth, CSRF rules and the `REAL_SUBMIT` hard stop must remain intact.
 

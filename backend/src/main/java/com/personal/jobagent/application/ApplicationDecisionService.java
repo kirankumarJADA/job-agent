@@ -132,7 +132,7 @@ public class ApplicationDecisionService {
                              String location, String applicationUrl, Integer matchScore,
                              String recommendation, String hardFilterOutcome, String hardFilterReasons,
                              String applicationMode, String decision, String reason,
-                             boolean applicationExists, boolean preparationExists,
+                             boolean applicationExists, boolean preparationExists, boolean jobStale,
                              java.time.Instant createdAt, java.time.Instant updatedAt) {}
 
     /** Owner-scoped active queue; deleted jobs are intentionally not actionable. */
@@ -145,6 +145,7 @@ public class ApplicationDecisionService {
                        coalesce(j.filter_reasons::text, '[]') as hard_filter_reasons,
                        d.application_mode, d.decision, d.reason, d.created_at, d.updated_at,
                        (app.id is not null) as application_exists,
+                       (j.last_seen_at < now() - interval '30 days') as job_stale,
                        exists(select 1 from application_events ae
                               where ae.application_id = app.id and ae.type = 'PREPARATION') as preparation_exists
                 from application_decisions d
@@ -163,7 +164,7 @@ public class ApplicationDecisionService {
                 (Integer) rs.getObject("match_score"), rs.getString("recommendation"),
                 rs.getString("hard_filter_outcome"), rs.getString("hard_filter_reasons"),
                 rs.getString("application_mode"), rs.getString("decision"), rs.getString("reason"),
-                rs.getBoolean("application_exists"), rs.getBoolean("preparation_exists"),
+                rs.getBoolean("application_exists"), rs.getBoolean("preparation_exists"), rs.getBoolean("job_stale"),
                 rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").toInstant() : null,
                 rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toInstant() : null),
                 profileId);
@@ -199,6 +200,7 @@ public class ApplicationDecisionService {
                        case when j.filter_reasons is null then 'PASSED' else 'FAILED' end as "hardFilterOutcome",
                        coalesce(j.filter_reasons::text, '[]') as "hardFilterReasons",
                        (app.id is not null) as "applicationExists",
+                       (j.last_seen_at < now() - interval '30 days') as "jobStale",
                        exists(select 1 from application_events ae
                               where ae.application_id = app.id and ae.type = 'PREPARATION') as "preparationExists"
                 from application_decisions d

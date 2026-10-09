@@ -271,6 +271,22 @@ class ReviewQueueIT {
     }
 
     @Test
+    @Order(8)
+    void stalePostingCannotBeApproved() throws Exception {
+        var seed = seedDecision(PROFILE_A, "Stale Engineer", "StaleCo", "NEEDS_REVIEW");
+        jdbc.update("update jobs set last_seen_at = now() - interval '60 days' where id = ?", seed.jobId());
+
+        mockMvc.perform(post("/api/v1/review-queue/{id}/approve", seed.decisionId())
+                        .with(csrf()).session(login("review-a@example.com", "PasswordA1!")))
+                .andExpect(status().isConflict());
+
+        assertThat(jdbc.queryForObject("select decision from application_decisions where id = ?",
+                String.class, seed.decisionId())).isEqualTo("NEEDS_REVIEW");
+        assertThat(jdbc.queryForObject("select count(*) from applications where profile_id = ? and job_id = ?",
+                Integer.class, PROFILE_A, seed.jobId())).isZero();
+    }
+
+    @Test
     @Order(7)
     void crossUserApprovalIsRefused() throws Exception {
         var seed = seedDecision(PROFILE_A, "Cross User", "AcmeG", "NEEDS_REVIEW");
