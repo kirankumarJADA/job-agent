@@ -66,7 +66,7 @@ describe('ReviewQueuePage', () => {
   });
 
   it('approving calls the approve endpoint and removes the item from the queue', async () => {
-    mockedApiFetch.mockImplementation(async (path: string, init?: { method?: string }) => {
+    mockedApiFetch.mockImplementation(async (path: string) => {
       if (String(path) === '/review-queue?includePaused=true') {
         return { items: items.items, pendingCount: items.items.filter((item) => item.decision === 'NEEDS_REVIEW').length };
       }
