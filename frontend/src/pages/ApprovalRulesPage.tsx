@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { apiFetch } from '../api/client';
+import type { ApprovalRule } from '../types';
 import {
   Alert,
   Label,
@@ -13,32 +14,36 @@ import {
 } from '../components/ui';
 
 /**
- * Approval Rules Settings (Phase 7.1).
+ * Approval Rules Settings (Phase 7.1, corrected in 7.2).
  *
  * Lets the owner configure their per-user auto-approval rule:
  *   • enable / disable automatic approval
  *   • set a minimum match score threshold (1–100)
  *
- * The rule can only TOGGLE automatic application creation and RAISE or
- * LOWER the score threshold.  It can NEVER bypass a hard stop, a
- * required-field failure, an artifact-integrity failure, the daily quota,
- * or any other safety gate — those live downstream and are unaffected. *
- * REAL_SUBMIT remains hard-stopped.  This page configures eligibility
- * evaluation rules, not live job-application submission.
+ * Three distinct states are represented, because they behave differently:
+ *   • Not configured — no rule row exists. The application mode alone decides:
+ *     Manual and Controlled Auto send every match to review; Assisted uses its
+ *     built-in floor of 85.
+ *   • Disabled — the owner saved a rule with automatic approval off. Every
+ *     match queues for review in both automatic modes.
+ *   • Enabled — matches meeting the threshold may be approved automatically.
+ *
+ * The rule can only TOGGLE automatic application creation and RAISE or LOWER
+ * the score threshold. It can NEVER bypass a hard stop, a required-field
+ * failure, an artifact-integrity failure, the daily quota, duplicate
+ * protection, or any other safety gate — those live downstream and are
+ * unaffected. REAL_SUBMIT remains hard-stopped: this page configures
+ * eligibility evaluation, not live job-application submission.
  */
 
-interface ApprovalRuleResponse {
-  autoApproveEnabled: boolean;
-  minScore: number;
-  configured: boolean;
-}
-
+/** Backend default floor for Assisted mode when no rule is saved. */
 const DEFAULT_MIN_SCORE = 85;
 
 export const ApprovalRulesPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [configured, setConfigured] = useState(false);
+  const [dirty, setDirty] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Form state
@@ -47,6 +52,10 @@ export const ApprovalRulesPage: React.FC = () => {
 
   // Validation
   const scoreValid = Number.isInteger(minScore) && minScore >= 1 && minScore <= 100;
+  // A freshly-loaded form that has not been touched must not be savable while
+  // no rule exists yet: saving it would persist the default (disabled) state
+  // and silently create a rule the owner never chose.
+  const canSave = scoreValid && (configured || dirty);
 
   useEffect(() => {
     loadRule();
@@ -55,10 +64,11 @@ export const ApprovalRulesPage: React.FC = () => {
   const loadRule = async () => {
     setLoading(true);
     try {
-      const rule = await apiFetch<ApprovalRuleResponse>('/approval-rules');
+      const rule = await apiFetch<ApprovalRule>('/approval-rules');
       setEnabled(rule.autoApproveEnabled);
       setMinScore(rule.minScore);
       setConfigured(rule.configured);
+      setDirty(false);
     } catch {
       setMessage({ type: 'error', text: 'Failed to load approval rules.' });
     } finally {
@@ -66,10 +76,27 @@ export const ApprovalRulesPage: React.FC = () => {
     }
   };
 
+  const updateEnabled = (next: boolean) => {
+    setEnabled(next);
+    setDirty(true);
+  };
+
+  const updateMinScore = (next: number) => {
+    setMinScore(next);
+    setDirty(true);
+  };
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!scoreValid) {
       setMessage({ type: 'error', text: 'Minimum score must be a whole number between 1 and 100.' });
+      return;
+    }
+    if (!canSave) {
+      setMessage({
+        type: 'error',
+        text: 'Change a setting first — saving the untouched default would store a disabled rule.',
+      });
       return;
     }
     setSaving(true);
@@ -80,6 +107,7 @@ export const ApprovalRulesPage: React.FC = () => {
         body: JSON.stringify({ autoApproveEnabled: enabled, minScore }),
       });
       setConfigured(true);
+      setDirty(false);
       setMessage({ type: 'success', text: 'Approval rules saved. Audit log recorded.' });
     } catch (err: unknown) {
       setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Save failed.' });
@@ -95,6 +123,8 @@ export const ApprovalRulesPage: React.FC = () => {
       </PageShell>
     );
   }
+
+  const statusLabel = !configured ? 'Not configured' : enabled ? 'Enabled' : 'Disabled';
 
   return (
     <PageShell>
@@ -114,8 +144,8 @@ export const ApprovalRulesPage: React.FC = () => {
           <SectionCard
             title="Automatic approval"
             actions={
-              <StatusPill tone={enabled ? 'emerald' : 'slate'}>
-                {enabled ? 'Enabled' : 'Disabled'}
+              <StatusPill tone={!configured ? 'slate' : enabled ? 'emerald' : 'slate'}>
+                {statusLabel}
               </StatusPill>
             }
             bodyClassName="space-y-4"
@@ -126,9 +156,10 @@ export const ApprovalRulesPage: React.FC = () => {
                   Enable automatic approval for high-confidence matches
                 </p>
                 <p className="mt-0.5 text-xs text-ink-muted">
-                  When enabled, jobs that meet your minimum score threshold will be
+                  When enabled, jobs that meet your minimum score threshold may be
                   automatically approved for application preparation — subject to your
-                  application mode, daily quota, and all safety checks.
+                  application mode, daily quota, and all safety checks. Enabling a rule
+                  never overrides a safety check or the quota.
                 </p>
               </div>
               <button
@@ -136,7 +167,7 @@ export const ApprovalRulesPage: React.FC = () => {
                 role="switch"
                 aria-checked={enabled}
                 aria-label="Toggle automatic approval"
-                onClick={() => setEnabled((prev) => !prev)}
+                onClick={() => updateEnabled(!enabled)}
                 className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600 focus-visible:ring-offset-2 ${
                   enabled ? 'bg-forest-700' : 'bg-ink-faint/30'
                 }`}
@@ -150,13 +181,25 @@ export const ApprovalRulesPage: React.FC = () => {
               </button>
             </div>
 
-            {!configured && (
+            {!configured ? (
               <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
-                No custom rule configured yet — Phase 5 defaults are in effect
-                (auto-approve high-confidence matches ≥ {DEFAULT_MIN_SCORE} in
-                Assisted and Controlled Auto modes).
+                <p className="font-semibold">No custom rule is saved yet.</p>
+                <p className="mt-1">
+                  Until you save one, your application mode alone decides what happens to
+                  a match: <span className="font-medium">Manual</span> sends every match to
+                  review, <span className="font-medium">Assisted</span> auto-approves matches
+                  scoring {DEFAULT_MIN_SCORE} or higher, and{' '}
+                  <span className="font-medium">Controlled Auto</span> sends every match to
+                  review — it requires an enabled rule. Save a rule below to change this.
+                </p>
               </div>
-            )}
+            ) : !enabled ? (
+              <div className="rounded-lg border border-line bg-surface-sunken px-4 py-3 text-xs text-ink-muted">
+                Automatic approval is <span className="font-medium">disabled</span> by your
+                saved rule. Every match goes to the review queue in every mode. Toggle the
+                switch on and save to re-enable it.
+              </div>
+            ) : null}
           </SectionCard>
 
           {/* Minimum score threshold */}
@@ -183,7 +226,7 @@ export const ApprovalRulesPage: React.FC = () => {
                   min="1"
                   max="100"
                   value={minScore}
-                  onChange={(e) => setMinScore(Number(e.target.value))}
+                  onChange={(e) => updateMinScore(Number(e.target.value))}
                   aria-label="Minimum score slider"
                   className="flex-1 cursor-pointer accent-forest-700"
                 />
@@ -194,7 +237,7 @@ export const ApprovalRulesPage: React.FC = () => {
                   max={100}
                   step={1}
                   value={minScore}
-                  onChange={(e) => setMinScore(Number(e.target.value))}
+                  onChange={(e) => updateMinScore(Number(e.target.value))}
                   className="!w-20 text-center font-mono"
                   aria-label="Minimum score input"
                 />
@@ -214,20 +257,20 @@ export const ApprovalRulesPage: React.FC = () => {
                 {
                   mode: 'MANUAL',
                   title: 'Manual',
-                  desc: 'All matches go to the review queue regardless of score. Your auto-approval rule has no effect in this mode.',
-                  effect: 'No auto-approval',
+                  desc: 'Every match goes to the review queue regardless of score. Your auto-approval rule has no effect in this mode.',
+                  effect: 'Review only',
                 },
                 {
                   mode: 'ASSISTED',
                   title: 'Assisted',
-                  desc: 'Only matches at or above your minimum score auto-approve. Below-threshold matches go to the review queue.',
-                  effect: 'Threshold applies',
+                  desc: `Matches at or above your minimum score auto-approve; everything else goes to review. With no rule saved, the built-in floor is ${DEFAULT_MIN_SCORE}. A disabled rule sends everything to review.`,
+                  effect: `Threshold ≥ ${DEFAULT_MIN_SCORE}`,
                 },
                 {
                   mode: 'CONTROLLED_AUTO',
                   title: 'Controlled Auto',
-                  desc: 'All APPLY-level matches auto-approve, but your minimum score can make the bar stricter. Disabling your rule stops all auto-approval.',
-                  effect: 'Full auto (with rule)',
+                  desc: 'Matches auto-approve only while your rule is enabled and the score meets your threshold. With no rule saved — or a disabled rule — every match goes to review.',
+                  effect: 'Needs enabled rule',
                 },
               ].map(({ mode, title, desc, effect }) => (
                 <div
@@ -261,13 +304,26 @@ export const ApprovalRulesPage: React.FC = () => {
               failures, required-field validation, artifact-integrity checks,
               daily application quotas, duplicate-application protection, or the
               REAL_SUBMIT safety gate. These controls are enforced downstream and
-              cannot be overridden by approval rules.
+              cannot be overridden by approval rules. If a rule cannot be read,
+              every match falls back to human review.
             </p>
           </div>
 
-          <PrimaryButton type="submit" disabled={saving || !scoreValid} className="w-full py-3">
-            {saving ? 'Saving approval rules…' : 'Save approval rules'}
-          </PrimaryButton>
+          <div className="space-y-2">
+            <PrimaryButton
+              type="submit"
+              disabled={saving || !canSave}
+              className="w-full py-3"
+            >
+              {saving ? 'Saving approval rules…' : 'Save approval rules'}
+            </PrimaryButton>
+            {!configured && !dirty && (
+              <p className="text-center text-xs text-ink-muted">
+                Adjust a setting to save a rule. Saving the untouched form would store a
+                disabled rule.
+              </p>
+            )}
+          </div>
         </form>
       </div>
     </PageShell>

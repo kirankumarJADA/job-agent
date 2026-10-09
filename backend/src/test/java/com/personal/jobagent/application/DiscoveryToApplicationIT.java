@@ -108,11 +108,19 @@ class DiscoveryToApplicationIT {
                 """, USER, "pipeline-wiring@example.com", passwordEncoder.encode("PasswordA1!"), "Wiring IT");
         jdbc.update("insert into profiles (id, user_id) values (?, ?) on conflict do nothing", PROFILE, USER);
         // This IT verifies the CONTROLLED_AUTO deployment posture: every
-        // APPLY-level match auto-creates the application.
+        // APPLY-level match auto-creates the application. Phase 7.2 requires
+        // that posture to opt in with an explicitly enabled rule, so seed one
+        // at the APPLY floor.
         jdbc.update("""
                 insert into preference_sets (id, profile_id, application_mode, scoring_weights, salary_min_gbp)
                 values (?, ?, 'CONTROLLED_AUTO', '{"skill":70,"experience":10,"visa":5,"location":5,"salary":5,"career":5,"difficulty":0}', 40000)
                 on conflict do nothing
+                """, UUID.randomUUID(), PROFILE);
+        jdbc.update("""
+                insert into user_approval_rules (id, profile_id, auto_approve_enabled, min_score)
+                values (?, ?, true, 70)
+                on conflict (profile_id) do update set auto_approve_enabled = true,
+                    min_score = 70, updated_at = now()
                 """, UUID.randomUUID(), PROFILE);
         jdbc.update("""
                 insert into skills (id, profile_id, name, category, mastery)

@@ -36,6 +36,11 @@ import static org.mockito.Mockito.when;
  * the mode thresholds. They can toggle automatic application creation and
  * raise or lower the score threshold — but they can never bypass quotas,
  * hard stops, or any safety gate.
+ *
+ * <p>Phase 7.2: rule resolution is tri-state (configured / absent /
+ * unreadable) and fails closed. {@code CONTROLLED_AUTO} no longer auto-applies
+ * without an explicitly enabled rule, and a rule that cannot be read queues
+ * for human review in every automatic mode instead of reverting to defaults.
  */
 class ApplicationDecisionServiceTest {
 
@@ -107,14 +112,20 @@ class ApplicationDecisionServiceTest {
             verify(metrics).decisionRecorded("NEEDS_REVIEW");
         }
 
+        /**
+         * Phase 7.2 changed this: CONTROLLED_AUTO used to auto-apply every
+         * APPLY match with no rule at all. It now requires an explicitly
+         * enabled rule, so an absent rule queues for human review.
+         */
         @Test
-        void controlledAutoModeAutoAppliesEveryApplyMatch() {
+        void controlledAutoModeWithoutARuleQueuesForReview() {
             mode("CONTROLLED_AUTO");
             quotaAllowed(true);
 
             var decision = service.decide(PROFILE, JOB, 72, "APPLY");
 
-            assertThat(decision.decision()).isEqualTo("AUTO_APPLY");
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(decision.reason()).contains("requires an enabled approval rule");
         }
 
         @Test
@@ -167,6 +178,7 @@ class ApplicationDecisionServiceTest {
         void decisionPersistenceIsBestEffortAndNeverBlocksThePipeline() {
             mode("CONTROLLED_AUTO");
             quotaAllowed(true);
+            ruleExists(true, 70);
             when(db.update(contains("application_decisions"), any(Object[].class)))
                     .thenThrow(new RuntimeException("db down"));
 
@@ -347,26 +359,80 @@ class ApplicationDecisionServiceTest {
         }
 
         @Test
-        void missingRuleInControlledAutoStillAutoApplies() {
+        void missingRuleInControlledAutoQueuesForReview() {
             mode("CONTROLLED_AUTO");
             quotaAllowed(true);
 
             var decision = service.decide(PROFILE, JOB, 72, "APPLY");
 
-            assertThat(decision.decision()).isEqualTo("AUTO_APPLY");
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(decision.reason()).contains("requires an enabled approval rule");
         }
 
+        /**
+         * Phase 7.2: an unreadable rule is never treated as an absent one.
+         * Both automatic modes fail closed to human review rather than
+         * reverting to a default that could auto-approve a disabled match.
+         */
         @Test
-        void ruleLoadExceptionFailsSafeToPhase5Defaults() {
-            mode("ASSISTED");
+        void ruleLoadExceptionFailsClosedInBothAutomaticModes() {
             quotaAllowed(true);
             when(db.queryForList(contains("user_approval_rules"), eq(PROFILE)))
                     .thenThrow(new RuntimeException("connection lost"));
 
-            assertThat(service.decide(PROFILE, JOB, 90, "APPLY").decision())
-                    .isEqualTo("AUTO_APPLY");
-            assertThat(service.decide(PROFILE, JOB, 80, "APPLY").decision())
-                    .isEqualTo("NEEDS_REVIEW");
+            mode("ASSISTED");
+            var assisted = service.decide(PROFILE, JOB, 100, "APPLY");
+            assertThat(assisted.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(assisted.reason()).contains("could not be loaded");
+
+            mode("CONTROLLED_AUTO");
+            var controlled = service.decide(PROFILE, JOB, 100, "APPLY");
+            assertThat(controlled.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(controlled.reason()).contains("could not be loaded");
+        }
+
+        @Test
+        void ruleLoadExceptionInControlledAutoNeverAutoApproves() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+            when(db.queryForList(contains("user_approval_rules"), eq(PROFILE)))
+                    .thenThrow(new RuntimeException("connection lost"));
+
+            var decision = service.decide(PROFILE, JOB, 99, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            verify(metrics).decisionRecorded("NEEDS_REVIEW");
+        }
+
+        /** A stored threshold outside 1–100 is untrustworthy: fail closed. */
+        @Test
+        void outOfRangeStoredThresholdFailsClosed() {
+            for (int invalid : new int[] {0, 101, -5}) {
+                mode("CONTROLLED_AUTO");
+                quotaAllowed(true);
+                ruleExists(true, invalid);
+
+                var decision = service.decide(PROFILE, JOB, 100, "APPLY");
+
+                assertThat(decision.decision())
+                        .as("stored threshold %d must fail closed", invalid)
+                        .isEqualTo("NEEDS_REVIEW");
+                assertThat(decision.reason()).contains("could not be loaded");
+            }
+        }
+
+        @Test
+        void nonNumericStoredThresholdFailsClosed() {
+            mode("ASSISTED");
+            quotaAllowed(true);
+            when(db.queryForList(contains("user_approval_rules"), eq(PROFILE)))
+                    .thenReturn(List.of(Map.of(
+                            "auto_approve_enabled", true,
+                            "min_score", "not-a-number")));
+
+            var decision = service.decide(PROFILE, JOB, 100, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
         }
 
         // ── Owner isolation ──
@@ -377,6 +443,36 @@ class ApplicationDecisionServiceTest {
             ruleExists(true, 50);  // Only matches PROFILE's UUID
 
             assertThat(service.ruleFor(otherProfile)).isNull();
+        }
+
+        @Test
+        void anotherProfilesDisabledRuleCannotForceReviewOnThisProfile() {
+            // PROFILE has no rule at all; another profile's disabled rule must
+            // not leak across the owner boundary.
+            mode("ASSISTED");
+            quotaAllowed(true);
+
+            var decision = service.decide(PROFILE, JOB, 95, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("AUTO_APPLY");
+            verify(db).queryForList(contains("user_approval_rules"), eq(PROFILE));
+        }
+
+        // ── Quota is checked before any rule can authorise approval ──
+
+        @Test
+        void quotaIsCheckedEvenWhenAnEnabledRuleWouldOtherwiseApprove() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(false);
+            ruleExists(true, 1);
+
+            var decision = service.decide(PROFILE, JOB, 100, "APPLY");
+
+            // Score 100 with an enabled rule at threshold 1 would auto-apply,
+            // so the quota reason proves the quota gate ran first.
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(decision.reason()).contains("quota exceeded");
+            verify(quotaService).check(eq(PROFILE), eq("application_daily"));
         }
 
         // ── Manual mode is always immune to rules ──

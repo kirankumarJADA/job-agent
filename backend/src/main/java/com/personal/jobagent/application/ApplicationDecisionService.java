@@ -22,13 +22,39 @@ import java.util.UUID;
  *
  * <ol>
  *   <li><b>Application mode</b> — {@code MANUAL} always queues for human
- *       review, {@code ASSISTED} auto-applies only high-confidence matches
- *       (≥ {@value #HIGH_CONFIDENCE_THRESHOLD}), and {@code CONTROLLED_AUTO}
- *       auto-applies every APPLY-level match.</li>
+ *       review. {@code ASSISTED} uses a conservative built-in floor (≥
+ *       {@value #HIGH_CONFIDENCE_THRESHOLD}) that a configured rule may
+ *       raise or lower. {@code CONTROLLED_AUTO} auto-applies only an
+ *       APPLY-level match that an explicitly enabled, successfully loaded
+ *       rule authorises.</li>
  *   <li><b>Quota</b> — if the profile's daily application quota is exhausted,
  *       the decision falls to NEEDS_REVIEW regardless of mode, so usage
- *       cannot runaway overnight.</li>
+ *       cannot runaway overnight. The quota is checked before any rule can
+ *       authorise automatic approval.</li>
+ *   <li><b>Per-user auto-approval rule</b> (Phase 7) — a rule can switch
+ *       automatic approval off and raise or lower the score threshold. It can
+ *       never bypass a hard stop, a required-field failure or an
+ *       artifact-integrity failure.</li>
  * </ol>
+ *
+ * <p><b>Fail-closed rule handling (Phase 7.2):</b> resolving the owner's rule
+ * is tri-state — {@code CONFIGURED}, {@code ABSENT} or {@code UNREADABLE} — so
+ * "no rule" is never conflated with "a rule we could not read".
+ *
+ * <ul>
+ *   <li>{@code UNREADABLE} (a database or query failure, a missing column, or
+ *       a threshold outside 1–100) always queues for human review. It never
+ *       falls back to a default that could widen auto-approval.</li>
+ *   <li>An explicitly {@code DISABLED} rule queues for human review in both
+ *       automatic modes.</li>
+ *   <li>{@code CONTROLLED_AUTO} with no rule at all queues for human review:
+ *       "auto-apply everything" is precisely the behaviour that must require
+ *       an explicit opt-in. This is the Phase 7.2 behaviour change — before
+ *       it, an absent rule silently auto-applied every APPLY match.</li>
+ *   <li>{@code ASSISTED} with no rule keeps its Phase 5 default floor of
+ *       {@value #HIGH_CONFIDENCE_THRESHOLD}, which is a conservative,
+ *       documented property of the mode rather than a silent widening.</li>
+ * </ul>
  *
  * <p>Every decision is persisted in {@code application_decisions} for the
  * audit trail and for Phase 6 (review queue) and Phase 7 (auto-approval
@@ -36,7 +62,8 @@ import java.util.UUID;
  * so event replays are idempotent.
  *
  * <p><b>Owner isolation:</b> the decision is always scoped to one profile,
- * and the quota check is per-profile.
+ * the rule lookup is filtered by {@code profile_id}, and the quota check is
+ * per-profile.
  */
 @Service
 public class ApplicationDecisionService {
@@ -44,10 +71,15 @@ public class ApplicationDecisionService {
     private static final Logger log = LoggerFactory.getLogger(ApplicationDecisionService.class);
 
     /**
-     * In ASSISTED mode, only matches at or above this score auto-apply.
-     * Matches between APPLY_THRESHOLD (70) and this value queue for review.
+     * In ASSISTED mode with no configured rule, only matches at or above this
+     * score auto-apply. Matches between APPLY_THRESHOLD (70) and this value
+     * queue for review. A configured rule may raise or lower it.
      */
     static final int HIGH_CONFIDENCE_THRESHOLD = 85;
+
+    /** Accepted range for a rule's minimum score; anything else fails closed. */
+    static final int MIN_SCORE = 1;
+    static final int MAX_SCORE = 100;
 
     private final PreferenceSetRepository preferenceSets;
     private final QuotaService quotaService;
@@ -112,23 +144,36 @@ public class ApplicationDecisionService {
         }
 
         // ── 4. Per-user auto-approval rule (Phase 7) ──
-        // Loads the owner's configurable rule. This can only TOGGLE automatic
-        // application creation and RAISE or LOWER the score threshold; it can
-        // never bypass a hard stop, a required-field failure or an
-        // artifact-integrity failure — those are enforced downstream at plan
-        // build, worker execution and the submit-approval precondition, and
-        // no decision recorded here changes them.
-        UserApprovalRule rule = loadRule(profileId);
+        // The rule can only TOGGLE automatic application creation and RAISE or
+        // LOWER the score threshold; it can never bypass a hard stop, a
+        // required-field failure or an artifact-integrity failure — those are
+        // enforced downstream at plan build, worker execution and the
+        // submit-approval precondition, and no decision recorded here changes
+        // them.
+        RuleLookup lookup = lookupRule(profileId);
 
-        // An explicit opt-out disables AUTO_APPLY even in CONTROLLED_AUTO.
-        if (rule != null && !rule.autoApproveEnabled()) {
+        // A rule we could not read must never widen auto-approval. Fail closed
+        // to human review rather than silently reverting to a default that
+        // could auto-approve a match the owner disabled.
+        if (lookup.availability() == RuleAvailability.UNREADABLE) {
+            return record(profileId, jobId, matchScore, recommendation, mode,
+                    "NEEDS_REVIEW", "Approval rule could not be loaded; awaiting human review");
+        }
+
+        // An explicit opt-out disables AUTO_APPLY in every automatic mode.
+        if (lookup.availability() == RuleAvailability.CONFIGURED
+                && !lookup.rule().autoApproveEnabled()) {
             return record(profileId, jobId, matchScore, recommendation, mode,
                     "NEEDS_REVIEW", "Automatic approval disabled by user rule");
         }
 
-        // ── 5. ASSISTED mode: threshold applies ──
-        int assistedThreshold = rule != null ? rule.minScore() : HIGH_CONFIDENCE_THRESHOLD;
+        // ── 5. ASSISTED mode: a conservative floor applies ──
+        // With no rule the mode's own high-confidence floor (85) is the bar,
+        // which is stricter than the APPLY threshold and is the documented
+        // Phase 5 default. A configured, enabled rule may move it.
         if ("ASSISTED".equals(mode)) {
+            int assistedThreshold = lookup.availability() == RuleAvailability.CONFIGURED
+                    ? lookup.rule().minScore() : HIGH_CONFIDENCE_THRESHOLD;
             if (matchScore >= assistedThreshold) {
                 return record(profileId, jobId, matchScore, recommendation, mode,
                         "AUTO_APPLY", "High-confidence match in assisted mode (score " + matchScore
@@ -139,16 +184,22 @@ public class ApplicationDecisionService {
                             + assistedThreshold + ") for assisted mode");
         }
 
-        // ── 6. CONTROLLED_AUTO: all APPLY recommendations auto-apply ──
-        // (subject to the opt-out above and the per-user minimum, if set,
-        //  which can only make the bar stricter for this mode)
-        if (rule != null && matchScore < rule.minScore()) {
+        // ── 6. CONTROLLED_AUTO requires an explicitly enabled, loaded rule ──
+        // No rule means no authorisation: "auto-apply everything" must be an
+        // explicit opt-in, never the silent default.
+        if (lookup.availability() == RuleAvailability.ABSENT) {
+            return record(profileId, jobId, matchScore, recommendation, mode,
+                    "NEEDS_REVIEW", "Controlled-auto mode requires an enabled approval rule; "
+                            + "none is configured");
+        }
+        if (matchScore < lookup.rule().minScore()) {
             return record(profileId, jobId, matchScore, recommendation, mode,
                     "NEEDS_REVIEW", "Score " + matchScore + " below user threshold ("
-                            + rule.minScore() + ")");
+                            + lookup.rule().minScore() + ")");
         }
         return record(profileId, jobId, matchScore, recommendation, mode,
-                "AUTO_APPLY", "Controlled-auto mode with APPLY recommendation (score " + matchScore + ")");
+                "AUTO_APPLY", "Controlled-auto mode with an enabled user rule (score "
+                        + matchScore + " >= " + lookup.rule().minScore() + ")");
     }
 
     // ── Phase 7: per-user auto-approval rules ────────────────────────
@@ -156,28 +207,69 @@ public class ApplicationDecisionService {
     /** The owner's configurable auto-approval rule. Null = Phase 5 defaults. */
     public record UserApprovalRule(boolean autoApproveEnabled, int minScore) {}
 
+    /**
+     * Whether a profile has a usable rule, no rule at all, or one we could not
+     * read. Keeping {@code ABSENT} and {@code UNREADABLE} separate is what lets
+     * the decision engine fail closed on the latter without treating it as an
+     * explicit (and therefore trustworthy) absence.
+     */
+    enum RuleAvailability { CONFIGURED, ABSENT, UNREADABLE }
+
+    /** The resolved rule plus how it was resolved. */
+    private record RuleLookup(RuleAvailability availability, UserApprovalRule rule) {
+        static RuleLookup of(UserApprovalRule rule) {
+            return new RuleLookup(RuleAvailability.CONFIGURED, rule);
+        }
+        static RuleLookup absent() {
+            return new RuleLookup(RuleAvailability.ABSENT, null);
+        }
+        static RuleLookup unreadable() {
+            return new RuleLookup(RuleAvailability.UNREADABLE, null);
+        }
+    }
+
     private static final String RULE_COLUMNS = "auto_approve_enabled, min_score";
 
-    private UserApprovalRule loadRule(UUID profileId) {
+    /**
+     * Resolves the owner's rule, distinguishing absence from unreadability.
+     * A query failure, a missing/unparseable threshold, or a threshold outside
+     * 1–100 is reported as {@code UNREADABLE} so callers fail closed.
+     */
+    private RuleLookup lookupRule(UUID profileId) {
         try {
             List<Map<String, Object>> rows = db.queryForList(
                     "select " + RULE_COLUMNS + " from user_approval_rules where profile_id = ?",
                     profileId);
-            if (rows.isEmpty()) return null;
-            return new UserApprovalRule(
-                    Boolean.TRUE.equals(rows.get(0).get("auto_approve_enabled")),
-                    ((Number) rows.get(0).get("min_score")).intValue());
+            if (rows.isEmpty()) return RuleLookup.absent();
+            Object rawScore = rows.get(0).get("min_score");
+            if (!(rawScore instanceof Number number)) {
+                log.warn("Approval rule for profile {} has no readable threshold; failing closed",
+                        profileId);
+                return RuleLookup.unreadable();
+            }
+            int minScore = number.intValue();
+            if (minScore < MIN_SCORE || minScore > MAX_SCORE) {
+                log.warn("Approval rule for profile {} has an out-of-range threshold ({}); "
+                        + "failing closed", profileId, minScore);
+                return RuleLookup.unreadable();
+            }
+            return RuleLookup.of(new UserApprovalRule(
+                    Boolean.TRUE.equals(rows.get(0).get("auto_approve_enabled")), minScore));
         } catch (Exception e) {
-            // A missing/unreadable rule must fall back to the safe defaults,
-            // never block the pipeline and never widen auto-apply.
-            log.warn("Could not load approval rule for profile {}: {}", profileId, e.getMessage());
-            return null;
+            // A rule we cannot read must never widen auto-apply: report it as
+            // UNREADABLE so every caller fails closed to human review.
+            log.warn("Could not load approval rule for profile {}: {}; failing closed",
+                    profileId, e.getMessage());
+            return RuleLookup.unreadable();
         }
     }
 
-    /** Reads the owner's rule for the API. Null when none is configured. */
+    /**
+     * Reads the owner's rule for the API. Null when none is configured (or when
+     * the stored rule is unreadable — decisions then fail closed to review).
+     */
     public UserApprovalRule ruleFor(UUID profileId) {
-        return loadRule(profileId);
+        return lookupRule(profileId).rule();
     }
 
     /**
@@ -186,12 +278,12 @@ public class ApplicationDecisionService {
      * guarantees: the score must be a whole number 1–100.
      */
     public UserApprovalRule saveRule(UUID profileId, Boolean autoApproveEnabled, Integer minScore) {
-        UserApprovalRule existing = loadRule(profileId);
+        UserApprovalRule existing = lookupRule(profileId).rule();
         boolean enabled = autoApproveEnabled != null ? autoApproveEnabled
                 : existing != null && existing.autoApproveEnabled();
         int score = minScore != null ? minScore
                 : existing != null ? existing.minScore() : HIGH_CONFIDENCE_THRESHOLD;
-        if (score < 1 || score > 100) {
+        if (score < MIN_SCORE || score > MAX_SCORE) {
             throw new IllegalArgumentException("min_score must be between 1 and 100");
         }
         db.update("""

@@ -5,25 +5,6 @@ import { assertDeployableApiBase } from "./src/apiBaseContract";
 import { assertNoLocalInspectionEnv } from "./src/localInspection";
 
 /**
- * React 18 CJS entry (react/index.js) checks process.env.NODE_ENV at
- * require-time to pick its production or development bundle.  Vitest's Vite
- * dep optimizer pre-bundles node_modules while process.env.NODE_ENV is
- * whatever the shell provides — which on many Windows setups is undefined
- * (defaulting to Vite's "production").  That bakes the production bundle
- * into the cache, and every test that calls @testing-library/react's render()
- * hits the stub act() that throws "act(...) is not supported in production
- * builds of React".
- *
- * Setting NODE_ENV here, before defineConfig runs, ensures the dep optimizer
- * sees it and bundles React's development CJS entry.  This only fires at
- * config-load time and does not affect the production build (which uses its
- * own "build" command path below).
- */
-if (!process.env.NODE_ENV) {
-  process.env.NODE_ENV = "test";
-}
-
-/**
  * Local inspection mode (`npm run dev` only — see src/localInspection.ts) is a
  * development convenience that signs in as the seeded local account. A build,
  * on the other hand, produces something deployable, where the flag or its
@@ -50,10 +31,13 @@ export default defineConfig(({ command, mode }) => {
       host: true,
       port: 5173,
     },
-    test: {
-      environment: "jsdom",
-      globals: false,
-      setupFiles: [],
-    },
+    // No global `test.environment` here on purpose.  The default (node) is what
+    // most suites need — including devCredentialsBundle.test.ts, whose esbuild
+    // run asserts `new TextEncoder().encode("") instanceof Uint8Array` and
+    // breaks under jsdom's TextEncoder.  The DOM-dependent suites opt in with a
+    // `// @vitest-environment jsdom` pragma instead, so no test needs a global
+    // override.  NODE_ENV=test is supplied by the `test` script via cross-env,
+    // which is enough for Vite's dep optimizer to pick React's development
+    // build without mutating the environment when `npm run dev` starts.
   };
 });
