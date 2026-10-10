@@ -67,6 +67,16 @@ describe('JobDetailPage FIND detail', () => {
       }
       if (path === '/cover-letters/job/job-1') return [];
       if (path === '/application-answers/job/job-1') return [];
+      if (path === '/prep/jobs/job-1/readiness') {
+        return {
+          jobId: 'job-1', applicationId: null, applicationStatus: null, overall: 'NOT_STARTED', overallLabel: 'Not started',
+          cv: { state: 'MISSING' }, coverLetter: { state: 'NOT_GENERATED', requirement: 'UNKNOWN', versions: 0 },
+          answers: { total: 0, confirmed: 0, unconfirmed: 0, needsInput: 0, requiredQuestionsKnown: false },
+          blockers: [], actions: [{ area: 'CV', code: 'CV_MISSING', message: 'Generate a tailored CV for this job.' }],
+          notChecked: [], note: '', computedAt: '2026-10-10T00:00:00Z',
+        };
+      }
+      if (path.startsWith('/resume-intelligence/job/job-1')) return { cv: null };
       throw new Error('Unexpected API path: ' + path);
     });
   });
@@ -112,6 +122,14 @@ describe('JobDetailPage FIND detail', () => {
     expect(screen.getByRole('link', { name: 'APPLY · Open review queue' }).getAttribute('href')).toBe('/review-queue');
     expect(screen.getByRole('link', { name: 'TRACK · Open applications' }).getAttribute('href')).toBe('/applications');
     expect(screen.getByRole('link', { name: 'PREP · Documents for this job' }).getAttribute('href')).toBe('#application-package');
+  });
+
+  it('embeds the PREP workspace with readiness derived from the API', async () => {
+    renderAt();
+    expect(await screen.findByText('Prepare this application')).toBeTruthy();
+    expect(await screen.findByText('Not started')).toBeTruthy();
+    expect(await screen.findByText(/Generate a tailored CV for this job\./)).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Generate job-specific CV' })).toBeTruthy();
   });
 
   it('shows an API failure instead of an empty job', async () => {
