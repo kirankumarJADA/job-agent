@@ -2,6 +2,7 @@ package com.personal.jobagent.automation;
 
 import com.personal.jobagent.ats.AtsAdapter.FormDescriptor;
 import com.personal.jobagent.ats.AtsAdapter.FormFieldDescriptor;
+import com.personal.jobagent.ats.AtsAdapter.RequiredState;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -30,7 +31,8 @@ class GreenhouseFieldMapperTest {
                     UUID.randomUUID(), "Dear hiring team...");
 
     private static FormFieldDescriptor field(String key, String label, String type, boolean required) {
-        return new FormFieldDescriptor(key, label, type, required, "#" + key, List.of());
+        return new FormFieldDescriptor(key, label, type,
+                required ? RequiredState.REQUIRED : RequiredState.OPTIONAL, "#" + key, List.of());
     }
 
     private final UUID answerId = UUID.randomUUID();

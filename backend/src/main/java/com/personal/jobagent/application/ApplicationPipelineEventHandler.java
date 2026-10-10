@@ -72,6 +72,7 @@ public class ApplicationPipelineEventHandler implements EventHandler {
     private final ObjectMapper json;
     private final AutomationMetrics metrics;
     private final ApplicationDecisionService decisionService;
+    private final com.personal.jobagent.audit.AuditLogWriter audit;
 
     public ApplicationPipelineEventHandler(ApplicationPipelineService pipeline,
                                            InspectionPlanService inspectionPlanService,
@@ -84,7 +85,8 @@ public class ApplicationPipelineEventHandler implements EventHandler {
                                            JdbcTemplate db,
                                            ObjectMapper json,
                                            AutomationMetrics metrics,
-                                           ApplicationDecisionService decisionService) {
+                                           ApplicationDecisionService decisionService,
+                                           com.personal.jobagent.audit.AuditLogWriter audit) {
         this.pipeline = pipeline;
         this.inspectionPlanService = inspectionPlanService;
         this.greenhousePlanService = greenhousePlanService;
@@ -97,6 +99,7 @@ public class ApplicationPipelineEventHandler implements EventHandler {
         this.json = json;
         this.metrics = metrics;
         this.decisionService = decisionService;
+        this.audit = audit;
     }
 
     @Override public String consumerName() { return CONSUMER_NAME; }
@@ -173,7 +176,24 @@ public class ApplicationPipelineEventHandler implements EventHandler {
             return;
         }
 
-        var created = pipeline.createApplicationFromMatch(profileId, jobId);
+        ApplicationPipelineService.CreatedApplication created;
+        try {
+            created = pipeline.createApplicationFromMatch(profileId, jobId);
+        } catch (com.personal.jobagent.apply.DuplicateApplicationException duplicate) {
+            // Cross-source duplicate protection: the candidate already has an
+            // application for this role. Refused, audited, and never reported
+            // as a fresh application.
+            log.info("Duplicate application refused for profile={} job={} ({}; existing application {})",
+                    profileId, jobId, duplicate.matchReason(), duplicate.existingApplicationId());
+            audit.write(new com.personal.jobagent.audit.AuditEntry("SYSTEM", "DUPLICATE_APPLICATION_DETECTED",
+                    "APPLICATION", duplicate.existingApplicationId(),
+                    Map.of("jobId", jobId.toString()),
+                    Map.of("existingJobId", String.valueOf(duplicate.existingJobId()),
+                            "identityKey", String.valueOf(duplicate.identityKey()),
+                            "matchReason", duplicate.matchReason()),
+                    null, UuidV7.generate()));
+            return;
+        }
         if (created == null || created.applicationId() == null) {
             log.warn("Pipeline returned no application for profile={} job={} — skipping", profileId, jobId);
             return;
@@ -253,6 +273,16 @@ public class ApplicationPipelineEventHandler implements EventHandler {
                                 log.info("Inspection plan {} queued for application {}", planId, applicationId);
                             });
                 }
+            } catch (com.personal.jobagent.automation.ExecutionPackageBlockedException blocked) {
+                // Fail-closed document selection: the exact reviewed/validated
+                // document versions do not exist yet, so NO plan is built. The
+                // application stays prepared; the candidate's APPLY workspace
+                // shows these blockers and rebuilds the package once the
+                // documents have been reviewed.
+                record(applicationId, "EXECUTION_PACKAGE_DEFERRED",
+                        Map.of("blockers", blocked.blockers().stream()
+                                .map(b -> String.valueOf(b.get("code"))).toList()));
+                log.warn("Execution package deferred for application {}: {}", applicationId, blocked.getMessage());
             } catch (Exception e) {
                 record(applicationId, "AUTOMATION_PLAN_FAILED",
                         Map.of("error", e.getClass().getSimpleName()));

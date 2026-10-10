@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../api/client';
 import { ApplicationSummary, ApplicationTimelineEvent, AutomationPackageView } from '../types';
 import { ApplicationPrepStatus } from '../components/ApplicationPrepStatus';
+import { ApplyWorkspace } from '../components/ApplyWorkspace';
 import {
   EmptyState,
   Loading,
@@ -149,6 +150,12 @@ export const ApplicationsPage: React.FC = () => {
                 </div>
               </dl>
               <ApplicationPrepStatus jobId={application.jobId} applicationId={application.id} />
+              <ApplyWorkspace
+                applicationId={application.id}
+                planId={application.planId}
+                planStatus={application.planStatus}
+                onChanged={fetchApplications}
+              />
 
               {application.planId && (
                 <div className="mt-3 rounded-lg border border-line bg-surface-sunken px-3 py-2">

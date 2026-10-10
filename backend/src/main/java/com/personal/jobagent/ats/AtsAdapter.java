@@ -35,6 +35,14 @@ public interface AtsAdapter {
     }
 
     /**
+     * What the employer's application form actually said about required-ness
+     * (Phase 8.2). Tri-state on purpose: REQUIRED and OPTIONAL need positive
+     * evidence on the form, while absent metadata stays UNKNOWN — a field is
+     * never assumed optional because the form supplied nothing.
+     */
+    enum RequiredState { REQUIRED, OPTIONAL, UNKNOWN }
+
+    /**
      * One inspected form control (Phase 3A, read-only). Deterministic metadata
      * only — never candidate values. {@code key} is the stable field identifier
      * (Greenhouse: the control's {@code id}, e.g. {@code first_name},
@@ -47,12 +55,18 @@ public interface AtsAdapter {
             String key,
             String label,
             String htmlType,
-            boolean required,
+            RequiredState requiredState,
             String selector,
             java.util.List<String> options
     ) {
         public FormFieldDescriptor {
             options = options == null ? java.util.List.of() : java.util.List.copyOf(options);
+            requiredState = requiredState == null ? RequiredState.UNKNOWN : requiredState;
+        }
+
+        /** Whether the employer's form marks this control required. */
+        public boolean required() {
+            return requiredState == RequiredState.REQUIRED;
         }
     }
 

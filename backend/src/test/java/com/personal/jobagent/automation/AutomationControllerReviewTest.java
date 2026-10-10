@@ -37,7 +37,11 @@ class AutomationControllerReviewTest {
     private ExecutionPackageService executionPackages;
     private NotificationService notifications;
     private OwnerContext owner;
+    private com.personal.jobagent.apply.ApplyReadinessService applyReadiness;
+    private ApplyDocumentSelector documentSelector;
     private AutomationController controller;
+    private final UUID cvVersionId = UUID.randomUUID();
+    private final UUID coverVersionId = UUID.randomUUID();
 
     @BeforeEach
     void setUp() {
@@ -49,8 +53,66 @@ class AutomationControllerReviewTest {
         when(owner.isWorkerRequest()).thenReturn(false);
         when(owner.actorOr(anyString())).thenReturn("candidate@example.test");
         when(plans.owns(profileId, planId)).thenReturn(true);
+        applyReadiness = mock(com.personal.jobagent.apply.ApplyReadinessService.class);
+        documentSelector = mock(ApplyDocumentSelector.class);
+        // Default posture: the application is ready and the exact document
+        // versions the package bound are still the selected ones.
+        when(applyReadiness.evaluate(eq(profileId), any()))
+                .thenReturn(Map.of("packageReady", true, "blockers", List.of()));
+        when(documentSelector.select(any(), any(), any())).thenReturn(new ApplyDocumentSelector.DocumentSelection(
+                new ApplyDocumentSelector.SelectedCv(cvVersionId, cvSha, 10, Instant.now().toString()),
+                new ApplyDocumentSelector.SelectedCoverLetter(coverVersionId, 1, "GENERATED", coverSha, null, false),
+                com.personal.jobagent.ats.JobFormQuestionService.CoverLetterRequirement.UNKNOWN,
+                List.of(), List.of()));
+        when(executionPackages.answersStillCurrent(any(), any(), any(), any())).thenReturn(true);
         controller = new AutomationController(plans, mock(AuditLogWriter.class), owner, "worker-secret",
-                executionPackages, notifications, new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
+                executionPackages, notifications, new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()),
+                applyReadiness, documentSelector);
+    }
+
+    /** Phase 8.2: approval re-runs the readiness gate server-side. */
+    @Test
+    void approvalIsRefusedWhenTheReadinessGateReportsBlockers() {
+        when(applyReadiness.evaluate(eq(profileId), any())).thenReturn(Map.of(
+                "packageReady", false,
+                "blockers", List.of(Map.of("area", "CV", "code", "CV_REVIEW_REQUIRED", "message", "review the CV"))));
+        when(plans.find(profileId, planId)).thenReturn(Optional.of(row("AWAITING_APPROVAL", planPayload())));
+
+        ResponseEntity<?> response = controller.approve(planId);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(409);
+        assertThat(String.valueOf(response.getBody())).contains("APPLY_NOT_READY");
+        verify(plans, never()).approveForSubmission(any());
+    }
+
+    /** A dependency failure is an explicit unavailable state, never a false refusal or success. */
+    @Test
+    void approvalReportsUnavailableWhenReadinessCannotBeComputed() {
+        when(applyReadiness.evaluate(eq(profileId), any()))
+                .thenThrow(new com.personal.jobagent.apply.ApplyReadinessService.ReadinessUnavailableException("DB_DOWN"));
+        when(plans.find(profileId, planId)).thenReturn(Optional.of(row("AWAITING_APPROVAL", planPayload())));
+
+        ResponseEntity<?> response = controller.approve(planId);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(503);
+        verify(plans, never()).approveForSubmission(any());
+    }
+
+    /** A replaced document invalidates the package instead of riding on the old approval. */
+    @Test
+    void approvalIsRefusedWhenTheSelectedDocumentsChangedSincePackaging() {
+        when(documentSelector.select(any(), any(), any())).thenReturn(new ApplyDocumentSelector.DocumentSelection(
+                new ApplyDocumentSelector.SelectedCv(UUID.randomUUID(), cvSha, 10, Instant.now().toString()),
+                new ApplyDocumentSelector.SelectedCoverLetter(coverVersionId, 1, "GENERATED", coverSha, null, false),
+                com.personal.jobagent.ats.JobFormQuestionService.CoverLetterRequirement.UNKNOWN,
+                List.of(), List.of()));
+        when(plans.find(profileId, planId)).thenReturn(Optional.of(row("AWAITING_APPROVAL", planPayload())));
+
+        ResponseEntity<?> response = controller.approve(planId);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(409);
+        assertThat(String.valueOf(response.getBody())).contains("PACKAGE_DRIFT");
+        verify(plans, never()).approveForSubmission(any());
     }
 
     /** A failed run must not silently disappear: the owner is notified. */
@@ -206,9 +268,9 @@ class AutomationControllerReviewTest {
     }
 
     private Map<String, Object> planPayload() {
-        Map<String, Object> cv = Map.of("versionId", UUID.randomUUID().toString(), "sha256", cvSha,
+        Map<String, Object> cv = Map.of("versionId", cvVersionId.toString(), "sha256", cvSha,
                 "jobId", jobId.toString(), "applicationId", applicationId.toString());
-        Map<String, Object> coverLetter = Map.of("versionId", UUID.randomUUID().toString(), "sha256", coverSha,
+        Map<String, Object> coverLetter = Map.of("versionId", coverVersionId.toString(), "sha256", coverSha,
                 "jobId", jobId.toString(), "applicationId", applicationId.toString());
         Map<String, Object> pkg = new java.util.LinkedHashMap<>(Map.of(
                 "planId", planId.toString(), "applicationId", applicationId.toString(),

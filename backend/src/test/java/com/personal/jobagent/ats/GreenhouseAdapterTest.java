@@ -103,6 +103,53 @@ class GreenhouseAdapterTest {
         assertThat(field(descriptor, "portfolio").required()).isFalse();
     }
 
+    // 4b. Tri-state required-ness (Phase 8.2): UNKNOWN is never assumed optional
+
+    @Test
+    void requirednessIsTriStateFromPositiveFormEvidence() {
+        FormDescriptor descriptor = inspectFixture();
+        // Positive required evidence: the hidden required-input mirror, or the
+        // label's conventional * marker even without a mirror.
+        assertThat(field(descriptor, "first_name").requiredState()).isEqualTo(AtsAdapter.RequiredState.REQUIRED);
+        assertThat(field(descriptor, "question_123456").requiredState()).isEqualTo(AtsAdapter.RequiredState.REQUIRED);
+        assertThat(field(descriptor, "work_auth").requiredState()).isEqualTo(AtsAdapter.RequiredState.REQUIRED);
+        // Positive optional evidence: a labelled wrapper rendered without the mirror.
+        assertThat(field(descriptor, "question_654321").requiredState()).isEqualTo(AtsAdapter.RequiredState.OPTIONAL);
+        assertThat(field(descriptor, "cover_letter").requiredState()).isEqualTo(AtsAdapter.RequiredState.OPTIONAL);
+        assertThat(field(descriptor, "portfolio").requiredState()).isEqualTo(AtsAdapter.RequiredState.OPTIONAL);
+    }
+
+    @Test
+    void fieldsWithoutAnyRequirednessMetadataStayUnknown() {
+        String flat = "<html><body><input id=\"q1\" aria-label=\"Notice period\" type=\"text\"></body></html>";
+        var fields = GreenhouseAdapter.parse(flat);
+        assertThat(fields).singleElement().satisfies(parsed -> {
+            assertThat(parsed.key()).isEqualTo("q1");
+            assertThat(parsed.label()).isEqualTo("Notice period");
+            // No attributes, no marker, no field-scoped wrapper: the form said
+            // nothing about required-ness, so it is UNKNOWN, not optional.
+            assertThat(parsed.requiredState()).isEqualTo(AtsAdapter.RequiredState.UNKNOWN);
+        });
+    }
+
+    @Test
+    void aLabelsWithoutFieldScopedWrapperNeverReadsAnotherFieldsMirror() {
+        String flat = """
+                <html><body>
+                <div class="field"><input class="requiredInput" required aria-hidden="true" value=""/>
+                <label for="a">Asterisk-free but mirrored field</label><input id="a" type="text"/></div>
+                <label for="b">Flat sibling</label><input id="b" type="text"/>
+                </body></html>
+                """;
+        var fields = GreenhouseAdapter.parse(flat);
+        var byKey = new java.util.HashMap<String, AtsAdapter.FormFieldDescriptor>();
+        fields.forEach(f -> byKey.put(f.key(), f));
+        assertThat(byKey.get("a").requiredState()).isEqualTo(AtsAdapter.RequiredState.REQUIRED);
+        // "b" shares the body with the mirror but has no field-scoped wrapper:
+        // the mirror is another field's evidence and must not mark "b" required.
+        assertThat(byKey.get("b").requiredState()).isEqualTo(AtsAdapter.RequiredState.UNKNOWN);
+    }
+
     // 5. Field types detected
 
     @Test

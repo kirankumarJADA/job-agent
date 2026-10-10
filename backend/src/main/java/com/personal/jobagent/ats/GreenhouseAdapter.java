@@ -95,8 +95,12 @@ public class GreenhouseAdapter extends BaseAtsAdapter {
         });
     }
 
-    /** Test seam: inspection fetch supplied directly (deterministic fixtures). */
-    GreenhouseAdapter(Function<String, String> fetcher) {
+    /**
+     * Test seam: inspection fetch supplied directly (deterministic fixtures).
+     * Public so integration tests in other packages can pin the inspected form
+     * instead of performing real network calls.
+     */
+    public GreenhouseAdapter(Function<String, String> fetcher) {
         super(AtsKind.GREENHOUSE, Pattern.compile("boards\\.greenhouse\\.io|greenhouse\\.io"), false, false);
         this.fetcher = fetcher;
     }
@@ -169,7 +173,7 @@ public class GreenhouseAdapter extends BaseAtsAdapter {
                             id,
                             groupLabel(document, groupControls, group),
                             "radio",
-                            radioGroupRequired(groupControls, group),
+                            radioGroupRequiredness(groupControls, group),
                             "#" + id,
                             new ArrayList<>(options)));
                     continue;
@@ -179,7 +183,7 @@ public class GreenhouseAdapter extends BaseAtsAdapter {
                     id,
                     labelFor(document, control, id),
                     htmlType(control),
-                    isRequired(control),
+                    requiredness(document, control),
                     "#" + id,
                     optionsOf(control)));
         }
@@ -189,22 +193,38 @@ public class GreenhouseAdapter extends BaseAtsAdapter {
     /** Group label from the smallest containing wrapper, excluding option labels. */
     private static String groupLabel(Document document, Elements groupControls, String group) {
         Element wrapper = radioGroupWrapper(groupControls, group);
-        if (wrapper != null) {
-            for (Element label : wrapper.select("label")) {
-                if (label.hasAttr("for")) continue;
-                if (!label.text().isBlank()) return stripRequiredMarker(label.text());
-            }
+        String raw = wrapper == null ? null : groupLabelRaw(wrapper);
+        return raw == null ? null : stripRequiredMarker(raw);
+    }
+
+    /** Raw group label text with required/optional markers intact (option labels carry {@code for}). */
+    private static String groupLabelRaw(Element wrapper) {
+        for (Element label : wrapper.select("label")) {
+            if (label.hasAttr("for")) continue;
+            if (!label.text().isBlank()) return label.text().trim();
         }
         return null;
     }
 
-    private static boolean radioGroupRequired(Elements groupControls, String group) {
-        if (groupControls.stream().anyMatch(GreenhouseAdapter::isRequired)) return true;
+    /** Tri-state required-ness for a radio group; same evidence rules as {@link #requiredness}. */
+    private static RequiredState radioGroupRequiredness(Elements groupControls, String group) {
+        for (Element radio : groupControls) {
+            if (radio.hasAttr("required") || "true".equalsIgnoreCase(radio.attr("aria-required"))) {
+                return RequiredState.REQUIRED;
+            }
+        }
         Element wrapper = radioGroupWrapper(groupControls, group);
-        if (wrapper == null) return false;
-        return !wrapper.select("input[class*=requiredInput]").isEmpty()
-                || wrapper.select("label").stream().filter(label -> !label.hasAttr("for"))
-                .anyMatch(label -> label.text().trim().endsWith("*"));
+        boolean fieldScoped = wrapper != null && !isDocumentRoot(wrapper);
+        String groupLabel = fieldScoped ? groupLabelRaw(wrapper) : null;
+        if (groupLabel != null && groupLabel.endsWith("*")) return RequiredState.REQUIRED;
+        if (!fieldScoped) {
+            // Nothing field-scoped said anything about required-ness.
+            return RequiredState.UNKNOWN;
+        }
+        if (!wrapper.select("input[class*=requiredInput]").isEmpty()) return RequiredState.REQUIRED;
+        // Greenhouse renders a required-input mirror inside the wrapper of every
+        // required group; a wrapped group without one is positively optional.
+        return RequiredState.OPTIONAL;
     }
 
     private static Element radioGroupWrapper(Elements groupControls, String group) {
@@ -257,31 +277,69 @@ public class GreenhouseAdapter extends BaseAtsAdapter {
     }
 
     /**
-     * Required = the control's own required/aria-required attributes, or
-     * Greenhouse's pattern of a hidden required-input mirror inside the same
-     * field wrapper (checked up to the nearest field-group boundary).
+     * Tri-state required-ness from the form's actual metadata (Phase 8.2).
+     *
+     * <p>REQUIRED on positive evidence: required/aria-required attributes, the
+     * label's {@code *} marker, or Greenhouse's hidden required-input mirror
+     * inside the field's own wrapper. OPTIONAL only when the form positively
+     * rendered the field optional (an explicit {@code (optional)} /
+     * aria-required="false" marker, or a labelled field wrapper without the
+     * mirror). Anything else is UNKNOWN: absent metadata is never assumed
+     * optional.
+     *
+     * <p>The mirror is scoped to the smallest wrapper that contains THIS
+     * field's label (up to the nearest field-group boundary), so another
+     * field's mirror can never mark this one required; body/html/form wrappers
+     * carry no field-scoped evidence at all.
      */
-    private static boolean isRequired(Element control) {
+    private static RequiredState requiredness(Document document, Element control) {
         if (control.hasAttr("required") || "true".equalsIgnoreCase(control.attr("aria-required"))) {
-            return true;
+            return RequiredState.REQUIRED;
         }
-        // Greenhouse renders a hidden required-input mirror inside the same
-        // field wrapper as the control and its label. Scoping the mirror to
-        // the smallest wrapper that contains THIS field's label prevents
-        // cross-field false positives on long forms.
+        Element wrapper = labelledFieldWrapper(control);
+        if (wrapper != null && !wrapper.select("input[class*=requiredInput]").isEmpty()) {
+            return RequiredState.REQUIRED;
+        }
+        String rawLabel = labelRawText(document, control).orElse("");
+        if (rawLabel.endsWith("*")) return RequiredState.REQUIRED;
+        if ("false".equalsIgnoreCase(control.attr("aria-required"))) return RequiredState.OPTIONAL;
+        if (rawLabel.toLowerCase(java.util.Locale.ROOT).endsWith("(optional)")) return RequiredState.OPTIONAL;
+        if (wrapper != null) {
+            // Greenhouse renders a required-input mirror inside the wrapper of
+            // every required field; a labelled wrapper without one is the form
+            // positively rendering an optional field.
+            return RequiredState.OPTIONAL;
+        }
+        return RequiredState.UNKNOWN;
+    }
+
+    /** Smallest wrapper containing this field's own label; null without field-scoped evidence. */
+    private static Element labelledFieldWrapper(Element control) {
         Element parent = control.parent();
         for (int depth = 0; parent != null && depth < 4; depth++) {
-            // The smallest wrapper containing this field's own label decides:
-            // mirror present → required; label present without mirror → optional.
-            // Walking past that wrapper would read other fields' mirrors.
+            if (isDocumentRoot(parent)) return null;
             boolean hasLabel = parent.select("label[for]").stream()
                     .anyMatch(label -> control.id().equals(label.attr("for")));
-            if (hasLabel) {
-                return !parent.select("input[class*=requiredInput]").isEmpty();
-            }
+            if (hasLabel) return parent;
             parent = parent.parent();
         }
-        return false;
+        return null;
+    }
+
+    /** body/html/form carry form-wide or no metadata, never field-scoped evidence. */
+    private static boolean isDocumentRoot(Element element) {
+        String tag = element.tagName();
+        return "body".equals(tag) || "html".equals(tag) || "form".equals(tag);
+    }
+
+    /** Raw label text with required/optional markers intact, including aria-labels. */
+    private static java.util.Optional<String> labelRawText(Document document, Element control) {
+        Element label = document.select("label[for]").stream()
+                .filter(candidate -> control.id().equals(candidate.attr("for")))
+                .findFirst().orElse(null);
+        if (label != null && !label.text().isBlank()) return java.util.Optional.of(label.text().trim());
+        String aria = control.attr("aria-label");
+        return aria.isBlank() ? java.util.Optional.empty() : java.util.Optional.of(aria.trim());
     }
 
     private static List<String> optionsOf(Element control) {
