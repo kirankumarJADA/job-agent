@@ -76,7 +76,7 @@ class JobMatchServiceTest {
     }
 
     @Test
-    void highMatchExplainsWhyAndCreatesAnApplicationAutomatically() {
+    void highMatchExplainsWhyAndDefersToTheDecisionRulesWithoutClaimingAnApplication() {
         when(jobRepository.findById(JOB)).thenReturn(Optional.of(job(List.of("Java", "Spring"), 60000)));
         profileSkills("Java", "Spring");
 
@@ -91,7 +91,12 @@ class JobMatchServiceTest {
                 .contains("\"matched_skills\":[\"Java\",\"Spring\"]")
                 .contains("Robin semantically matched 2 of the 2 skills")
                 .contains("The offered salary meets your stated minimum.")
-                .contains("was created automatically");
+                // Since Phase 5 the decision engine (mode + approval rules) decides
+                // what happens next; the match record must not claim an
+                // application exists or was submitted.
+                .contains("passed to your application decision rules")
+                .contains("A match alone never submits an application.")
+                .doesNotContain("was created automatically");
         verify(notifications).emit(any(NotificationService.NotificationCommand.class));
     }
 

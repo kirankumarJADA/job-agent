@@ -414,11 +414,14 @@ export const JobCard: React.FC<{
   actions?: React.ReactNode;
 }> = ({ job, footer, actions }) => {
   // Some imported postings have no usable timestamps; never render "Invalid Date".
-  const seen = toShortDate(job.first_seen_at);
+  // Missing data is shown as missing — never replaced with an assumed
+  // location, currency or "Competitive" salary.
+  const seen = toShortDate(job.last_seen_at || job.first_seen_at);
   const metaSegments = [
-    job.location_raw || 'United Kingdom',
-    minSalary(job.salary_min, job.salary_max),
-    seen ? `Seen ${seen}` : null,
+    job.location_raw || 'Location not listed',
+    formatSalary(job.salary_min, job.salary_max, job.salary_currency),
+    seen ? `Last seen ${seen}` : null,
+    job.source_name ? `via ${job.source_name}` : null,
   ].filter((segment): segment is string => segment !== null);
 
   return (
@@ -444,6 +447,15 @@ export const JobCard: React.FC<{
           </div>
         </div>
 
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <MatchPill score={job.match_score} recommendation={job.match_recommendation} />
+          {job.stale && (
+            <StatusPill tone="amber">
+              Not seen for {STALE_AFTER_DAYS}+ days
+            </StatusPill>
+          )}
+        </div>
+
         <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-muted">
           <span className="inline-flex items-center gap-1">
             <svg viewBox="0 0 20 20" fill="none" className="h-3.5 w-3.5 shrink-0" aria-hidden="true">
@@ -454,7 +466,7 @@ export const JobCard: React.FC<{
               />
               <circle cx="10" cy="8.4" r="2.1" stroke="currentColor" strokeWidth="1.4" />
             </svg>
-            {metaSegments[0] ?? 'United Kingdom'}
+            {metaSegments[0] ?? 'Location not listed'}
           </span>
           {metaSegments.slice(1).map((segment, i) => (
             <span key={i} className="inline-flex items-center gap-2">
@@ -491,10 +503,44 @@ function toShortDate(value?: string): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toLocaleDateString();
 }
 
-function minSalary(min?: number, max?: number): string {
-  if (!min) return 'Competitive';
-  return max ? `£${min.toLocaleString()} – £${max.toLocaleString()}` : `£${min.toLocaleString()}+`;
+/**
+ * Mirrors the backend's JobRepository.STALE_AFTER_DAYS, the same rule the
+ * review queue uses to refuse approval of postings that have not been seen.
+ */
+export const STALE_AFTER_DAYS = 30;
+
+/**
+ * Salary as the posting states it. The currency comes from the posting; when
+ * it is absent no symbol is guessed, and an absent salary is "not listed"
+ * rather than an invented "Competitive".
+ */
+export function formatSalary(min?: number | null, max?: number | null, currency?: string | null): string {
+  if (min == null && max == null) return 'Salary not listed';
+  const unit = currency ? `${currency.trim().toUpperCase()} ` : '';
+  const fmt = (value: number) => `${unit}${value.toLocaleString()}`;
+  if (min != null && max != null) return `${fmt(min)} – ${fmt(max)}`;
+  if (min != null) return `${fmt(min)}+`;
+  return `Up to ${fmt(max as number)}`;
 }
+
+/**
+ * The caller's own match result for a posting (the API only ever returns the
+ * signed-in candidate's score). An absent score is shown as "Not scored".
+ */
+export const MatchPill: React.FC<{ score?: number | null; recommendation?: string | null }> = ({
+  score,
+  recommendation,
+}) => {
+  if (score == null) {
+    return <StatusPill tone="slate">Not scored for you</StatusPill>;
+  }
+  const tone: PillTone = recommendation === 'APPLY' ? 'emerald' : recommendation === 'REVIEW' ? 'amber' : 'slate';
+  return (
+    <StatusPill tone={tone}>
+      Match {score}/100{recommendation ? ` · ${recommendation}` : ''}
+    </StatusPill>
+  );
+};
 
 /* ------------------------------------------------------------------ */
 /* Document preview                                                    */

@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { apiFetch } from '../api/client';
-import { ApplicationSummary, Job } from '../types';
+import { ApplicationSummary, Job, JobSource } from '../types';
 import {
   Alert,
   EmptyState,
   JobStatusPill,
   Loading,
+  MatchPill,
   PageHeader,
   PageShell,
   SecondaryButton,
@@ -61,6 +62,47 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 /**
+ * FIND card detail: relevance from the caller's own match fields on the
+ * loaded page (the API never returns another candidate's score) and real
+ * discovery status from the source registry. Counts are scoped to the
+ * loaded page and say so.
+ */
+export function describeFind(
+  jobs: Job[] | null,
+  hasMore: boolean,
+  jobsError: string | null,
+  sources: JobSource[] | null,
+  sourcesError: string | null,
+): string {
+  const parts: string[] = [];
+  if (jobsError) {
+    parts.push('Job catalogue unavailable: ' + jobsError);
+  } else if (jobs === null) {
+    parts.push('Loading the job catalogue…');
+  } else {
+    const recommended = jobs.filter(
+      (job) => job.match_recommendation === 'APPLY' || job.match_recommendation === 'REVIEW',
+    ).length;
+    parts.push(
+      `${recommended} recommended for you in ${hasMore ? 'the latest ' : ''}${jobs.length} indexed ${jobs.length === 1 ? 'job' : 'jobs'}`,
+    );
+  }
+  if (sourcesError) {
+    parts.push('Discovery sources unavailable');
+  } else if (sources !== null) {
+    const boards = sources.filter(
+      (source) => source.enabled && ['GREENHOUSE', 'ASHBY'].includes(String(source.kind).toUpperCase()),
+    );
+    const failing = boards.filter((source) => (source.failure_streak || 0) > 0).length;
+    parts.push(
+      `${boards.length} enabled ${boards.length === 1 ? 'board' : 'boards'}` +
+        (failing > 0 ? `, ${failing} with recent failures` : ''),
+    );
+  }
+  return parts.join(' · ');
+}
+
+/**
  * Robin workflow dashboard.
  *
  * Counts are drawn from authenticated APIs. No stage is reported as complete
@@ -79,8 +121,17 @@ export const DashboardPage: React.FC = () => {
   const [applicationsError, setApplicationsError] = useState<string | null>(null);
   const [reviewQueue, setReviewQueue] = useState<ReviewQueueSummary | null>(null);
   const [reviewQueueError, setReviewQueueError] = useState<string | null>(null);
+  const [sources, setSources] = useState<JobSource[] | null>(null);
+  const [sourcesError, setSourcesError] = useState<string | null>(null);
 
   useEffect(() => {
+    apiFetch<JobSource[]>('/sources')
+      .then((result) => setSources(result || []))
+      .catch((error: unknown) => {
+        setSources(null);
+        setSourcesError(errorMessage(error, 'Could not load discovery sources.'));
+      });
+
     apiFetch<{ status: string }>('/system/health')
       .then(setHealth)
       .catch(() => setHealth({ status: 'DOWN' }));
@@ -129,6 +180,7 @@ export const DashboardPage: React.FC = () => {
     ? (applicationsError ? 'Unavailable' : '…')
     : String(applications.length);
   const backendUp = health?.status === 'UP';
+  const findDetail = describeFind(jobs, jobsHasMore, jobsError, sources, sourcesError);
 
   return (
     <PageShell>
@@ -165,7 +217,7 @@ export const DashboardPage: React.FC = () => {
               title="FIND"
               description="Discover relevant jobs"
               value={jobCount}
-              detail={jobsError || (jobs === null ? 'Loading the job catalogue…' : 'Recent indexed jobs' + (jobsHasMore ? '; more results are available' : ''))}
+              detail={findDetail}
               href="/jobs"
               action="Browse jobs"
               accent="bg-emerald-50 text-emerald-800"
@@ -175,9 +227,9 @@ export const DashboardPage: React.FC = () => {
               title="PREP"
               description="Prepare your application"
               value={prepCount}
-              detail={applicationsError || 'Application records currently marked READY_TO_APPLY'}
-              href="/jobs"
-              action="Open job preparation"
+              detail={applicationsError || 'Application records currently marked READY_TO_APPLY (set when an application is created; it does not confirm documents were generated)'}
+              href="/applications"
+              action="Open applications"
               accent="bg-sky-50 text-sky-800"
             />
             <WorkflowStageCard
@@ -258,6 +310,7 @@ export const DashboardPage: React.FC = () => {
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
+                    <MatchPill score={job.match_score} recommendation={job.match_recommendation} />
                     <JobStatusPill status={job.status} />
                     <Link to={'/jobs/' + job.id} className="rounded-lg border border-line bg-surface px-3 py-1.5 text-xs font-semibold text-ink-soft hover:border-forest-300 hover:bg-forest-50">
                       Inspect

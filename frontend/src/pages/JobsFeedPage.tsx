@@ -25,6 +25,27 @@ interface SourceHealthResponse {
   health?: string | Record<string, unknown> | null;
 }
 
+const PAGE_SIZE = 50;
+
+/**
+ * Describes exactly what is loaded. Counts refer to the loaded pages only —
+ * the catalogue is cursor-paginated, so no total is claimed.
+ */
+export function feedSummary(jobs: Job[], hasMore: boolean): string {
+  const scored = jobs.filter((job) => job.match_score != null).length;
+  const recommended = jobs.filter(
+    (job) => job.match_recommendation === 'APPLY' || job.match_recommendation === 'REVIEW',
+  ).length;
+  const stale = jobs.filter((job) => job.stale).length;
+  const parts = [
+    `${jobs.length} ${jobs.length === 1 ? 'job' : 'jobs'} loaded`,
+    `${scored} scored for you`,
+    `${recommended} recommended (APPLY or REVIEW)`,
+  ];
+  if (stale > 0) parts.push(`${stale} not seen for 30+ days`);
+  return parts.join(' · ') + (hasMore ? ' · more available' : '');
+}
+
 interface DiscoveryMessage {
   tone: 'success' | 'error' | 'info';
   text: string;
@@ -62,28 +83,55 @@ export const JobsFeedPage: React.FC = () => {
   const [discoveryMessage, setDiscoveryMessage] = useState<DiscoveryMessage | null>(null);
   const [importUrl, setImportUrl] = useState('');
   const [importMsg, setImportMsg] = useState<DiscoveryMessage | null>(null);
+  const [nextCursor, setNextCursor] = useState<string>('');
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+
+  const buildQuery = useCallback((cursor?: string) => {
+    const params = new URLSearchParams();
+    if (search.trim()) params.set('q', search.trim());
+    if (statusFilter) params.set('status', statusFilter);
+    params.set('limit', String(PAGE_SIZE));
+    if (cursor) params.set('cursor', cursor);
+    return '/jobs?' + params.toString();
+  }, [search, statusFilter]);
 
   const fetchJobs = useCallback(async () => {
     setLoading(true);
     setJobsError(null);
+    setLoadMoreError(null);
     try {
-      const params = new URLSearchParams();
-      if (search.trim()) params.set('q', search.trim());
-      if (statusFilter) params.set('status', statusFilter);
-      params.set('limit', '50');
-
-      const response = await apiFetch<{ items: Job[]; next_cursor?: string }>(
-        '/jobs?' + params.toString(),
-      );
+      const response = await apiFetch<{ items: Job[]; next_cursor?: string }>(buildQuery());
       setJobs(response.items || []);
+      setNextCursor(response.next_cursor || '');
     } catch (error: unknown) {
       setJobs([]);
+      setNextCursor('');
       setJobsError(error instanceof Error ? error.message : 'Could not load the job catalogue.');
     } finally {
       setJobsLoaded(true);
       setLoading(false);
     }
-  }, [search, statusFilter]);
+  }, [buildQuery]);
+
+  // Keyset pagination: the API returns next_cursor only when more rows exist.
+  const loadMore = async () => {
+    if (!nextCursor) return;
+    setLoadingMore(true);
+    setLoadMoreError(null);
+    try {
+      const response = await apiFetch<{ items: Job[]; next_cursor?: string }>(buildQuery(nextCursor));
+      setJobs((current) => {
+        const seen = new Set(current.map((job) => job.id));
+        return [...current, ...(response.items || []).filter((job) => !seen.has(job.id))];
+      });
+      setNextCursor(response.next_cursor || '');
+    } catch (error: unknown) {
+      setLoadMoreError(error instanceof Error ? error.message : 'Could not load more jobs.');
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const fetchSources = useCallback(async () => {
     setSourcesError(null);
@@ -323,7 +371,7 @@ export const JobsFeedPage: React.FC = () => {
         ) : (
           <>
             <p className="text-xs font-medium text-ink-muted" role="status">
-              Showing {jobs.length} indexed {jobs.length === 1 ? 'job' : 'jobs'} in this result page.
+              {feedSummary(jobs, Boolean(nextCursor))}
             </p>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
               {jobs.map((job) => (
@@ -334,15 +382,23 @@ export const JobsFeedPage: React.FC = () => {
                   footer={
                     job.skills_extracted && job.skills_extracted.length > 6 ? (
                       <span className="text-[11px] text-ink-faint">+{job.skills_extracted.length - 6} more skills listed</span>
-                    ) : (
+                    ) : job.employment_type ? (
                       <span className="inline-flex items-center gap-1.5 text-[11px] text-ink-faint">
-                        <Chip>{job.employment_type || 'FULL_TIME'}</Chip>
+                        <Chip>{job.employment_type}</Chip>
                       </span>
-                    )
+                    ) : null
                   }
                 />
               ))}
             </div>
+            {loadMoreError && <Alert tone="error">More jobs could not be loaded: {loadMoreError}</Alert>}
+            {nextCursor && (
+              <div className="flex justify-center">
+                <SecondaryButton onClick={() => void loadMore()} disabled={loadingMore}>
+                  {loadingMore ? 'Loading more…' : 'Load more jobs'}
+                </SecondaryButton>
+              </div>
+            )}
           </>
         )}
       </div>

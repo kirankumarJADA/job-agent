@@ -118,6 +118,93 @@ public class JobRepository {
                 .stream().findFirst();
     }
 
+    /**
+     * A posting is stale when no discovery run has seen it for this many days.
+     * Same threshold the review queue uses to refuse approval
+     * (ApplicationDecisionService: {@code last_seen_at < now() - interval '30 days'}),
+     * so the FIND feed and the APPLY gate never disagree about freshness.
+     */
+    public static final int STALE_AFTER_DAYS = 30;
+
+    /**
+     * One row of the FIND feed: the shared catalogue posting, its freshness and
+     * source, and ONLY the caller's own match result. The match columns come
+     * from a left join on {@code job_matches} constrained to the caller's
+     * profile, so another candidate's score can never appear here; a null
+     * profile simply yields no match.
+     */
+    public record FeedItem(JobRecord job, java.time.Instant firstSeenAt, java.time.Instant lastSeenAt,
+                           boolean stale, boolean removed, String sourceName, String sourceKind,
+                           Integer matchScore, String matchRecommendation, java.time.Instant matchScoredAt) {
+    }
+
+    public record FeedPage(List<FeedItem> items, String nextCursor) {
+    }
+
+    private static final String FEED_SELECT = "select "
+            + JOB_COLUMNS.replaceAll("(^|, )(\\w+)", "$1j.$2")
+            + ", j.first_seen_at, j.last_seen_at, (j.deleted_at is not null) as removed"
+            + ", (j.last_seen_at < now() - interval '" + STALE_AFTER_DAYS + " days') as stale"
+            + ", s.display_name as source_name, s.kind as source_kind"
+            + ", m.score as match_score, m.recommendation as match_recommendation, m.scored_at as match_scored_at"
+            + " from jobs j"
+            + " left join job_sources s on s.id = j.source_id"
+            + " left join job_matches m on m.job_id = j.id and m.profile_id = ?::uuid";
+
+    private static final RowMapper<FeedItem> FEED_MAPPER = (rs, rowNum) -> new FeedItem(
+            ROW_MAPPER.mapRow(rs, rowNum),
+            rs.getTimestamp("first_seen_at").toInstant(),
+            rs.getTimestamp("last_seen_at").toInstant(),
+            rs.getBoolean("stale"),
+            rs.getBoolean("removed"),
+            rs.getString("source_name"),
+            rs.getString("source_kind"),
+            (Integer) rs.getObject("match_score"),
+            rs.getString("match_recommendation"),
+            rs.getTimestamp("match_scored_at") == null ? null : rs.getTimestamp("match_scored_at").toInstant());
+
+    /**
+     * The FIND feed. Same filters and keyset pagination as {@link #findJobs}
+     * (status, full-text {@code q}, cursor on first_seen_at/id) but soft-deleted
+     * postings are excluded, because they can no longer be applied to and the
+     * review queue already hides them.
+     */
+    public FeedPage findFeed(UUID profileId, String status, String query, int limit, String cursor) {
+        List<String> conditions = new ArrayList<>();
+        List<Object> params = new ArrayList<>();
+        params.add(profileId);
+        conditions.add("j.deleted_at is null");
+        if (status != null) {
+            conditions.add("j.status = ?");
+            params.add(status);
+        }
+        if (query != null && !query.isBlank()) {
+            conditions.add("j.search_vector @@ plainto_tsquery('english', ?)");
+            params.add(query);
+        }
+        if (cursor != null && !cursor.isBlank()) {
+            String[] decoded = new String(Base64.getDecoder().decode(cursor)).split("\\|", 2);
+            conditions.add("(j.first_seen_at, j.id) < (?::timestamptz, ?::uuid)");
+            params.add(decoded[0]);
+            params.add(decoded[1]);
+        }
+        String sql = FEED_SELECT + " where " + String.join(" and ", conditions)
+                + " order by j.first_seen_at desc, j.id desc limit ?";
+        params.add(limit + 1);
+
+        List<FeedItem> rows = jdbcTemplate.query(sql, FEED_MAPPER, params.toArray());
+        boolean hasMore = rows.size() > limit;
+        List<FeedItem> page = hasMore ? rows.subList(0, limit) : rows;
+        String nextCursor = hasMore ? encodeCursor(page.get(page.size() - 1).job().id()) : null;
+        return new FeedPage(page, nextCursor);
+    }
+
+    /** One posting with its freshness, source and the caller's own match — soft-deleted rows included and flagged. */
+    public Optional<FeedItem> findFeedItem(UUID profileId, UUID jobId) {
+        return jdbcTemplate.query(FEED_SELECT + " where j.id = ?", FEED_MAPPER, profileId, jobId)
+                .stream().findFirst();
+    }
+
     /** One candidate's own match decision for a posting, or empty if they have not scored it. */
     public Optional<JobMatch> findMatch(UUID profileId, UUID jobId) {
         if (profileId == null || jobId == null) {

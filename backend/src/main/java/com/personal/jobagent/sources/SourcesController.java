@@ -46,12 +46,15 @@ public class SourcesController {
     @PostMapping("/{id}/health-check")
     public ResponseEntity<?> healthCheck(@PathVariable UUID id) {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
-                "select kind, org_identifier from job_sources where id = ?", id);
+                "select kind, org_identifier, enabled from job_sources where id = ?", id);
         if (rows.isEmpty()) return ResponseEntity.notFound().build();
         String kind = (String) rows.get(0).get("kind");
         String orgIdentifier = (String) rows.get(0).get("org_identifier");
+        // A disabled source is never fetched live (the same rule /discovery/run
+        // enforces); its recorded state is returned unchanged, never reset.
+        boolean enabled = Boolean.TRUE.equals(rows.get(0).get("enabled"));
 
-        if (("GREENHOUSE".equals(kind) || "ASHBY".equals(kind))
+        if (enabled && ("GREENHOUSE".equals(kind) || "ASHBY".equals(kind))
                 && orgIdentifier != null && !orgIdentifier.isBlank()) {
             DiscoveryOrchestrator.DiscoveryRun run = "ASHBY".equals(kind)
                     ? orchestrator.discoverAshbyBoard(id, orgIdentifier)

@@ -49,8 +49,8 @@ class SourcesControllerTest {
 
     @Test
     void healthCheckRunsARealBoardFetchAndRecordsTheOutcome() {
-        when(db.queryForList("select kind, org_identifier from job_sources where id = ?", SOURCE))
-                .thenReturn(List.of(Map.of("kind", "GREENHOUSE", "org_identifier", "acme")));
+        when(db.queryForList("select kind, org_identifier, enabled from job_sources where id = ?", SOURCE))
+                .thenReturn(List.of(Map.of("kind", "GREENHOUSE", "org_identifier", "acme", "enabled", true)));
         when(orchestrator.discoverGreenhouseBoard(SOURCE, "acme")).thenReturn(
                 new DiscoveryOrchestrator.DiscoveryRun("corr", List.of(), false, List.of()));
 
@@ -62,8 +62,8 @@ class SourcesControllerTest {
 
     @Test
     void aFailedBoardFetchIsRecordedAsAFailureNotReset() {
-        when(db.queryForList("select kind, org_identifier from job_sources where id = ?", SOURCE))
-                .thenReturn(List.of(Map.of("kind", "GREENHOUSE", "org_identifier", "acme")));
+        when(db.queryForList("select kind, org_identifier, enabled from job_sources where id = ?", SOURCE))
+                .thenReturn(List.of(Map.of("kind", "GREENHOUSE", "org_identifier", "acme", "enabled", true)));
         when(orchestrator.discoverGreenhouseBoard(SOURCE, "acme")).thenReturn(
                 new DiscoveryOrchestrator.DiscoveryRun("corr", List.of(), false, List.of("greenhouse:UPSTREAM_503")));
 
@@ -77,7 +77,8 @@ class SourcesControllerTest {
         Map<String, Object> row = new java.util.HashMap<>();
         row.put("kind", "COMPANY_SITE");
         row.put("org_identifier", null);
-        when(db.queryForList("select kind, org_identifier from job_sources where id = ?", SOURCE))
+        row.put("enabled", true);
+        when(db.queryForList("select kind, org_identifier, enabled from job_sources where id = ?", SOURCE))
                 .thenReturn(List.of(row));
 
         ResponseEntity<?> response = controller.healthCheck(SOURCE);
@@ -89,8 +90,21 @@ class SourcesControllerTest {
     }
 
     @Test
+    void aDisabledBoardSourceIsNeverFetchedLiveAndKeepsItsRecordedState() {
+        when(db.queryForList("select kind, org_identifier, enabled from job_sources where id = ?", SOURCE))
+                .thenReturn(List.of(Map.of("kind", "GREENHOUSE", "org_identifier", "acme", "enabled", false)));
+
+        ResponseEntity<?> response = controller.healthCheck(SOURCE);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        verify(orchestrator, never()).discoverGreenhouseBoard(any(), any());
+        verify(orchestrator, never()).discoverAshbyBoard(any(), any());
+        verify(db, never()).update(contains("update job_sources"), any(), any());
+    }
+
+    @Test
     void anUnknownSourceIsNotFound() {
-        when(db.queryForList("select kind, org_identifier from job_sources where id = ?", SOURCE))
+        when(db.queryForList("select kind, org_identifier, enabled from job_sources where id = ?", SOURCE))
                 .thenReturn(List.of());
 
         assertThat(controller.healthCheck(SOURCE).getStatusCode().value()).isEqualTo(404);

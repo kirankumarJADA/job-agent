@@ -3,7 +3,7 @@
 Persistent engineering handoff. Update this file after every completed phase and at the end of every session.
 
 ## Current Date
-2026-10-09
+2026-10-10
 
 ## Repository State
 - Phase 1–5 commits: `72d18fd`, `f8008c3`, `aecc7e9`, `a32c2da`, `48b7d56`.
@@ -13,6 +13,7 @@ Persistent engineering handoff. Update this file after every completed phase and
 - Phase 7.1 (Approval Rules Settings UI): `daa848d`, on branch `phase7-approval-rules-ui`.
 - Phase 7.2 (auto-approval safety audit + fail-closed correction): `bb449a4`; status record `9f2f4e2`.
 - Phase 7.3 (approval-rule health and observability): `5e75e31`, on branch `phase7-approval-rules-ui`.
+- Phase 8.0 (architecture audit, workflow dashboard, FIND slice): branch `phase8-find-workflow` = `226c750` (unverified first pass) + the Phase 8.0 completion commit on top. Parent `d57f498`.
 - `ROBIN_PROJECT_HANDOFF.md` does not exist in this repository (checked all branches and history). This file is the persistent engineering handoff.
 - Do not infer the state of a separate Windows working tree from this GitHub branch.
 
@@ -30,6 +31,7 @@ Persistent engineering handoff. Update this file after every completed phase and
 | 7.1 — Approval Rules Settings UI | `daa848d` | Frontend: 178 tests pass, tsc clean, build clean (one pre-existing suite failure, fixed in 7.2) |
 | 7.2 — Auto-approval safety audit (fail-closed) | `bb449a4` | Backend: 564 unit (0 fail, 1 skip) + 109 IT (0 fail, 19 skip) = 673. Frontend: 185 tests, tsc clean, build clean. Worker: 19/19 |
 | 7.3 — Approval-rule health & observability | `5e75e31` | Backend: 592 unit (0 fail, 1 skip) + 110 IT (0 fail, 19 skip) = 702. Frontend: 190 tests, tsc clean, build clean. Worker: 19/19 |
+| 8.0 - Architecture audit, workflow dashboard, FIND slice | `phase8-find-workflow` | Backend: 593 unit (0 fail, 1 skip) + 117 IT (0 fail, 19 skip) = 710. Frontend: 212 tests (20 files), tsc clean, build clean. Worker: 19/19 |
 
 ## Phase 7 Implementation: Auto-Approval Rule Engine (corrected here in 7.2)
 - `V034__approval_rules.sql` creates `user_approval_rules` with exactly three value columns: `auto_approve_enabled` (boolean, default false) and `min_score` (integer, default 85, `CHECK (min_score BETWEEN 1 AND 100)`), plus `updated_at`. (Earlier drafts of this document invented `max_daily_auto` and `require_cover_letter` columns that were never created; they do not exist.) Owner-isolated by `profile_id` with a unique constraint.
@@ -140,9 +142,10 @@ Persistent engineering handoff. Update this file after every completed phase and
 - `ApplicationPipelineIT` (+1 test, 9 total): with the rule genuinely unreadable, the match queues for review, no application is created, and exactly one durable `APPROVAL_RULE_UNAVAILABLE` notification lands for that owner.
 
 ## Next Exact Task
-Phase 7.3 is verified locally. Commit and push on `phase7-approval-rules-ui`, then stop unless Phase 8 is explicitly requested. Phase 8 (production PDF generation for tailored CVs/cover letters) must not begin until explicitly requested. Phase 6 hardening PR #1 against `phase5-ready` remains open and was not touched.
+Phase 8.0 is verified locally and pushed on `phase8-find-workflow`. Do not merge or deploy. Next, only when requested: Phase 8.1 PREP (see `docs/PHASE8_FIND_WORKFLOW.md` section 6). `REAL_SUBMIT` stays hard-stopped. Phase 6 hardening PR #1 against `phase5-ready` remains open and was not touched.
 
 ## Last Verified Baseline
+- Phase 8.0: backend 593 unit + 117 integration = 710, 0 failures, 0 errors (1 + 19 skipped), BUILD SUCCESS; frontend 212 tests (20 files), tsc clean, build clean; worker 19/19.
 - Phase 7.3 backend local verify: 592 unit + 110 integration = 702 test cases, 0 failures, 0 errors (1 + 19 skipped). BUILD SUCCESS.
 - Phase 7.3 frontend verify: 190 tests pass (17 files), tsc clean, build clean.
 - Phase 7.3 worker verify: 19/19 pass.
@@ -155,22 +158,40 @@ Phase 7.3 is verified locally. Commit and push on `phase7-approval-rules-ui`, th
 - Phase 7.3 files changed: `ApprovalRuleHealthMonitor.java` (new), `ApplicationDecisionService.java`, `ApprovalRulesController.java`, `AutomationMetrics.java`, `NotificationEvents.java`, `NotificationEventHandler.java`, `ApprovalRuleHealthMonitorTest.java` (new), `ApprovalRulesControllerTest.java`, `ApplicationDecisionServiceTest.java`, `ApplicationPipelineIT.java`, `NotificationEventHandlerTest.java`, `frontend/src/types.ts`, `ApprovalRulesPage.tsx`, `ApprovalRulesPage.test.tsx`, `ROBIN_BUILD_STATUS.md`. **No schema/migration change.**
 
 
-## Phase 8.0 Implementation: Four-Stage Dashboard and FIND Vertical Slice
+## Phase 8.0 Implementation: Architecture Audit, Workflow Dashboard and FIND Vertical Slice
 
-- Starting revision: phase7-approval-rules-ui at d57f498 (remote verified); implementation branch: phase8-find-workflow (created from that exact commit).
-- Added frontend dashboard and Jobs Feed regression tests. Rebuilt the dashboard summary around FIND / PREP / APPLY / TRACK. Each count comes from the existing authenticated API; unavailable calls are shown as unavailable rather than zero.
-- The FIND dashboard count reads the indexed jobs endpoint at limit 100 and indicates there are more results only when the response contains next_cursor. PREP uses the existing application status READY_TO_APPLY; APPLY uses pendingCount from the review queue; TRACK is explicitly labelled as application records, not confirmed submissions.
-- frontend/src/pages/JobsFeedPage.tsx now loads the source registry and supports discovery from enabled Greenhouse/Ashby sources using the existing POST /sources/{id}/health-check endpoint. This endpoint invokes the existing board connector and persists source health. Job results are refreshed after the source call, including partial-failure responses.
-- Jobs Feed now surfaces job-catalogue load failures rather than incorrectly displaying the empty-results state. Source API failures are shown separately. Search/status filters continue to use the existing /jobs endpoint parameters.
-- URL-import copy is corrected: /jobs/import-url returns RESOLUTION_PENDING and currently validates URL syntax only; it does not resolve or ingest a job. The UI no longer claims the job was imported.
-- Added frontend regression tests for API-derived stage data, source discovery and feed refresh, visible API failure, and honest URL-resolution copy.
-- Added docs/PHASE8_FIND_WORKFLOW.md with the architecture map, reused API contracts, stage classifications, deferred Phase 8.1–8.3 sequence and known limitations.
-- No backend endpoint, migration, or schema change was introduced. REAL_SUBMIT remains hard-stopped.
-- Verification limitation: the implementation environment cannot resolve github.com for a local clone and does not have the user's Windows checkout, so this session could not execute Maven, Vitest, TypeScript, worker tests or the production build. Do not label the changes verified until CI or the local checkout runs all required commands. The branch is pushed for review/CI; this is not a production deployment.
+Full architecture map, audit table, API changes, state-transition map and PREP/APPLY/TRACK specification: `docs/PHASE8_FIND_WORKFLOW.md`.
 
-### Phase 8.0 exact next steps
+- Branch `phase8-find-workflow`, parent `d57f498` (tip of `phase7-approval-rules-ui`, verified against `origin`). The branch already contained `226c750` (dashboard shell + FIND page) committed without any test run. That commit was audited and built upon, not duplicated or rewritten.
+- Audit findings fixed in this pass:
+  - `GET /jobs` and `GET /jobs/{id}` returned camelCase JSON while the frontend reads snake_case, so live cards showed no company/location/workplace/skills and the UI substituted invented values ("United Kingdom", "HYBRID", "Competitive", "£", "Recently", "FULL_TIME"). Now an explicit snake_case wire format (`JobsController.toWire`); invented fallbacks removed.
+  - Feed now carries the caller's own `match_score` / `match_recommendation` (left join on `job_matches` scoped to the caller's profile; another candidate's score cannot appear), `first_seen_at`, `last_seen_at`, `stale` (30 days, same rule the review queue uses to refuse approval), `source_name`, `source_kind`. Detail adds `removed`.
+  - Soft-deleted jobs are excluded from the feed (they already were from the review queue).
+  - `POST /sources/{id}/health-check` (the FIND Discover action; performs a live board fetch) is now in the `discovery` rate-limit bucket and refuses to fetch disabled sources.
+  - Cursor pagination ("Load more") on the FIND page using the API's `next_cursor`.
+  - Match explanation for APPLY scores no longer claims "an application was created automatically" (false since Phase 5). Existing rows keep old text until re-scored.
+  - Dashboard: FIND card shows caller-recommended count in the loaded page and real discovery status from `/sources`; PREP card states READY_TO_APPLY does not confirm documents exist and links to Applications.
+  - Job detail: freshness, source, removed/stale warnings, honest unscored/sponsorship/trace copy, links to review queue, applications and the per-job preparation section.
+- No Flyway migration. No new endpoint. CLI/MCP callers of `JobRepository.findJobs` unchanged. `REAL_SUBMIT` remains hard-stopped; nothing in this phase submits or claims submission.
 
-1. Run npm test, npx tsc -b, and npm run build in frontend/.
-2. Run mvn -B verify in backend/ and the existing worker tests.
-3. Review the diff for the dashboard and FIND source action before merging any branch.
-4. Only after all required checks pass, integrate Phase 6 and Phase 7 in the correct ancestry order. Do not enable real ATS submission in this phase.
+### Phase 8.0 files changed (on top of `226c750`)
+Backend: `JobRepository.java`, `JobsController.java`, `SourcesController.java`, `RateLimitService.java`, `JobMatchService.java`; tests `JobFeedIT.java` (new, 7 tests), `SourcesControllerTest.java` (+1 test, stubs updated for the new `enabled` column in the query), `RateLimitServiceTest.java`, `JobMatchServiceTest.java` (assertion updated to the corrected wording, plus a negative assertion).
+Frontend: `types.ts`, `components/ui.tsx` (`MatchPill`, `formatSalary`, `STALE_AFTER_DAYS`, honest `JobCard`), `JobsFeedPage.tsx`, `JobDetailPage.tsx`, `DashboardPage.tsx`; tests `JobsFeedPage.test.tsx` (+6), `DashboardPage.test.tsx` (+4), `JobDetailPage.test.tsx` (new, 6). One `226c750` test asserted copy the UI never rendered; corrected to the actual copy.
+Docs: `PHASE8_FIND_WORKFLOW.md` (rewritten), `ROBIN_BUILD_STATUS.md`.
+
+### Phase 8.0 verification (local Windows checkout)
+- Backend: `mvn -B verify` BUILD SUCCESS (6:04). Unit: 593 run, 0 failures, 0 errors, 1 skipped (`RedisConnectivityDiagnosticsTest`). Integration: 117 run, 0 failures, 0 errors, 19 skipped (all `UserDataIsolationIT`, which runs only with `-Dit.postgres.url`). Total 710. New `JobFeedIT`: 7/7. Before the `JobMatchServiceTest` assertion was updated the first full run failed 1 test (the old wording assertion); that run is superseded.
+- Frontend: `npx tsc -b` clean; `npm test` 20 files, 212 tests, 0 failures; `npm run build` clean (489 kB JS, 31.5 kB CSS).
+- Worker: `npm test` 19/19.
+
+### Phase 8.0 known limitations
+- Discovery is Greenhouse/Ashby only; `POST /jobs/import-url` is still a validated stub (`RESOLUTION_PENDING`) and the UI says so.
+- Search/filter is the existing full-text `q` + `status`; location/salary/workplace/score filters need API support first.
+- Per-candidate hard-filter reasons are not persisted (only the shared `jobs.filter_reasons`), so they are not shown.
+- `APPLICATION_SUBMITTED` can still be set by the owner transition API without evidence; TRACK (8.3) must record and label the evidence source.
+- Not deployed; not yet run through GitHub Actions.
+
+### Recommended sequence after Phase 8.0
+1. Phase 8.1 PREP: readiness derived from linked artifacts, evidence-grounded validation, master-vs-tailored diff, artifact hashes, PDFs, ATS required-field analysis.
+2. Phase 8.2 APPLY: required-answer validation, ATS field mapping, artifact-bound document selection, cross-source duplicate protection, readiness gate before approval. `REAL_SUBMIT` stays hard-stopped.
+3. Phase 8.3 TRACK: timeline UI, receipt evidence source, recruiter messages, interviews/rejection/withdrawal, failure recovery; AI email classifications labelled as inferred.

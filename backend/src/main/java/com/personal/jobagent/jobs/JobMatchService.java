@@ -255,7 +255,9 @@ public class JobMatchService {
 
         String decision = switch (recommendation) {
             case "APPLY" -> "Score " + overall + " is at or above the APPLY threshold of "
-                    + APPLY_THRESHOLD + " — an application was created automatically.";
+                    + APPLY_THRESHOLD + " — it was passed to your application decision rules, which"
+                    + " decide (by approval mode and auto-approval rules) whether it needs your review."
+                    + " A match alone never submits an application.";
             case "REVIEW" -> "Score " + overall + " is below the APPLY threshold of " + APPLY_THRESHOLD
                     + " but at or above the REVIEW threshold of " + REVIEW_THRESHOLD
                     + " — nothing was created; you decide from here.";

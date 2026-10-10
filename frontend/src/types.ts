@@ -8,7 +8,8 @@ export interface Job {
   id: string;
   source_id: string;
   external_id: string;
-  dedup_key: string;
+  /** Internal deduplication key; not part of the /jobs wire format. */
+  dedup_key?: string;
   company_id?: string;
   company_name_raw?: string;
   title: string;
@@ -31,6 +32,15 @@ export interface Job {
   status: 'DISCOVERED' | 'FILTERED_OUT' | 'ANALYSED' | 'SCORED' | 'DECIDED' | 'ARCHIVED' | 'PIPELINE_ERROR';
   first_seen_at: string;
   last_seen_at: string;
+  /** Not seen by discovery for 30+ days (same rule the review queue uses to block approval). */
+  stale?: boolean;
+  /** Soft-deleted from the catalogue; only ever true on the detail endpoint. */
+  removed?: boolean;
+  source_name?: string | null;
+  source_kind?: string | null;
+  /** The signed-in candidate's own match; null when this candidate has not scored the posting. */
+  match_score?: number | null;
+  match_recommendation?: 'APPLY' | 'REVIEW' | 'SKIP' | null;
 }
 
 export interface JobDetailResponse {

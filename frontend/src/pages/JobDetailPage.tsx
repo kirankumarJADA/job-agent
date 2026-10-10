@@ -13,9 +13,18 @@ import {
   PrimaryButton,
   SecondaryButton,
   SectionCard,
+  STALE_AFTER_DAYS,
   StatusPill,
   WorkplacePill,
+  formatSalary,
 } from '../components/ui';
+
+/** Locale date, or null when absent/unparseable — never "Invalid Date" or an invented "Recently". */
+function formatDate(value?: string | null): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toLocaleDateString();
+}
 
 /**
  * Job Details — the deepest page in the product.
@@ -121,18 +130,21 @@ export const JobDetailPage: React.FC = () => {
             <div className="min-w-0">
               <h1 className="text-2xl font-bold tracking-tight text-ink">{job.title}</h1>
               <p className="mt-1 text-base font-medium text-ink-soft">
-                {job.company_name_raw || 'Direct employer'}
+                {job.company_name_raw || 'Company not stated'}
               </p>
-              <div className="mt-4 grid grid-cols-1 gap-x-8 gap-y-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
-                <MetaItem label="Location">{job.location_raw || 'United Kingdom'}</MetaItem>
-                <MetaItem label="Workplace type">{job.remote_type || 'HYBRID'}</MetaItem>
-                <MetaItem label="Compensation">
-                  {job.salary_min
-                    ? `£${job.salary_min.toLocaleString()} – £${job.salary_max?.toLocaleString()}`
-                    : 'Competitive'}
+              {/* Every value is what the posting states; missing data is shown as missing. */}
+              <div className="mt-4 grid grid-cols-1 gap-x-8 gap-y-3 text-sm sm:grid-cols-2 xl:grid-cols-3">
+                <MetaItem label="Location">{job.location_raw || 'Not listed'}</MetaItem>
+                <MetaItem label="Workplace type">
+                  {job.remote_type && job.remote_type !== 'UNKNOWN' ? job.remote_type : 'Not stated'}
                 </MetaItem>
-                <MetaItem label="Posted">
-                  {job.posted_at ? new Date(job.posted_at).toLocaleDateString() : 'Recently'}
+                <MetaItem label="Compensation">
+                  {formatSalary(job.salary_min, job.salary_max, job.salary_currency)}
+                </MetaItem>
+                <MetaItem label="Posted">{formatDate(job.posted_at) || 'Not stated by the board'}</MetaItem>
+                <MetaItem label="Last seen by discovery">{formatDate(job.last_seen_at) || 'Unknown'}</MetaItem>
+                <MetaItem label="Source">
+                  {job.source_name ? `${job.source_name}${job.source_kind ? ` (${job.source_kind})` : ''}` : 'Unknown source'}
                 </MetaItem>
               </div>
             </div>
@@ -162,6 +174,31 @@ export const JobDetailPage: React.FC = () => {
             )}
           </div>
         </header>
+
+        {job.removed && (
+          <Alert tone="error">
+            This posting has been removed from the catalogue. It no longer appears in the Jobs Feed and should not be applied to.
+          </Alert>
+        )}
+        {!job.removed && job.stale && (
+          <Alert tone="info">
+            Discovery has not seen this posting for {STALE_AFTER_DAYS}+ days, so it may have closed. The review queue will refuse approval until the posting is refreshed by a discovery run.
+          </Alert>
+        )}
+
+        {/* Next steps in the workflow — links only to workflows that exist. */}
+        <nav aria-label="Next steps for this job" className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface px-4 py-3 text-xs shadow-card">
+          <span className="font-semibold text-ink-soft">Next steps:</span>
+          <Link to="/review-queue" className="rounded-md border border-line px-2.5 py-1 font-semibold text-ink-soft hover:border-forest-300 hover:bg-forest-50">
+            APPLY · Open review queue
+          </Link>
+          <Link to="/applications" className="rounded-md border border-line px-2.5 py-1 font-semibold text-ink-soft hover:border-forest-300 hover:bg-forest-50">
+            TRACK · Open applications
+          </Link>
+          <a href="#application-package" className="rounded-md border border-line px-2.5 py-1 font-semibold text-ink-soft hover:border-forest-300 hover:bg-forest-50">
+            PREP · Documents for this job
+          </a>
+        </nav>
 
         {/* Intelligence: description + sponsorship left, score + trace right */}
         <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
@@ -232,7 +269,7 @@ export const JobDetailPage: React.FC = () => {
                       <div key={factor} className="flex items-center justify-between text-ink-soft">
                         <span className="capitalize">{factor.replace(/_/g, ' ')}</span>
                         <span className="font-mono font-semibold text-ink">
-                          {match.breakdown?.[factor] ?? '—'} pts
+                          {match.breakdown?.[factor] != null ? `${match.breakdown[factor]}%` : '—'}
                         </span>
                       </div>
                     ))}
@@ -267,7 +304,7 @@ export const JobDetailPage: React.FC = () => {
                 <div className="rounded-lg border border-dashed border-line bg-cream-50 p-4 text-center">
                   <span className="text-2xl font-bold text-ink-faint">— / 100</span>
                   <p className="mt-2 text-xs leading-relaxed text-ink-muted">
-                    Scoring runs in Phase 3 after the rule-filtering gate.
+                    Not scored for you yet. Matching runs automatically after discovery when the posting passes your hard filters; a posting your filters reject is not scored.
                   </p>
                 </div>
               )}
@@ -300,7 +337,7 @@ export const JobDetailPage: React.FC = () => {
                 </div>
               ) : (
                 <p className="text-xs leading-relaxed text-ink-muted">
-                  Sponsorship evaluation fuses the Home Office register with JD analysis in Phase 3.
+                  No sponsorship analysis is available for this posting.
                 </p>
               )}
             </SectionCard>
@@ -321,7 +358,7 @@ export const JobDetailPage: React.FC = () => {
                 </ol>
               ) : (
                 <p className="text-xs leading-relaxed text-ink-muted">
-                  Decision steps are logged idempotently as each filter evaluates the job.
+                  No decision trace is returned for this posting yet.
                 </p>
               )}
             </SectionCard>
@@ -329,7 +366,7 @@ export const JobDetailPage: React.FC = () => {
         </div>
 
         {/* Application package — full width so documents are readable */}
-        <div className="space-y-4">
+        <div id="application-package" className="space-y-4">
           <PageHeader
             eyebrow="Application package"
             title="Apply with preparation"
