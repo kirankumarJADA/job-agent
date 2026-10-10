@@ -83,6 +83,12 @@ public class ApplicationAnswerController {
         }
 
         UUID profileId = currentProfileId();
+        // The application id comes from the request body: it must be the
+        // caller's own application for this job, or the answer could be
+        // attached to another account's application.
+        if (!answerRepository.applicationBelongs(profileId, body.jobId(), body.applicationId())) {
+            return notFound(request, "Application not found for this job");
+        }
         ApplicationAnswerService.AnswerResult result = answerService.draftAnswer(profileId, body.jobId(), body.applicationId(), body.questionText());
 
         auditLogWriter.write(new AuditEntry(
