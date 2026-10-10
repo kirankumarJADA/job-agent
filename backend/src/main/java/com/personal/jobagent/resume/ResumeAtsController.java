@@ -31,14 +31,17 @@ public class ResumeAtsController {
     private final ResumeAtsRepository repository;
     private final CvComparisonService comparison;
     private final AuditLogWriter audit;
+    private final com.personal.jobagent.apply.ApplyPackageGuard packageGuard;
 
     public ResumeAtsController(ResumeAtsIntelligenceService service, ProfileRepository profiles,
-                               ResumeAtsRepository repository, CvComparisonService comparison, AuditLogWriter audit) {
+                               ResumeAtsRepository repository, CvComparisonService comparison, AuditLogWriter audit,
+                               com.personal.jobagent.apply.ApplyPackageGuard packageGuard) {
         this.service = service;
         this.profiles = profiles;
         this.repository = repository;
         this.comparison = comparison;
         this.audit = audit;
+        this.packageGuard = packageGuard;
     }
 
     public record Request(UUID jobId, UUID applicationId) {}
@@ -130,6 +133,10 @@ public class ResumeAtsController {
         }
         String digest = check.map(ResumeAtsRepository.ArtifactCheck::actualSha256).orElse("");
         repository.saveReview(profileId, cvVersionId, body.approved(), actor(), digest == null ? "" : digest);
+        // Phase 8.2: a CV review (granted or withdrawn) changes which exact
+        // version an execution package may carry, so any approved package is
+        // re-evaluated instead of silently keeping a stale approval.
+        packageGuard.cvReviewChanged(profileId, cvVersionId);
         audit.write(new AuditEntry(actor(), body.approved() ? "TAILORED_CV_APPROVED" : "TAILORED_CV_APPROVAL_WITHDRAWN",
                 "CV", cvVersionId, Map.of(), Map.of("approved", body.approved(), "content_sha256", digest == null ? "" : digest),
                 request.getRemoteAddr(), UuidV7.generate()));

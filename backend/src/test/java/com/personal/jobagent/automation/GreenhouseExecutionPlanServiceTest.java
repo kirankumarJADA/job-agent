@@ -95,7 +95,9 @@ class GreenhouseExecutionPlanServiceTest {
             String expectedUrl, List<Map<String, Object>> fields, List<Map<String, Object>> gaps) {
         return new ExecutionPackageService.ExecutionPackage(PLAN, APPLICATION, JOB, expectedUrl,
                 Map.of(), null, null, List.of(), List.of(), fields, List.of(), List.of(), gaps,
-                AutomationPlan.SAFETY_CONTRACT);
+                AutomationPlan.SAFETY_CONTRACT,
+                new java.util.LinkedHashMap<>(Map.of("coverLetterRequirement", "UNKNOWN")),
+                "digest");
     }
 
     private static Map<String, Object> field(String key, String type, String classification,

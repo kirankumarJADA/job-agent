@@ -87,7 +87,24 @@ public class ReviewQueueController {
         if (!decisions.transition(profileId, id, current, "APPROVED", actor, "Approved by candidate")) {
             return ResponseEntity.status(409).body(Map.of("error", "review state changed"));
         }
-        var created = pipeline.createApplicationFromMatch(profileId, (UUID) item.get("jobId"));
+        ApplicationPipelineService.CreatedApplication created;
+        try {
+            created = pipeline.createApplicationFromMatch(profileId, (UUID) item.get("jobId"));
+        } catch (com.personal.jobagent.apply.DuplicateApplicationException duplicate) {
+            // Cross-source duplicate protection: the candidate already has an
+            // application for this role. The approval is rolled back and the
+            // existing record is identified only to its owner.
+            decisions.transition(profileId, id, "APPROVED", current, null, null);
+            audit.write(new AuditEntry(actor, "DUPLICATE_APPLICATION_DETECTED", "APPLICATION_DECISION", id,
+                    Map.of("decision", current),
+                    Map.of("duplicateApplicationId", duplicate.existingApplicationId().toString(),
+                            "matchReason", duplicate.matchReason()),
+                    request.getRemoteAddr(), UuidV7.generate()));
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "you already have an application for this role: " + duplicate.matchReason(),
+                    "code", "DUPLICATE_APPLICATION",
+                    "duplicateApplicationId", duplicate.existingApplicationId().toString()));
+        }
         if (created == null || created.applicationId() == null) {
             decisions.transition(profileId, id, "APPROVED", current, null, null);
             return ResponseEntity.status(409).body(Map.of("error", "application could not be created"));

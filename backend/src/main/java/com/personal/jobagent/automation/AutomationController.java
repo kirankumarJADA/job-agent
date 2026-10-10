@@ -53,6 +53,8 @@ public class AutomationController {
     private final String workerToken;
     private final NotificationService notifications;
     private final AutomationMetrics metrics;
+    private final com.personal.jobagent.apply.ApplyReadinessService applyReadiness;
+    private final ApplyDocumentSelector documentSelector;
 
     public AutomationController(AutomationPlanRepository plans,
                                 AuditLogWriter audit,
@@ -60,7 +62,9 @@ public class AutomationController {
                                 @Value("${app.worker-event-token:}") String workerToken,
                                 ExecutionPackageService executionPackages,
                                 NotificationService notifications,
-                                AutomationMetrics metrics) {
+                                AutomationMetrics metrics,
+                                com.personal.jobagent.apply.ApplyReadinessService applyReadiness,
+                                ApplyDocumentSelector documentSelector) {
         this.plans = plans;
         this.audit = audit;
         this.ownerContext = ownerContext;
@@ -68,6 +72,8 @@ public class AutomationController {
         this.executionPackages = executionPackages;
         this.notifications = notifications;
         this.metrics = metrics;
+        this.applyReadiness = applyReadiness;
+        this.documentSelector = documentSelector;
     }
 
     public record CreateRequest(UUID applicationId, UUID jobId, String targetUrl, String idempotencyKey, List<AutomationPlan.Step> steps) {}
@@ -147,6 +153,36 @@ public class AutomationController {
         if (plan == null || !"AWAITING_APPROVAL".equals(plan.status())) {
             return ResponseEntity.status(409).body(Map.of(
                     "error", "approval requires a validated plan awaiting human review"));
+        }
+        // Phase 8.2: approval re-runs the server-side readiness gate over the
+        // CURRENT records. A stale frontend state cannot bypass a blocker, and
+        // a refusal names the blockers instead of a generic error.
+        UUID profileId = ownerContext.profileIdOrNull();
+        Map<String, Object> state;
+        try {
+            state = applyReadiness.evaluate(profileId, plan.applicationId());
+        } catch (java.util.NoSuchElementException e) {
+            return notFound();
+        } catch (com.personal.jobagent.apply.ApplyReadinessService.ReadinessUnavailableException e) {
+            return ResponseEntity.status(503).body(Map.of(
+                    "availability", "UNAVAILABLE", "reason", e.getMessage(),
+                    "message", "Preparation state could not be verified, so nothing was approved."));
+        }
+        if (!Boolean.TRUE.equals(state.get("packageReady"))) {
+            audit.write(new AuditEntry(ownerContext.actorOr("user"), "GREENHOUSE_SUBMIT_APPROVAL_REFUSED",
+                    "AUTOMATION_PLAN", id, null,
+                    Map.of("blockers", state.get("blockers")), null, UuidV7.generate()));
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "the application is not ready for approval",
+                    "code", "APPLY_NOT_READY",
+                    "blockers", state.get("blockers")));
+        }
+        String drift = packageDrift(plan, profileId);
+        if (drift != null) {
+            audit.write(new AuditEntry(ownerContext.actorOr("user"), "GREENHOUSE_SUBMIT_APPROVAL_REFUSED",
+                    "AUTOMATION_PLAN", id, null,
+                    Map.of("reason", drift), null, UuidV7.generate()));
+            return ResponseEntity.status(409).body(Map.of("error", drift, "code", "PACKAGE_DRIFT"));
         }
         String rejection = approvalPrecondition(plan);
         if (rejection != null) {
@@ -355,6 +391,52 @@ public class AutomationController {
         }
         if (bytes == null || !s.equals(bytes.sha256())) {
             return "the " + kind + " artifact checksum does not match the stored version";
+        }
+        return null;
+    }
+
+    /**
+     * Phase 8.2: the package is a snapshot of exact document versions and
+     * confirmed answers. If anything it carries moved underneath it — document
+     * replacement, approval withdrawal, an edited or unconfirmed answer — the
+     * approval statement is no longer true and the plan must be rebuilt and
+     * re-reviewed. Returns null while the package still matches its records.
+     */
+    private String packageDrift(AutomationPlanRepository.PlanRow plan, UUID profileId) {
+        Map<String, Object> stored = plan.plan() == null ? Map.of() : plan.plan();
+        Map<String, Object> pkg = asObjectMap(stored.get("package"));
+        Map<String, Object> correlation = asObjectMap(stored.get("correlation"));
+        UUID applicationId = uuid(correlation.get("applicationId"));
+        UUID jobId = uuid(correlation.get("jobId"));
+        if (applicationId == null || jobId == null) return "plan correlation is incomplete";
+        ApplyDocumentSelector.DocumentSelection selection = documentSelector.select(profileId, jobId, applicationId);
+        if (selection.blocked()) {
+            Object first = selection.blockers().isEmpty() ? null : selection.blockers().get(0).get("message");
+            return "the package's documents are no longer usable: " + first;
+        }
+        Map<String, Object> cv = asObjectMap(pkg.get("cv"));
+        if (!cv.isEmpty()) {
+            if (selection.cv() == null) {
+                return "the CV in this package is no longer selected for this application; rebuild the package";
+            }
+            if (!String.valueOf(selection.cv().versionId()).equals(cv.get("versionId"))) {
+                return "the CV attached to this package is no longer the reviewed version; rebuild the package";
+            }
+        }
+        Map<String, Object> cover = asObjectMap(pkg.get("coverLetter"));
+        if (!cover.isEmpty()) {
+            if (selection.coverLetter() == null) {
+                return "the cover letter in this package is no longer approved for this application; rebuild the package";
+            }
+            if (!String.valueOf(selection.coverLetter().versionId()).equals(cover.get("versionId"))) {
+                return "the cover letter in this package is no longer the approved version; rebuild the package";
+            }
+        }
+        List<Map<String, Object>> packagedAnswers = pkg.get("answers") instanceof List<?> list
+                ? list.stream().filter(o -> o instanceof Map).map(this::asObjectMap).toList()
+                : List.of();
+        if (!executionPackages.answersStillCurrent(profileId, applicationId, jobId, packagedAnswers)) {
+            return "an answer in this package has changed since it was built; rebuild the package";
         }
         return null;
     }

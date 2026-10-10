@@ -168,7 +168,10 @@ public final class GreenhouseFieldMapper {
             return new FieldOutcome(HUMAN, null, null, "sponsorship question — policy data is not an answer");
         }
 
-        if (answered != null) return new FieldOutcome(AUTO, answered, "application_answers (ANSWERED)", null);
+        // answeredValue only returns ANSWERED, human-confirmed, non-empty
+        // answers, so the provenance label is exactly the guarantee upstream
+        // consumers check before trusting a question value.
+        if (answered != null) return new FieldOutcome(AUTO, answered, "application_answers (human-confirmed)", null);
         if ("NEEDS_USER_INPUT".equals(answerStatus)) {
             return new FieldOutcome(HUMAN, null, null, "draft answer needs user input");
         }

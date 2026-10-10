@@ -305,12 +305,14 @@ class UserDataIsolationTest {
 
     private CoverLetterController coverLetterController(CoverLetterRepository repository) {
         return new CoverLetterController(mock(CoverLetterService.class), repository,
-                profileRepository(), mock(AuditLogWriter.class));
+                profileRepository(), mock(AuditLogWriter.class),
+                mock(com.personal.jobagent.apply.ApplyPackageGuard.class));
     }
 
     private ApplicationAnswerController answerController(ApplicationAnswerRepository repository) {
         return new ApplicationAnswerController(mock(ApplicationAnswerService.class), repository,
-                profileRepository(), mock(AuditLogWriter.class));
+                profileRepository(), mock(AuditLogWriter.class),
+                mock(com.personal.jobagent.apply.ApplyPackageGuard.class));
     }
 
     private ProfileRepository profileRepository() {

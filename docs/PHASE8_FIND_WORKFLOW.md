@@ -329,3 +329,192 @@ version, verified download), screening answers (draft for the linked application
 - CVs and letters created before 8.1 keep their old artifacts; readiness marks such CVs
   `LEGACY_UNVALIDATED` and the old CV PDFs are not readable.
 - Nothing in PREP submits an application. `REAL_SUBMIT` stays hard-stopped.
+
+## 11. Phase 8.2 — APPLY: reviewable execution workflow
+
+Branch `phase8.2-apply-workflow`, parent `e389809` (tip of `phase8.1-prep-workflow`). Nothing here
+is deployed, merged, or able to submit an application. `REAL_SUBMIT` remains hard-stopped.
+
+### 11.1 The five states, never conflated
+
+1. A job was **discovered** (`jobs` row).
+2. An **application record** was created (owner-scoped `applications` row).
+3. An **execution package** exists whose documents and answers are valid (exact versions selected,
+   every check green).
+4. That package was **approved** for the next step (`submit_approved`, `READY_TO_SUBMIT`).
+5. A **submission confirmed by trustworthy evidence** — unreachable in this phase.
+
+`READY_TO_APPLY` (an application pipeline status) is evidence of none of the above; the readiness
+payload says so in its `note`, and no UI state claims a submission.
+
+### 11.2 Document selection is fail-closed (`ApplyDocumentSelector`)
+
+The known Phase 8.1 defect is fixed: `ExecutionPackageService` used to attach the newest cover
+letter for the application regardless of approval. Selection is now exact, immutable and
+version-bound; the package records the chosen IDs, versions and digests, and the plan JSON is
+checksum-bound (`packageDigest`), so a package is reproducible and tamper-evident.
+
+**CV requirements** (all must hold; any failure blocks, nothing is substituted):
+belongs to the caller and the correct job/application; it is the exact version the user reviewed
+(`cv_version_reviews`); the review is bound to the CV's current content digest; the stored PDF
+bytes match the recorded SHA-256; its validation is current (`DocumentFactValidator.VERSION`) and
+passing. A missing review (`CV_REVIEW_REQUIRED`), failed integrity check
+(`CV_ARTIFACT_INTEGRITY_FAILED`), legacy-unvalidated CV (`CV_LEGACY_UNVALIDATED`), stale validator
+(`CV_STALE_VALIDATION`) or digest mismatch (`CV_REVIEW_DIGEST_MISMATCH`) blocks the package. A newer
+CV never displaces a reviewed one silently: it is reported as a warning (`NEWER_CV_NOT_USED`) and
+the replacement must be reviewed to be used.
+
+**Cover-letter requirements**: belongs to the caller/job/application; explicitly approved; current
+validation acceptable; body content matches its digest and the rendered PDF matches its recorded
+digest. Unapproved, changed, integrity-failed or stale-validated letters are rejected
+(`COVER_LETTER_NOT_APPROVED`, `COVER_LETTER_CHECKSUM_MISMATCH`, …); there is no fallback to a
+newest or previous letter. When the employer's requirement is unknown it is represented as
+`UNKNOWN` — never invented, never claimed complete.
+
+### 11.3 Pre-approval readiness gate (`ApplyReadinessService`, one model)
+
+Before any approval the current preparation state is re-derived from the underlying records —
+ownership of job/application/CV/letter/answers, job↔application association, the reviewed CV
+version and digest, cover-letter requirement and approval state, current validation and file
+integrity, required screening questions and confirmed answers, duplicate detection, approval-rule
+decision, quota and review-queue state, and what has not been checked at all. The result separates
+**blockers** (hard), **warnings** and **unknowns**; a database or dependency failure returns an
+explicit `UNAVAILABLE` outcome (HTTP 503) — never a false "ready" and never a false "blocked".
+There is no second readiness model and no parallel status table: PREP readiness
+(`PrepReadinessService`) stays the preparation view; APPLY readiness is the approval gate.
+
+### 11.4 API surface (Phase 8.2)
+
+| Method | Path | Behaviour |
+|---|---|---|
+| GET | `/api/v1/apply/applications/{id}/readiness` | Owner-scoped readiness, recomputed per request (never cached). Foreign id → 404. Dependency failure → 503 `UNAVAILABLE`. |
+| POST | `/api/v1/apply/applications/{id}/package` | Runs the readiness gate again server-side (stale UI cannot bypass a blocker), then selects exact documents and creates the execution plan. Refusal → 409 with `blockers`, `warnings`, `unknowns` and an audit entry (`APPLY_PACKAGE_REFUSED`). |
+| POST | `/api/v1/automation/plans/{id}/approve-submit` | Re-runs the readiness gate, then package-drift and artifact-integrity preconditions. Confirms `READY_TO_SUBMIT` + `submissionEnabled: false` only on success. |
+| PUT | `/api/v1/application-answers/{id}` | Candidate answer confirmation/editing; invalidates any approved package that carried it. |
+
+**Approval invalidation** (`ApplyPackageGuard`): any CV review grant/withdrawal, cover-letter
+change, or answer edit withdraws an approved package and returns the plan to `AWAITING_APPROVAL`,
+with a `PACKAGE_APPROVAL_INVALIDATED` audit entry. Re-approval is additionally refused while the
+package has drifted from current records (`PACKAGE_DRIFT`), so a stale approval can never be reused.
+
+### 11.5 Employer questions and form-field mapping
+
+`job_form_questions` stores what a **real, read-only inspection** of the employer's application
+form exposed, with provenance (`source`, `form_url`, `capture_status`, `captured_at`): the stable
+control key, question text, answer type, statically-present options, and required-ness as an
+evidence-backed tri-state — `REQUIRED` (required attribute, `aria-required="true"`, the label's `*`
+marker, or Greenhouse's hidden required-input mirror), `OPTIONAL` (an explicit `(optional)` /
+`aria-required="false"` marker, or a labelled field wrapper rendered without the mirror), and
+`UNKNOWN` when the form supplied no metadata. Absent metadata is never assumed optional
+(`GreenhouseAdapter.requiredness`; cross-field mirrors can never mark a sibling field required).
+Answers bind to the captured question (`application_answers.form_question_id`) and carry
+`answer_origin` (`MODEL_DRAFT` / `CANDIDATE_CONFIRMED` / `CANDIDATE_EDITED`); only
+candidate-confirmed answers are eligible for automatic mapping, and required questions without one
+block approval.
+
+**Honest capability limit.** Only Greenhouse public board forms are inspectable today (static
+HTML; JavaScript-rendered forms report `UNAVAILABLE`). Ashby and the secondary providers expose
+job descriptions but not the application form; for those jobs the form is simply not captured and
+readiness reports the questions and the cover-letter requirement as **unknown**. No employer
+question is fabricated, no field is inferred optional, and no form-field mapping is invented. The
+`AtsAdapter.FormDescriptor`/`JobFormQuestionService.capture` seam is the safe extension point for
+future form capture; no ATS adapter pretends to support application APIs it does not implement.
+
+### 11.6 Duplicate-application semantics (cross-source, race-safe)
+
+Identity is derived from the strongest signals actually available, in order: board/embedded
+requisition identity (`greenhouse:<org>:<requisition>`, `ashby:<org>:<id>` from the
+canonical/application URL), then the normalised URL (tracking-only parameters — `utm_*`, `gclid`,
+`fbclid`, `ref`, `source`, … — stripped, case-normalised host, no fragment, no trailing slash),
+then `src:<kind>:<externalId>`. Titles are never used: different roles with the same title stay
+distinct, and one requisition seen through two boards is one role. Unknown identity (`NULL` key)
+never matches anything. Enforcement is in the persistence layer: the partial unique index
+`applications_profile_identity_live_uq` on `(profile_id, identity_key)` where the application is
+live, so under concurrent creation exactly one application commits and the loser receives a clear
+duplicate/conflict response. The existing application is identified only to its owner. Repeated
+requests reuse the existing idempotency keys and never create duplicate packages or approvals.
+Legacy rows keep a `NULL` key and are matched on the fly, owner-scoped.
+
+### 11.7 Migration V036 (additive only)
+
+`V036__apply_selection_and_duplicates.sql`:
+1. `job_form_questions` (job-scoped capture with provenance, `unique (job_id, source, question_key)`).
+2. `application_answers.form_question_id` (nullable FK, `on delete set null`) and `answer_origin`
+   (check `MODEL_DRAFT|CANDIDATE_CONFIRMED|CANDIDATE_EDITED`, default `MODEL_DRAFT` — existing rows
+   keep their honest "draft" meaning).
+3. `applications.identity_key` (nullable) + the partial unique index above. No column changes
+   meaning, no data is rewritten, pre-8.1 rows are unaffected.
+
+### 11.8 State transitions and submission safety
+
+Only `AWAITING_APPROVAL` plans can be approved (→ `READY_TO_SUBMIT`); a worker request can never
+approve (`403 human approval is required`); `CLICK`/`MOCK_SUBMIT`/`REAL_SUBMIT` steps make a plan
+unapprovable; no endpoint transitions anything to `SUBMITTED`. Queued or retried work revalidates
+ownership, approval, document digests and package state before acting. Approval records intent
+only — `submissionEnabled` is always `false`, and no submission receipt is fabricated; a future
+receipt must name its evidence source and be distinguishable from inferred evidence (TRACK, 8.3).
+
+### 11.9 Phase 8.2 verification
+
+- Backend `mvn -B -o verify` with `-Dit.postgres.url` pointed at a real PostgreSQL 16:
+  **BUILD SUCCESS**. Unit **657 run, 0 failures, 0 errors, 1 skipped** (the skipped test is
+  `RedisConnectivityDiagnosticsTest`, which skips itself when local Docker Redis is unreachable).
+  Integration **132 run, 0 failures, 0 errors, 0 skipped** — `UserDataIsolationIT` (19 tests) ran
+  for real this phase via the `it.postgres.url` property and is not being counted from a skip.
+- `ApplyWorkflowIT` (Testcontainers PostgreSQL, 9 tests): package creation and approval with real
+  persisted records; an unreviewed CV blocks package creation; an answer edit or a CV-review
+  withdrawal invalidates an approved package and re-approval is refused; a cross-source duplicate
+  is refused with 409 and identified only to its owner; concurrent creation commits exactly one
+  application (persistence-layer unique index); tracking-only query parameters are not distinct
+  roles; another user's application is invisible (reads as nonexistent).
+- `AutomationLifecycleIT` 4/4 (validation → review → explicit approval → `READY_TO_SUBMIT`,
+  submission impossible; anti-bot terminal stop; stale-plan reclaim), `PrepWorkflowIT` 6/6,
+  `ApplicationPipelineIT` 9/9, `ReviewQueueIT` 8/8, `DiscoveryToApplicationIT` 3/3,
+  `CrossFeatureIntegrationIT` 2/2, `JobFeedIT` 7/7 and the remaining ITs green in the same run.
+- Frontend: `npx tsc -b` clean; `npm test` 24 files, **240 tests, 0 failures** (11 new
+  `ApplyWorkspace` tests); `npm run build` clean (Vite repeats its >500 kB chunk-size warning; not
+  an error).
+- Worker: `npm test` 19/19, including "Greenhouse human review never transitions to submission and
+  no submit step is allowed" and the policy-gate suite.
+
+**Defects found and fixed while proving the flow (not test accommodations):**
+- `GreenhouseFieldMapper` labelled confirmed answers `application_answers (ANSWERED)` while every
+  consumer (package builder, plan builder) trusts `application_answers (human-confirmed)`, so a
+  candidate-confirmed answer never counted as a safe value and could not become a fill step.
+- `ExecutionPackageService` listed every required employer question as a permanent human-required
+  gap even when a candidate-confirmed answer was safely mapped; a gap now means "no safe value",
+  and approval still refuses while any gap remains.
+- `GreenhouseAdapter` ignored the label's `*` required marker on non-radio fields, so
+  `work_auth`-style fields were misread as optional.
+
+**Test repairs (fixtures modernised to the strengthened contract; assertions unchanged or
+strengthened):**
+- `ApplyWorkflowIT`'s fixture form is now the real Greenhouse field-wrapper shape (required fields
+  carry the hidden required-input mirror or the label's `*` marker), each test uses its own
+  requisition URL so duplicate protection does not cross-contaminate scenarios, and the readiness
+  case asserts both the pre-capture UNKNOWN state and the post-capture provenance. The previous
+  flat fixture could not express required-ness at all, and its expectation that an unmarked field
+  is `REQUIRED` was unsound: required-ness is captured as evidence and a field with no metadata is
+  `UNKNOWN`, never assumed optional.
+- `AutomationLifecycleIT` seeds one requisition URL per scenario (Phase 8.2 duplicate protection
+  correctly refuses a second application for one requisition) and a genuinely reviewed CV
+  (validation plus a digest-bound review), which the Phase 8.2 approval gate requires.
+
+### 11.10 Remaining risks and known limitations (APPLY)
+
+- Employer-form capture covers Greenhouse public board forms only; Ashby/secondary sources report
+  the form as not captured and readiness reports questions and the cover-letter requirement as
+  UNKNOWN. JavaScript-rendered forms cannot be inspected (`capture_status = UNAVAILABLE`).
+- Required-ness is UNKNOWN for controls with no field-scoped metadata; the UI renders that as
+  unknown, not optional.
+- A plan reaches `AWAITING_APPROVAL` only after a validation report (worker `complete` with
+  `HUMAN_REQUIRED`); the worker suite covers the report path, the browser run is Phase 8.3/ops.
+- PDF limitations from 8.1 persist (single typeface, no CJK/emoji).
+- Not deployed; not merged; CI on the branch is pending.
+
+### 11.11 REAL_SUBMIT
+
+`REAL_SUBMIT` remains hard-stopped. No endpoint submits an application, no browser automation
+submits anything, no employer-side mutation exists, `submissionEnabled` is always `false`, no
+submission receipt is fabricated, and worker requests can never grant submission approval.
+
