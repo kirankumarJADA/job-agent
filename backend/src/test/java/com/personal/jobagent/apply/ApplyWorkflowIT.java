@@ -363,6 +363,83 @@ class ApplyWorkflowIT {
                         "https://boards.greenhouse.io/fixtureco/jobs/88?gclid=abc")));
     }
 
+    // ── idempotent retries ───────────────────────────────────────────
+
+    @Test
+    void repeatedRequestsCreateNeitherDuplicatePackagesNorDuplicateApprovals() throws Exception {
+        UUID applicationId = seedApplication("apply-idem", fixtureUrl(107));
+        seedReviewedCv(applicationId, "apply-idem");
+        seedApprovedLetter(applicationId, 1, "I would love to join Fixture Co.");
+        seedConfirmedAnswer(applicationId, "apply-idem", "Why do you want to join?", "For the challenge.");
+
+        // A client retry of the package request reuses the identical plan —
+        // one application, one package, one plan row.
+        UUID first = packageId(applicationId);
+        UUID retry = packageId(applicationId);
+        assertThat(retry).as("a retried request reuses the identical plan").isEqualTo(first);
+        Integer planCount = jdbc.queryForObject(
+                "select count(*) from automation_plans where application_id = ?", Integer.class, applicationId);
+        assertThat(planCount).isEqualTo(1);
+
+        // A retried approval does not double-approve: the second attempt finds
+        // no plan awaiting approval, is refused, and the single approval stands.
+        jdbc.update("update automation_plans set status = 'AWAITING_APPROVAL' where id = ?", first);
+        mvc.perform(post("/api/v1/automation/plans/{id}/approve-submit", first).with(csrf()).session(session))
+                .andExpect(status().isOk());
+        mvc.perform(post("/api/v1/automation/plans/{id}/approve-submit", first).with(csrf()).session(session))
+                .andExpect(status().isConflict());
+        Map<String, Object> plan = jdbc.queryForMap(
+                "select status, submit_approved from automation_plans where id = ?", first);
+        assertThat(plan.get("submit_approved")).isEqualTo(true);
+        assertThat(plan.get("status")).isEqualTo("READY_TO_SUBMIT");
+    }
+
+    private UUID packageId(UUID applicationId) throws Exception {
+        MvcResult created = mvc.perform(post("/api/v1/apply/applications/{id}/package", applicationId)
+                        .with(csrf()).session(session))
+                .andExpect(status().isOk()).andReturn();
+        return UUID.fromString(json.readTree(created.getResponse().getContentAsString())
+                .get("planId").asText());
+    }
+
+    // ── persistence-layer constraints ────────────────────────────────
+
+    @Test
+    void theLiveIdentityUniquenessIsADatabaseConstraintAndViolationsRollBack() {
+        UUID jobA = seedJob("apply-constraint-a", "https://boards.greenhouse.io/fixtureco/jobs/108");
+        UUID jobB = seedJob("apply-constraint-b", "https://job-boards.greenhouse.io/fixtureco/jobs/108");
+        UUID winner = seedApplicationForJob(jobA);
+        String identityKey = jdbc.queryForObject(
+                "select identity_key from applications where id = ?", String.class, winner);
+
+        // A second live row for the same role — seen through another board row —
+        // is a database constraint violation, and the failed statement rolls
+        // back completely. This is the persistence layer, not frontend code.
+        assertThatThrownBy(() -> insertApplicationFrom(winner, jobB, identityKey))
+                .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+        Integer live = jdbc.queryForObject(
+                "select count(*) from applications where profile_id = ? and identity_key = ?",
+                Integer.class, devProfile, identityKey);
+        assertThat(live).as("the rolled-back violation left exactly one live application").isEqualTo(1);
+
+        // The same insert with a different identity succeeds: the violation
+        // above was the uniqueness rule, not the row shape.
+        insertApplicationFrom(winner, jobB, "greenhouse:fixtureco:constraint-sentinel-108");
+
+        // The index covers LIVE applications only: after a withdrawal, a new
+        // application for the same role is legitimate.
+        jdbc.update("update applications set status = 'WITHDRAWN' where id = ?", winner);
+        insertApplicationFrom(winner, seedJob("apply-constraint-c", fixtureUrl(109)), identityKey);
+    }
+
+    /** Raw insert copying owner and mode from a template row — bypasses every service guard on purpose. */
+    private void insertApplicationFrom(UUID templateRowId, UUID jobId, String identityKey) {
+        jdbc.update("""
+                insert into applications (id, job_id, profile_id, mode, identity_key, status)
+                select ?, ?, profile_id, mode, ?, 'READY_TO_APPLY' from applications where id = ?
+                """, UuidV7.generate(), jobId, identityKey, templateRowId);
+    }
+
     // ── owner isolation ──────────────────────────────────────────────
 
     @Test

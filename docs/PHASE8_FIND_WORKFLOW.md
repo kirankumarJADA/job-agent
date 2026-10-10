@@ -459,14 +459,21 @@ receipt must name its evidence source and be distinguishable from inferred evide
 - Backend `mvn -B -o verify` with `-Dit.postgres.url` pointed at a real PostgreSQL 16:
   **BUILD SUCCESS**. Unit **657 run, 0 failures, 0 errors, 1 skipped** (the skipped test is
   `RedisConnectivityDiagnosticsTest`, which skips itself when local Docker Redis is unreachable).
-  Integration **132 run, 0 failures, 0 errors, 0 skipped** — `UserDataIsolationIT` (19 tests) ran
+  Integration **134 run, 0 failures, 0 errors, 0 skipped** — `UserDataIsolationIT` (19 tests) ran
   for real this phase via the `it.postgres.url` property and is not being counted from a skip.
-- `ApplyWorkflowIT` (Testcontainers PostgreSQL, 9 tests): package creation and approval with real
+- `ApplyWorkflowIT` (Testcontainers PostgreSQL, 11 tests): package creation and approval with real
   persisted records; an unreviewed CV blocks package creation; an answer edit or a CV-review
   withdrawal invalidates an approved package and re-approval is refused; a cross-source duplicate
   is refused with 409 and identified only to its owner; concurrent creation commits exactly one
-  application (persistence-layer unique index); tracking-only query parameters are not distinct
-  roles; another user's application is invisible (reads as nonexistent).
+  application (persistence-layer unique index); a retried package request reuses the identical
+  plan and a retried approval does not double-approve; the live-identity uniqueness is enforced by
+  a database constraint and a violating insert rolls back (a withdrawal legitimately frees the
+  identity); tracking-only query parameters are not distinct roles; another user's application is
+  invisible (reads as nonexistent).
+- Two intermediate full runs reported `UserDataIsolationIT` 19 errors each before the green run
+  above: both pointed `it.postgres.url` at the host's native PostgreSQL on port 5432 instead of
+  the test container (published on 55432) and failed password authentication. No test or code was
+  changed to hide the failure; the connection target was corrected and the whole suite re-run.
 - `AutomationLifecycleIT` 4/4 (validation → review → explicit approval → `READY_TO_SUBMIT`,
   submission impossible; anti-bot terminal stop; stale-plan reclaim), `PrepWorkflowIT` 6/6,
   `ApplicationPipelineIT` 9/9, `ReviewQueueIT` 8/8, `DiscoveryToApplicationIT` 3/3,
