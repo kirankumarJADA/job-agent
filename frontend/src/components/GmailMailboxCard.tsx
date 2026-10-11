@@ -30,7 +30,7 @@ export const GmailMailboxCard: React.FC = () => {
     setNotice(null);
     // Full-page redirect to Google's consent screen; the callback returns to
     // /applications?track&gmail=<status>.
-    window.location.href = `${API_BASE.replace(/\/api\/v1$/, '')}/integrations/gmail/authorize`;
+    window.location.href = gmailAuthorizeUrl(API_BASE);
   }, []);
 
   const sync = useCallback(async () => {
