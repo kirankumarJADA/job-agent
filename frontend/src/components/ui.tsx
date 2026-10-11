@@ -421,7 +421,7 @@ export const JobCard: React.FC<{
     job.location_raw || 'Location not listed',
     formatSalary(job.salary_min, job.salary_max, job.salary_currency),
     seen ? `Last seen ${seen}` : null,
-    job.source_name ? `via ${job.source_name}` : null,
+    // No "via <source>": candidates are never told which site or ATS surfaced a job.
   ].filter((segment): segment is string => segment !== null);
 
   return (

@@ -29,6 +29,7 @@ public class JobsController {
     private final JobSeedService jobSeedService;
     private final com.personal.jobagent.security.OwnerContext ownerContext;
     private final com.personal.jobagent.application.ApplicationPipelineService pipeline;
+    private com.personal.jobagent.discovery.platform.BoardImportService boardImport;
 
     public JobsController(JobRepository jobRepository,
                           @org.springframework.beans.factory.annotation.Autowired(required = false) JobSeedService jobSeedService,
@@ -38,6 +39,11 @@ public class JobsController {
         this.jobSeedService = jobSeedService;
         this.ownerContext = ownerContext;
         this.pipeline = pipeline;
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void setBoardImport(com.personal.jobagent.discovery.platform.BoardImportService boardImport) {
+        this.boardImport = boardImport;
     }
 
     /**
@@ -107,13 +113,19 @@ public class JobsController {
      * The shared {@code jobs.filter_reasons} column is deliberately NOT exposed:
      * it is written by whichever candidate's hard filters ran first, so it is not
      * this caller's result.
+     *
+     * <p>Source hiding (Phase 8.2.5): this is a CANDIDATE view, so nothing that
+     * reveals which website, ATS platform or aggregator surfaced the posting is
+     * included — no source id/name/kind, no source external id and no
+     * canonical (discovery) URL. Provenance stays in the database
+     * ({@code jobs.source_id}, {@code job_source_observations}) and in the
+     * operational Sources views. The employer and the employer's genuine
+     * application URL are still shown; nothing is replaced or disguised.
      */
     static Map<String, Object> toWire(JobRepository.FeedItem item) {
         JobRecord job = item.job();
         Map<String, Object> wire = new java.util.LinkedHashMap<>();
         wire.put("id", job.id());
-        wire.put("source_id", job.sourceId());
-        wire.put("external_id", job.externalId());
         wire.put("company_id", job.companyId());
         wire.put("company_name_raw", job.companyNameRaw());
         wire.put("title", job.title());
@@ -128,19 +140,21 @@ public class JobsController {
         wire.put("salary_currency", job.salaryCurrency());
         wire.put("description_text", job.descriptionText());
         wire.put("skills_extracted", job.skillsExtracted() == null ? List.of() : job.skillsExtracted());
-        wire.put("application_url", job.applicationUrl());
-        wire.put("canonical_url", job.canonicalUrl());
+        wire.put("application_url", candidateApplicationUrl(job.applicationUrl()));
         wire.put("posted_at", job.postedAt() == null ? null : job.postedAt().toString());
         wire.put("status", job.status());
         wire.put("first_seen_at", item.firstSeenAt().toString());
         wire.put("last_seen_at", item.lastSeenAt().toString());
         wire.put("stale", item.stale());
         wire.put("removed", item.removed());
-        wire.put("source_name", item.sourceName());
-        wire.put("source_kind", item.sourceKind());
         wire.put("match_score", item.matchScore());
         wire.put("match_recommendation", item.matchRecommendation());
         return wire;
+    }
+
+    /** Aggregator pages are never presented as the employer's application page. */
+    static String candidateApplicationUrl(String url) {
+        return com.personal.jobagent.discovery.platform.JobIdentity.isAggregatorUrl(url) ? null : url;
     }
 
     @GetMapping("/{id}")
@@ -172,25 +186,54 @@ public class JobsController {
                 });
     }
 
-    public record ImportUrlRequest(String url) {
+    /**
+     * @param platform optional platform name/kind when the URL alone is not enough
+     * @param board    optional board identifier in the platform's format
+     * @param preview  list one page of the resolved board so it can be inspected
+     * @param confirm  create the source and run it once
+     */
+    public record ImportUrlRequest(String url, String platform, String board, Boolean preview, Boolean confirm,
+                                   String employer_name) {
+        public ImportUrlRequest(String url) {
+            this(url, null, null, null, null, null);
+        }
     }
 
     /**
-     * Stub per the architecture's own phasing: full URL resolution
-     * (LinkedIn → underlying ATS board detection) is Phase 2 scope. This
-     * validates the URL is well-formed and accepts the request without
-     * attempting resolution.
+     * Resolves a careers/job URL to a supported board (SSRF-safe, see
+     * {@link com.personal.jobagent.discovery.platform.BoardImportService}),
+     * optionally previews it, and — only when confirmed — configures it as a
+     * discovery source and runs it once. Malformed or unsafe URLs are 400.
      */
     @PostMapping("/import-url")
     public ResponseEntity<?> importUrl(@RequestBody ImportUrlRequest request, HttpServletRequest httpRequest) {
+        String raw = request == null ? null : request.url();
         try {
-            new URI(request.url()).toURL();
+            if (raw == null) throw new URISyntaxException("", "missing");
+            new URI(raw.strip()).toURL();
         } catch (URISyntaxException | java.net.MalformedURLException | IllegalArgumentException e) {
-            ApiError error = ApiError.of(400, "Invalid URL", "url must be well-formed",
-                    httpRequest.getRequestURI(), String.valueOf(org.slf4j.MDC.get("correlation_id")));
-            return ResponseEntity.badRequest().body(error);
+            return badRequest(httpRequest, "Invalid URL", "url must be well-formed");
         }
-        return ResponseEntity.status(HttpStatus.ACCEPTED).body(Map.of("status", "RESOLUTION_PENDING"));
+        if (boardImport == null) {
+            return ResponseEntity.status(HttpStatus.ACCEPTED).body(Map.of("status", "RESOLUTION_PENDING"));
+        }
+        try {
+            return ResponseEntity.ok(boardImport.importUrl(new com.personal.jobagent.discovery.platform.BoardImportService.ImportRequest(
+                    raw, request.platform(), request.board(), request.preview(), request.confirm(), request.employer_name())));
+        } catch (com.personal.jobagent.discovery.platform.BoardImportService.ImportRejected e) {
+            if (e.status() == 429) {
+                return ResponseEntity.status(429).body(ApiError.of(429, "Too Many Requests", e.getMessage(),
+                        httpRequest.getRequestURI(), String.valueOf(org.slf4j.MDC.get("correlation_id"))));
+            }
+            return badRequest(httpRequest, "Invalid URL", e.getMessage());
+        } catch (com.personal.jobagent.discovery.platform.BoardDiscoveryService.RunRefused e) {
+            return badRequest(httpRequest, "Import refused", e.getMessage());
+        }
+    }
+
+    private static ResponseEntity<?> badRequest(HttpServletRequest httpRequest, String title, String detail) {
+        return ResponseEntity.badRequest().body(ApiError.of(400, title, detail, httpRequest.getRequestURI(),
+                String.valueOf(org.slf4j.MDC.get("correlation_id"))));
     }
 
     @PostMapping("/seed-uk")

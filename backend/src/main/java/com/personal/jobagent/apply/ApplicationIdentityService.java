@@ -58,7 +58,12 @@ public class ApplicationIdentityService {
         if (fromCanonical != null) return fromCanonical;
         String fromApplication = boardIdentity(applicationUrl);
         if (fromApplication != null) return fromApplication;
-        String normalized = normalizeUrl(canonicalUrl != null && !canonicalUrl.isBlank() ? canonicalUrl : applicationUrl);
+        // An aggregator listing URL identifies the aggregator's page, not the
+        // employer's role, so it is never the identity when an application URL exists.
+        boolean canonicalUsable = canonicalUrl != null && !canonicalUrl.isBlank()
+                && !(com.personal.jobagent.discovery.platform.JobIdentity.isAggregatorUrl(canonicalUrl)
+                     && applicationUrl != null && !applicationUrl.isBlank());
+        String normalized = normalizeUrl(canonicalUsable ? canonicalUrl : applicationUrl);
         if (normalized != null) return "url:" + normalized;
         if (sourceKind != null && externalId != null && !externalId.isBlank()) {
             return "src:" + sourceKind.toLowerCase(Locale.ROOT) + ":" + externalId.trim();
@@ -66,25 +71,14 @@ public class ApplicationIdentityService {
         return null;
     }
 
-    /** Employer requisition identity when the board URL embeds one (Greenhouse, Ashby). */
+    /**
+     * Employer requisition identity when a job/application URL embeds one.
+     * Delegates to the discovery layer's platform-aware identity so FIND and
+     * APPLY agree on what "the same posting" means across all supported
+     * platforms. The greenhouse/ashby key formats are unchanged from Phase 8.2.
+     */
     static String boardIdentity(String url) {
-        if (url == null || url.isBlank()) return null;
-        try {
-            URI uri = URI.create(url.trim());
-            String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(Locale.ROOT);
-            String[] segments = uri.getPath() == null ? new String[0]
-                    : java.util.Arrays.stream(uri.getPath().split("/")).filter(s -> !s.isBlank()).toArray(String[]::new);
-            if (("boards.greenhouse.io".equals(host) || "job-boards.greenhouse.io".equals(host))
-                    && segments.length >= 3 && "jobs".equals(segments[segments.length - 2])) {
-                return "greenhouse:" + segments[segments.length - 3] + ":" + segments[segments.length - 1];
-            }
-            if ("jobs.ashbyhq.com".equals(host) && segments.length >= 2) {
-                return "ashby:" + segments[0] + ":" + segments[segments.length - 1];
-            }
-        } catch (IllegalArgumentException ignored) {
-            // not a parsable URL: fall through to the generic signals
-        }
-        return null;
+        return com.personal.jobagent.discovery.platform.JobIdentity.atsKey(url);
     }
 
     /** Normalised URL: lowercase host, no fragment, no tracking parameters, no trailing slash. */
@@ -177,10 +171,14 @@ public class ApplicationIdentityService {
                 .stream().findFirst().orElse(null);
     }
 
+    /**
+     * Candidate-facing reason. Phase 8.2.5: provider names (Greenhouse, Ashby…)
+     * are deliberately not mentioned — the candidate is never told which
+     * platform a posting came from.
+     */
     static String describeMatch(String identityKey) {
-        if (identityKey.startsWith("greenhouse:")) return "same Greenhouse requisition identifier";
-        if (identityKey.startsWith("ashby:")) return "same Ashby job identifier";
         if (identityKey.startsWith("url:")) return "same normalised application URL";
-        return "same source external job id";
+        if (identityKey.startsWith("src:")) return "same source external job id";
+        return "same employer requisition identifier";
     }
 }

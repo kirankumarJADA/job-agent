@@ -141,9 +141,6 @@ export const JobDetailPage: React.FC = () => {
                 </MetaItem>
                 <MetaItem label="Posted">{formatDate(job.posted_at) || 'Not stated by the board'}</MetaItem>
                 <MetaItem label="Last seen by discovery">{formatDate(job.last_seen_at) || 'Unknown'}</MetaItem>
-                <MetaItem label="Source">
-                  {job.source_name ? `${job.source_name}${job.source_kind ? ` (${job.source_kind})` : ''}` : 'Unknown source'}
-                </MetaItem>
               </div>
             </div>
             {job.application_url && (
@@ -154,7 +151,7 @@ export const JobDetailPage: React.FC = () => {
                   rel="noopener noreferrer"
                   className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-forest-900 px-5 py-2.5 text-sm font-semibold text-cream-50 shadow-raise transition-colors hover:bg-forest-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600 focus-visible:ring-offset-2"
                 >
-                  Apply on official board
+                  Apply with the employer
                   <svg viewBox="0 0 16 16" fill="none" className="h-3.5 w-3.5" aria-hidden="true">
                     <path
                       d="M4.5 11.5 11.5 4.5M6 4.5h5.5V10"

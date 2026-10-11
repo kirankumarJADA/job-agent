@@ -4,12 +4,16 @@ export interface User {
   displayName: string;
 }
 
+/**
+ * A posting as the CANDIDATE sees it (GET /jobs, GET /jobs/{id}).
+ *
+ * Source hiding (Phase 8.2.5): the API deliberately omits which website, ATS
+ * platform or aggregator surfaced the posting — no source id/name/kind, no
+ * source external id, no discovery (canonical) URL. Do not add those fields
+ * back here; provenance belongs to the operational Sources view only.
+ */
 export interface Job {
   id: string;
-  source_id: string;
-  external_id: string;
-  /** Internal deduplication key; not part of the /jobs wire format. */
-  dedup_key?: string;
   company_id?: string;
   company_name_raw?: string;
   title: string;
@@ -25,8 +29,8 @@ export interface Job {
   salary_period?: string;
   description_text: string;
   skills_extracted: string[];
+  /** The employer's own application page (never an aggregator URL). */
   application_url?: string;
-  canonical_url?: string;
   posted_at?: string;
   posted_date_source?: 'EXPLICIT' | 'INFERRED' | 'UNKNOWN';
   status: 'DISCOVERED' | 'FILTERED_OUT' | 'ANALYSED' | 'SCORED' | 'DECIDED' | 'ARCHIVED' | 'PIPELINE_ERROR';
@@ -36,8 +40,6 @@ export interface Job {
   stale?: boolean;
   /** Soft-deleted from the catalogue; only ever true on the detail endpoint. */
   removed?: boolean;
-  source_name?: string | null;
-  source_kind?: string | null;
   /** The signed-in candidate's own match; null when this candidate has not scored the posting. */
   match_score?: number | null;
   match_recommendation?: 'APPLY' | 'REVIEW' | 'SKIP' | null;
@@ -314,6 +316,42 @@ export interface JobSource {
   enabled: boolean;
   failure_streak: number;
   last_run_at?: string;
+  last_attempted_at?: string | null;
+  last_success_at?: string | null;
+  /** JSON text of the last run's counters (listed/created/updated/…, duration, failure category). */
+  last_run?: string | Record<string, unknown> | null;
+  /** JSON text of the recorded health ({status, checked_at, detail, error, failure_streak, circuit}). */
+  health?: string | Record<string, unknown> | null;
+}
+
+/** GET /sources/coverage — one row per platform (operations view only). */
+export interface PlatformCoverage {
+  kind: string;
+  name: string;
+  group: 'A' | 'B' | 'C' | 'AGGREGATOR';
+  aliases: string[];
+  readiness: 'LIVE_VALIDATED' | 'UNVERIFIED' | 'BLOCKED';
+  adapter: boolean;
+  status: 'SUPPORTED' | 'NEEDS_BOARD_CONFIGURATION' | 'TEMPORARILY_UNAVAILABLE' | 'BLOCKED' | 'UNVERIFIED';
+  configuration: string;
+  configured_sources: number;
+  enabled_sources: number;
+  failing_sources: number;
+  last_success_at: string | null;
+}
+
+/** POST /jobs/import-url result. */
+export interface BoardImportResult {
+  status: 'RESOLVED' | 'NEEDS_CONFIGURATION' | 'UNSUPPORTED' | 'UNRECOGNIZED' | 'CONFIGURED' | 'SOURCE_DISABLED' | 'RESOLUTION_PENDING';
+  url?: string;
+  message?: string;
+  platform?: { kind: string; name: string; readiness: string; board_format: string };
+  platforms?: Array<{ kind: string; name: string; readiness: string; board_format: string }>;
+  board?: string;
+  existing_source?: { id: string; enabled: boolean; display_name: string };
+  preview?: { listed_on_first_page: number; more_pages_possible: boolean; sample_titles: string[]; employer?: string; problem?: string };
+  source_id?: string;
+  run?: { status: string; complete: boolean; counts: Record<string, number | boolean>; failure?: string };
 }
 
 export interface AuditLog {
@@ -499,7 +537,6 @@ export interface ApplyQuestionItem {
   answerState: 'CONFIRMED' | 'UNCONFIRMED' | 'MISSING' | 'NEEDS_USER_INPUT' | 'HARD_STOP' | string;
   answerOrigin?: string | null;
   answerId?: string | null;
-  source: string;
   formUrl: string;
 }
 
@@ -528,7 +565,6 @@ export interface ApplyReadiness {
   };
   questions: {
     formCaptured: boolean;
-    source: string | null;
     formUrl: string | null;
     items: ApplyQuestionItem[];
     storedAnswerCount: number;

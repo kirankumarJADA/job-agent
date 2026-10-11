@@ -29,8 +29,10 @@ const baseJob = {
   last_seen_at: '2026-10-01T10:00:00Z',
   stale: false,
   removed: false,
-  source_name: 'Acme Careers',
+  // Legacy provenance fields (older API payloads): the page must ignore them.
+  source_name: 'Acme Careers (Greenhouse)',
   source_kind: 'GREENHOUSE',
+  canonical_url: 'https://boards.greenhouse.io/acme/jobs/1',
   match_score: 64,
   match_recommendation: 'REVIEW',
 };
@@ -91,7 +93,9 @@ describe('JobDetailPage FIND detail', () => {
     expect(screen.getByText('Not stated')).toBeTruthy();
     expect(screen.getByText('Salary not listed')).toBeTruthy();
     expect(screen.getByText('Not stated by the board')).toBeTruthy();
-    expect(screen.getByText('Acme Careers (GREENHOUSE)')).toBeTruthy();
+    // Source hiding (Phase 8.2.5): no source name, platform or discovery URL is shown.
+    expect(screen.queryByText(/Acme Careers|GREENHOUSE|Greenhouse/)).toBeNull();
+    expect(screen.queryByText('Source')).toBeNull();
     for (const invented of ['United Kingdom', 'HYBRID', 'Competitive', 'Recently']) {
       expect(screen.queryByText(invented)).toBeNull();
     }

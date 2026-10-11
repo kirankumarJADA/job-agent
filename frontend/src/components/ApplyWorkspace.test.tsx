@@ -49,7 +49,6 @@ function readiness(overrides: Partial<ApplyReadiness> = {}): ApplyReadiness {
     },
     questions: {
       formCaptured: true,
-      source: 'GREENHOUSE_PUBLIC_FORM',
       formUrl: 'https://boards.greenhouse.io/fixtureco/jobs/42',
       items: [
         {
@@ -61,7 +60,6 @@ function readiness(overrides: Partial<ApplyReadiness> = {}): ApplyReadiness {
           answerState: 'CONFIRMED',
           answerOrigin: 'CANDIDATE_CONFIRMED',
           answerId: 'ans-1',
-          source: 'GREENHOUSE_PUBLIC_FORM',
           formUrl: 'https://boards.greenhouse.io/fixtureco/jobs/42',
         },
       ],
@@ -137,7 +135,6 @@ describe('ApplyWorkspace', () => {
         },
         questions: {
           formCaptured: true,
-          source: 'GREENHOUSE_PUBLIC_FORM',
           formUrl: 'https://boards.greenhouse.io/fixtureco/jobs/42',
           items: [
             {
@@ -149,8 +146,7 @@ describe('ApplyWorkspace', () => {
               answerState: 'CONFIRMED',
               answerOrigin: 'CANDIDATE_CONFIRMED',
               answerId: 'ans-7',
-              source: 'GREENHOUSE_PUBLIC_FORM',
-              formUrl: 'https://boards.greenhouse.io/fixtureco/jobs/42',
+                  formUrl: 'https://boards.greenhouse.io/fixtureco/jobs/42',
             },
           ],
           storedAnswerCount: 1,
@@ -170,12 +166,25 @@ describe('ApplyWorkspace', () => {
     expect(screen.getByText('No approved cover letter is bound to this application.')).toBeTruthy();
   });
 
+  it('never names the platform an employer form was captured from, even if a legacy payload carries it', async () => {
+    const legacy = readiness({}) as unknown as Record<string, unknown>;
+    const questions = legacy.questions as Record<string, unknown>;
+    questions.source = 'GREENHOUSE_PUBLIC_FORM';
+    (questions.items as Array<Record<string, unknown>>).forEach((item) => {
+      item.source = 'GREENHOUSE_PUBLIC_FORM';
+    });
+    mocked.mockResolvedValue(legacy);
+    renderWorkspace();
+    expect(await screen.findByText('Why do you want to join?')).toBeTruthy();
+    expect(screen.queryByText(/GREENHOUSE/i)).toBeNull();
+    expect(screen.getAllByText(/captured from the employer form|employer.s application form/).length).toBeGreaterThan(0);
+  });
+
   it('shows captured questions with provenance and an empty state when none exist', async () => {
     mocked.mockResolvedValue(
       readiness({
         questions: {
           formCaptured: true,
-          source: 'GREENHOUSE_PUBLIC_FORM',
           formUrl: 'form',
           items: [],
           storedAnswerCount: 0,
@@ -280,7 +289,6 @@ describe('ApplyWorkspace', () => {
       readiness({
         questions: {
           formCaptured: true,
-          source: 'GREENHOUSE_PUBLIC_FORM',
           formUrl: 'form',
           items: [
             {
@@ -292,8 +300,7 @@ describe('ApplyWorkspace', () => {
               answerState: 'UNCONFIRMED',
               answerOrigin: 'MODEL_DRAFT',
               answerId: 'ans-1',
-              source: 'GREENHOUSE_PUBLIC_FORM',
-              formUrl: 'form',
+                  formUrl: 'form',
             },
           ],
           storedAnswerCount: 1,

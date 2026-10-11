@@ -1,0 +1,75 @@
+{
+ "id": "744000154830479",
+ "name": "OPERADOR (Prazo determinado)",
+ "uuid": "66d2c669-6847-4942-acc8-bc0b8eb6ebb1",
+ "jobId": "d9c264f0-4fa3-4c9a-8e32-2cafa4ee38a8",
+ "jobAdId": "6c6cda81-8df5-4319-8375-980cb9540aba",
+ "defaultJobAd": true,
+ "refNumber": "REF298230D",
+ "company": {
+  "name": "Bosch Group",
+  "identifier": "BoschGroup"
+ },
+ "location": {
+  "city": "Curitiba",
+  "region": "PR",
+  "country": "br",
+  "address": "Avenida Juscelino Kubitschek de Oliveira - Ld",
+  "remote": false,
+  "hybrid": false,
+  "latitude": "-25.4901584",
+  "longitude": "-49.3446295",
+  "fullLocation": "Curitiba, PR, Brazil"
+ },
+ "releasedDate": "2026-10-10T13:57:54.203Z",
+ "creator": {
+  "name": "",
+  "avatarUrl": ""
+ },
+ "postingUrl": "https://jobs.smartrecruiters.com/BoschGroup/744000154830479-operador-prazo-determinado-",
+ "applyUrl": "https://jobs.smartrecruiters.com/BoschGroup/744000154830479-operador-prazo-determinado-?oga=true",
+ "referralUrl": "https://jobs.smartrecruiters.com/external-referrals/company/BoschGroup/publication/66d2c669-6847-4942-acc8-bc0b8eb6ebb1?dcr_ci=BoschGroup",
+ "jobAd": {
+  "sections": {
+   "companyDescription": {
+    "title": "Descrição da empresa",
+    "text": "<p>Na Bosch, moldamos o futuro por meio das inovações tecnológicas de alta qualidade e de serviços que despertam entusiasmo e melhoram a vida das pessoas. Temos uma promessa sólida para nossos colaboradores: crescemos juntos, gostamos do nosso trabalho e inspiramos uns aos outros. Junte-se a nós e sinta a diferença.</p>"
+   },
+   "jobDescription": {
+    "title": "Descrição da vaga",
+    "text": "<p><strong>Principais responsabilidades:</strong></p><p>- Operar máquinas de usinagem, bancadas e estações de montagens para produção seriada</p><p>- Garantir a produção conforme metas estabelecidas e padrões de qualidade determinados</p><p>- Seguir os princípios de produção BPS conforme padrões estabelecidos</p>"
+   },
+   "qualifications": {
+    "title": "Qualificações",
+    "text": "<p><strong>- Ensino médio completo</strong></p><p><strong>- Curso técnico de Operador de Produção, Mecânica Básica ou afins</strong></p><p><strong>- Disponibilidade para trabalhar em turnos 1ºT (das 06:00 às 15:00), 2ºT (das 15:00 à 00:00) e 3ºT (da 00:00 às 06:00) e escalas SaS (segunda a sexta), TaS (terça a sábado), DaQ (domingo a quinta)</strong></p>"
+   },
+   "additionalInformation": {
+    "title": "Informações adicionais",
+    "text": "<p>- <u><strong>Prazo de candidatura: 23/10/2026 às 16:00</strong></u></p><p><u><strong>OBSERVAÇÕES:</strong></u></p><p>1. Candidate-se apenas uma vez</p><p>2. Atente-se para cadastrar seu e-mail corretamente. É através dele que será nossa comunicação</p><p>3. Se possível, anexe seu currículo. Dessa forma sua candidatura fica mais completa</p><p>4. Após candidatar-se você receberá um formulário que deverá ser devolvido no prazo estabelecido. Fique atento(a) pois a não devolução do mesmo <u><strong>dentro do prazo</strong></u>&#xa0;implica na não continuidade no processo seletivo</p><p>5. As pessoa que estiverem aderentes ao perfil da vaga, poderão permanecer em uma banco de candidatos por até 06 meses</p><p>- Acreditamos que a DIVERSIDADE é o motor da inovação, por isso, todas as vagas da Bosch são elegíveis para pessoas com deficiência, em situação vulnerável e grupos minoritários</p><p>- Colaboradores Bosch podem fazer sua candidatura internamente pelo site Smart Hub</p><p>- Modelo de trabalho: presencial</p><p><strong>Benefícios da Bosch</strong></p><ul><li><p>Assistência médica e odontológica (incluso dependente)&#xa0;​</p></li><li><p>Reembolso para tratamentos médicos (incluso dependente)&#xa0;​</p></li><li><p>Plano de remuneração variável &amp; PLR&#xa0;​</p></li><li><p>Vale alimentação</p></li><li><p>Programas de Bem-Estar, Saúde e Diversidade​</p></li><li><p>Política de expatriação internacional​</p></li><li><p>Plano de previdência privada&#xa0;​</p></li><li><p>Reembolso parcial para medicamentos​</p></li><li><p>Seguro de vida&#xa0;​</p></li><li><p>Acesso ao Clube Bosch&#xa0;​</p></li><li><p>Benefícios de fim de ano&#xa0;​</p></li><li><p>Creche na planta (presencial)&#xa0;​</p></li><li><p>Alimentação no local de trabalho (presencial)&#xa0;​</p></li><li><p>Carro compartilhado ou vale transporte em caso de indisponibilidade​ (*as pessoas admitidas entrarão em uma lista para utilização do carro compartilhado. Até a disponibilidade do mesmo receberão o vale transporte)</p></li><li><p>Material escolar para colaboradores e filhos​</p></li><li><p>Política de cursos, especializações e idiomas​</p></li><li><p>Licença maternidade e paternidade estendida (incluso adoção e casais homoafetivos)​</p></li><li><p>Premiação por tempo de casa (10 anos)​</p></li><li><p>Treinamentos e preparações através do Bosch Training Center (0G125)​</p></li></ul><p>&#xa0;</p><p><em>Junte-se a nós e sinta a diferença.&#xa0;</em><em>Work #LikeABosch.</em></p><p>bosch.com.br/carreiras</p><p>&#xa0;</p>"
+   }
+  }
+ },
+ "active": true,
+ "visibility": "PUBLIC",
+ "industry": {
+  "id": "automotive",
+  "label": "Automotive"
+ },
+ "function": {
+  "id": "production",
+  "label": "Production"
+ },
+ "experienceLevel": {
+  "id": "entry_level",
+  "label": "Entry Level"
+ },
+ "typeOfEmployment": {
+  "id": "permanent",
+  "label": "Full-time"
+ },
+ "language": {
+  "code": "pt-BR",
+  "label": "Portuguese (Brazil)",
+  "labelNative": "português (Brasil)"
+ }
+}
