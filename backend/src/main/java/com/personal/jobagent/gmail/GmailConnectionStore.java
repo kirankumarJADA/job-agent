@@ -65,6 +65,13 @@ public class GmailConnectionStore {
         }
     }
 
+    /**
+     * Stores the connection. Reconnecting the same mailbox keeps its sync state;
+     * connecting a different mailbox resets it, because history IDs, page tokens
+     * and message IDs are only meaningful within the mailbox that issued them (the
+     * new mailbox starts its own bounded initial scan). SET expressions read the
+     * row as it was before this statement, so the comparison sees the old address.
+     */
     public void upsertConnected(UUID profileId, String googleEmail, String encryptedRefreshToken,
                                 String scopes) {
         db.update("""
@@ -76,6 +83,18 @@ public class GmailConnectionStore {
                     encrypted_refresh_token = excluded.encrypted_refresh_token,
                     scopes = excluded.scopes,
                     status = 'CONNECTED',
+                    history_id = case when lower(gmail_connections.google_email) = lower(excluded.google_email)
+                                      then gmail_connections.history_id end,
+                    initial_page_token = case when lower(gmail_connections.google_email) = lower(excluded.google_email)
+                                              then gmail_connections.initial_page_token end,
+                    history_pending_ids = case when lower(gmail_connections.google_email) = lower(excluded.google_email)
+                                               then gmail_connections.history_pending_ids else '[]'::jsonb end,
+                    last_sync_at = case when lower(gmail_connections.google_email) = lower(excluded.google_email)
+                                        then gmail_connections.last_sync_at end,
+                    last_sync_status = case when lower(gmail_connections.google_email) = lower(excluded.google_email)
+                                            then gmail_connections.last_sync_status end,
+                    connected_at = case when lower(gmail_connections.google_email) = lower(excluded.google_email)
+                                        then gmail_connections.connected_at else now() end,
                     last_sync_error = null,
                     updated_at = now()
                 """, UUID.randomUUID(), profileId, googleEmail, encryptedRefreshToken, scopes);
