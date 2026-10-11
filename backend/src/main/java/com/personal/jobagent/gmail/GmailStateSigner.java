@@ -63,7 +63,7 @@ public class GmailStateSigner {
      * when the state is invalid for any reason.
      */
     public UUID verify(String state, UUID expectedProfileId) {
-        if (state == null || !state.contains(".")) return null;
+        if (secret == null || expectedProfileId == null || state == null || !state.contains(".")) return null;
         int dot = state.lastIndexOf('.');
         String body = state.substring(0, dot);
         String signature = state.substring(dot + 1);

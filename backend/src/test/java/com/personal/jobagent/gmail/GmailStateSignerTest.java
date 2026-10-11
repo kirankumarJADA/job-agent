@@ -50,10 +50,12 @@ class GmailStateSignerTest {
     }
 
     @Test
-    void aMissingSecretRefusesToSign() {
+    void aMissingSecretRefusesToSignOrVerify() {
         GmailStateSigner unconfigured = new GmailStateSigner("  ");
+        assertThat(unconfigured.configured()).isFalse();
         assertThatThrownBy(() -> unconfigured.sign(UUID.randomUUID()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("APP_GMAIL_STATE_SECRET");
+        assertThat(unconfigured.verify("body.signature", UUID.randomUUID())).isNull();
     }
 }
