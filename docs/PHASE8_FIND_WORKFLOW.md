@@ -1185,3 +1185,32 @@ fewer; the authentication/CSRF IT was then added and everything below was re-run
 Unchanged and hard-stopped. TRACK adds no submission path, no employer-side action and no outbound
 message. Approving a package still records approval only; the timeline and every status say
 nothing was sent.
+
+
+## 14. Phase 8.4 — Gmail read-only integration (feature branch, not live-verified)
+
+Branch: `phase8.4-gmail-integration`. Draft PR #6 targets `phase8.2.5-ats-discovery-expansion`; it is intentionally separate and has not been merged or deployed.
+
+### 14.1 Implemented path
+
+- OAuth endpoints: `GET /api/v1/integrations/gmail/status`, `GET /authorize`, `GET /callback`, `POST /sync`, `POST /disconnect`.
+- Explicit environment mapping in `application.yml`:
+  - `GMAIL_CLIENT_ID` → `app.gmail.client-id`
+  - `GMAIL_CLIENT_SECRET` → `app.gmail.client-secret`
+  - `GMAIL_REDIRECT_URI` → `app.gmail.redirect-uri`
+  - `APP_GMAIL_TOKEN_KEY` → `app.gmail.token-key` (base64-encoded 32-byte key recommended)
+  - `APP_GMAIL_STATE_SECRET` → `app.gmail.state-secret`
+  - `APP_FRONTEND_URL` → `app.frontend-url` (production must set the Vercel origin explicitly)
+  - Optional `APP_GMAIL_LOOKBACK_DAYS` → bounded initial lookback (maximum 90 days).
+- The requested and explicitly accepted OAuth scope is only `https://www.googleapis.com/auth/gmail.readonly`. No Gmail write endpoint is implemented.
+- Refresh tokens are encrypted using AES-256-GCM; OAuth state is signed, bound to the profile, time-limited and consumed from a database-backed hash table exactly once.
+- Initial sync reads the provider's `historyId` from `users.getProfile` before the bounded, paginated message list. Initial-list page tokens and the snapshot cursor are persisted together. Incremental sync handles sparse history records by fetching full message resources before checking their Gmail labels. Expired history cursors trigger a bounded resync; failed/partial work does not delete earlier evidence.
+- Message time is taken from Gmail's provider-supplied `internalDate`, not a sender-controlled `Date` header. Inbox eligibility comes from Gmail's structured label IDs, not the sender-controlled `To` / `Delivered-To` headers.
+- The provider's first `Authentication-Results` header is considered only when its authentication-service identifier is `mx.google.com`; an untrusted first header fails closed. This parsing and the receipt policy still require a real-mailbox validation before live receipt verification is claimed.
+- The Connect button preserves the configured API base path (`/api/v1`) when navigating to the OAuth start endpoint.
+
+### 14.2 Important verification boundary
+
+Fixture/mocked tests do not prove a real Google OAuth grant or real mailbox sync. Live Gmail authorization has not been performed because credentials and the consent screen are not configured in this environment. Do not say that a live application receipt has been verified until a connected mailbox provides acceptable evidence and that end-to-end path is demonstrated.
+
+PR #6 remains draft while the independent audit fixes are being verified. Check the latest CI result on the PR head before changing this status. No production secrets were added, no deployment was performed, no mail was sent or mutated, no real application was submitted, and `REAL_SUBMIT` remains hard-stopped.
