@@ -9,6 +9,7 @@ import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.discovery.platform.JobIdentity;
 import com.personal.jobagent.email.EmailIntelligenceService;
 import com.personal.jobagent.email.EmailIntelligenceService.ConnectorMessage;
+import com.personal.jobagent.mailbox.MailboxVerificationProvider;
 import com.personal.jobagent.profile.ProfileRepository;
 import com.personal.jobagent.security.AppUserDetails;
 import com.personal.jobagent.security.UserRecord;
@@ -21,6 +22,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.boot.test.mock.mockito.SpyBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
@@ -47,6 +49,7 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -86,7 +89,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 @SpringBootTest(properties = {"spring.flyway.placeholders.remove_seed_dev_account=false",
         "app.discovery.scheduler-enabled=false", "app.rate-limit.enabled=false",
-        "app.events.dispatch-interval-ms=3600000"})
+        "app.events.dispatch-interval-ms=3600000", "app.worker-event-token=phase85-test-token"})
 @AutoConfigureMockMvc
 @Testcontainers
 class ApplicationTrackingIT {
@@ -131,6 +134,7 @@ class ApplicationTrackingIT {
     @Autowired private EmailIntelligenceService emails;
     @Autowired private ApplicationStatusService statusService;
     @SpyBean private TrackRepository trackRepository;
+    @MockBean private MailboxVerificationProvider mailboxVerificationProvider;
 
     private MockHttpSession session;
     private UUID devProfile;
@@ -673,6 +677,51 @@ class ApplicationTrackingIT {
                 .andExpect(status().isConflict());
         mvc.perform(post("/api/v1/emails/ingest").with(csrf()).session(session).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"subject\":\"\",\"body\":\"\"}")).andExpect(status().isBadRequest());
+    }
+
+    // ── Phase 8.5 worker mailbox-verification boundary ───────────────────
+
+    @Test
+    void mailboxVerificationResolveRequiresWorkerTokenAndRefusesSourceReplay() throws Exception {
+        UUID app = application(seedJob("mailbox-verify", "Verification Co", "Backend Engineer",
+                greenhouseUrl("mailbox-verify", 8151), null));
+        JsonNode source = ingestHttp(Map.of("messageId", "verify-" + UUID.randomUUID(),
+                "from", "security@verification.fixture.example", "to", "dev@example.local",
+                "subject", "Your verification code", "body", "Use 482913 to verify your account"));
+        UUID emailId = UUID.fromString(source.get("emailId").asText());
+        Mockito.when(mailboxVerificationProvider.findVerification(Mockito.eq(devProfile),
+                Mockito.eq("verification.fixture.example"), Mockito.isNull(), Mockito.any(Instant.class)))
+                .thenReturn(Optional.of(new MailboxVerificationProvider.VerificationHit(
+                        "fixture", "fixture-message-1", emailId, "482913", null, Instant.now())));
+        String body = json.writeValueAsString(Map.of("applicationId", app.toString(),
+                "employerDomain", "verification.fixture.example"));
+        mvc.perform(post("/api/v1/mailbox-verification/resolve").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(post("/api/v1/mailbox-verification/resolve").header("Authorization", "Bearer wrong-token")
+                .contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isUnauthorized());
+        MvcResult result = mvc.perform(post("/api/v1/mailbox-verification/resolve")
+                .header("Authorization", "Bearer phase85-test-token")
+                .contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isOk()).andReturn();
+        JsonNode response = json.readTree(result.getResponse().getContentAsString(StandardCharsets.UTF_8));
+        assertThat(response.get("otp").asText()).isEqualTo("482913");
+        assertThat(count("select count(*) from mailbox_verifications where source_email_id = ?", emailId)).isEqualTo(1);
+        mvc.perform(post("/api/v1/mailbox-verification/resolve").header("Authorization", "Bearer phase85-test-token")
+                .contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isNotFound());
+    }
+
+    @Test
+    void mailboxVerificationMissReturns404ForManualPause() throws Exception {
+        UUID app = application(seedJob("mailbox-miss", "Verification Co", "Platform Engineer",
+                greenhouseUrl("mailbox-miss", 8152), null));
+        Mockito.when(mailboxVerificationProvider.findVerification(Mockito.eq(devProfile),
+                Mockito.eq("verification.fixture.example"), Mockito.isNull(), Mockito.any(Instant.class)))
+                .thenReturn(Optional.empty());
+        String body = json.writeValueAsString(Map.of("applicationId", app.toString(),
+                "employerDomain", "verification.fixture.example"));
+        MvcResult result = mvc.perform(post("/api/v1/mailbox-verification/resolve")
+                .header("Authorization", "Bearer phase85-test-token")
+                .contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isNotFound()).andReturn();
+        assertThat(result.getResponse().getContentAsString()).contains("paused for manual verification");
     }
 
     // ── authentication and CSRF ──────────────────────────────────────────

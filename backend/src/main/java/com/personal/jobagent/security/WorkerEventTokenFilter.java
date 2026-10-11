@@ -40,6 +40,7 @@ public class WorkerEventTokenFilter extends OncePerRequestFilter {
 
     private static final String CLAIM_NEXT_PATH = "/api/v1/automation/plans/claim-next";
     private static final String RECOVER_STALE_PATH = "/api/v1/automation/plans/recover-stale";
+    private static final String MAILBOX_VERIFICATION_RESOLVE_PATH = "/api/v1/mailbox-verification/resolve";
 
     private static final Pattern WORKER_PLAN_PATH = Pattern.compile(
             "^/api/v1/automation/plans/[0-9a-fA-F-]{36}/"
@@ -101,7 +102,8 @@ public class WorkerEventTokenFilter extends OncePerRequestFilter {
     private boolean isWorkerOnlyPath(String path) {
         return EVENTS_PATH.equals(path)
                 || CLAIM_NEXT_PATH.equals(path)
-                || RECOVER_STALE_PATH.equals(path);
+                || RECOVER_STALE_PATH.equals(path)
+                || MAILBOX_VERIFICATION_RESOLVE_PATH.equals(path);
     }
 
     private boolean constantTimeEquals(String expected, String actual) {

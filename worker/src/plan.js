@@ -159,8 +159,15 @@ export function buildAccountLifecyclePlan({ baseUrl, employerDomain, application
     step('signup-submit', StepType.CLICK, Policy.AUTO, { selector: 'button[type="submit"]' }),
   ];
   if (verifyOtp) {
-    steps.push(step('account-verify-otp', StepType.ACCOUNT_VERIFY_OTP, Policy.AUTO,
-      { employerDomain, applicationId }));
+    steps.push(
+      step('account-verify-otp', StepType.ACCOUNT_VERIFY_OTP, Policy.AUTO, { employerDomain, applicationId }),
+      step('account-verify-otp-fill', StepType.FILL_FIELD, Policy.AUTO, {
+        selector: 'input[name="otp"]', valueFrom: 'verification.otp', skipWhenMissing: true,
+      }),
+      step('account-verify-otp-submit', StepType.CLICK, Policy.AUTO, {
+        selector: 'button[type="submit"]', onlyWhenVerificationOtp: true,
+      }),
+    );
   }
   steps.push(step('login-navigate', StepType.NAVIGATE, Policy.AUTO, { url: `${baseUrl}/login` }),
     step('login-email', StepType.FILL_FIELD, Policy.AUTO, { selector: 'input[name="email"]', value: accountEmail }),

@@ -150,8 +150,8 @@ Persistent engineering handoff. Update this file after every completed phase and
 - `ApplicationDecisionServiceTest` (+8 tests): every decision-time lookup reported with its resolved state; unreadable disabled-rule and absent-rule withholdings attributed to the rule; a healthy auto-apply attributed to no withholding; MANUAL and quota paths not attributed to the rule; `ruleState` for all three states; and `effectiveApplicationMode` matching the engine's default.
 - `ApplicationPipelineIT` (+1 test, 9 total): with the rule genuinely unreadable, the match queues for review, no application is created, and exactly one durable `APPROVAL_RULE_UNAVAILABLE` notification lands for that owner.
 
-## Phase 8.5 — WORK IN PROGRESS (uncommitted follow-up to 8.4, branch phase8.4-gmail-integration)
-Implemented (compiles; focused suites green):
+## Phase 8.5 — WORK IN PROGRESS (branch phase8.5-managed-mail, based on Phase 8.4)
+Implemented (compile reported by author; CI validation pending):
 - `V040__employer_credentials_and_mailbox_verification.sql` (employer_credentials
   AES-encrypted via SecretCipher/APP_SECRETS_KEY; mailbox_verifications audit).
 - `security/SecretCipher.java` (AES-256-GCM, fail-closed at use).
@@ -165,23 +165,22 @@ Implemented (compiles; focused suites green):
   worker.js resolver from WORKER_VERIFICATION_URL) + plan.js
   `buildAccountLifecyclePlan` (signup → OTP → login).
 
-NOT yet done (exact next steps):
-1. `worker/test/account-lifecycle.test.js` — 3 of 4 tests fail:
-   a. startMock(): server.listen race -> mockUrl null. Fix: assign
-      `mockUrl = http://127.0.0.1:${server.address().port}` AFTER listening
-      completes (already done) but tests 2-4 call startMock() then build the
-      plan synchronously — assert mockUrl before building; the null-port
-      failure came from the port test using the constant 59999 (blocked by
-      Chromium). Use the live mock port for ALL plans.
-   b. "resolves the OTP" test asserts HardStopError after splicing a
-      FORBIDDEN step — verify the splice index (6) is right after the OTP
-      step, and that the OTP resolved into values.verification before abort.
-2. Then run: `node --test test/*.test.js` (must be 23/23) and backend
-   `mvn -q verify` (must be 0 failures — new backend code compiles; the
-   mailbox controller/provider are not yet covered by a focused IT: add one
-   seeding an emails row and asserting the resolve endpoint).
-3. Commit as `feat(phase8.5): employer account lifecycle and mailbox
-   verification`, push, open draft PR to phase8.2.5.
+Changes in this continuation (pending CI verification):
+1. Worker lifecycle tests now exercise a mock signup → OTP entry → verification
+   → login flow, safe same-origin links, cross-origin link rejection, missing
+   provider and provider-failure pauses.
+2. The worker plan now submits the OTP form, clears OTP state after successful
+   verification and refills the OTP after restart if the form had not yet been
+   submitted. Gmail matching respects the requested age window, connected
+   mailbox identity and contextual code patterns; multiple possible messages
+   are treated as ambiguous.
+3. The resolve endpoint requires a worker token and records a minimal audit
+   reference without storing the OTP or verification URL. Database uniqueness
+   prevents resolving one source email twice. PostgreSQL-backed MockMvc tests
+   cover success, bad/missing token, replay and no-match (404).
+4. CI validation is pending; do not mark Phase 8.5 complete until all three
+   jobs pass. Managed-mail inbound provider, owned domain, DNS and provider
+   credentials remain external setup.
 Safety: REAL_SUBMIT hard stop untouched; Gmail stays read-only; managed
 mailbox provider interface done, REAL provider still needs external
 inbound-email service + domain + DNS (documented, not invented).

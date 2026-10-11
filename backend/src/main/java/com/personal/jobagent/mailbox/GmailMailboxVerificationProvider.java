@@ -8,6 +8,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -28,7 +29,7 @@ import java.util.regex.Pattern;
 @Component
 public class GmailMailboxVerificationProvider implements MailboxVerificationProvider {
 
-    private static final Pattern OTP = Pattern.compile("\\b(\\d{4,8})\\b");
+    private static final Pattern OTP = Pattern.compile("(?i)(?:verification[ -]?code|one[- ]time (?:passcode|code)|security code|otp|code is|use)\\D{0,40}(\\d{4,8})");
     private static final Pattern LINK = Pattern.compile("https?://[^\\s\"'<>]+");
 
     private final GmailConnectionStore connections;
@@ -58,17 +59,20 @@ public class GmailMailboxVerificationProvider implements MailboxVerificationProv
     @Override
     public Optional<VerificationHit> findVerification(UUID ownerProfileId, String employerDomain,
                                                       String mailboxAddress, Instant after) {
-        if (!connected(ownerProfileId)) return Optional.empty();
-        // Bounded incremental sync first (idempotent) so the newest mail is read.
-        try {
-            syncService.sync(ownerProfileId);
-        } catch (Exception ignored) {
-            // A failed sync must not produce a guess: fall through to the query
-            // over already-ingested mail and report only what is verifiable.
+        GmailConnectionStore.Connection connection = connections.find(ownerProfileId)
+                .filter(GmailConnectionStore.Connection::active).orElse(null);
+        if (connection == null) return Optional.empty();
+        String connectedMailbox = connection.googleEmail();
+        if (mailboxAddress != null && !mailboxAddress.isBlank()
+                && !connectedMailbox.equalsIgnoreCase(mailboxAddress.trim())) return Optional.empty();
+        try { syncService.sync(ownerProfileId); } catch (Exception ignored) {
+            // Continue only with existing owner-scoped evidence if sync failed.
         }
-        String domain = employerDomain == null ? "" : employerDomain.toLowerCase();
+        String domain = employerDomain == null ? "" : employerDomain.trim().toLowerCase(java.util.Locale.ROOT);
+        if (!domain.matches("(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}")) return Optional.empty();
+        Instant effectiveAfter = after == null ? Instant.now().minusSeconds(60) : after;
         List<Map<String, Object>> rows = db.queryForList("""
-                select id, message_id, to_address, subject, body_text, received_at
+                select id, message_id, from_address, to_address, subject, body_text, received_at
                 from emails
                 where profile_id = ?
                   and channel = 'MAILBOX_CONNECTOR'
@@ -77,21 +81,29 @@ public class GmailMailboxVerificationProvider implements MailboxVerificationProv
                   and body_retained = true
                 order by received_at desc
                 limit 10
-                """, ownerProfileId, "%@" + domain, Instant.now().minusSeconds(60));
+                """, ownerProfileId, "%@" + domain + "%", effectiveAfter);
+        List<VerificationHit> hits = new ArrayList<>();
         for (Map<String, Object> row : rows) {
-            if (!deliveredToConnectedMailbox(row, mailboxAddress)) continue;
+            String sender = TrackText.addressOf(String.valueOf(row.getOrDefault("from_address", "")));
+            if (sender == null || !sender.toLowerCase(java.util.Locale.ROOT).endsWith("@" + domain)) continue;
+            if (!deliveredToConnectedMailbox(row, connectedMailbox)) continue;
             String text = row.get("subject") + " " + row.get("body_text");
             Matcher otp = OTP.matcher(text);
-            String otpValue = otp.find() ? otp.group(1) : null;
+            List<String> codes = new ArrayList<>();
+            while (otp.find()) if (!codes.contains(otp.group(1))) codes.add(otp.group(1));
+            if (codes.size() > 1) return Optional.empty();
+            String code = codes.isEmpty() ? null : codes.get(0);
             Matcher link = LINK.matcher(text);
-            String linkValue = link.find() ? link.group() : null;
-            if (otpValue == null && linkValue == null) continue;
-            Instant receivedAt = row.get("received_at") == null
-                    ? null : ((java.sql.Timestamp) row.get("received_at")).toInstant();
-            return Optional.of(new VerificationHit("gmail",
-                    String.valueOf(row.get("message_id")), otpValue, linkValue, receivedAt));
+            List<String> links = new ArrayList<>();
+            while (link.find()) if (!links.contains(link.group())) links.add(link.group());
+            String url = links.size() == 1 ? links.get(0) : null;
+            if (code == null && url == null) continue;
+            Instant receivedAt = row.get("received_at") == null ? null : ((java.sql.Timestamp) row.get("received_at")).toInstant();
+            hits.add(new VerificationHit("gmail", String.valueOf(row.get("message_id")),
+                    UUID.fromString(String.valueOf(row.get("id"))), code, url, receivedAt));
+            if (hits.size() > 1) return Optional.empty();
         }
-        return Optional.empty();
+        return hits.stream().findFirst();
     }
 
     private boolean deliveredToConnectedMailbox(Map<String, Object> row, String mailboxAddress) {

@@ -29,7 +29,7 @@ public interface MailboxVerificationProvider {
     Optional<VerificationHit> findVerification(UUID ownerProfileId, String employerDomain,
                                                String mailboxAddress, Instant after);
 
-    record VerificationHit(String providerId, String messageId, String otp, String link,
+    record VerificationHit(String providerId, String messageId, UUID sourceEmailId, String otp, String link,
                            Instant receivedAt) {
 
         public boolean hasOtp() {
