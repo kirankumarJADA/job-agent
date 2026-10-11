@@ -95,6 +95,16 @@ class RateLimitServiceTest {
     }
 
     @Test
+    void theProductionGmailAuthorizationRuleBoundsOAuthStateCreation() {
+        RateLimitService limiter = new RateLimitService(true);
+        for (int i = 0; i < 10; i++) {
+            assertThat(limiter.checkAndRecord("gmail-authorize", "profile-1")).isEqualTo(-1);
+        }
+        assertThat(limiter.checkAndRecord("gmail-authorize", "profile-1")).isPositive();
+        assertThat(limiter.checkAndRecord("gmail-authorize", "profile-2")).isEqualTo(-1);
+    }
+
+    @Test
     void theProductionTrackRuleAllowsNormalUseAndStopsFlooding() {
         RateLimitService limiter = new RateLimitService(true);
         for (int i = 0; i < 30; i++) {

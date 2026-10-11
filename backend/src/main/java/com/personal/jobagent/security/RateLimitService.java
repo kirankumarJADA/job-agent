@@ -40,7 +40,8 @@ public class RateLimitService {
                 "llm", new Rule(30, 60_000L),       // generation + re-prepare per account
                 "discovery", new Rule(10, 60_000L), // run / ingest / seed per account
                 "track", new Rule(30, 60_000L),     // TRACK evidence writes and message ingestion per account
-                "gmail-sync", new Rule(6, 3_600_000L) // manual Gmail mailbox sync per account (hourly window)
+                "gmail-sync", new Rule(6, 3_600_000L), // manual Gmail mailbox sync per account (hourly window)
+                "gmail-authorize", new Rule(10, 3_600_000L) // OAuth initiation per account (hourly window)
         );
     }
 

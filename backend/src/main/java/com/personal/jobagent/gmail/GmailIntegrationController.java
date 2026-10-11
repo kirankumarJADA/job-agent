@@ -130,6 +130,12 @@ public class GmailIntegrationController {
         if (profile == null) {
             return ResponseEntity.badRequest().body(Map.of("error", "a profile is required"));
         }
+        long retryAfter = rateLimiter.checkAndRecord("gmail-authorize", "u:" + profile);
+        if (retryAfter >= 0) {
+            return ResponseEntity.status(429)
+                    .header("Retry-After", String.valueOf(retryAfter))
+                    .body(Map.of("error", "Gmail authorization rate limit reached; retry later"));
+        }
         String state = stateSigner.sign(profile);
         connections.registerOAuthState(profile, state);
         audit.write(new AuditEntry(ownerContext.actorOr("user"), "GMAIL_CONNECT_STARTED", "PROFILE",
