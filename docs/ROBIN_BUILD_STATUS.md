@@ -18,6 +18,8 @@ Persistent engineering handoff. Update this file after every completed phase and
 - Phase 8.2 (APPLY): branch `phase8.2-apply-workflow` = `bf38078`.
 - Phase 8.2.5 (FIND across 30 platforms + Tsenta): implementation commit `c2b7cbc`; PR #4 merged into `phase8.2-apply-workflow` at `0cb69a2`. The cumulative feature chain later received the Phase 8.3 merge commit `a054522`; these phase branches have not been merged into `master`.
 - Phase 8.3 (TRACK): implementation commit `26c3f97`; PR #5 merged into `phase8.2.5-ats-discovery-expansion` at `a054522`. It is not merged into `master`.
+- Phase 8.4 (read-only Gmail): branch `phase8.4-gmail-integration`, draft PR #6, not merged.
+- Phase 8.5 (employer account lifecycle + Robin-managed email): branch `phase8.5-managed-mail`, draft PR #7 (base `phase8.2.5-ats-discovery-expansion`), not merged. Managed email receiving is implemented and verified with simulated signed deliveries; the real domain, DNS and Mailgun setup is still to be done by the operator.
 - `ROBIN_PROJECT_HANDOFF.md` does not exist in this repository (checked all branches and history). This file is the persistent engineering handoff.
 - Do not infer the state of a separate Windows working tree from this GitHub branch.
 
@@ -150,57 +152,211 @@ Persistent engineering handoff. Update this file after every completed phase and
 - `ApplicationDecisionServiceTest` (+8 tests): every decision-time lookup reported with its resolved state; unreadable disabled-rule and absent-rule withholdings attributed to the rule; a healthy auto-apply attributed to no withholding; MANUAL and quota paths not attributed to the rule; `ruleState` for all three states; and `effectiveApplicationMode` matching the engine's default.
 - `ApplicationPipelineIT` (+1 test, 9 total): with the rule genuinely unreadable, the match queues for review, no application is created, and exactly one durable `APPROVAL_RULE_UNAVAILABLE` notification lands for that owner.
 
-## Phase 8.5 — WORK IN PROGRESS (branch phase8.5-managed-mail, based on Phase 8.4)
-Implemented (compile reported by author; CI validation pending):
-- `V040__employer_credentials_and_mailbox_verification.sql` (employer_credentials
-  AES-encrypted via SecretCipher/APP_SECRETS_KEY; mailbox_verifications audit).
-- `security/SecretCipher.java` (AES-256-GCM, fail-closed at use).
-- `identity/EmployerCredentialService.java` (per owner+employer domain, unique).
-- `mailbox/MailboxVerificationProvider.java` (interface) +
-  `mailbox/GmailMailboxVerificationProvider.java` (Gmail impl: bounded sync,
-  employer-domain + delivery-to-connected-mailbox + time-window correlation,
-  fresh OTP/link extraction) + `mailbox/MailboxVerificationController.java`
-  (worker-only `/api/v1/mailbox-verification/resolve`, 404 → pause).
-- Worker: `ACCOUNT_VERIFY_OTP` step (plan.js + browser_worker.js case +
-  worker.js resolver from WORKER_VERIFICATION_URL) + plan.js
-  `buildAccountLifecyclePlan` (signup → OTP → login).
+## Phase 8.5 — Employer Account Lifecycle and Robin-Managed Email (branch `phase8.5-managed-mail`, draft PR #7)
 
-Changes in this continuation (pending CI verification):
-1. Worker lifecycle tests now exercise a mock signup → OTP entry → verification
-   → login flow, safe same-origin links, cross-origin link rejection, missing
-   provider and provider-failure pauses.
-2. The worker plan now submits the OTP form, clears OTP state after successful
-   verification and refills the OTP after restart if the form had not yet been
-   submitted. Gmail matching respects the requested age window, connected
-   mailbox identity and contextual code patterns; multiple possible messages
-   are treated as ambiguous.
-3. The resolve endpoint requires a worker token and records a minimal audit
-   reference without storing the OTP or verification URL. Database uniqueness
-   prevents resolving one source email twice. PostgreSQL-backed MockMvc tests
-   cover success, bad/missing token, replay and no-match (404).
-4. VERIFIED 2026-10-11 on this head (`05e68c9`), full local suite:
-   backend `mvn -B verify` 1169 tests / 0 fail / 0 err; worker 25/25;
-   frontend 300/300 + tsc + build clean. Managed-mail inbound provider,
-   owned domain, DNS and provider credentials remain external setup.
-Safety: REAL_SUBMIT hard stop untouched; Gmail stays read-only; managed
-mailbox provider interface done, REAL provider still needs external
-inbound-email service + domain + DNS (documented, not invented).
+Status: Robin's side of managed email receiving is implemented and verified with
+signed, simulated Mailgun deliveries on PostgreSQL 16. **No real domain, DNS
+record, Mailgun account or inbound delivery exists yet**, so no real mailbox is
+claimed to work: the product itself refuses to offer an address for employer
+registration until a signed delivery has proven the domain receives mail.
+PR #7 is not merged. `REAL_SUBMIT` stays hard-stopped. Nothing was deployed.
+
+### Earlier on this branch (`05e68c9`, verified and CI-green before this milestone)
+- `V040`/`V041`: AES-GCM encrypted `employer_credentials`; `mailbox_verifications`
+  audit (never the code or link), one resolution per source message.
+- `SecretCipher` (AES-256-GCM, fail-closed), `EmployerCredentialService`,
+  `MailboxVerificationProvider` + Gmail implementation, worker-only
+  `POST /api/v1/mailbox-verification/resolve`, worker `ACCOUNT_VERIFY_OTP`
+  step and `buildAccountLifecyclePlan` (sign-up → code → login, `NO_SUBMIT`).
+
+### Managed email receiving (this milestone)
+- **Addresses** (`V042`, `mailbox/managed/ManagedMailboxService`): one opaque
+  alias per profile per domain — 16 random characters (~80 bits, no look-alike
+  characters), never derived from the candidate's identity. Uniqueness of alias
+  and of owner+domain is enforced by the database; a composite foreign key makes
+  it impossible to file a message under a profile that does not own the address.
+  Readiness is `NOT_CONFIGURED` (domain, signing key or `APP_SECRETS_KEY`
+  missing), `PENDING_RECEIVING_VERIFICATION` (configured, no signed delivery yet)
+  or `ACTIVE` (a provider-signed delivery for the domain was accepted). An alias
+  can be reserved while pending but is reported as not receiving and is never
+  used for a registration.
+- **Mailgun inbound webhook** `POST /api/v1/managed-mail/inbound/mailgun`
+  (route `forward()` POST, form or multipart; public, CSRF-exempt, rate-limited
+  per client): hex HMAC-SHA256(signing key, timestamp+token) checked in constant
+  time before anything else; signed timestamps older than 15 minutes (or more
+  than 5 minutes in the future) refused; every accepted token stored as a hash
+  with a digest of its payload — the same token and payload again is answered as
+  a duplicate (provider retry), the same token with different content is
+  refused (replay); duplicate deliveries collapse by Message-Id (or content
+  fingerprint). Status codes follow Mailgun's contract: 200 stored/duplicate,
+  401 unauthenticated (retried, so a wrong key loses no mail), 406 stale /
+  replayed / malformed / wrong domain / unknown alias (not retried), 503 not
+  configured or storage failure (retried; nothing half-stored).
+- **Routing** by the SMTP envelope recipient (`recipient`) only; the To header
+  is never consulted. Exact alias match under the configured domain.
+- **Minimisation**: subject, text and links are stored only AES-256-GCM
+  encrypted, erased at first use and otherwise after 2 hours; messages that
+  Mailgun marks as spam or as failing SPF/DKIM (or that carry conflicting
+  verdicts) keep no content at all. Kept metadata: sender, redacted subject
+  (numbers, links and addresses removed), times, flags; deleted after 30 days.
+  Webhook tokens are kept only as long as a request carrying them could pass
+  the timestamp check. No code, body, subject, alias, token or signature is
+  logged (asserted against every log event in the end-to-end test).
+- **Verification** (`ManagedMailVerificationProvider`, selected by
+  `RoutingMailboxVerificationProvider`): a code or link is released only when
+  the message was delivered to the owner's active alias (and the mailbox the
+  account was registered with), its From mailbox is on the employer's domain
+  or a subdomain, no failed sender check or spam verdict was reported, it
+  arrived inside the 30-minute window and after the account session began, it
+  was never used before, and it contains exactly one code (or, without a code,
+  exactly one https employer verification link) — with exactly one such
+  message. Anything else answers 404 and the worker pauses for the human.
+  Resolution records an audit row (`source_managed_message_id`, unique) and
+  erases the message content in the same transaction.
+- **Managed email is the default for employer registration**: new worker-only
+  `POST /api/v1/mailbox-verification/registration-identity` returns the
+  candidate's managed address for a new employer domain (recorded once in
+  `applicant_identities`, provider `ROBIN_MANAGED`), or the address an existing
+  account already uses (never switched); 409 `MANAGED_MAILBOX_NOT_READY` when
+  managed mail is not proven. `POST /api/v1/identity/identities` without an
+  email also defaults to the managed address. The worker's lifecycle plan now
+  resolves the address at run time (new `ACCOUNT_RESOLVE_IDENTITY` step, no
+  address in the plan, identity kept across restarts, never put in events).
+  Gmail is not needed for managed verification; it stays read-only for TRACK
+  and is used for verification only for accounts registered with that Gmail
+  address.
+- **Account-session lifecycle**: with a session, its owner, application and
+  employer domain must match; closed sessions (HARD_STOP, FAILED, COMPLETED)
+  get neither an identity nor a code; the identity is bound to the session,
+  which moves DISCOVER/ACCOUNT_REQUIRED → SIGNUP (or LOGIN for an existing
+  account) and then → VERIFY_EMAIL when a code is released.
+- **Delete my data**: `V042` also gives `applicant_identities`, the
+  applications ↔ account_sessions references, `mailbox_verifications` and
+  `verification_extractions` delete actions, so deleting a profile that has
+  employer identities or account sessions no longer fails (it did since V009).
+- **Fixed on the way**: `APP_SECRETS_KEY` was documented but never mapped to
+  `app.secrets.encryption-key`; it is now (`application.yml`).
+- **UI**: Applications page "Robin email address" card — reserve the address,
+  "Not receiving yet" until proven, "Active" only when usable, recent deliveries
+  as metadata only.
+
+### Tests added
+- Backend unit: signature (vector computed independently with Python `hmac`),
+  stale/future windows, malformed fields; parser (envelope vs To, duplicated
+  fields, malformed headers, HTML-only bodies, forged/conflicting verdicts);
+  address parsing (display-name tricks, multiple mailboxes, lookalike domains);
+  code/link extraction (phrasings, ambiguity, years, phone numbers, unsafe
+  links); settings and alias generation; webhook controller status mapping;
+  routing between managed and Gmail; identity default; rate limit; multipart
+  refusal.
+- `ManagedMailIT` (PostgreSQL 16, signed simulated Mailgun posts, 12 tests):
+  readiness never claimed before a signed delivery; alias ownership and database
+  uniqueness; unsigned, forged, stale, future and malformed deliveries refused
+  with nothing stored; provider retries, replays and duplicate deliveries;
+  multipart with attachments; envelope-recipient routing against a forged To
+  header and owner-scoped listing; sign-up → verification → login with no Gmail
+  connection; worker-only and session/owner/employer binding including
+  hard-stopped sessions; foreign, failed-check, ambiguous, two-message, stale and
+  pre-session messages never used; encryption, redaction and retention; safe
+  link resolution; profile deletion.
+- Worker: managed-default plan shape; sign-up, verification and login with the
+  managed address against the mock employer; pause before any employer page
+  when managed mail is not ready, unavailable or invalid; restart keeps the
+  signed-up address.
+- Frontend: `RobinMailboxCard` (not configured, pending, active, failure) and
+  the Applications page renders it once.
+
+### Known limitations (deliberate, documented)
+- Employer mail to the managed address that is not a verification message
+  (acknowledgements, interview invitations) is **not fed into TRACK** yet: the
+  card shows its sender and redacted subject, and its content is erased after
+  the retention window. Deciding how TRACK should ingest managed mail (and what
+  it may retain) is the next decision for this feature.
+- Attachments are ignored; multipart parts over 1 MB or bodies over 10 MB
+  (Spring defaults), and form bodies over 2 MB (Tomcat default), are refused
+  with 406.
+- Mailgun's SPF/DKIM verdict headers can only exclude a message: a sender can
+  add its own copies, so a "pass" is never trusted. Employer identity rests on
+  the From domain, the unguessable alias, the session's employer domain,
+  freshness, single use and the ambiguity rules; a positive DKIM-aligned check
+  would need the raw MIME message.
+- Mailgun does not document whether retries reuse the original token and
+  timestamp. If real retries arrive older than `MAILGUN_WEBHOOK_MAX_AGE_SECONDS`
+  they are refused as stale (406); raise the window if the end-to-end check
+  shows that.
+- Employer portal passwords are still supplied in the lifecycle plan;
+  generating and storing them through `EmployerCredentialService` (which has the
+  encrypted storage but no caller yet) is the next lifecycle step. The backend
+  does not yet create lifecycle plans, so no real employer account is created.
+
+### Managed email — external setup still needed (operator; none of it was done here)
+1. Pick a receive-only subdomain you control, e.g. `mail.<your-domain>`
+   (the root domain's own mail is untouched).
+2. Mailgun: add that subdomain as a domain (choose US or EU region). The free
+   plan currently includes one inbound route, which is all Robin needs; check
+   Mailgun's current plan limits before relying on it.
+3. DNS for the subdomain, exactly as Mailgun's control panel shows for it:
+   - MX `mxa.mailgun.org` and `mxb.mailgun.org`, priority 10 each (EU region:
+     `mxa.eu.mailgun.org`, `mxb.eu.mailgun.org`) — required for receiving;
+   - the SPF TXT (`v=spf1 include:mailgun.org ~all`) and DKIM TXT records Mailgun
+     lists, so the domain verifies (Robin never sends from it).
+4. Mailgun → Receiving → Create route: expression
+   `match_recipient(".*@mail.<your-domain>")`, actions
+   `forward("https://<backend-host>/api/v1/managed-mail/inbound/mailgun")` and
+   `stop()`.
+5. Mailgun → Settings → API Security → copy the **HTTP webhook signing key**
+   (not the API key).
+6. Backend environment: `APP_MANAGED_MAIL_DOMAIN=mail.<your-domain>`,
+   `MAILGUN_WEBHOOK_SIGNING_KEY=<key>`, `APP_SECRETS_KEY=<openssl rand -base64 32>`
+   (keep it stable: rotating it makes stored credentials and held content
+   unreadable). Redeploy; Flyway applies `V042`.
+7. Worker environment: `WORKER_REGISTRATION_IDENTITY_URL` and
+   `WORKER_VERIFICATION_URL` (see `worker/README.md`) with `WORKER_EVENT_TOKEN`.
+
+### Verifying real inbound delivery end to end
+1. Signed in to Robin → Applications → "Robin email address": expect
+   "Not receiving yet". Reserve the address and note it.
+2. From any outside mailbox, send a message to that address.
+3. Mailgun → Logs: the message is accepted and the route's forward is answered
+   200. (401 = signing key mismatch; 503 = backend variables missing; 406
+   "rejected" = recipient not under the configured domain or unknown alias.)
+4. Refresh the card: "Active", a "Last delivery" time, and the message listed
+   with its sender and redacted subject. Backend log:
+   `Managed inbound delivery accepted: outcome=STORED`.
+5. Code path: from a mailbox on a domain you control (standing in for an
+   employer), send "Your verification code is 123456" to the address, then
+   call `POST /api/v1/mailbox-verification/resolve` with the worker token for
+   one of your applications and `employerDomain` = that sender's domain:
+   expect `{"provider":"managed","otp":"123456",...}` once and 404 on a repeat.
+6. Optional retry check: briefly unset `MAILGUN_WEBHOOK_SIGNING_KEY` (deliveries
+   get 503 and Mailgun retries), restore it, and confirm the retried delivery
+   is stored rather than refused as stale.
 
 ## Last Verified Test Result (Phase 8.5)
-- Backend `mvn -B verify` on `05e68c9`: 1169 tests, 0 failures, 0 errors
-  (includes the mailbox-verification resolve endpoint tests: success, bad or
-  missing worker token, replay prevention, no-match 404).
-- Worker: 25/25. Frontend: 300/300 + production build.
-- CI on `phase8.5-managed-mail`: **all three jobs green** for both heads —
-  run 38163111568 (`05e68c9`): backend/worker/frontend success; run
-  38164091197 (`027b8e8`, docs commit): backend/worker/frontend success.
-  Run URLs: https://github.com/kirankumarJADA/job-agent/actions/runs/38163111568
-  and https://github.com/kirankumarJADA/job-agent/actions/runs/38164091197
+Verified 2026-10-11 in the local Windows checkout on exactly the code and
+tests that are committed (only this status file changed afterwards):
+- Backend `mvn -B verify`: unit 1038 tests, 0 failures, 0 errors, 1 skipped
+  (the Redis-only diagnostic assumption); integration 184 tests, 0 failures,
+  0 errors, 1 skipped (the opt-in live suite); BUILD SUCCESS. Includes
+  `ManagedMailIT` 12/12, `ApplicationTrackingIT` 19/19 and
+  `UserDataIsolationIT` 21/21 on PostgreSQL 16 (`-Dit.postgres.url` against a
+  disposable container).
+- Worker: 30/30. Frontend: `tsc -b` clean, 305 tests (32 files), production
+  build clean.
+- Also re-run in the cloud sandbox: all 183 integration tests (no live suite)
+  and the backend unit suite (only the two `ActuatorInfoExposureTest` checks
+  that need Maven's build-info fail outside Maven, as before).
+- Mock and simulated provider deliveries only: no real Mailgun account, domain,
+  DNS record or inbound message was involved.
 
 ## Next Exact Task
-Phase 8.4 (read-only Gmail) closure audit is verified locally (full Windows suite) on `phase8.4-gmail-integration` (draft PR #6 targeting `phase8.2.5-ats-discovery-expansion`); check PR #6 for the CI result of its head commit. Do not merge or deploy. The remaining step needs the operator: configure the Google OAuth client and deployment variables, then run the live test-account check in `PHASE8_FIND_WORKFLOW.md` 14.4. Until then no live mailbox or verified receipt is claimed. `REAL_SUBMIT` stays hard-stopped.
+Run the operator setup and the end-to-end delivery check above, then decide
+how employer mail to the managed address should reach TRACK and move
+employer-portal passwords into `EmployerCredentialService`. Do not merge PR #7
+or deploy until then. `REAL_SUBMIT` stays hard-stopped.
 
 ## Last Verified Baseline
+- Phase 8.5 (managed email receiving): backend 1038 unit + 184 integration, 0 failures, 0 errors (1 + 1 skipped: the Redis-only diagnostic assumption and the opt-in live suite), BUILD SUCCESS; `ManagedMailIT` 12/12, `ApplicationTrackingIT` 19/19, `UserDataIsolationIT` 21/21 on PostgreSQL 16. Frontend: 305 tests (32 files), tsc clean, build clean. Worker: 30/30. Simulated signed Mailgun deliveries only. 2026-10-11.
 - Phase 8.4 (closure audit): backend 995 unit + 170 integration, 0 failures, 0 errors (2 skipped: the Redis-only diagnostic assumption and the opt-in live suite), BUILD SUCCESS; `UserDataIsolationIT` 21/21 and `GmailConnectionStoreIT` 5/5 on PostgreSQL 16. Frontend: 300 tests (31 files), tsc clean, build clean. Worker: 19/19. Mock and fixture tests only; no live Google OAuth or mailbox. 2026-10-11.
 - Phase 8.3: backend 953 unit + 165 integration, 0 failures, 0 errors (2 skipped: the Redis-only diagnostic assumption and the opt-in live suite), BUILD SUCCESS; `UserDataIsolationIT` 21/21, `ApplicationTrackingIT` 17/17 and `TrackMigrationCompatibilityIT` 1/1 on PostgreSQL 16. Frontend: 290 tests (29 files), tsc clean, build clean. Worker: 19/19 pass. 2026-10-11.
 - Phase 8.2.5: backend 862 unit + 145 integration, 0 failures, 0 errors (2 skipped: a Redis-only diagnostic assumption and the opt-in live suite), BUILD SUCCESS. Frontend: 251 tests (26 files), tsc clean, build clean. Worker: 19/19 pass. Live public-board suite: 22/22 pass when run explicitly (21 ATS boards + Tsenta), 2026-10-11.
