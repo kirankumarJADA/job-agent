@@ -53,11 +53,14 @@ function serve(items: ApplicationSummary[]) {
   mocked.mockImplementation((async (path: string) => {
     if (path === '/applications') return { items };
     if (path === '/track/reviews') return { items: [], mailboxConnected: false };
+    if (path === '/managed-mail/address') return managedMailNotConfigured;
     if (path.startsWith('/prep/jobs/')) throw new ApiError(503, 'unavailable in this test');
     if (path.startsWith('/apply/applications/')) throw new ApiError(503, JSON.stringify({ message: 'Not loaded in this test.' }));
     throw new Error(`Unexpected API call: ${path}`);
   }) as never);
 }
+
+const managedMailNotConfigured = { readiness: 'NOT_CONFIGURED', usableForRegistration: false, missing: ['APP_MANAGED_MAIL_DOMAIN'] };
 
 function renderPage() {
   return render(
@@ -121,6 +124,7 @@ describe('Applications page — TRACK status', () => {
       }
       if (path === '/track/reviews') return { items: [], mailboxConnected: false };
       if (path === '/integrations/gmail/status') return { configured: true, connected: false };
+      if (path === '/managed-mail/address') return managedMailNotConfigured;
       if (path.startsWith('/prep/jobs/')) throw new ApiError(503, 'unavailable in this test');
       if (path.startsWith('/apply/applications/')) throw new ApiError(503, JSON.stringify({ message: 'Not loaded in this test.' }));
       throw new Error(`Unexpected API call: ${path}`);
@@ -132,6 +136,15 @@ describe('Applications page — TRACK status', () => {
     expect(mocked.mock.calls.filter(([path]) => path === '/integrations/gmail/status')).toHaveLength(1);
   });
 
+  it('shows the Robin-managed address card once for the account, next to the Gmail card', async () => {
+    serve([application({ id: 'app-1', track: prepared }), application({ id: 'app-2', jobId: 'job-2', track: prepared })]);
+    renderPage();
+    expect((await screen.findAllByText('Platform Engineer')).length).toBe(2);
+    expect(screen.getAllByText('Robin email address')).toHaveLength(1);
+    expect(await screen.findByText(/Robin-managed email is not set up on this deployment/)).toBeTruthy();
+    expect(mocked.mock.calls.filter(([path]) => path === '/managed-mail/address')).toHaveLength(1);
+  });
+
   it('opens the tracking panel for one application on request', async () => {
     serve([application({ track: prepared })]);
     mocked.mockImplementation((async (path: string) => {
@@ -139,6 +152,7 @@ describe('Applications page — TRACK status', () => {
       if (path === '/track/reviews') return { items: [], mailboxConnected: false };
       if (path.startsWith('/applications/app-1/track/timeline')) return { items: [], nextCursor: '', limit: 20 };
       if (path === '/applications/app-1/track') throw new ApiError(404, 'No application with that id');
+      if (path === '/managed-mail/address') return managedMailNotConfigured;
       if (path.startsWith('/prep/jobs/')) throw new ApiError(503, 'unavailable in this test');
       if (path.startsWith('/apply/applications/')) throw new ApiError(503, JSON.stringify({ message: 'Not loaded in this test.' }));
       throw new Error(`Unexpected API call: ${path}`);

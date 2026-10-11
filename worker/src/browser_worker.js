@@ -20,11 +20,13 @@ export class HumanInputRequiredError extends Error {
 }
 
 export class BrowserWorker {
-  constructor({ statePath, artifactDir, eventSink = () => {}, verificationResolver = null }) {
+  constructor({ statePath, artifactDir, eventSink = () => {}, verificationResolver = null, identityResolver = null }) {
     this.store = new StateStore(statePath);
     this.artifactDir = artifactDir;
     this.eventSink = eventSink;
     this.verificationResolver = verificationResolver;
+    /** Phase 8.5: asks the backend which address to register an employer account with. */
+    this.identityResolver = identityResolver;
     /** Set by requestAbort(): the run stops at the next step boundary. */
     this.abortRequested = false;
   }
@@ -67,7 +69,13 @@ export class BrowserWorker {
     fs.mkdirSync(sessionDir, { recursive: true });
     const context = await browser.newContext({ storageState: fs.existsSync(path.join(sessionDir, 'storage.json')) ? path.join(sessionDir, 'storage.json') : undefined });
     const page = await context.newPage();
-    const values = { verification: state.verification, greenhouseExpected: new Map(state.greenhouseExpected ?? []) };
+    const values = {
+      verification: state.verification,
+      // The registration identity survives a restart, so a resumed run logs in
+      // with the address it signed up with (and never asks for a new one).
+      identity: state.identity ?? null,
+      greenhouseExpected: new Map(state.greenhouseExpected ?? []),
+    };
     // A paused or crashed worker may have completed the navigation step but
     // not yet completed the next step. Restore the last durable URL before
     // resuming so a fresh browser process never attempts a form action on
@@ -157,7 +165,7 @@ export class BrowserWorker {
         break;
       case StepType.FILL_FIELD: {
         assertSafeSelector(p.selector);
-        const value = p.valueFrom ? values.verification?.[p.valueFrom.split('.')[1]] : p.value;
+        const value = p.valueFrom ? this.#valueFrom(values, p.valueFrom) : p.value;
         if (p.valueFrom && (value === null || value === undefined || value === '')) {
           if (p.skipWhenMissing) break;
           throw new ApprovalRequiredError(step.id);
@@ -234,6 +242,36 @@ export class BrowserWorker {
         assertSafeSelector(p.selector);
         await page.locator(p.selector).waitFor({ state: 'visible', timeout: 5000 });
         break;
+      case StepType.ACCOUNT_RESOLVE_IDENTITY: {
+        // Phase 8.5: the account e-mail comes from the backend — by default the
+        // candidate's Robin-managed address. Never guessed, never invented.
+        const pauseForHuman = (reason) => {
+          this.store.pause(plan.planId, reason);
+          this.#emit(plan, { type: reason, stepId: step.id });
+          throw new ApprovalRequiredError(step.id);
+        };
+        if (!this.identityResolver) pauseForHuman('REGISTRATION_IDENTITY_UNAVAILABLE');
+        let identity;
+        try {
+          identity = await this.identityResolver({
+            applicationId: plan.correlation.applicationId,
+            employerDomain: p.employerDomain,
+            sessionId: plan.correlation.sessionId ?? null,
+          });
+        } catch (error) {
+          pauseForHuman(String(error?.message ?? '').endsWith(':409')
+            ? 'MANAGED_MAILBOX_NOT_READY' : 'REGISTRATION_IDENTITY_UNAVAILABLE');
+        }
+        const email = String(identity?.email ?? '').trim().toLowerCase();
+        if (!/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(email)) {
+          pauseForHuman('REGISTRATION_IDENTITY_INVALID');
+        }
+        values.identity = { email, mailbox: identity.mailbox ?? null };
+        this.store.identity(plan.planId, values.identity);
+        // The address itself is never put in an event: it routes the candidate's mail.
+        this.#emit(plan, { type: 'REGISTRATION_IDENTITY_RESOLVED', stepId: step.id, mailbox: values.identity.mailbox });
+        break;
+      }
       case StepType.ACCOUNT_VERIFY_OTP: {
         // Never guess. Missing, ambiguous or unavailable results pause safely.
         const pauseForHuman = (reason) => {
@@ -248,7 +286,7 @@ export class BrowserWorker {
             applicationId: plan.correlation.applicationId,
             employerDomain: p.employerDomain,
             sessionId: plan.correlation.sessionId ?? null,
-            mailboxAddress: plan.correlation.mailboxAddress ?? null,
+            mailboxAddress: values.identity?.email ?? plan.correlation.mailboxAddress ?? null,
           });
         } catch {
           pauseForHuman('VERIFICATION_PROVIDER_UNAVAILABLE');
@@ -348,6 +386,14 @@ export class BrowserWorker {
       }
       default: throw new Error(`UNKNOWN_STEP_TYPE:${step.type}`);
     }
+  }
+
+  /** Values a step may take from earlier steps: `verification.otp`, `identity.email`. */
+  #valueFrom(values, path) {
+    const [source, key] = String(path).split('.');
+    if (source === 'verification') return values.verification?.[key];
+    if (source === 'identity') return values.identity?.[key];
+    throw new Error(`UNKNOWN_VALUE_SOURCE:${source}`);
   }
 
   #validateGreenhousePlan(plan) {
