@@ -1214,4 +1214,66 @@ Branch: `phase8.4-gmail-integration`. Draft PR #6 targets `phase8.2.5-ats-discov
 
 Fixture/mocked tests do not prove a real Google OAuth grant or real mailbox sync. Live Gmail authorization has not been performed because credentials and the consent screen are not configured in this environment. Do not say that a live application receipt has been verified until a connected mailbox provides acceptable evidence and that end-to-end path is demonstrated.
 
-PR #6 remains draft while the independent audit fixes are being verified. Check the latest CI result on the PR head before changing this status. No production secrets were added, no deployment was performed, no mail was sent or mutated, no real application was submitted, and `REAL_SUBMIT` remains hard-stopped.
+PR #6 remains draft. Check the latest CI result on the PR head before changing this status. No production secrets were added, no deployment was performed, no mail was sent or mutated, no real application was submitted, and `REAL_SUBMIT` remains hard-stopped.
+
+### 14.3 Closure audit (2026-10-11)
+
+CI run #38 on `9549ec2` was green (backend, frontend, worker). A bounded audit of the Gmail code against
+documented provider behaviour found five defects. Each was reproduced by a failing test before the fix.
+
+1. **Sync stalled on a message that no longer exists.** Gmail history keeps `messageAdded` entries for
+   messages deleted since (replaced drafts, deleted mail), and `messages.get` answers 404 for them. The run
+   failed without advancing, and a stored backlog containing such an ID failed on every later sync. A 404 on
+   a message fetch now skips that ID (there is nothing to ingest); any other error still fails the run and
+   keeps the cursor and backlog.
+2. **Expired or revoked refresh tokens were never flagged.** The code caught `GoogleJsonResponseException`,
+   but the token endpoint throws `TokenResponseException`, so the connection stayed `CONNECTED` and every sync
+   failed with a raw error. `invalid_grant` (revoked, or the 7-day expiry of an OAuth app in Testing status)
+   now marks the connection `REAUTH_REQUIRED` and the card offers Connect again; `invalid_client` and other
+   token errors stay `FAILED` because reconnecting would not fix a configuration fault.
+3. **Gmail's DKIM result was not read.** Gmail reports the signer as `header.i=@domain`, not `header.d=`, so
+   the DKIM domain was always empty and no real Gmail message could pass sender authentication (fail-closed,
+   but `VERIFIED` was unreachable). The identity's domain is now used when `header.d` is absent; RFC 6376
+   requires it to equal or be a subdomain of the signing domain, so alignment is never looser. Only the first
+   `Authentication-Results` header is used, and only from `mx.google.com`, as before.
+4. **Connecting a different mailbox inherited the previous mailbox's history cursor, initial page token and
+   backlog.** These are now reset when the mailbox address changes; reconnecting the same mailbox keeps them.
+   The new `GmailConnectionStoreIT` (PostgreSQL 16, V039) also proves the round trip of cursor, page token,
+   backlog and status, their preservation on failure, single-use owner-bound expiring OAuth state hashes and the
+   purge cascade. Before this, those paths were covered only by mocks.
+5. **The Gmail card was rendered inside every application card** (one card and one status request per
+   application, and none when there are no applications), and the callback result
+   (`gmail=connected|refused|invalid_state|failed`) was never shown. The card is now rendered once on the
+   Applications page, explains the callback result in fixed wording (unknown values are ignored and nothing is
+   echoed), and refreshes the TRACK views after a sync or disconnect.
+
+Verification on Windows, run on the committed code tree:
+- `mvn -B verify` with a disposable `postgres:16` on 127.0.0.1:55436 for `UserDataIsolationIT`, removed
+  afterwards: BUILD SUCCESS.
+  - Unit: 995 run, 0 failures, 1 skipped (Redis assumption).
+  - Integration: 170 run, 0 failures, 1 skipped (opt-in live suite).
+  - Includes `GmailSyncServiceTest` 17, `GmailMessageMapperTest` 7, `GmailConnectionStoreIT` 5 and
+    `UserDataIsolationIT` 21.
+- Frontend: `tsc -b` clean, 300/300 tests (31 files), production build clean.
+- Worker: 19/19.
+
+### 14.4 Still to be done outside this repository (not verifiable here)
+
+- **Google Cloud project.**
+  - Enable the Gmail API.
+  - Configure the OAuth consent screen and add the `gmail.readonly` scope. It is a restricted scope: production
+    use needs Google's app verification and a security assessment. In Testing status, only listed test users
+    can connect and refresh tokens expire after 7 days (handled as `REAUTH_REQUIRED`).
+  - Create a Web OAuth client whose authorized redirect URI is exactly
+    `https://<backend-host>/api/v1/integrations/gmail/callback`.
+- **Backend environment.** Set `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REDIRECT_URI` (the same URI),
+  `APP_GMAIL_TOKEN_KEY` and `APP_GMAIL_STATE_SECRET` (generate each with `openssl rand -base64 32`), and
+  `APP_FRONTEND_URL` (the frontend origin, with no path). Keep `APP_GMAIL_TOKEN_KEY` stable: rotating it makes
+  stored grants undecryptable and every candidate must reconnect.
+- **Live check with a test account.**
+  1. Connect, and confirm the return to `/applications` says "Gmail connected".
+  2. Run Sync now, and confirm a real employer acknowledgement's `Authentication-Results` yields DKIM pass with
+     a domain and the expected verification outcome.
+  3. Disconnect, and confirm the grant disappears from the Google account's third-party access list.
+- **Manual sync only.** There is no background poller: each run reads at most 50 messages and is limited to
+  6 runs per hour per account.
