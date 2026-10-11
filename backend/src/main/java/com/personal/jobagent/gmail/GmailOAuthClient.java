@@ -150,6 +150,14 @@ public class GmailOAuthClient {
         }
     }
 
+    /** Validates the returned grant and supplies the requested scope when OAuth omits it. */
+    public static String storedReadonlyScope(String grantedScope) {
+        assertReadonlyScopes(grantedScope);
+        // A missing scope is legal when it is identical to the request, and the
+        // authorization URL requests this one scope only.
+        return SCOPE_READONLY;
+    }
+
     /** Distinguishes credential faults (re-auth needed) from other API errors. */
     public static class GmailApiException extends RuntimeException {
         public final int status;

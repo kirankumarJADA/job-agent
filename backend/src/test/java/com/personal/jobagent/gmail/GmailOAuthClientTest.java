@@ -28,6 +28,10 @@ class GmailOAuthClientTest {
         GmailOAuthClient.assertReadonlyScopes(GmailOAuthClient.SCOPE_READONLY);
         GmailOAuthClient.assertReadonlyScopes(null);
         GmailOAuthClient.assertReadonlyScopes("   ");
+        assertThat(GmailOAuthClient.storedReadonlyScope(null)).isEqualTo(GmailOAuthClient.SCOPE_READONLY);
+        assertThat(GmailOAuthClient.storedReadonlyScope("  ")).isEqualTo(GmailOAuthClient.SCOPE_READONLY);
+        assertThat(GmailOAuthClient.storedReadonlyScope(GmailOAuthClient.SCOPE_READONLY))
+                .isEqualTo(GmailOAuthClient.SCOPE_READONLY);
         assertThatThrownBy(() -> GmailOAuthClient.assertReadonlyScopes(
                 GmailOAuthClient.SCOPE_READONLY + " https://www.googleapis.com/auth/gmail.send"))
                 .isInstanceOf(IllegalStateException.class);

@@ -171,11 +171,27 @@ public class GmailIntegrationController {
         }
         try {
             GoogleTokenResponse tokens = oauth.exchangeCode(code);
-            GmailOAuthClient.assertReadonlyScopes(tokens.getScope());
+            String storedScopes = GmailOAuthClient.storedReadonlyScope(tokens.getScope());
             String googleEmail = verifyIdentity(tokens.getAccessToken());
 
-            connections.upsertConnected(profile, googleEmail,
-                    cipher.encrypt(tokens.getRefreshToken()), tokens.getScope());
+            String refreshToken = tokens.getRefreshToken();
+            String encryptedRefreshToken;
+            if (refreshToken != null && !refreshToken.isBlank()) {
+                encryptedRefreshToken = cipher.encrypt(refreshToken);
+            } else {
+                // Google may omit a new refresh token on re-consent. Preserve the
+                // existing encrypted token only when it is still active and the
+                // verified mailbox identity is exactly the same; never replace
+                // another account's connection with a credential-less grant.
+                GmailConnectionStore.Connection existing = connections.find(profile).orElse(null);
+                if (existing == null || !existing.active()
+                        || !existing.googleEmail().equalsIgnoreCase(googleEmail)) {
+                    throw new IllegalStateException("Google did not return a refresh token. Revoke Robin's existing Google grant and connect again.");
+                }
+                encryptedRefreshToken = existing.encryptedRefreshToken();
+            }
+
+            connections.upsertConnected(profile, googleEmail, encryptedRefreshToken, storedScopes);
             audit.write(new AuditEntry(ownerContext.actorOr("user"), "GMAIL_CONNECTED", "PROFILE",
                     profile, null,
                     Map.of("accountEmail", googleEmail, "scope", GmailOAuthClient.SCOPE_READONLY),
