@@ -72,7 +72,7 @@ public class GmailSyncService {
                     || initialPageToken != null);
 
             JsonNode history = null;
-            if (!initialSync) {
+            if (!initialSync && !drainingHistoryBacklog) {
                 try {
                     history = oauth.get("/users/me/history?startHistoryId=" + connection.historyId()
                             + "&historyTypes=messageAdded&maxResults=100", accessToken);
