@@ -36,6 +36,10 @@ public class GmailTokenCipher {
                 ? null : deriveKey(configuredKey.trim());
     }
 
+    public boolean configured() {
+        return key != null;
+    }
+
     private void requireKey() {
         if (key == null) {
             throw new IllegalStateException("APP_GMAIL_TOKEN_KEY must be configured before Gmail connections "

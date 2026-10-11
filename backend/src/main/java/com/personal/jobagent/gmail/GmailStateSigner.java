@@ -18,10 +18,8 @@ import java.util.UUID;
  *
  * <p>The state binds the consent round-trip to the signed-in profile: it
  * carries the profile id and an expiry, HMAC-signed with the server secret.
- * The callback refuses a state that is expired, tampered with, or belongs to
- * a different profile — preventing CSRF on the account-linking flow, state
- * replay (bounded by the 10-minute expiry) and connecting credentials to the
- * wrong user.
+ * The callback verifies profile/signature/expiry and consumes a database-backed
+ * state hash exactly once, preventing replay as well as account-linking CSRF.
  */
 @Component
 public class GmailStateSigner {
@@ -37,6 +35,10 @@ public class GmailStateSigner {
         // authorize endpoint answers 503 instead of signing states.
         this.secret = configuredSecret == null || configuredSecret.isBlank()
                 ? null : configuredSecret.trim().getBytes(StandardCharsets.UTF_8);
+    }
+
+    public boolean configured() {
+        return secret != null;
     }
 
     public String sign(UUID profileId) {

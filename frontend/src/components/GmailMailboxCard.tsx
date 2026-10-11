@@ -37,7 +37,7 @@ export const GmailMailboxCard: React.FC = () => {
     try {
       const res = await apiFetch<{ status: string; ingested: number; considered: number }>(
         '/integrations/gmail/sync', { method: 'POST' });
-      setNotice(`Sync finished: ${res.ingested} new message(s) considered out of ${res.considered} retrieved.`);
+      setNotice(`${res.status === 'PARTIAL' ? 'Partial sync' : 'Sync finished'}: ${res.ingested} new message(s) considered out of ${res.considered} retrieved.${res.status === 'PARTIAL' ? ' Run sync again to continue safely.' : ''}`);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sync failed');
@@ -70,7 +70,8 @@ export const GmailMailboxCard: React.FC = () => {
         {status && !status.configured && (
           <p className="text-ink-muted">
             Gmail sync is not configured on this deployment. The operator needs to set
-            GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET and GMAIL_REDIRECT_URI.
+            GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REDIRECT_URI, APP_GMAIL_TOKEN_KEY,
+            APP_GMAIL_STATE_SECRET and APP_FRONTEND_URL.
           </p>
         )}
 

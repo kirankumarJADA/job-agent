@@ -4,6 +4,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 import java.sql.Timestamp;
+import java.security.MessageDigest;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -28,6 +31,34 @@ public class GmailConnectionStore {
 
         public boolean active() {
             return "CONNECTED".equals(status);
+        }
+    }
+
+    /** Store only a hash of each OAuth state, making each consent round-trip single-use. */
+    public void registerOAuthState(UUID profileId, String state) {
+        db.update("delete from gmail_oauth_states where expires_at < now()");
+        db.update("""
+                insert into gmail_oauth_states(state_hash, profile_id, expires_at)
+                values (?, ?, now() + interval '10 minutes')
+                """, stateHash(state), profileId);
+    }
+
+    /** Atomically consumes an unexpired, owner-bound OAuth state exactly once. */
+    public boolean consumeOAuthState(UUID profileId, String state) {
+        if (state == null || state.isBlank()) return false;
+        int deleted = db.update("""
+                delete from gmail_oauth_states
+                where state_hash = ? and profile_id = ? and expires_at > now()
+                """, stateHash(state), profileId);
+        return deleted == 1;
+    }
+
+    private static String stateHash(String state) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(state.getBytes(StandardCharsets.UTF_8));
+            return Base64.getUrlEncoder().withoutPadding().encodeToString(digest);
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not hash OAuth state", e);
         }
     }
 

@@ -42,6 +42,7 @@ public class GmailIntegrationController {
     private final AuditLogWriter audit;
     private final OwnerContext ownerContext;
     private final String configuredRedirectUri;
+    private final String frontendUrl;
     private final int expireDays;
 
     public GmailIntegrationController(GmailOAuthClient oauth, GmailStateSigner stateSigner,
@@ -49,6 +50,7 @@ public class GmailIntegrationController {
                                       GmailSyncService syncService, RateLimitService rateLimiter,
                                       AuditLogWriter audit, OwnerContext ownerContext,
                                       @Value("${app.gmail.redirect-uri:}") String configuredRedirectUri,
+                                      @Value("${app.frontend-url:http://localhost:5173}") String frontendUrl,
                                       @Value("${app.review.expire-days:14}") int expireDays) {
         this.oauth = oauth;
         this.stateSigner = stateSigner;
@@ -59,11 +61,39 @@ public class GmailIntegrationController {
         this.audit = audit;
         this.ownerContext = ownerContext;
         this.configuredRedirectUri = configuredRedirectUri == null ? "" : configuredRedirectUri.trim();
+        this.frontendUrl = frontendUrl == null ? "" : frontendUrl.trim();
         this.expireDays = expireDays;
     }
 
     private boolean configured() {
-        return oauth.configured() && !configuredRedirectUri.isEmpty();
+        return oauth.configured() && !configuredRedirectUri.isEmpty()
+                && stateSigner.configured() && cipher.configured() && frontendOriginConfigured(frontendUrl);
+    }
+
+    private static boolean frontendOriginConfigured(String value) {
+        try {
+            frontendApplicationsUrl(value, "gmail=failed");
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** The front-end URL is deployment configuration, never request input. */
+    static String frontendApplicationsUrl(String baseUrl, String statusHint) {
+        if (!java.util.Set.of("gmail=connected", "gmail=refused", "gmail=invalid_state", "gmail=failed")
+                .contains(statusHint)) {
+            throw new IllegalArgumentException("Invalid Gmail status hint");
+        }
+        java.net.URI uri = java.net.URI.create(baseUrl == null ? "" : baseUrl.trim());
+        String scheme = uri.getScheme();
+        if (scheme == null || (!scheme.equalsIgnoreCase("https") && !scheme.equalsIgnoreCase("http"))
+                || uri.getHost() == null || uri.getRawUserInfo() != null
+                || uri.getRawQuery() != null || uri.getRawFragment() != null
+                || (uri.getRawPath() != null && !uri.getRawPath().isEmpty() && !uri.getRawPath().equals("/"))) {
+            throw new IllegalArgumentException("APP_FRONTEND_URL must be an HTTP(S) origin without a path or credentials");
+        }
+        return scheme + "://" + uri.getRawAuthority() + "/applications?track&" + statusHint;
     }
 
     private UUID profileId() {
@@ -101,6 +131,7 @@ public class GmailIntegrationController {
             return ResponseEntity.badRequest().body(Map.of("error", "a profile is required"));
         }
         String state = stateSigner.sign(profile);
+        connections.registerOAuthState(profile, state);
         audit.write(new AuditEntry(ownerContext.actorOr("user"), "GMAIL_CONNECT_STARTED", "PROFILE",
                 profile, null, Map.of("scope", GmailOAuthClient.SCOPE_READONLY), null, UuidV7.generate()));
         return ResponseEntity.status(302)
@@ -128,15 +159,15 @@ public class GmailIntegrationController {
         if (profile == null) {
             return ResponseEntity.badRequest().body(Map.of("error", "a profile is required"));
         }
+        if (stateSigner.verify(state, profile) == null || !connections.consumeOAuthState(profile, state)) {
+            audit.write(new AuditEntry(ownerContext.actorOr("user"), "GMAIL_CONNECT_INVALID_STATE", "PROFILE",
+                    profile, null, Map.of(), request.getRemoteAddr(), UuidV7.generate()));
+            return redirectFrontend("gmail=invalid_state");
+        }
         if (error != null) {
             audit.write(new AuditEntry(ownerContext.actorOr("user"), "GMAIL_CONNECT_REFUSED", "PROFILE",
                     profile, null, Map.of("reason", error), request.getRemoteAddr(), UuidV7.generate()));
             return redirectFrontend("gmail=refused");
-        }
-        if (stateSigner.verify(state, profile) == null) {
-            audit.write(new AuditEntry(ownerContext.actorOr("user"), "GMAIL_CONNECT_INVALID_STATE", "PROFILE",
-                    profile, null, Map.of(), request.getRemoteAddr(), UuidV7.generate()));
-            return redirectFrontend("gmail=invalid_state");
         }
         try {
             GoogleTokenResponse tokens = oauth.exchangeCode(code);
@@ -219,10 +250,10 @@ public class GmailIntegrationController {
         return ResponseEntity.noContent().build();
     }
 
-    /** The frontend redirect target is fixed by the server; query is a status hint only. */
+    /** Redirects to the separately hosted frontend origin configured by the operator. */
     private ResponseEntity<?> redirectFrontend(String statusHint) {
         return ResponseEntity.status(302)
-                .header("Location", "/applications?track&" + statusHint)
+                .header("Location", frontendApplicationsUrl(frontendUrl, statusHint))
                 .build();
     }
 

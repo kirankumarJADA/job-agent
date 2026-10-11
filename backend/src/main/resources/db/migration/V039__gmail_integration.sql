@@ -24,3 +24,12 @@ create table if not exists gmail_connections (
 
 create index if not exists gmail_connections_status_idx
     on gmail_connections(status, last_sync_at);
+
+
+-- Single-use, owner-bound OAuth state. Only SHA-256 hashes are stored.
+create table if not exists gmail_oauth_states (
+    state_hash text primary key,
+    profile_id uuid not null references profiles(id) on delete cascade,
+    expires_at timestamptz not null
+);
+create index if not exists gmail_oauth_states_expiry_idx on gmail_oauth_states(expires_at);
