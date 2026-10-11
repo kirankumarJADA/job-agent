@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { API_BASE, apiFetch } from '../api/client';
 import { Alert, SectionCard, StatusPill } from './ui';
+import { gmailAuthorizeUrl } from './gmailMailboxLinks';
 
 /**
  * Gmail mailbox connection card (Phase 8.4, TRACK): connect the candidate's
