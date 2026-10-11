@@ -9,11 +9,33 @@ import { gmailAuthorizeUrl } from './gmailMailboxLinks';
  * connected identity, scopes in plain language, sync state, and errors.
  * Robin never sends, deletes, labels or modifies mail.
  */
-export const GmailMailboxCard: React.FC = () => {
+/**
+ * The OAuth callback returns to /applications?track&gmail=<result>. Only these
+ * fixed values are recognised and each maps to fixed wording, so nothing from
+ * the URL is ever echoed into the page.
+ */
+const CALLBACK_RESULTS: Record<string, { tone: 'success' | 'error'; message: string }> = {
+  connected: { tone: 'success', message: 'Gmail connected (read-only). Use “Sync now” to bring in employer messages.' },
+  refused: { tone: 'error', message: 'Gmail access was not granted, so nothing was connected.' },
+  invalid_state: {
+    tone: 'error',
+    message: 'That Gmail connection attempt expired or did not start from this session. Nothing was connected; try again.',
+  },
+  failed: { tone: 'error', message: 'Gmail could not be connected. Nothing was stored; try again.' },
+};
+
+function callbackResult(): { tone: 'success' | 'error'; message: string } | null {
+  if (typeof window === 'undefined') return null;
+  const value = new URLSearchParams(window.location.search).get('gmail');
+  return value && Object.prototype.hasOwnProperty.call(CALLBACK_RESULTS, value) ? CALLBACK_RESULTS[value] : null;
+}
+
+export const GmailMailboxCard: React.FC<{ onChanged?: () => void }> = ({ onChanged }) => {
   const [status, setStatus] = useState<GmailStatus | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [callback] = useState(callbackResult);
+  const [error, setError] = useState<string | null>(callback?.tone === 'error' ? callback.message : null);
+  const [notice, setNotice] = useState<string | null>(callback?.tone === 'success' ? callback.message : null);
 
   const load = useCallback(async () => {
     try {
@@ -40,12 +62,13 @@ export const GmailMailboxCard: React.FC = () => {
         '/integrations/gmail/sync', { method: 'POST' });
       setNotice(`${res.status === 'PARTIAL' ? 'Partial sync' : 'Sync finished'}: ${res.ingested} new message(s) considered out of ${res.considered} retrieved.${res.status === 'PARTIAL' ? ' Run sync again to continue safely.' : ''}`);
       await load();
+      onChanged?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sync failed');
     } finally {
       setBusy(false);
     }
-  }, [load]);
+  }, [load, onChanged]);
 
   const disconnect = useCallback(async () => {
     setBusy(true); setError(null); setNotice(null);
@@ -53,12 +76,13 @@ export const GmailMailboxCard: React.FC = () => {
       await apiFetch('/integrations/gmail/disconnect', { method: 'POST' });
       setNotice('Gmail disconnected. Previously captured messages and evidence are kept.');
       await load();
+      onChanged?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Disconnect failed');
     } finally {
       setBusy(false);
     }
-  }, [load]);
+  }, [load, onChanged]);
 
   const connected = status?.connected === true;
 

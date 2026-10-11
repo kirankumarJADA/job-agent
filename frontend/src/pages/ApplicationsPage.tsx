@@ -76,6 +76,13 @@ export const ApplicationsPage: React.FC = () => {
     void refreshQuietly();
   }, [refreshQuietly]);
 
+  /** A mailbox sync can add employer messages to any application and to the queue. */
+  const onMailboxChanged = useCallback(() => {
+    setQueueKey((k) => k + 1);
+    setPanelsKey((k) => k + 1);
+    void refreshQuietly();
+  }, [refreshQuietly]);
+
   useEffect(() => {
     fetchApplications();
   }, [fetchApplications]);
@@ -145,6 +152,13 @@ export const ApplicationsPage: React.FC = () => {
 
       {reviewError && <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300" role="alert">{reviewError}</div>}
 
+      {/* One mailbox per account (Phase 8.4): shown once, not per application. */}
+      {!loading && (
+        <div className="mb-4">
+          <GmailMailboxCard onChanged={onMailboxChanged} />
+        </div>
+      )}
+
       {!loading && !error && applications.length > 0 && (
         <TrackReviewQueue
           applications={applications.map((application) => ({
@@ -207,7 +221,6 @@ export const ApplicationsPage: React.FC = () => {
                 refreshKey={panelsKey}
                 onChanged={onPanelChanged}
               />
-              <GmailMailboxCard />
               <ApplyWorkspace
                 applicationId={application.id}
                 planId={application.planId}
