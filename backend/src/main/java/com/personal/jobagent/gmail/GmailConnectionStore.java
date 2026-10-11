@@ -1,0 +1,94 @@
+package com.personal.jobagent.gmail;
+
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Component;
+
+import java.sql.Timestamp;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+
+/**
+ * Owner-scoped persistence for Gmail OAuth connections. One connection per
+ * profile; the refresh token is stored encrypted by the caller.
+ */
+@Component
+public class GmailConnectionStore {
+
+    private final JdbcTemplate db;
+
+    public GmailConnectionStore(JdbcTemplate db) {
+        this.db = db;
+    }
+
+    public record Connection(UUID id, UUID profileId, String googleEmail, String encryptedRefreshToken,
+                             String scopes, String status, Long historyId,
+                             java.time.Instant lastSyncAt, String lastSyncStatus, String lastSyncError) {
+
+        public boolean active() {
+            return "CONNECTED".equals(status);
+        }
+    }
+
+    public void upsertConnected(UUID profileId, String googleEmail, String encryptedRefreshToken,
+                                String scopes) {
+        db.update("""
+                insert into gmail_connections (id, profile_id, google_email, encrypted_refresh_token,
+                                               scopes, status, connected_at, updated_at)
+                values (?, ?, ?, ?, ?, 'CONNECTED', now(), now())
+                on conflict (profile_id) do update set
+                    google_email = excluded.google_email,
+                    encrypted_refresh_token = excluded.encrypted_refresh_token,
+                    scopes = excluded.scopes,
+                    status = 'CONNECTED',
+                    last_sync_error = null,
+                    updated_at = now()
+                """, UUID.randomUUID(), profileId, googleEmail, encryptedRefreshToken, scopes);
+    }
+
+    public Optional<Connection> find(UUID profileId) {
+        List<Map<String, Object>> rows = db.queryForList("""
+                select id, profile_id, google_email, encrypted_refresh_token, scopes, status,
+                       history_id, last_sync_at, last_sync_status, last_sync_error
+                from gmail_connections where profile_id = ?
+                """, profileId);
+        return rows.isEmpty() ? Optional.empty() : Optional.of(map(rows.get(0)));
+    }
+
+    public void updateSyncState(UUID profileId, Long historyId, java.time.Instant lastSyncAt,
+                                String status, String error) {
+        db.update("""
+                update gmail_connections
+                set history_id = coalesce(?, history_id),
+                    last_sync_at = coalesce(?, last_sync_at),
+                    last_sync_status = ?,
+                    last_sync_error = ?,
+                    updated_at = now()
+                where profile_id = ?
+                """, historyId, lastSyncAt == null ? null : Timestamp.from(lastSyncAt), status, error, profileId);
+    }
+
+    public void markReauthRequired(UUID profileId, String error) {
+        db.update("""
+                update gmail_connections
+                set status = 'REAUTH_REQUIRED', last_sync_status = 'FAILED', last_sync_error = ?,
+                    updated_at = now()
+                where profile_id = ?
+                """, error, profileId);
+    }
+
+    public void delete(UUID profileId) {
+        db.update("delete from gmail_connections where profile_id = ?", profileId);
+    }
+
+    private Connection map(Map<String, Object> r) {
+        return new Connection(
+                (UUID) r.get("id"), (UUID) r.get("profile_id"),
+                (String) r.get("google_email"), (String) r.get("encrypted_refresh_token"),
+                (String) r.get("scopes"), (String) r.get("status"),
+                r.get("history_id") == null ? null : ((Number) r.get("history_id")).longValue(),
+                r.get("last_sync_at") == null ? null : ((Timestamp) r.get("last_sync_at")).toInstant(),
+                (String) r.get("last_sync_status"), (String) r.get("last_sync_error"));
+    }
+}

@@ -4,6 +4,7 @@ import { ApplicationSummary, ApplicationTimelineEvent, AutomationPackageView } f
 import { ApplicationPrepStatus } from '../components/ApplicationPrepStatus';
 import { ApplyWorkspace } from '../components/ApplyWorkspace';
 import { ApplicationTrackPanel } from '../components/ApplicationTrackPanel';
+import { GmailMailboxCard } from '../components/GmailMailboxCard';
 import { TrackReviewQueue } from '../components/TrackReviewQueue';
 import { stageTone } from '../components/trackShared';
 import {
@@ -206,6 +207,7 @@ export const ApplicationsPage: React.FC = () => {
                 refreshKey={panelsKey}
                 onChanged={onPanelChanged}
               />
+              <GmailMailboxCard />
               <ApplyWorkspace
                 applicationId={application.id}
                 planId={application.planId}
