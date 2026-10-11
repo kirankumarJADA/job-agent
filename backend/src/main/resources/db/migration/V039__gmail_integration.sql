@@ -15,6 +15,7 @@ create table if not exists gmail_connections (
         check (status in ('CONNECTED', 'REAUTH_REQUIRED', 'DISCONNECTED')),
     history_id              bigint,
     initial_page_token      text,
+    history_pending_ids     jsonb not null default '[]'::jsonb,
     last_sync_at            timestamptz,
     last_sync_status        text,
     last_sync_error         text,

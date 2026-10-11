@@ -40,6 +40,7 @@ class GmailSyncServiceTest {
         Mockito.reset(connections, cipher, oauth, emailIntelligence, db);
         when(connections.find(PROFILE)).thenReturn(java.util.Optional.of(CONNECTION));
         when(connections.initialPageToken(PROFILE)).thenReturn(null);
+        when(connections.pendingHistoryMessageIds(PROFILE)).thenReturn(java.util.List.of());
         when(cipher.decrypt("encrypted")).thenReturn("refresh-token");
         when(oauth.refresh("refresh-token")).thenReturn(new com.google.api.client.googleapis.auth.oauth2.GoogleTokenResponse()
                 .setAccessToken("access-token"));
@@ -174,6 +175,45 @@ class GmailSyncServiceTest {
         verify(oauth, never()).refresh(anyString());
     }
 
+    @Test
+    void oneOversizedHistoryRecordPersistsItsTailAndNeverSkipsMessages() throws Exception {
+        java.util.List<String> ids = java.util.stream.IntStream.range(0, 51)
+                .mapToObj(i -> "m-" + i).toList();
+        java.util.List<String> responses = new java.util.ArrayList<>();
+        responses.add(historyJsonWithIds(200, ids));
+        for (int i = 0; i < 50; i++) {
+            responses.add(fullMessage(ids.get(i), "no-reply@employer.example", "candidate@example.com",
+                    "Application update", null, "We received your message."));
+        }
+        stub(responses.toArray(String[]::new));
+        when(emailIntelligence.ingestFromMailboxConnector(eq(PROFILE), any()))
+                .thenReturn(new EmailIntelligenceService.IngestResult(UUID.randomUUID(), "OTHER", null, false));
+
+        var outcome = service.sync(PROFILE);
+
+        assertThat(outcome.status()).isEqualTo("PARTIAL");
+        assertThat(outcome.considered()).isEqualTo(50);
+        verify(connections).updateHistorySyncState(eq(PROFILE), eq(200L), any(), eq("PARTIAL"), eq(null),
+                org.mockito.ArgumentMatchers.argThat(tail -> tail.size() == 1 && tail.get(0).equals("m-50")));
+    }
+
+    @Test
+    void pendingHistoryTailIsDrainedBeforeAnyNewHistoryQuery() throws Exception {
+        when(connections.pendingHistoryMessageIds(PROFILE)).thenReturn(java.util.List.of("m-50"));
+        stub(fullMessage("m-50", "no-reply@employer.example", "candidate@example.com",
+                "Application update", null, "We received your message."));
+        when(emailIntelligence.ingestFromMailboxConnector(eq(PROFILE), any()))
+                .thenReturn(new EmailIntelligenceService.IngestResult(UUID.randomUUID(), "OTHER", null, false));
+
+        var outcome = service.sync(PROFILE);
+
+        assertThat(outcome.status()).isEqualTo("OK");
+        assertThat(outcome.considered()).isEqualTo(1);
+        verify(oauth, never()).get(contains("/history?startHistoryId="), anyString());
+        verify(connections).updateHistorySyncState(eq(PROFILE), eq(100L), any(), eq("OK"), eq(null),
+                org.mockito.ArgumentMatchers.argThat(java.util.List::isEmpty));
+    }
+
     private void stub(String... responses) throws Exception {
         JsonNode[] nodes = new JsonNode[responses.length];
         for (int i = 0; i < responses.length; i++) nodes[i] = parse(responses[i]);
@@ -207,6 +247,23 @@ class GmailSyncServiceTest {
         sb.append("],\"resultSizeEstimate\":").append(ids.length);
         if (pageToken != null) sb.append(",\"nextPageToken\":\"").append(pageToken).append("\"");
         return sb.append("}").toString();
+    }
+
+    private static String historyJsonWithIds(long historyId, java.util.List<String> messageIds) {
+        try {
+            com.fasterxml.jackson.databind.node.ObjectNode root = new ObjectMapper().createObjectNode();
+            root.put("historyId", Long.toString(historyId));
+            com.fasterxml.jackson.databind.node.ArrayNode history = root.putArray("history");
+            com.fasterxml.jackson.databind.node.ObjectNode record = history.addObject();
+            record.put("id", Long.toString(historyId));
+            com.fasterxml.jackson.databind.node.ArrayNode added = record.putArray("messagesAdded");
+            for (String id : messageIds) {
+                added.addObject().putObject("message").put("id", id);
+            }
+            return root.toString();
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private static String historyJson(long historyId, String messageId) {

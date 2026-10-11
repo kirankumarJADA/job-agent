@@ -1,5 +1,7 @@
 package com.personal.jobagent.gmail;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -20,6 +22,7 @@ import java.util.UUID;
 public class GmailConnectionStore {
 
     private final JdbcTemplate db;
+    private final ObjectMapper json = new ObjectMapper();
 
     public GmailConnectionStore(JdbcTemplate db) {
         this.db = db;
@@ -94,13 +97,30 @@ public class GmailConnectionStore {
         return rows.isEmpty() ? null : rows.get(0);
     }
 
-    /** Atomically advances the cursor snapshot and the bounded initial-list page token. */
+    /** Pending message IDs left by a history record larger than one sync batch. */
+    public List<String> pendingHistoryMessageIds(UUID profileId) {
+        List<String> rows = db.query("""
+                select history_pending_ids::text from gmail_connections where profile_id = ?
+                """, (rs, n) -> rs.getString(1), profileId);
+        if (rows.isEmpty() || rows.get(0) == null || rows.get(0).isBlank()) return List.of();
+        try {
+            return json.readValue(rows.get(0), new TypeReference<List<String>>() {});
+        } catch (Exception e) {
+            throw new IllegalStateException("Stored Gmail history backlog is invalid", e);
+        }
+    }
+
+    /**
+     * Atomically advances the cursor snapshot and initial-list page token.
+     * Initial scanning is only entered when the incremental-history backlog is empty.
+     */
     public void updateInitialSyncState(UUID profileId, Long historyId, java.time.Instant lastSyncAt,
                                        String status, String error, String nextPageToken) {
         db.update("""
                 update gmail_connections
                 set history_id = coalesce(?, history_id),
                     initial_page_token = ?,
+                    history_pending_ids = '[]'::jsonb,
                     last_sync_at = coalesce(?, last_sync_at),
                     last_sync_status = ?,
                     last_sync_error = ?,
@@ -108,6 +128,27 @@ public class GmailConnectionStore {
                 where profile_id = ?
                 """, historyId, nextPageToken, lastSyncAt == null ? null : Timestamp.from(lastSyncAt),
                 status, error, profileId);
+    }
+
+    /** Cursor and the remaining IDs from one oversized history record are saved atomically. */
+    public void updateHistorySyncState(UUID profileId, Long historyId, java.time.Instant lastSyncAt,
+                                       String status, String error, List<String> pendingIds) {
+        try {
+            String pendingJson = json.writeValueAsString(pendingIds == null ? List.of() : pendingIds);
+            db.update("""
+                    update gmail_connections
+                    set history_id = coalesce(?, history_id),
+                        history_pending_ids = ?::jsonb,
+                        last_sync_at = coalesce(?, last_sync_at),
+                        last_sync_status = ?,
+                        last_sync_error = ?,
+                        updated_at = now()
+                    where profile_id = ?
+                    """, historyId, pendingJson,
+                    lastSyncAt == null ? null : Timestamp.from(lastSyncAt), status, error, profileId);
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not persist Gmail history cursor", e);
+        }
     }
 
     public void updateSyncState(UUID profileId, Long historyId, java.time.Instant lastSyncAt,

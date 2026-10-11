@@ -65,8 +65,11 @@ public class GmailSyncService {
             String refreshToken = cipher.decrypt(connection.encryptedRefreshToken());
             String accessToken = accessToken(profileId, refreshToken);
             String initialPageToken = connections.initialPageToken(profileId);
-            boolean initialSync = connection.historyId() == null || connection.historyId() <= 0
-                    || initialPageToken != null;
+            List<String> storedHistoryBacklog = connections.pendingHistoryMessageIds(profileId);
+            boolean drainingHistoryBacklog = !storedHistoryBacklog.isEmpty();
+            boolean initialSync = !drainingHistoryBacklog
+                    && (connection.historyId() == null || connection.historyId() <= 0
+                    || initialPageToken != null);
 
             JsonNode history = null;
             if (!initialSync) {
@@ -88,9 +91,21 @@ public class GmailSyncService {
             List<String> messageIds = new ArrayList<>();
             long newHistoryId;
             String nextInitialPageToken = null;
+            List<String> nextPendingHistoryIds = List.of();
             boolean partial = false;
 
-            if (initialSync) {
+            if (drainingHistoryBacklog) {
+                // Drain an already-seen oversized history record before querying
+                // for later history. This ensures the cursor cannot skip its tail.
+                if (connection.historyId() == null || connection.historyId() <= 0) {
+                    throw new IllegalStateException("Gmail history backlog has no valid cursor");
+                }
+                int end = Math.min(MAX_MESSAGES_PER_SYNC, storedHistoryBacklog.size());
+                messageIds.addAll(storedHistoryBacklog.subList(0, end));
+                nextPendingHistoryIds = List.copyOf(storedHistoryBacklog.subList(end, storedHistoryBacklog.size()));
+                newHistoryId = connection.historyId();
+                partial = !nextPendingHistoryIds.isEmpty();
+            } else if (initialSync) {
                 if (connection.historyId() == null || connection.historyId() <= 0 || initialPageToken == null) {
                     JsonNode profile = oauth.get("/users/me/profile", accessToken);
                     newHistoryId = requiredHistoryId(profile);
@@ -135,22 +150,35 @@ public class GmailSyncService {
                             if (!id.isBlank()) recordIds.add(id);
                         }
 
-                        // Never split one history record: nextHistoryId must not jump
-                        // past messages in that same record. If a single record
-                        // itself has >50 messages, process it whole to preserve truth.
+                        long recordId = record.path("id").asLong(boundary);
+
+                        // A single history record can contain more IDs than one
+                        // bounded run can fetch. Process the first batch now and
+                        // persist its tail together with this record's cursor.
+                        // Subsequent runs drain that tail before querying newer history.
+                        if (selectedIds.isEmpty() && recordIds.size() > MAX_MESSAGES_PER_SYNC) {
+                            List<String> orderedIds = new ArrayList<>(recordIds);
+                            selectedIds.addAll(orderedIds.subList(0, MAX_MESSAGES_PER_SYNC));
+                            nextPendingHistoryIds = List.copyOf(orderedIds.subList(MAX_MESSAGES_PER_SYNC, orderedIds.size()));
+                            if (recordId > 0) boundary = recordId;
+                            batchLimitReached = true;
+                            break;
+                        }
+
+                        // Never split a record when preceding records already use
+                        // some of this run's budget: keep the cursor before this one.
                         if (!selectedIds.isEmpty()
                                 && selectedIds.size() + recordIds.size() > MAX_MESSAGES_PER_SYNC) {
                             batchLimitReached = true;
                             break;
                         }
                         selectedIds.addAll(recordIds);
-                        long recordId = record.path("id").asLong(boundary);
                         if (recordId > 0) boundary = recordId;
                     }
                 }
                 messageIds.addAll(selectedIds);
                 boolean hasNextHistoryPage = history.hasNonNull("nextPageToken");
-                partial = batchLimitReached || hasNextHistoryPage;
+                partial = batchLimitReached || hasNextHistoryPage || !nextPendingHistoryIds.isEmpty();
                 newHistoryId = partial ? boundary : history.path("historyId").asLong(boundary);
                 if (newHistoryId <= 0) {
                     throw new IllegalStateException("Gmail history response did not include a usable history cursor");
@@ -161,7 +189,6 @@ public class GmailSyncService {
             int considered = 0;
             int fetched = 0;
             for (String id : messageIds) {
-                if (fetched >= MAX_MESSAGES_PER_SYNC && !initialSync) break;
                 if (fetched >= MAX_MESSAGES_PER_SYNC) break;
                 JsonNode message = oauth.get("/users/me/messages/" + encodePathSegment(id) + "?format=full", accessToken);
                 fetched++;
@@ -184,7 +211,8 @@ public class GmailSyncService {
                 connections.updateInitialSyncState(profileId, newHistoryId, Instant.now(),
                         status, null, nextInitialPageToken);
             } else {
-                connections.updateSyncState(profileId, newHistoryId, Instant.now(), status, null);
+                connections.updateHistorySyncState(profileId, newHistoryId, Instant.now(),
+                        status, null, nextPendingHistoryIds);
             }
             log.info("Gmail sync for profile {}: fetched {} message(s), considered {} inbox message(s), ingested {}",
                     profileId, fetched, considered, ingested);
