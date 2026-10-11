@@ -20,10 +20,11 @@ export class HumanInputRequiredError extends Error {
 }
 
 export class BrowserWorker {
-  constructor({ statePath, artifactDir, eventSink = () => {} }) {
+  constructor({ statePath, artifactDir, eventSink = () => {}, verificationResolver = null }) {
     this.store = new StateStore(statePath);
     this.artifactDir = artifactDir;
     this.eventSink = eventSink;
+    this.verificationResolver = verificationResolver;
     /** Set by requestAbort(): the run stops at the next step boundary. */
     this.abortRequested = false;
   }
@@ -46,7 +47,7 @@ export class BrowserWorker {
     // for full plans, which still pass through validatePackage unchanged.
     if (plan.planType === 'GREENHOUSE') {
       this.#validateGreenhousePlan(plan);
-    } else if (plan.planType !== 'INSPECTION') {
+    } else if (plan.planType !== 'INSPECTION' && plan.package) {
       validatePackage(plan.package);
     }
     if (plan.planType === 'GREENHOUSE') this.#validateGreenhouseArtifacts(plan);
@@ -219,6 +220,25 @@ export class BrowserWorker {
         assertSafeSelector(p.selector);
         await page.locator(p.selector).waitFor({ state: 'visible', timeout: 5000 });
         break;
+      case StepType.ACCOUNT_VERIFY_OTP: {
+        // Phase 8.5: resolve the OTP through Robin's mailbox-verification
+        // provider (managed mailbox first, personal Gmail if connected).
+        // Never guess: an unambiguous fresh code is required, otherwise the
+        // workflow pauses for the human.
+        if (!this.verificationResolver) {
+          throw new ApprovalRequiredError(step.id);
+        }
+        const resolution = await this.verificationResolver({
+          applicationId: plan.correlation.applicationId,
+          employerDomain: p.employerDomain,
+        });
+        if (!resolution || (!resolution.otp && !resolution.link)) {
+          this.#emit(plan, { type: 'VERIFICATION_NOT_FOUND', stepId: step.id });
+          throw new ApprovalRequiredError(step.id);
+        }
+        values.verification = { otp: resolution.otp, link: resolution.link };
+        break;
+      }
       case StepType.MAILBOX_VERIFY: {
         const mailbox = new MockMailboxClient(p.mailboxUrl);
         const verification = await mailbox.getVerification({ applicationId: p.applicationId, senderDomain: p.senderDomain, receivedAfter: Date.now() - 120000 });

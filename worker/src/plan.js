@@ -12,6 +12,7 @@ export const StepType = Object.freeze({
   WAIT_FOR: 'WAIT_FOR',
   SCREENSHOT: 'SCREENSHOT',
   MAILBOX_VERIFY: 'MAILBOX_VERIFY',
+  ACCOUNT_VERIFY_OTP: 'ACCOUNT_VERIFY_OTP',
   POLICY_CHECK: 'POLICY_CHECK',
   MOCK_SUBMIT: 'MOCK_SUBMIT',
   VALIDATE: 'VALIDATE',
@@ -140,4 +141,32 @@ export function buildApplicationPlan({ baseUrl, mailboxUrl, package: pkg }) {
 
 export function planFingerprint(plan) {
   return crypto.createHash('sha256').update(JSON.stringify(plan)).digest('hex');
+}
+
+/**
+ * Phase 8.5: employer account lifecycle plan (signup OR existing login) with
+ * the verification step resolved through Robin's mailbox-verification
+ * provider (managed mailbox first, personal Gmail if connected). The worker
+ * pauses for the human when the provider cannot return a fresh code.
+ */
+export function buildAccountLifecyclePlan({ baseUrl, employerDomain, applicationId,
+                                            accountEmail, accountPassword, verifyOtp = true }) {
+  const step = (id, type, policy, params = {}) => ({ id, type, policy, params });
+  const steps = [
+    step('signup-navigate', StepType.NAVIGATE, Policy.AUTO, { url: `${baseUrl}/signup` }),
+    step('signup-email', StepType.FILL_FIELD, Policy.AUTO, { selector: 'input[name="email"]', value: accountEmail }),
+    step('signup-password', StepType.FILL_FIELD, Policy.AUTO, { selector: 'input[name="password"]', value: accountPassword }),
+    step('signup-submit', StepType.CLICK, Policy.AUTO, { selector: 'button[type="submit"]' }),
+  ];
+  if (verifyOtp) {
+    steps.push(step('account-verify-otp', StepType.ACCOUNT_VERIFY_OTP, Policy.AUTO,
+      { employerDomain, applicationId }));
+  }
+  steps.push(step('login-navigate', StepType.NAVIGATE, Policy.AUTO, { url: `${baseUrl}/login` }),
+    step('login-email', StepType.FILL_FIELD, Policy.AUTO, { selector: 'input[name="email"]', value: accountEmail }),
+    step('login-password', StepType.FILL_FIELD, Policy.AUTO, { selector: 'input[name="password"]', value: accountPassword }),
+    step('login-submit', StepType.CLICK, Policy.AUTO, { selector: 'button[type="submit"]' }));
+  return { planId: `plan-lifecycle-${applicationId}`, version: 1,
+    correlation: { applicationId, employerDomain }, steps,
+    safetyContract: 'NO_SUBMIT' };
 }
