@@ -261,6 +261,11 @@ export interface ApplicationSummary {
   planSubmitApproved?: boolean | null;
   planHeartbeatAt?: string | null;
   planUpdatedAt?: string | null;
+  /**
+   * TRACK (Phase 8.3): the status Robin derives from evidence. `status` above
+   * stays Robin's internal workflow status; this is what the candidate sees.
+   */
+  track?: TrackSummary | null;
 }
 
 export interface LlmModel {
@@ -589,3 +594,193 @@ export interface ApplyReadiness {
   computedAt: string;
 }
 
+
+/* ------------------------------------------------------------------ */
+/* TRACK (Phase 8.3)                                                   */
+/* ------------------------------------------------------------------ */
+
+/** Reconciled, candidate-facing application stage (derived at read time, never stored). */
+export type TrackStage =
+  | 'PREPARING'
+  | 'READY_TO_APPLY'
+  | 'APPLYING'
+  | 'APPLIED'
+  | 'ACKNOWLEDGED'
+  | 'IN_CONTACT'
+  | 'ASSESSMENT'
+  | 'INTERVIEW'
+  | 'OFFER'
+  | 'REJECTED'
+  | 'WITHDRAWN'
+  | 'STOPPED'
+  | 'NEEDS_REVIEW'
+  | 'UNKNOWN';
+
+/** What the current stage rests on, strongest first. */
+export type TrackBasis = 'VERIFIED' | 'CANDIDATE_CONFIRMED' | 'CANDIDATE_REPORTED' | 'UNVERIFIED' | 'INTERNAL' | 'INFERRED';
+export type TrackSubmissionState = 'CONFIRMED' | 'UNVERIFIED' | 'UNKNOWN' | 'CONFLICTING';
+export type TrackAcknowledgementState = 'VERIFIED' | 'UNVERIFIED' | 'NONE';
+export type TrackEventClassification = 'INTERNAL' | 'EXTERNAL' | 'INFERRED' | 'CANDIDATE_REPORTED';
+export type TrackVerification = 'NOT_APPLICABLE' | 'VERIFIED' | 'UNVERIFIED' | 'REJECTED' | 'UNKNOWN';
+export type TrackTimePrecision = 'EXACT' | 'DATE' | 'UNKNOWN';
+export type TrackReportKind =
+  | 'SUBMITTED'
+  | 'ACKNOWLEDGED'
+  | 'RECRUITER_CONTACT'
+  | 'ASSESSMENT'
+  | 'INTERVIEW'
+  | 'OFFER'
+  | 'REJECTED'
+  | 'WITHDRAWN';
+
+/** Compact TRACK state carried by each row of GET /applications. */
+export interface TrackSummary {
+  availability: 'AVAILABLE' | 'UNAVAILABLE';
+  status?: TrackStage;
+  label?: string;
+  basis?: TrackBasis | null;
+  submission?: TrackSubmissionState;
+  needsReview?: boolean;
+  attentionCount?: number;
+  pending?: string | null;
+}
+
+export interface TrackApplicationRef {
+  applicationId: string;
+  jobTitle: string;
+  company: string;
+  location?: string | null;
+  createdAt?: string | null;
+}
+
+export interface TrackAttention {
+  code: string;
+  message: string;
+  emailId?: string | null;
+  receiptId?: string | null;
+}
+
+export interface TrackConflict {
+  code: string;
+  message: string;
+}
+
+/** One piece of submission evidence and the verification policy's outcome for it. */
+export interface TrackReceipt {
+  id: string;
+  evidenceType: 'EMPLOYER_ACKNOWLEDGEMENT_EMAIL' | 'CANDIDATE_STATEMENT';
+  evidenceLabel: string;
+  channel: 'MAILBOX_CONNECTOR' | 'CANDIDATE_FORWARDED' | 'CANDIDATE_ENTERED';
+  channelLabel: string;
+  verification: TrackVerification;
+  verificationLabel: string;
+  /** Why the verification policy reached its outcome, one entry per rule checked. */
+  reasons: Array<{ code: string; message: string }>;
+  policyVersion: string;
+  summary: string | null;
+  externalReference: string | null;
+  evidenceAt: string | null;
+  evidenceAtPrecision: TrackTimePrecision;
+  capturedAt: string | null;
+  candidateReview: 'CONFIRMED' | 'REJECTED' | null;
+  candidateReviewedAt: string | null;
+  reviewVersion: number;
+  emailId: string | null;
+}
+
+/** An employer message waiting for the candidate's decision. */
+export interface TrackReviewItem {
+  emailId: string;
+  status: string;
+  reviewType: 'CONFLICT' | 'ASSOCIATION' | 'UNMATCHED' | 'MEANING';
+  subject: string | null;
+  from: string | null;
+  receivedAt: string | null;
+  receivedTimeKnown: boolean;
+  category: string;
+  categoryLabel: string;
+  categoryConfirmed: boolean;
+  confidence: number | null;
+  confidenceNote: string;
+  excerpt: string | null;
+  rationale: Array<{ code: string; message: string }> | null;
+  decisionVersion: number;
+  addedBy: 'YOU' | 'MAILBOX_CONNECTOR';
+  currentApplication: TrackApplicationRef | null;
+  candidates: Array<TrackApplicationRef & { signals: string[] }>;
+  allowedCategories: Array<{ value: string; label: string }>;
+}
+
+/** GET /applications/{id}/track */
+export interface ApplicationTrack {
+  applicationId: string;
+  availability: 'AVAILABLE';
+  application: TrackApplicationRef;
+  status: TrackStage;
+  label: string;
+  basis: TrackBasis | null;
+  basisLabel: string | null;
+  reason: string;
+  since: string | null;
+  sincePrecision: TrackTimePrecision | null;
+  evidenceStage: TrackStage;
+  recordedStatus: string;
+  recordedStatusLabel: string;
+  submission: { state: TrackSubmissionState; label: string; reason: string };
+  acknowledgement: { state: TrackAcknowledgementState; label: string };
+  communications: { linkedMessages: number; awaitingReview: number };
+  pending: { stage: TrackStage; label: string; emailId: string | null } | null;
+  attention: TrackAttention[];
+  unknowns: string[];
+  conflicts: TrackConflict[];
+  needsReview: boolean;
+  robinSubmission: { submitted: boolean; note: string };
+  receipts: TrackReceipt[];
+  reviews: TrackReviewItem[];
+  mailbox: { connected: boolean; note: string };
+  versions?: Record<string, string>;
+  computedAt: string;
+  replayed?: boolean;
+}
+
+/** One neutral timeline entry (no discovery-source or platform names by construction). */
+export interface TrackTimelineItem {
+  id: string;
+  type: string;
+  summary: string;
+  classification: TrackEventClassification;
+  verification: TrackVerification;
+  label: string;
+  actor: 'ROBIN' | 'YOU' | 'EMPLOYER';
+  occurredAt: string | null;
+  occurredOn: string | null;
+  occurredAtPrecision: TrackTimePrecision;
+  recordedAt: string | null;
+  supersedes: string | null;
+  receiptId: string | null;
+  emailId: string | null;
+}
+
+/** GET /applications/{id}/track/timeline — `nextCursor` is "" when there is no further page. */
+export interface TrackTimelinePage {
+  items: TrackTimelineItem[];
+  nextCursor: string;
+  limit: number;
+}
+
+/** GET /track/reviews */
+export interface TrackReviewQueueResponse {
+  items: TrackReviewItem[];
+  mailboxConnected: boolean;
+}
+
+/** POST /emails/ingest */
+export interface EmailIngestResult {
+  emailId: string | null;
+  classification: string | null;
+  applicationId: string | null;
+  replayed: boolean;
+  associationStatus: string | null;
+  needsReview: boolean;
+  receiptVerification: string | null;
+}
