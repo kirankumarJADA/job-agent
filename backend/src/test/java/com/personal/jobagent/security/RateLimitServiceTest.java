@@ -78,4 +78,30 @@ class RateLimitServiceTest {
         assertThat(limiter.bucketFor("POST", "/api/v1/automation/plans/claim-next")).isNull();
         assertThat(limiter.bucketFor("POST", "/api/v1/cover-letters/generate/extra")).isNull();
     }
+
+    @Test
+    void trackEvidenceWritesAndMessageIngestionShareTheTrackBucket() {
+        RateLimitService limiter = new RateLimitService(true, Map.of());
+
+        assertThat(limiter.bucketFor("POST", "/api/v1/emails/ingest")).isEqualTo("track");
+        assertThat(limiter.bucketFor("POST", "/api/v1/applications/abc/track/reports")).isEqualTo("track");
+        assertThat(limiter.bucketFor("POST", "/api/v1/applications/abc/track/receipts/def/review")).isEqualTo("track");
+        assertThat(limiter.bucketFor("POST", "/api/v1/track/emails/abc/review")).isEqualTo("track");
+        // Reads stay unthrottled, and nothing outside TRACK moved bucket.
+        assertThat(limiter.bucketFor("GET", "/api/v1/applications/abc/track")).isNull();
+        assertThat(limiter.bucketFor("GET", "/api/v1/track/reviews")).isNull();
+        assertThat(limiter.bucketFor("POST", "/api/v1/applications/abc/status")).isNull();
+        assertThat(limiter.bucketFor("POST", "/api/v1/applications/abc/track/reports/extra")).isNull();
+    }
+
+    @Test
+    void theProductionTrackRuleAllowsNormalUseAndStopsFlooding() {
+        RateLimitService limiter = new RateLimitService(true);
+        for (int i = 0; i < 30; i++) {
+            assertThat(limiter.checkAndRecord("track", "profile-1")).isEqualTo(-1);
+        }
+        assertThat(limiter.checkAndRecord("track", "profile-1")).isPositive();
+        // Per account: another candidate is unaffected.
+        assertThat(limiter.checkAndRecord("track", "profile-2")).isEqualTo(-1);
+    }
 }

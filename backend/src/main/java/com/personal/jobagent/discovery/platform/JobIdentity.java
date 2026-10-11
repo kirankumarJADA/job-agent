@@ -76,7 +76,12 @@ public final class JobIdentity {
         return new ArrayList<>(keys);
     }
 
-    static String employerKey(String employer) {
+    /**
+     * Normalised employer key used in {@code req:} identity keys (legal suffixes and
+     * punctuation removed). Public so TRACK can recognise a requisition number quoted
+     * in an employer message against the same key the job was indexed under.
+     */
+    public static String employerKey(String employer) {
         if (employer == null) return null;
         String k = employer.toLowerCase(Locale.ROOT)
                 .replaceAll("\\b(inc|incorporated|ltd|limited|llc|plc|gmbh|corp|corporation|co|company)\\b\\.?", "")

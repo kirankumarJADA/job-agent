@@ -90,6 +90,7 @@ class UserDataIsolationIT {
     @Autowired private OwnerContext ownerContext;
     @Autowired private com.personal.jobagent.identity.IdentityService identityService;
     @Autowired private com.personal.jobagent.resume.ResumeAtsRepository resumeAtsRepository;
+    @Autowired private com.personal.jobagent.track.ApplicationTrackingService tracking;
 
     /** Account A (the "caller" in most assertions) and account B (the "stranger"). */
     private UUID userA, userB, profileA, profileB;
@@ -282,6 +283,61 @@ class UserDataIsolationIT {
         assertThat(emails.extractVerification(profileA, ingested.emailId(), sessionB, "employer.example")).isEmpty();
         // Still unused, because A's attempt did not consume it.
         assertThat(emails.resolve(profileB, extractionId)).isEqualTo("123456");
+    }
+
+    // ── TRACK (Phase 8.3) ────────────────────────────────────────────
+
+    @Test
+    void trackingViewsTimelinesAndEvidenceAreOwnerScoped() {
+        UUID applicationA = seedApplication(profileA, jobId);
+        UUID applicationB = seedApplication(profileB, jobId);
+        tracking.report(profileA, applicationA, new com.personal.jobagent.track.ApplicationTrackingService.ReportCommand(
+                "SUBMITTED", null, null, "iso-" + UUID.randomUUID()));
+        UUID receiptA = jdbc.queryForObject("select id from application_receipts where application_id = ?", UUID.class,
+                applicationA);
+
+        // B sees none of A's tracking, and cannot add to or review it.
+        assertThat(tracking.view(profileB, applicationA)).isEmpty();
+        assertThat(tracking.timeline(profileB, applicationA, null, null)).isEmpty();
+        assertThat(tracking.summaries(profileB)).doesNotContainKey(applicationA);
+        assertThatThrownBy(() -> tracking.report(profileB, applicationA,
+                new com.personal.jobagent.track.ApplicationTrackingService.ReportCommand("OFFER", null, null, null)))
+                .isInstanceOf(java.util.NoSuchElementException.class);
+        assertThatThrownBy(() -> tracking.reviewReceipt(profileB, applicationA, receiptA, "REJECT", null, null))
+                .isInstanceOf(java.util.NoSuchElementException.class);
+        // Not even through B's own application id.
+        assertThatThrownBy(() -> tracking.reviewReceipt(profileB, applicationB, receiptA, "REJECT", null, null))
+                .isInstanceOf(java.util.NoSuchElementException.class);
+        assertThat(jdbc.queryForObject("select candidate_review from application_receipts where id = ?", String.class, receiptA))
+                .isNull();
+        assertThat(tracking.view(profileA, applicationA)).isPresent();
+    }
+
+    @Test
+    void anEmployerMessageCanOnlyBeReviewedByItsOwnerOntoTheirOwnApplications() {
+        UUID applicationA = seedApplication(profileA, jobId);
+        UUID applicationB = seedApplication(profileB, jobId);
+        var ingested = emails.ingest(profileA, "track-iso-" + UUID.randomUUID() + "@example.com", "talent@isolation.example",
+                "alice@isolation.test", "Thanks", "Thank you for applying.", Instant.now());
+        var confirmA = new com.personal.jobagent.track.ApplicationTrackingService.MessageReviewCommand(
+                "CONFIRM", applicationA, null, null);
+
+        assertThatThrownBy(() -> tracking.reviewMessage(profileB, ingested.emailId(),
+                new com.personal.jobagent.track.ApplicationTrackingService.MessageReviewCommand("REJECT", null, null, null)))
+                .isInstanceOf(java.util.NoSuchElementException.class);
+        assertThatThrownBy(() -> tracking.reviewMessage(profileA, ingested.emailId(),
+                new com.personal.jobagent.track.ApplicationTrackingService.MessageReviewCommand("CONFIRM", applicationB, null, null)))
+                .isInstanceOf(java.util.NoSuchElementException.class);
+        assertThatThrownBy(() -> emails.ingest(profileA, null, "x@isolation.example", null, "s", "b", Instant.now(), applicationB))
+                .isInstanceOf(java.util.NoSuchElementException.class);
+        assertThat(tracking.reviews(profileB))
+                .noneMatch(r -> String.valueOf(r.get("emailId")).equals(String.valueOf(ingested.emailId())));
+
+        tracking.reviewMessage(profileA, ingested.emailId(), confirmA);
+        assertThat(jdbc.queryForObject("select status from email_application_links where email_id = ?", String.class,
+                ingested.emailId())).isEqualTo("CONFIRMED");
+        assertThat(jdbc.queryForObject("select application_id from email_application_links where email_id = ?", UUID.class,
+                ingested.emailId())).isEqualTo(applicationA);
     }
 
     // ── automation ───────────────────────────────────────────────────

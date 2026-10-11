@@ -38,7 +38,8 @@ public class RateLimitService {
         this.rules = Map.of(
                 "auth", new Rule(20, 60_000L),      // login / firebase session per IP
                 "llm", new Rule(30, 60_000L),       // generation + re-prepare per account
-                "discovery", new Rule(10, 60_000L)  // run / ingest / seed per account
+                "discovery", new Rule(10, 60_000L), // run / ingest / seed per account
+                "track", new Rule(30, 60_000L)      // TRACK evidence writes and message ingestion per account
         );
     }
 
@@ -93,6 +94,13 @@ public class RateLimitService {
         // it as its Discover action, so it shares the discovery quota rather
         // than being an unthrottled way to hit external boards.
         if (path.matches("/api/v1/sources/[^/]+/health-check")) return "discovery";
+        // Phase 8.3: employer-message ingestion and TRACK writes (reports, evidence
+        // and message reviews) are cheap but write durable, audited history, so a
+        // single account cannot flood them.
+        if (path.equals("/api/v1/emails/ingest")
+                || path.matches("/api/v1/applications/[^/]+/track/reports")
+                || path.matches("/api/v1/applications/[^/]+/track/receipts/[^/]+/review")
+                || path.matches("/api/v1/track/emails/[^/]+/review")) return "track";
         return null;
     }
 
