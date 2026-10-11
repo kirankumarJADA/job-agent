@@ -103,7 +103,7 @@ class GmailSyncServiceTest {
 
     @Test
     void incrementalSyncUsesStoredHistoryCursorAndAdvancesOnlyToCompleteBoundary() throws Exception {
-        stub(historyJson(200, "m-2", "INBOX"), fullMessage("m-2", "a@b.c", "candidate@example.com", "s", null, "body"));
+        stub(historyJson(200, "m-2"), fullMessage("m-2", "a@b.c", "candidate@example.com", "s", null, "body"));
         when(emailIntelligence.ingestFromMailboxConnector(eq(PROFILE), any()))
                 .thenReturn(new EmailIntelligenceService.IngestResult(UUID.randomUUID(), "OTHER", null, true));
 
@@ -132,12 +132,15 @@ class GmailSyncServiceTest {
 
     @Test
     void sentHistoryMessagesAreNotIngestedAsEmployerEvidence() throws Exception {
-        when(oauth.get(contains("/history?startHistoryId=100"), eq("access-token")))
-                .thenReturn(parse(historyJson(200, "m-sent", "SENT")));
+        stub(historyJson(200, "m-sent"),
+                fullMessage("m-sent", "candidate@example.com", "candidate@example.com", "Application received",
+                        "mx.google.com; dkim=pass header.d=example.com; spf=pass; dmarc=pass",
+                        "We have received your application.").replace("\\"labelIds\\":[\\"INBOX\\"]",
+                        "\\"labelIds\\":[\\"SENT\\"]"));
         var outcome = service.sync(PROFILE);
         assertThat(outcome.status()).isEqualTo("OK");
         verify(emailIntelligence, never()).ingestFromMailboxConnector(eq(PROFILE), any());
-        verify(oauth, never()).get(contains("/messages/m-sent"), anyString());
+        verify(oauth).get(contains("/messages/m-sent?format=full"), eq("access-token"));
     }
 
     @Test
@@ -206,10 +209,10 @@ class GmailSyncServiceTest {
         return sb.append("}").toString();
     }
 
-    private static String historyJson(long historyId, String messageId, String label) {
+    private static String historyJson(long historyId, String messageId) {
+        // Gmail's history messages are normally sparse: only id/threadId are populated.
         return "{\"historyId\":\"" + historyId + "\",\"history\":[{\"id\":\"" + historyId
-                + "\",\"messagesAdded\":[{\"message\":{\"id\":\"" + messageId + "\",\"historyId\":\""
-                + historyId + "\",\"labelIds\":[\"" + label + "\"]}}]}]}";
+                + "\",\"messagesAdded\":[{\"message\":{\"id\":\"" + messageId + "\"}}]}]}";
     }
 
     private static String fullMessage(String id, String from, String to, String subject,

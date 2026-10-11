@@ -128,9 +128,11 @@ public class GmailSyncService {
                     for (JsonNode record : records) {
                         LinkedHashSet<String> recordIds = new LinkedHashSet<>();
                         for (JsonNode added : record.path("messagesAdded")) {
-                            JsonNode message = added.path("message");
-                            String id = message.path("id").asText("");
-                            if (!id.isBlank() && GmailMessageMapper.isInboxReceived(message)) recordIds.add(id);
+                            // Gmail history records normally contain only message id/threadId,
+                            // not full labelIds. Fetch each candidate message and check its
+                            // structured labels before ingesting it below.
+                            String id = added.path("message").path("id").asText("");
+                            if (!id.isBlank()) recordIds.add(id);
                         }
 
                         // Never split one history record: nextHistoryId must not jump
