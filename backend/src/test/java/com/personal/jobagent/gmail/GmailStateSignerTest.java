@@ -1,7 +1,14 @@
 package com.personal.jobagent.gmail;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.Base64;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -37,16 +44,23 @@ class GmailStateSignerTest {
     }
 
     @Test
-    void anExpiredStateIsRefused() {
-        GmailStateSigner shortLived = new GmailStateSigner("state-secret-for-tests-only") {
-            @Override public String sign(UUID profileId) {
-                // simulate an expired signature by using a past expiry via a
-                // negative TTL is not exposed; instead reuse verify with a
-                // state signed for a different secret to force mismatch.
-                return "bogus";
-            }
-        };
-        assertThat(shortLived.verify("anything", UUID.randomUUID())).isNull();
+    void anExpiredButCorrectlySignedStateIsRefused() throws Exception {
+        UUID profileId = UUID.randomUUID();
+        String state = signPayload(profileId, Instant.now().minusSeconds(60).getEpochSecond(),
+                "state-secret-for-tests-only");
+        assertThat(signer.verify(state, profileId)).isNull();
+    }
+
+    private static String signPayload(UUID profileId, long expiry, String secret) throws Exception {
+        String payload = new ObjectMapper().writeValueAsString(Map.of(
+                "profileId", profileId.toString(), "exp", expiry, "nonce", "expiry-test"));
+        String body = Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(payload.getBytes(StandardCharsets.UTF_8));
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+        String signature = Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(mac.doFinal(body.getBytes(StandardCharsets.UTF_8)));
+        return body + "." + signature;
     }
 
     @Test
