@@ -1208,6 +1208,7 @@ Branch: `phase8.4-gmail-integration`. Draft PR #6 targets `phase8.2.5-ats-discov
 - Message time is taken from Gmail's provider-supplied `internalDate`, not a sender-controlled `Date` header. Inbox eligibility comes from Gmail's structured label IDs, not the sender-controlled `To` / `Delivered-To` headers.
 - The provider's first `Authentication-Results` header is considered only when its authentication-service identifier is `mx.google.com`; an untrusted first header fails closed. This parsing and the receipt policy still require a real-mailbox validation before live receipt verification is claimed.
 - The Connect button preserves the configured API base path (`/api/v1`) when navigating to the OAuth start endpoint.
+- OAuth initiation is rate-limited to 10 attempts/hour per profile; manual sync is rate-limited to 6 attempts/hour. OAuth state creation stores only a SHA-256 hash and consumes each valid state once.
 
 ### 14.2 Important verification boundary
 
