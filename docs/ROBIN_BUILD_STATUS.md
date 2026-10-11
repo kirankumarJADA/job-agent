@@ -348,6 +348,10 @@ tests that are committed (only this status file changed afterwards):
   that need Maven's build-info fail outside Maven, as before).
 - Mock and simulated provider deliveries only: no real Mailgun account, domain,
   DNS record or inbound message was involved.
+- CI on `phase8.5-managed-mail` head `dac60f3`: backend, worker and frontend
+  jobs all green — run 38171646568 (push) and run 38171646809 (pull request):
+  https://github.com/kirankumarJADA/job-agent/actions/runs/38171646568 and
+  https://github.com/kirankumarJADA/job-agent/actions/runs/38171646809
 
 ## Next Exact Task
 Run the operator setup and the end-to-end delivery check above, then decide
