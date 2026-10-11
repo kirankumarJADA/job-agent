@@ -135,8 +135,8 @@ class GmailSyncServiceTest {
         stub(historyJson(200, "m-sent"),
                 fullMessage("m-sent", "candidate@example.com", "candidate@example.com", "Application received",
                         "mx.google.com; dkim=pass header.d=example.com; spf=pass; dmarc=pass",
-                        "We have received your application.").replace("\\"labelIds\\":[\\"INBOX\\"]",
-                        "\\"labelIds\\":[\\"SENT\\"]"));
+                        "We have received your application.").replace("\"labelIds\":[\"INBOX\"]",
+                        "\"labelIds\":[\"SENT\"]"));
         var outcome = service.sync(PROFILE);
         assertThat(outcome.status()).isEqualTo("OK");
         verify(emailIntelligence, never()).ingestFromMailboxConnector(eq(PROFILE), any());
