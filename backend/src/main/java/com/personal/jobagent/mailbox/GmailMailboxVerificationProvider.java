@@ -56,6 +56,16 @@ public class GmailMailboxVerificationProvider implements MailboxVerificationProv
                 .orElse(false);
     }
 
+    /** Only the candidate's own, currently connected Gmail address. */
+    @Override
+    public boolean handles(UUID ownerProfileId, String mailboxAddress) {
+        if (mailboxAddress == null || mailboxAddress.isBlank()) return false;
+        return connections.find(ownerProfileId)
+                .filter(GmailConnectionStore.Connection::active)
+                .map(connection -> connection.googleEmail().equalsIgnoreCase(mailboxAddress.trim()))
+                .orElse(false);
+    }
+
     @Override
     public Optional<VerificationHit> findVerification(UUID ownerProfileId, String employerDomain,
                                                       String mailboxAddress, Instant after) {

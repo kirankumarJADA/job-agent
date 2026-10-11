@@ -68,6 +68,33 @@ app:
     token-key: ${APP_GMAIL_TOKEN_KEY:}
     state-secret: ${APP_GMAIL_STATE_SECRET:}
     lookback-days: ${APP_GMAIL_LOOKBACK_DAYS:90}
+  secrets:
+    # AES-256-GCM key (base64 32 bytes preferred: `openssl rand -base64 32`)
+    # for employer portal credentials and Robin-managed mail content at rest.
+    # Blank keeps both features fail-closed: nothing is stored unencrypted.
+    encryption-key: ${APP_SECRETS_KEY:}
+  # Phase 8.5: Robin-managed email (receive-only) for employer registrations and
+  # verification codes. Inactive until the domain, the inbound provider's
+  # webhook signing key and APP_SECRETS_KEY are all set AND a signed delivery
+  # has been received for the domain (see docs/ROBIN_BUILD_STATUS.md).
+  managed-mail:
+    # A (sub)domain the operator owns whose MX records point at the provider,
+    # e.g. mail.robin.example. Dedicated to receiving; never used to send.
+    domain: ${APP_MANAGED_MAIL_DOMAIN:}
+    provider: ${APP_MANAGED_MAIL_PROVIDER:mailgun}
+    # Encrypted content is erased after this long (and at first use).
+    content-retention-minutes: ${APP_MANAGED_MAIL_CONTENT_RETENTION_MINUTES:120}
+    # Message metadata (sender, redacted subject, times) is deleted after this.
+    metadata-retention-days: ${APP_MANAGED_MAIL_METADATA_RETENTION_DAYS:30}
+    mailgun:
+      # Mailgun "HTTP webhook signing key" (Settings → API Security). Not the API key.
+      webhook-signing-key: ${MAILGUN_WEBHOOK_SIGNING_KEY:}
+      # Signed requests older than this are refused (406); accepted tokens are
+      # remembered for twice this long so a captured request cannot be replayed.
+      max-age-seconds: ${MAILGUN_WEBHOOK_MAX_AGE_SECONDS:900}
+  mailbox-verification:
+    # How old a verification message may be when the worker asks for it.
+    window-minutes: ${APP_MAILBOX_VERIFICATION_WINDOW_MINUTES:30}
   redis:
     # Cold TLS handshakes can exceed the command timeout. This only bounds
     # Lettuce connection initialization; command execution remains 2s.
