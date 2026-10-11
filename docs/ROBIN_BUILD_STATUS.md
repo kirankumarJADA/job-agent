@@ -178,12 +178,21 @@ Changes in this continuation (pending CI verification):
    reference without storing the OTP or verification URL. Database uniqueness
    prevents resolving one source email twice. PostgreSQL-backed MockMvc tests
    cover success, bad/missing token, replay and no-match (404).
-4. CI validation is pending; do not mark Phase 8.5 complete until all three
-   jobs pass. Managed-mail inbound provider, owned domain, DNS and provider
-   credentials remain external setup.
+4. VERIFIED 2026-10-11 on this head (`05e68c9`), full local suite:
+   backend `mvn -B verify` 1169 tests / 0 fail / 0 err; worker 25/25;
+   frontend 300/300 + tsc + build clean. Managed-mail inbound provider,
+   owned domain, DNS and provider credentials remain external setup.
 Safety: REAL_SUBMIT hard stop untouched; Gmail stays read-only; managed
 mailbox provider interface done, REAL provider still needs external
 inbound-email service + domain + DNS (documented, not invented).
+
+## Last Verified Test Result (Phase 8.5)
+- Backend `mvn -B verify` on `05e68c9`: 1169 tests, 0 failures, 0 errors
+  (includes the mailbox-verification resolve endpoint tests: success, bad or
+  missing worker token, replay prevention, no-match 404).
+- Worker: 25/25. Frontend: 300/300 + production build.
+- CI on `phase8.5-managed-mail` head: triggered by push (ci.yml now includes
+  this branch); verify the three jobs on GitHub before merging PR #7.
 
 ## Next Exact Task
 Phase 8.4 (read-only Gmail) closure audit is verified locally (full Windows suite) on `phase8.4-gmail-integration` (draft PR #6 targeting `phase8.2.5-ats-discovery-expansion`); check PR #6 for the CI result of its head commit. Do not merge or deploy. The remaining step needs the operator: configure the Google OAuth client and deployment variables, then run the live test-account check in `PHASE8_FIND_WORKFLOW.md` 14.4. Until then no live mailbox or verified receipt is claimed. `REAL_SUBMIT` stays hard-stopped.
