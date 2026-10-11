@@ -59,6 +59,15 @@ spring:
 
 app:
   frontend-url: ${APP_FRONTEND_URL:http://localhost:5173}
+  # Gmail TRACK integration. Explicit environment mappings are required because
+  # the Java beans read app.gmail.* properties rather than raw GMAIL_* variables.
+  gmail:
+    client-id: ${GMAIL_CLIENT_ID:}
+    client-secret: ${GMAIL_CLIENT_SECRET:}
+    redirect-uri: ${GMAIL_REDIRECT_URI:}
+    token-key: ${APP_GMAIL_TOKEN_KEY:}
+    state-secret: ${APP_GMAIL_STATE_SECRET:}
+    lookback-days: ${APP_GMAIL_LOOKBACK_DAYS:90}
   redis:
     # Cold TLS handshakes can exceed the command timeout. This only bounds
     # Lettuce connection initialization; command execution remains 2s.
