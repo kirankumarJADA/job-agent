@@ -478,3 +478,78 @@ export interface ApplicationAnswer {
   updatedAt: string;
 }
 
+/** One actionable blocker/warning from the server-side APPLY readiness gate. */
+export interface ApplyReadinessItem {
+  area: string;
+  code: string;
+  message: string;
+}
+
+/**
+ * One employer form question as captured from the real application form.
+ * requiredState is evidence-backed tri-state: UNKNOWN never means optional.
+ * answerState distinguishes confirmed candidate answers from drafts.
+ */
+export interface ApplyQuestionItem {
+  questionKey: string;
+  questionText: string;
+  requiredState: 'REQUIRED' | 'OPTIONAL' | 'UNKNOWN';
+  answerType: string;
+  options: string[];
+  answerState: 'CONFIRMED' | 'UNCONFIRMED' | 'MISSING' | 'NEEDS_USER_INPUT' | 'HARD_STOP' | string;
+  answerOrigin?: string | null;
+  answerId?: string | null;
+  source: string;
+  formUrl: string;
+}
+
+/** GET /apply/applications/{id}/readiness — recomputed from records per request. */
+export interface ApplyReadiness {
+  availability: 'AVAILABLE' | 'UNAVAILABLE';
+  application: {
+    applicationId: string;
+    jobId: string;
+    jobTitle: string;
+    company: string;
+    applicationUrl: string;
+    status: string;
+  };
+  documents: {
+    cv: { versionId: string; pdfSha256: string; byteSize: number; reviewedAt: string } | null;
+    coverLetter: {
+      versionId: string;
+      version: number;
+      origin: string;
+      bodySha256: string;
+      pdfSha256: string;
+    } | null;
+    coverLetterRequirement: 'REQUIRED' | 'OPTIONAL' | 'UNKNOWN';
+    selectionBlocked: boolean;
+  };
+  questions: {
+    formCaptured: boolean;
+    source: string | null;
+    formUrl: string | null;
+    items: ApplyQuestionItem[];
+    storedAnswerCount: number;
+    confirmedCount: number;
+  };
+  duplicates: {
+    checked: boolean;
+    status: 'NONE' | 'DUPLICATE';
+    items: Array<{ applicationId: string; jobId: string; matchReason: string }>;
+  };
+  decision: { applicationMode: string; ruleAvailability: string };
+  blockers: ApplyReadinessItem[];
+  warnings: ApplyReadinessItem[];
+  unknowns: string[];
+  packageReady: boolean;
+  packagePreview: {
+    documents: { cv: string | null; coverLetter: string | null };
+    coverLetterRequirement: string;
+    note: string;
+  };
+  note: string;
+  computedAt: string;
+}
+

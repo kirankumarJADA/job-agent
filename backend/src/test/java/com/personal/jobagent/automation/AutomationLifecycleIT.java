@@ -2,6 +2,7 @@ package com.personal.jobagent.automation;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.discovery.JobDiscoveryService;
+import com.personal.jobagent.documents.DocumentFactValidator;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.MethodOrderer;
@@ -59,7 +60,15 @@ class AutomationLifecycleIT {
     private static final UUID USER = UUID.fromString("00000000-0000-7000-8000-00000000cc10");
     private static final UUID PROFILE = UUID.fromString("00000000-0000-7000-8000-00000000cc11");
     private static final UUID SOURCE = UUID.fromString("00000000-0000-7000-8000-00000000cc30");
-    private static final String APPLY_URL = "https://boards.greenhouse.io/lifecycle/jobs/77";
+    /**
+     * Each scenario is a genuinely different role and gets its own requisition
+     * URL. Phase 8.2 duplicate protection treats one board requisition URL as
+     * one role (never titles), so a shared URL would correctly refuse the
+     * second and third scenario's application as a duplicate of the first.
+     */
+    private static String scenarioUrl(String externalId) {
+        return "https://boards.greenhouse.io/lifecycle/jobs/" + externalId;
+    }
 
     @Container
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
@@ -122,11 +131,12 @@ class AutomationLifecycleIT {
 
     /** One job + application + bound CV + a RUNNING greenhouse plan, seeded directly. */
     private UUID seedRunningPlan(String externalId, String title) throws Exception {
+        String applyUrl = scenarioUrl(externalId);
         JobDiscoveryService.IngestResult ingest = discovery.ingestJob(new JobDiscoveryService.IngestJobCommand(
                 SOURCE, externalId, null, "Lifecycle Corp", title, "London", "London", "GB",
                 "HYBRID", "FULL_TIME", "MID", 70000, 90000, "GBP",
                 "Build Java services.", List.of("Java"),
-                APPLY_URL, APPLY_URL));
+                applyUrl, applyUrl));
         UUID jobId = ingest.jobId();
 
         Awaitility.await().atMost(java.time.Duration.ofSeconds(20)).untilAsserted(() -> {
@@ -154,25 +164,43 @@ class AutomationLifecycleIT {
                 """, cvVersionId, jobId, applicationId, PROFILE, pdfSha, fileId);
         jdbc.update("update applications set cv_version_id = ? where id = ?", cvVersionId, applicationId);
 
+        // Phase 8.2: a bound CV is not enough — it must be validated and its
+        // review must be bound to the exact content digest before any approval
+        // can be granted. Seed both so the fixture is a genuinely reviewed CV.
+        jdbc.update("""
+                insert into resume_ats_analyses (id, profile_id, job_id, application_id, input_hash, role, domain,
+                    required_skills, preferred_skills, normalized_skills, verified_evidence, gaps, ats_report,
+                    cv_version_id, profile_revision, profile_snapshot_hash)
+                values (?, ?, ?, ?, ?, 'Engineer', 'Tech', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+                        '[]'::jsonb, '[]'::jsonb, ?::jsonb, ?, 1, 'snap')
+                """, UUID.randomUUID(), PROFILE, jobId, applicationId, "hash-" + applicationId,
+                json.writeValueAsString(Map.of("validation", Map.of(
+                        "passed", true, "validator_version", DocumentFactValidator.VERSION))), cvVersionId);
+        jdbc.update("""
+                insert into cv_version_reviews (cv_version_id, profile_id, approved, decided_by, content_sha256)
+                values (?, ?, true, 'owner', ?)
+                on conflict (cv_version_id) do nothing
+                """, cvVersionId, PROFILE, pdfSha);
+
         // Seed the RUNNING greenhouse plan with a verified, gap-free package.
         UUID planId = UUID.randomUUID();
         Map<String, Object> cv = Map.of("versionId", cvVersionId.toString(), "sha256", pdfSha,
                 "jobId", jobId.toString(), "applicationId", applicationId.toString());
         Map<String, Object> pkg = Map.of(
                 "planId", planId.toString(), "applicationId", applicationId.toString(),
-                "jobId", jobId.toString(), "expectedUrl", APPLY_URL,
+                "jobId", jobId.toString(), "expectedUrl", applyUrl,
                 "requiredGaps", List.of(), "cv", cv);
         Map<String, Object> plan = Map.of(
                 "planType", "GREENHOUSE", "version", 1,
                 "correlation", Map.of("jobId", jobId.toString(), "applicationId", applicationId.toString()),
-                "targetUrl", APPLY_URL,
+                "targetUrl", applyUrl,
                 "steps", List.of(Map.of("id", "validate-form", "type", "VALIDATE", "policy", "AUTO", "params", Map.of())),
                 "package", pkg, "safetyContract", "NO_SUBMIT");
         jdbc.update("""
                 insert into automation_plans (id, application_id, profile_id, target_url, status, plan, submit_approved,
                                               heartbeat_at, idempotency_key, created_at, updated_at)
                 values (?, ?, ?, ?, 'RUNNING', ?::jsonb, false, now(), ?, now(), now())
-                """, planId, applicationId, PROFILE, APPLY_URL, json.writeValueAsString(plan),
+                """, planId, applicationId, PROFILE, applyUrl, json.writeValueAsString(plan),
                 "lifecycle:" + applicationId);
         PLAN_IDS.put(externalId, planId);
         return planId;
@@ -198,10 +226,14 @@ class AutomationLifecycleIT {
         assertThat(planStatus(planId)).isEqualTo("AWAITING_APPROVAL");
 
         // The explicit approval does:
-        mockMvc.perform(post("/api/v1/automation/plans/{id}/approve-submit", planId).with(csrf()).session(session))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("READY_TO_SUBMIT"))
-                .andExpect(jsonPath("$.submissionEnabled").value(false));
+        MvcResult approval = mockMvc.perform(post("/api/v1/automation/plans/{id}/approve-submit", planId)
+                        .with(csrf()).session(session)).andReturn();
+        assertThat(approval.getResponse().getStatus())
+                .as("approve-submit response body: %s", approval.getResponse().getContentAsString())
+                .isEqualTo(200);
+        Map<String, Object> approvalBody = json.readValue(approval.getResponse().getContentAsString(), Map.class);
+        assertThat(approvalBody.get("status")).isEqualTo("READY_TO_SUBMIT");
+        assertThat(approvalBody.get("submissionEnabled")).isEqualTo(false);
         assertThat(planStatus(planId)).isEqualTo("READY_TO_SUBMIT");
         Boolean approved = jdbc.queryForObject(
                 "select submit_approved from automation_plans where id = ?", Boolean.class, planId);

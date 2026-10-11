@@ -167,7 +167,8 @@ class CoverLetterReviewTest {
         CoverLetterRecord letter = new CoverLetterRecord(letterId, profileId, jobId, null, 1, "v1", body, Map.of(), false,
                 Instant.now(), Instant.now(), CoverLetterService.sha256Hex(body), null, "GENERATED", true);
         when(repository.findByIdForProfile(letterId, profileId)).thenReturn(Optional.of(letter));
-        CoverLetterController controller = new CoverLetterController(service, repository, profiles, mock(AuditLogWriter.class));
+        CoverLetterController controller = new CoverLetterController(service, repository, profiles, mock(AuditLogWriter.class),
+                mock(com.personal.jobagent.apply.ApplyPackageGuard.class));
         HttpServletRequest request = request();
 
         var refused = controller.setApproval(letterId, new CoverLetterController.ApprovalRequest(true), request);
@@ -191,7 +192,8 @@ class CoverLetterReviewTest {
         CoverLetterRecord tampered = new CoverLetterRecord(letterId, profileId, jobId, null, 1, "v1", "edited after generation",
                 Map.of(), false, Instant.now(), Instant.now(), CoverLetterService.sha256Hex("original text"), null, "GENERATED", true);
         when(repository.findByIdForProfile(letterId, profileId)).thenReturn(Optional.of(tampered));
-        CoverLetterController controller = new CoverLetterController(service, repository, profiles, mock(AuditLogWriter.class));
+        CoverLetterController controller = new CoverLetterController(service, repository, profiles, mock(AuditLogWriter.class),
+                mock(com.personal.jobagent.apply.ApplyPackageGuard.class));
 
         var response = controller.setApproval(letterId, new CoverLetterController.ApprovalRequest(true), request());
 

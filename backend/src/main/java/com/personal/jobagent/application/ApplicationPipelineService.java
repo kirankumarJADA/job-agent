@@ -1,5 +1,7 @@
 package com.personal.jobagent.application;
 
+import com.personal.jobagent.apply.ApplicationIdentityService;
+import com.personal.jobagent.apply.DuplicateApplicationException;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.jobs.HardFilterResult;
 import com.personal.jobagent.jobs.HardFilterService;
@@ -14,6 +16,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -68,6 +71,7 @@ public class ApplicationPipelineService {
     private final JdbcTemplate db;
     private final NotificationService notifications;
     private final ObjectMapper objectMapper;
+    private final ApplicationIdentityService identityService;
     private final TransactionTemplate transactionTemplate;
 
     public ApplicationPipelineService(HardFilterService hardFilterService,
@@ -78,6 +82,7 @@ public class ApplicationPipelineService {
                                       JdbcTemplate db,
                                       NotificationService notifications,
                                       ObjectMapper objectMapper,
+                                      ApplicationIdentityService identityService,
                                       PlatformTransactionManager transactionManager) {
         this.hardFilterService = hardFilterService;
         this.jobMatchService = jobMatchService;
@@ -87,7 +92,13 @@ public class ApplicationPipelineService {
         this.db = db;
         this.notifications = notifications;
         this.objectMapper = objectMapper;
+        this.identityService = identityService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
+        // Creation runs in its OWN transaction so a duplicate-key race rolls
+        // back only the insert (and its timeline/notification writes), leaving
+        // the caller's transaction usable for the duplicate resolution below.
+        this.transactionTemplate.setPropagationBehavior(
+                org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     public record CreatedApplication(UUID applicationId, boolean created, String status) {}
@@ -172,38 +183,52 @@ public class ApplicationPipelineService {
             return new CreatedApplication(existing.get(), false, statusOf(existing.get()));
         }
 
+        // Cross-source duplicate protection (Phase 8.2): the same role seen
+        // through another board already has one of this owner's applications.
+        // Owner-scoped by construction — never another candidate's record.
+        String identityKey = identityService.identityKeyForJob(jobId);
+        for (var duplicate : identityService.findDuplicates(profileId, jobId)) {
+            throw new DuplicateApplicationException(duplicate.applicationId(), duplicate.jobId(),
+                    duplicate.identityKey(), duplicate.matchReason());
+        }
+
         String mode = preferenceSets.findActiveByProfileId(profileId)
                 .map(p -> p.applicationMode() == null || p.applicationMode().isBlank()
                         ? "ASSISTED" : p.applicationMode())
                 .orElse("ASSISTED");
         UUID applicationId = UuidV7.generate();
 
-        return transactionTemplate.execute(tx -> {
-            // The pre-check ran outside the transaction, so the insert is the
-            // arbiter: the partial unique index (V022) rejects a second live
-            // application for the same (profile, job) under concurrency.
-            int inserted = db.update("""
-                    insert into applications (id, job_id, profile_id, mode)
-                    values (?, ?, ?, ?)
-                    on conflict do nothing
-                    """, applicationId, jobId, profileId, mode);
+        CreatedApplication created;
+        try {
+            created = transactionTemplate.execute(tx -> {
+                // The pre-check ran outside the transaction, so the insert is
+                // the arbiter: the partial unique index (V022) rejects a second
+                // live application for the same (profile, job), and V036's
+                // identity index rejects a second live application for the
+                // same role across sources. The conflict target names the
+                // one-per-job index only, so an identity violation surfaces as
+                // a constraint error instead of being silently swallowed.
+                int inserted = db.update("""
+                        insert into applications (id, job_id, profile_id, mode, identity_key)
+                        values (?, ?, ?, ?, ?)
+                        on conflict (profile_id, job_id) where status not in ('FAILED','WITHDRAWN') do nothing
+                        """, applicationId, jobId, profileId, mode, identityKey);
 
-            if (inserted == 0) {
-                UUID winner = findLiveApplication(profileId, jobId)
-                        .orElseThrow(() -> new IllegalStateException(
-                                "application insert conflicted but no live row exists for " + profileId + "/" + jobId));
-                return new CreatedApplication(winner, false, statusOf(winner));
-            }
-
-            db.update("""
+                if (inserted == 0) {
+                    UUID winner = findLiveApplication(profileId, jobId)
+                            .orElseThrow(() -> new IllegalStateException(
+                                    "application insert conflicted but no live row exists for " + profileId + "/" + jobId));
+                    return new CreatedApplication(winner, false, statusOf(winner));
+                }
+                db.update("""
                     insert into application_events (id, application_id, type, payload, actor)
                     values (?, ?, 'APPLICATION_CREATED', ?::jsonb, 'SYSTEM')
                     """, UuidV7.generate(), applicationId,
                     "{\"event_key\":\"application-created:" + applicationId
                             + "\",\"source\":\"auto-match\",\"job_id\":\"" + jobId + "\"}");
 
-            var job = jobTitle(profileId, jobId);
-            notifications.emit(new NotificationService.NotificationCommand(
+                var job = jobTitle(profileId, jobId);
+                notifications.emit(new NotificationService.NotificationCommand(
                     NotificationEvents.APPLICATION_CREATED,
                     "APPLICATION",
                     applicationId,
@@ -220,10 +245,32 @@ public class ApplicationPipelineService {
                     UuidV7.generate(),
                     null));
 
-            log.info("Pipeline created application {} for profile={} job={} (mode={})",
-                    applicationId, profileId, jobId, mode);
-            return new CreatedApplication(applicationId, true, "READY_TO_APPLY");
-        });
+                log.info("Pipeline created application {} for profile={} job={} (mode={})",
+                        applicationId, profileId, jobId, mode);
+                return new CreatedApplication(applicationId, true, "READY_TO_APPLY");
+            });
+        } catch (DuplicateKeyException e) {
+            // Lost a race with a concurrent create. The failed transaction
+            // rolled back entirely, so the winner is resolved fresh: the same
+            // (profile, job) row makes this an idempotent replay; a live row
+            // with the same identity key is a cross-source duplicate.
+            Optional<UUID> sameJob = findLiveApplication(profileId, jobId);
+            if (sameJob.isPresent()) {
+                return new CreatedApplication(sameJob.get(), false, statusOf(sameJob.get()));
+            }
+            for (var duplicate : identityService.findDuplicates(profileId, jobId)) {
+                throw new DuplicateApplicationException(duplicate.applicationId(), duplicate.jobId(),
+                        duplicate.identityKey(), duplicate.matchReason());
+            }
+            if (identityKey != null) {
+                for (var duplicate : identityService.findByIdentity(profileId, identityKey)) {
+                    throw new DuplicateApplicationException(duplicate.applicationId(), duplicate.jobId(),
+                            duplicate.identityKey(), duplicate.matchReason());
+                }
+            }
+            throw e;
+        }
+        return created;
     }
 
     private record JobSummary(String jobTitle, String company) {}

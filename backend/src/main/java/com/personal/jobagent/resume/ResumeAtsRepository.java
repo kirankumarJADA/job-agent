@@ -157,6 +157,21 @@ public class ResumeAtsRepository {
         return jdbc.query(sql, (rs, n) -> map(rs), profileId, jobId, profileId, applicationId, applicationId).stream().findFirst();
     }
 
+    /**
+     * Every CV version generated for this owner's application, newest first.
+     * Phase 8.2 document selection walks these to find the exact reviewed
+     * version; the application correlation is part of the predicate so a CV
+     * generated for another application (or another job) can never qualify.
+     */
+    public List<ResumeAtsAnalysis> findForApplication(UUID profileId, UUID jobId, UUID applicationId) {
+        String sql = "select r.*, c.body_markdown, c.content_sha256 from resume_ats_analyses r "
+                + "join cv_versions c on c.id=r.cv_version_id "
+                + "where r.profile_id=? and r.job_id=? and r.application_id=? and c.profile_id=? "
+                + "and c.job_id=? and c.application_id=? "
+                + "order by r.created_at desc, r.id desc";
+        return jdbc.query(sql, (rs, n) -> map(rs), profileId, jobId, applicationId, profileId, jobId, applicationId);
+    }
+
     /** The owner's analysis for one CV version, or empty when the caller does not own it. */
     public Optional<ResumeAtsAnalysis> findByCvVersion(UUID profileId, UUID cvVersionId) {
         String sql = "select r.*, c.body_markdown, c.content_sha256 from resume_ats_analyses r join cv_versions c on c.id=r.cv_version_id "

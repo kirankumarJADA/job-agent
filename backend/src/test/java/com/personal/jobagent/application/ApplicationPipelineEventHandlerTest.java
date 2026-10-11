@@ -70,7 +70,8 @@ class ApplicationPipelineEventHandlerTest {
                 answerService, jobRepository, notifications, db);
         handler = new ApplicationPipelineEventHandler(pipeline, inspectionPlanService, greenhousePlanService,
                 resumeService, coverLetterService, answerService, jobRepository, notifications, db, new ObjectMapper(),
-                new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()), decisionService);
+                new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()), decisionService,
+                mock(com.personal.jobagent.audit.AuditLogWriter.class));
         when(db.queryForObject(contains("count(*) from applications"), eq(Integer.class), eq(APPLICATION)))
                 .thenReturn(1);
         when(db.update(contains("application_events"), any(UUID.class), eq(APPLICATION), any(String.class)))

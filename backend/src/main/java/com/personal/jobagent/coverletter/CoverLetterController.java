@@ -26,15 +26,18 @@ public class CoverLetterController {
     private final CoverLetterRepository coverLetterRepository;
     private final ProfileRepository profileRepository;
     private final AuditLogWriter auditLogWriter;
+    private final com.personal.jobagent.apply.ApplyPackageGuard packageGuard;
 
     public CoverLetterController(CoverLetterService coverLetterService,
                                  CoverLetterRepository coverLetterRepository,
                                  ProfileRepository profileRepository,
-                                 AuditLogWriter auditLogWriter) {
+                                 AuditLogWriter auditLogWriter,
+                                 com.personal.jobagent.apply.ApplyPackageGuard packageGuard) {
         this.coverLetterService = coverLetterService;
         this.coverLetterRepository = coverLetterRepository;
         this.profileRepository = profileRepository;
         this.auditLogWriter = auditLogWriter;
+        this.packageGuard = packageGuard;
     }
 
     public record GenerateRequest(UUID jobId, UUID applicationId) {}
@@ -138,6 +141,10 @@ public class CoverLetterController {
         }
 
         coverLetterRepository.setApprovedForProfile(id, body.approved(), profileId);
+        // Phase 8.2: approval state decides which exact letter version an
+        // execution package may carry, so a change re-evaluates any approved
+        // package instead of leaving a stale approval behind.
+        packageGuard.letterChanged(profileId, id);
 
         auditLogWriter.write(new AuditEntry(
                 actorEmail(),
@@ -173,6 +180,10 @@ public class CoverLetterController {
             return ResponseEntity.badRequest()
                     .body(ApiError.of(400, "Bad Request", e.getMessage(), request.getRequestURI(), correlationId()));
         }
+        // A correction is a NEW letter version: the previously approved
+        // version is no longer the newest approved state of the user's letter,
+        // so any approved package is re-evaluated (Phase 8.2).
+        packageGuard.letterChanged(profileId, id);
         auditLogWriter.write(new AuditEntry(actorEmail(), "COVER_LETTER_CORRECTED", "COVER_LETTER",
                 result.coverLetter().id(), Map.of("corrects", id.toString()),
                 Map.of("version", result.coverLetter().version(), "passed_validation", result.passedValidation()),

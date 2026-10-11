@@ -158,6 +158,24 @@ public class AutomationPlanRepository {
         }
     }
 
+    /**
+     * Phase 8.2: withdraws an approved package when the records it was built
+     * from changed (document replacement, approval withdrawal, answer edits).
+     * READY_TO_SUBMIT returns to AWAITING_APPROVAL with {@code
+     * submit_approved=false} — the approval statement is no longer true, so a
+     * human must re-approve the rebuilt package. Only the rows for this
+     * application are touched.
+     *
+     * @return how many approvals were withdrawn
+     */
+    public int invalidateApproval(UUID applicationId) {
+        if (applicationId == null) return 0;
+        return db.update("""
+                update automation_plans set submit_approved = false, status = 'AWAITING_APPROVAL', updated_at = now()
+                where application_id = ? and status = 'READY_TO_SUBMIT' and submit_approved = true
+                """, applicationId);
+    }
+
     public int recoverStale(Instant cutoff) {
         return db.update("update automation_plans set status='PREPARED',updated_at=now() where status='RUNNING' and heartbeat_at < ?",
                 java.sql.Timestamp.from(cutoff));

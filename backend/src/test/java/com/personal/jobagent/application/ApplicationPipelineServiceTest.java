@@ -62,7 +62,8 @@ class ApplicationPipelineServiceTest {
     @BeforeEach
     void setUp() {
         service = new ApplicationPipelineService(hardFilterService, matchService, jobRepository,
-                preferenceSets, profileRepository, db, notifications, objectMapper, transactionManager);
+                preferenceSets, profileRepository, db, notifications, objectMapper,
+                mock(com.personal.jobagent.apply.ApplicationIdentityService.class), transactionManager);
         when(profileRepository.findAllIds()).thenReturn(List.of(PROFILE_A, PROFILE_B));
         when(preferenceSets.findActiveByProfileId(PROFILE_A)).thenReturn(Optional.of(preferences("CONTROLLED_AUTO", 60000L)));
         when(preferenceSets.findActiveByProfileId(PROFILE_B)).thenReturn(Optional.empty());
@@ -114,7 +115,7 @@ class ApplicationPipelineServiceTest {
     void creationInsertsWithThePreferredModeAndEmitsTheCreationEventTransactionally() {
         when(db.query(contains("applications"), any(org.springframework.jdbc.core.RowMapper.class), eq(PROFILE_A), eq(JOB)))
                 .thenReturn(List.of()); // no live application
-        when(db.update(contains("insert into applications"), any(UUID.class), eq(JOB), eq(PROFILE_A), eq("CONTROLLED_AUTO")))
+        when(db.update(contains("insert into applications"), any(UUID.class), eq(JOB), eq(PROFILE_A), eq("CONTROLLED_AUTO"), any()))
                 .thenReturn(1);
         when(db.queryForList(contains("from jobs"), eq(JOB)))
                 .thenReturn(List.of(Map.of("title", "Java Engineer", "company", "Monzo")));
@@ -147,7 +148,7 @@ class ApplicationPipelineServiceTest {
         assertThat(created.applicationId()).isEqualTo(EXISTING_APP);
         assertThat(created.created()).isFalse();
         assertThat(created.status()).isEqualTo("APPLICATION_STARTED");
-        verify(db, never()).update(contains("insert into applications"), any(), any(), any(), any());
+        verify(db, never()).update(contains("insert into applications"), any(), any(), any(), any(), any());
         verify(notifications, never()).emit(any());
     }
 
@@ -155,14 +156,14 @@ class ApplicationPipelineServiceTest {
     void aMissingPreferenceFallsBackToTheAssistedMode() {
         when(db.query(contains("applications"), any(org.springframework.jdbc.core.RowMapper.class), eq(PROFILE_B), eq(JOB)))
                 .thenReturn(List.of());
-        when(db.update(contains("insert into applications"), any(UUID.class), eq(JOB), eq(PROFILE_B), eq("ASSISTED")))
+        when(db.update(contains("insert into applications"), any(UUID.class), eq(JOB), eq(PROFILE_B), eq("ASSISTED"), any()))
                 .thenReturn(1);
         when(db.queryForList(contains("from jobs"), eq(JOB)))
                 .thenReturn(List.of(Map.of("title", "Java Engineer", "company", "Monzo")));
 
         service.createApplicationFromMatch(PROFILE_B, JOB);
 
-        verify(db).update(contains("insert into applications"), any(UUID.class), eq(JOB), eq(PROFILE_B), eq("ASSISTED"));
+        verify(db).update(contains("insert into applications"), any(UUID.class), eq(JOB), eq(PROFILE_B), eq("ASSISTED"), any());
     }
 
     @Test
@@ -170,7 +171,7 @@ class ApplicationPipelineServiceTest {
         when(db.query(contains("applications"), any(org.springframework.jdbc.core.RowMapper.class), eq(PROFILE_A), eq(JOB)))
                 .thenReturn(List.of())            // fast path: nothing live yet
                 .thenReturn(List.of(EXISTING_APP)); // post-conflict re-select
-        when(db.update(contains("insert into applications"), any(UUID.class), eq(JOB), eq(PROFILE_A), eq("CONTROLLED_AUTO")))
+        when(db.update(contains("insert into applications"), any(UUID.class), eq(JOB), eq(PROFILE_A), eq("CONTROLLED_AUTO"), any()))
                 .thenReturn(0); // the other writer won
         when(db.queryForObject(contains("select status"), eq(String.class), eq(EXISTING_APP)))
                 .thenReturn("READY_TO_APPLY");

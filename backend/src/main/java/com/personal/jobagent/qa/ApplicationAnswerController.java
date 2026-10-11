@@ -26,15 +26,18 @@ public class ApplicationAnswerController {
     private final ApplicationAnswerRepository answerRepository;
     private final ProfileRepository profileRepository;
     private final AuditLogWriter auditLogWriter;
+    private final com.personal.jobagent.apply.ApplyPackageGuard packageGuard;
 
     public ApplicationAnswerController(ApplicationAnswerService answerService,
                                      ApplicationAnswerRepository answerRepository,
                                      ProfileRepository profileRepository,
-                                     AuditLogWriter auditLogWriter) {
+                                     AuditLogWriter auditLogWriter,
+                                     com.personal.jobagent.apply.ApplyPackageGuard packageGuard) {
         this.answerService = answerService;
         this.answerRepository = answerRepository;
         this.profileRepository = profileRepository;
         this.auditLogWriter = auditLogWriter;
+        this.packageGuard = packageGuard;
     }
 
     public record DraftAnswerRequest(UUID jobId, UUID applicationId, String questionText) {}
@@ -142,6 +145,10 @@ public class ApplicationAnswerController {
             humanConfirmed = false;
         }
         answerRepository.updateStatusForProfile(id, status, body.answerText(), humanConfirmed, profileId);
+        // Phase 8.2: an edited, confirmed or unconfirmed answer changes what
+        // the execution package would carry, so any approved package for the
+        // application is re-evaluated instead of trusting a stale approval.
+        packageGuard.answerChanged(profileId, id);
 
         auditLogWriter.write(new AuditEntry(
                 actorEmail(),

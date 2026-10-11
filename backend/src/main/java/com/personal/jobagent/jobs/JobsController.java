@@ -62,6 +62,14 @@ public class JobsController {
                     "application_id", created.applicationId().toString(),
                     "created", created.created(),
                     "status", created.status()));
+        } catch (com.personal.jobagent.apply.DuplicateApplicationException duplicate) {
+            // Cross-source duplicate protection. The identified record is the
+            // CALLER'S OWN application — nothing about another candidate.
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "you already have an application for this role: " + duplicate.matchReason(),
+                    "code", "DUPLICATE_APPLICATION",
+                    "duplicateApplicationId", duplicate.existingApplicationId().toString(),
+                    "duplicateJobId", String.valueOf(duplicate.existingJobId())));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.notFound().build();
         }
