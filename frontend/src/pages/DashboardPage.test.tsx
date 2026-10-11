@@ -90,8 +90,9 @@ describe('DashboardPage workflow stages', () => {
 
   it('derives FIND relevance from the caller match and discovery status from the source registry', async () => {
     renderDashboard();
-    // 1 of 2 loaded jobs has the caller's own APPLY/REVIEW match; 2 enabled boards, 1 failing.
-    expect(await screen.findByText('1 recommended for you in 2 indexed jobs · 2 enabled boards, 1 with recent failures')).toBeTruthy();
+    // 1 of 2 loaded jobs has the caller's own APPLY/REVIEW match; 2 enabled sources, 1 failing.
+    // Phase 8.2.5: counted across every platform and worded without naming one (was "enabled boards" for Greenhouse/Ashby only).
+    expect(await screen.findByText('1 recommended for you in 2 indexed jobs · 2 enabled discovery sources, 1 with recent failures')).toBeTruthy();
     expect(screen.getByText('Match 78/100 · APPLY')).toBeTruthy();
     expect(screen.getByText('Not scored for you')).toBeTruthy();
   });
@@ -133,7 +134,7 @@ describe('DashboardPage workflow stages', () => {
 describe('describeFind', () => {
   it('scopes counts to the loaded page when more results exist', () => {
     expect(describeFind([job], true, null, [], null)).toBe(
-      '1 recommended for you in the latest 1 indexed job · 0 enabled boards',
+      '1 recommended for you in the latest 1 indexed job · 0 enabled discovery sources',
     );
   });
 

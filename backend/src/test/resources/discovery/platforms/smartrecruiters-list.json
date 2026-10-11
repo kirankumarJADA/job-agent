@@ -1,0 +1,106 @@
+{
+ "offset": 0,
+ "limit": 2,
+ "totalFound": 4932,
+ "content": [
+  {
+   "id": "744000154830479",
+   "name": "OPERADOR (Prazo determinado)",
+   "uuid": "66d2c669-6847-4942-acc8-bc0b8eb6ebb1",
+   "jobAdId": "6c6cda81-8df5-4319-8375-980cb9540aba",
+   "defaultJobAd": true,
+   "refNumber": "REF298230D",
+   "company": {
+    "identifier": "BoschGroup",
+    "name": "Bosch Group"
+   },
+   "releasedDate": "2026-10-10T13:57:54.203Z",
+   "location": {
+    "city": "Curitiba",
+    "region": "PR",
+    "country": "br",
+    "address": "Avenida Juscelino Kubitschek de Oliveira - Ld",
+    "remote": false,
+    "hybrid": false,
+    "latitude": "-25.4901584",
+    "longitude": "-49.3446295",
+    "fullLocation": "Curitiba, PR, Brazil"
+   },
+   "industry": {
+    "id": "automotive",
+    "label": "Automotive"
+   },
+   "department": {},
+   "function": {
+    "id": "production",
+    "label": "Production"
+   },
+   "typeOfEmployment": {
+    "id": "permanent",
+    "label": "Full-time"
+   },
+   "experienceLevel": {
+    "id": "entry_level",
+    "label": "Entry Level"
+   },
+   "visibility": "PUBLIC",
+   "ref": "https://api.smartrecruiters.com/v1/companies/BoschGroup/postings/744000154830479",
+   "language": {
+    "code": "pt-BR",
+    "label": "Portuguese (Brazil)",
+    "labelNative": "português (Brasil)"
+   }
+  },
+  {
+   "id": "744000154822859",
+   "name": "ADAS系统及软件测试工程师_BCSC",
+   "uuid": "d4a0e3ce-234d-482b-881d-832b2b5761f7",
+   "jobAdId": "5a0a897f-1788-4423-97aa-f18c81c80ec2",
+   "defaultJobAd": true,
+   "refNumber": "REF298225M",
+   "company": {
+    "identifier": "BoschGroup",
+    "name": "Bosch Group"
+   },
+   "releasedDate": "2026-10-10T08:30:00.568Z",
+   "location": {
+    "city": "Wuxi",
+    "region": "Jiangsu",
+    "country": "cn",
+    "postalCode": "214000",
+    "remote": false,
+    "hybrid": false,
+    "latitude": "31.4912",
+    "longitude": "120.3119",
+    "fullLocation": "Wuxi, Jiangsu, China"
+   },
+   "industry": {
+    "id": "automotive",
+    "label": "Automotive"
+   },
+   "department": {},
+   "function": {
+    "id": "engineering",
+    "label": "Engineering"
+   },
+   "typeOfEmployment": {
+    "id": "permanent",
+    "label": "Full-time"
+   },
+   "experienceLevel": {
+    "id": "associate",
+    "label": "Associate"
+   },
+   "visibility": "PUBLIC",
+   "ref": "https://api.smartrecruiters.com/v1/companies/BoschGroup/postings/744000154822859",
+   "creator": {
+    "name": "Jie ZHANG (GS/HRS-PAC1-CN)"
+   },
+   "language": {
+    "code": "en",
+    "label": "English",
+    "labelNative": "English (US)"
+   }
+  }
+ ]
+}

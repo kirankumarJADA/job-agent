@@ -1,6 +1,7 @@
 package com.personal.jobagent.sources;
 
-import com.personal.jobagent.discovery.DiscoveryOrchestrator;
+import com.personal.jobagent.discovery.platform.BoardDiscoveryService;
+import com.personal.jobagent.discovery.platform.PlatformCoverageService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
@@ -11,67 +12,72 @@ import java.util.UUID;
 
 /**
  * Sources Controller: provides GET /api/v1/sources and POST /api/v1/sources/{id}/health-check
- * per architecture §C3.
+ * per architecture §C3, plus GET /api/v1/sources/coverage (Phase 8.2.5).
  *
- * <p>The health check performs a REAL verification for schedulable board
- * sources (GREENHOUSE / ASHBY with an org identifier): one live board fetch
- * through the same orchestrator the scheduled sweep uses, with the outcome
- * recorded into {@code failure_streak}/{@code health}. It used to fake a
- * clean bill of health by resetting the failure counter without checking
- * anything — a lie the dashboard would then display. Sources that cannot be
- * verified (no board API) return their recorded state unchanged.
+ * <p>This is the OPERATIONS view of discovery — the one place where source
+ * names, platforms and health are shown. Candidate job views never expose them.
+ *
+ * <p>The health check performs a REAL verification for every board platform
+ * with a registered adapter: a bounded live run (small page and detail
+ * budget) through the same {@link BoardDiscoveryService} the scheduler uses,
+ * with the outcome, counters and failure category recorded on the source. It
+ * never fakes a clean bill of health. A disabled source is never fetched and
+ * its recorded state is returned unchanged; kinds without an adapter (legacy
+ * non-board kinds, unverified or blocked platforms) are returned as recorded.
  */
 @RestController
 @RequestMapping("/api/v1/sources")
 public class SourcesController {
 
     private final JdbcTemplate jdbcTemplate;
-    private final DiscoveryOrchestrator orchestrator;
+    private final BoardDiscoveryService boards;
+    private final PlatformCoverageService coverage;
 
-    public SourcesController(JdbcTemplate jdbcTemplate, DiscoveryOrchestrator orchestrator) {
+    public SourcesController(JdbcTemplate jdbcTemplate, BoardDiscoveryService boards, PlatformCoverageService coverage) {
         this.jdbcTemplate = jdbcTemplate;
-        this.orchestrator = orchestrator;
+        this.boards = boards;
+        this.coverage = coverage;
     }
 
     @GetMapping
     public List<Map<String, Object>> listSources() {
         return jdbcTemplate.queryForList("""
                 select id, kind, org_identifier, display_name, capabilities::text as capabilities,
-                       policy, rate_limit_per_min, enabled, failure_streak, last_run_at, coalesce(health::text, '{}') as health
+                       policy, rate_limit_per_min, enabled, failure_streak, last_run_at,
+                       last_attempted_at, last_success_at, coalesce(last_run::text, '{}') as last_run,
+                       coalesce(health::text, '{}') as health
                 from job_sources
                 order by display_name
                 """);
     }
 
+    /** One row per platform (30 ATS + Tsenta) with its current coverage status. */
+    @GetMapping("/coverage")
+    public List<Map<String, Object>> coverage() {
+        return coverage.coverage();
+    }
+
     @PostMapping("/{id}/health-check")
     public ResponseEntity<?> healthCheck(@PathVariable UUID id) {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
-                "select kind, org_identifier, enabled from job_sources where id = ?", id);
+                "select kind, enabled, policy from job_sources where id = ?", id);
         if (rows.isEmpty()) return ResponseEntity.notFound().build();
         String kind = (String) rows.get(0).get("kind");
-        String orgIdentifier = (String) rows.get(0).get("org_identifier");
-        // A disabled source is never fetched live (the same rule /discovery/run
-        // enforces); its recorded state is returned unchanged, never reset.
-        boolean enabled = Boolean.TRUE.equals(rows.get(0).get("enabled"));
-
-        if (enabled && ("GREENHOUSE".equals(kind) || "ASHBY".equals(kind))
-                && orgIdentifier != null && !orgIdentifier.isBlank()) {
-            DiscoveryOrchestrator.DiscoveryRun run = "ASHBY".equals(kind)
-                    ? orchestrator.discoverAshbyBoard(id, orgIdentifier)
-                    : orchestrator.discoverGreenhouseBoard(id, orgIdentifier);
-            boolean ok = run.errors() == null || run.errors().isEmpty();
-            jdbcTemplate.update(ok
-                            ? "update job_sources set last_run_at = now(), failure_streak = 0, "
-                              + "health = jsonb_build_object('status','ok','checked_at',to_char(now() at time zone 'utc','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),'detail',?::text) "
-                              + "where id = ?"
-                            : "update job_sources set last_run_at = now(), failure_streak = failure_streak + 1, "
-                              + "health = jsonb_build_object('status','failed','checked_at',to_char(now() at time zone 'utc','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),'error',?::text,'failure_streak',failure_streak + 1) "
-                              + "where id = ?",
-                    ok ? run.ingested().size() + " job(s) seen" : String.join(",", run.errors()), id);
+        boolean enabled = Boolean.TRUE.equals(rows.get(0).get("enabled")) && !"DISABLED".equals(rows.get(0).get("policy"));
+        Map<String, Object> run = null;
+        if (enabled && boards.isRunnable(kind)) {
+            try {
+                BoardDiscoveryService.SourceRunReport report = boards.run(id, BoardDiscoveryService.Mode.HEALTH_CHECK);
+                run = Map.of("status", report.status(), "complete", report.complete(), "counts", report.counts());
+            } catch (BoardDiscoveryService.RunRefused refused) {
+                // Raced with a disable or a delete: report what is recorded.
+            }
         }
-        // Non-schedulable kinds return their recorded state as-is — no fake reset.
-        return ResponseEntity.ok(jdbcTemplate.queryForMap(
-                "select id, display_name, kind, policy, enabled, failure_streak, last_run_at, "
+        Map<String, Object> body = new java.util.LinkedHashMap<>(jdbcTemplate.queryForMap(
+                "select id, display_name, kind, policy, enabled, failure_streak, last_run_at, last_attempted_at, "
+                        + "last_success_at, coalesce(last_run::text, '{}') as last_run, "
                         + "coalesce(health::text, '{}') as health from job_sources where id = ?", id));
+        if (run != null) body.put("run", run);
+        return ResponseEntity.ok(body);
     }
 }

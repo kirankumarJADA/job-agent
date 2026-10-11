@@ -90,12 +90,11 @@ export function describeFind(
   if (sourcesError) {
     parts.push('Discovery sources unavailable');
   } else if (sources !== null) {
-    const boards = sources.filter(
-      (source) => source.enabled && ['GREENHOUSE', 'ASHBY'].includes(String(source.kind).toUpperCase()),
-    );
-    const failing = boards.filter((source) => (source.failure_streak || 0) > 0).length;
+    // Aggregate only: the dashboard never names a platform or provider.
+    const enabled = sources.filter((source) => source.enabled && source.policy !== 'DISABLED');
+    const failing = enabled.filter((source) => (source.failure_streak || 0) > 0).length;
     parts.push(
-      `${boards.length} enabled ${boards.length === 1 ? 'board' : 'boards'}` +
+      `${enabled.length} enabled discovery ${enabled.length === 1 ? 'source' : 'sources'}` +
         (failing > 0 ? `, ${failing} with recent failures` : ''),
     );
   }
@@ -290,7 +289,7 @@ export const DashboardPage: React.FC = () => {
             </div>
           ) : jobs && jobs.length === 0 ? (
             <div className="p-5">
-              <EmptyState title="No jobs in the current index" body="Open the Jobs Feed to search the existing catalogue or run discovery from an enabled Greenhouse or Ashby source." actions={<SecondaryButton href="/jobs">Open FIND</SecondaryButton>} />
+              <EmptyState title="No jobs in the current index" body="Open the Jobs Feed to search the existing catalogue or run discovery from an enabled source in Job Sources." actions={<SecondaryButton href="/jobs">Open FIND</SecondaryButton>} />
             </div>
           ) : (
             <div className="divide-y divide-line">

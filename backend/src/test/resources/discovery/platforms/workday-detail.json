@@ -1,0 +1,40 @@
+{
+ "jobPostingInfo": {
+  "id": "e197b3ffb77f102fc60f579474340000",
+  "title": "Senior HPC Storage Engineer",
+  "jobDescription": "<p>NVIDIA has been transforming computer graphics, PC gaming, and accelerated computing for more than 25 years. It’s a unique legacy of innovation that’s fueled by great technology—and amazing people. Today, we’re tapping into the unlimited potential of AI to define the next era of computing. An era in which our GPU acts as the brains of computers, robots, and self-driving cars that can understand the world. Doing what’s never been done before takes vision, innovation, and the world’s best talent. As an NVIDIAN, you’ll be immersed in a diverse, supportive environment where everyone is inspired to do their best work. Come join the team and see how you can make a lasting impact on the world.</p><p></p><p>As a member of the HW Infrastructure Storage Strategy team, you will provide leadership in the research, design and implementation of ground breaking fast storage solutions to enable runs of demanding high performance computing, and computationally intensive workloads. We seek an expert to identify architectural changes encompassing file, block, and object storage, to cater to the scaling and performance requirements of an expanding cloud infrastructure. As an expert, you will help us with the next-gen storage solutions strategic challenges we encounter with storage design for large scale, high performance workloads, evolving our private/public cloud strategy, capacity modelling, and growth planning across our global computing environment.</p><p></p><p><b>What you&#39;ll be doing:</b></p><ul><li><p>Research and analyze existing internal distributed storage services.</p></li><li><p>Research, design, and implement scalable, next-gen distributed storage services for HPC workloads, optimizing both performance and cost-effectiveness to meet NVIDIA’s growing infrastructure needs</p></li><li><p>Develop tooling to automate management of large-scale infrastructure environments, to automate operational monitoring and alerting, and to enable self-service consumption of resources.</p></li><li><p>Detail the general procedures and practices, perform technology evaluations, related to distributed file systems.</p></li><li><p>Collaborate across teams to better understand developers&#39; workflows and capture their infrastructure requirements.</p></li><li><p>Influence and guide methodologies for building, testing, and deploying applications to ensure efficient performance and resource utilization.</p></li><li><p>Supporting our researchers to run their flows on our clusters including performance analysis and optimizations of deep learning workflows</p></li><li><p>Root cause analysis and suggest corrective action for problems large and small scales</p></li></ul><p></p><p><b>What we need to see:</b></p><ul><li><p>Bachelor’s degree in Computer Science, Electrical Engineering or related field or equivalent experience.</p></li><li><p>8&#43; years of experience designing and/or operating large scale storage infrastructure.</p></li><li><p>Experience analyzing and tuning storage performance for a variety of workloads.</p></li><li><p>Proficient in Centos/RHEL and/or Ubuntu Linux distros including Python programming and bash scripting</p></li><li><p>In depth understanding of container technologies like Docker, Enroot</p></li></ul><p></p><p><b>Ways to stand out from the crowd:</b></p><ul><li><p>Distributed Storage Expertise: Extensive experience with parallel and distributed filesystems (Ceph, Weka.io, Vast, Lustre, GPFS) and Linux storage kernel development.</p></li><li><p>GPU &amp; AI Infrastructure: Proficient with NVIDIA GPUs, CUDA programming, and NCCL, including performance benchmarking via MLPerf.</p></li><li><p>Hardware &amp; Storage Engineering: Deep familiarity with storage hardware (HDDs, SSDs, NVMe), enclosures, and specialized appliances like Network Appliance.</p></li><li><p>Advanced Networking: Strong background in Software Defined Networking (SDN) and high-performance networking for AI/HPC clusters.</p></li><li><p>Deep Learning Frameworks: P",
+  "location": "US, CA, Santa Clara",
+  "additionalLocations": [
+   "US, TX, Austin"
+  ],
+  "postedOn": "Posted Today",
+  "startDate": "2026-10-10",
+  "timeType": "Full time",
+  "jobReqId": "JR2014997",
+  "jobPostingId": "Senior-HPC-Storage-Engineer_JR2014997",
+  "jobPostingSiteId": "NVIDIAExternalCareerSite",
+  "country": {
+   "descriptor": "United States of America",
+   "id": "bc33aa3152ec42d4995f4791a106ed09"
+  },
+  "canApply": true,
+  "posted": true,
+  "includeResumeParsing": true,
+  "jobRequisitionLocation": {
+   "descriptor": "US, CA, Santa Clara",
+   "country": {
+    "descriptor": "United States of America",
+    "id": "bc33aa3152ec42d4995f4791a106ed09",
+    "alpha2Code": "US"
+   }
+  },
+  "externalUrl": "https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite/job/US-CA-Santa-Clara/Senior-HPC-Storage-Engineer_JR2014997",
+  "questionnaireId": "028095df097b1001ac9358c586600000"
+ },
+ "hiringOrganization": {
+  "name": "2100 NVIDIA USA",
+  "url": ""
+ },
+ "similarJobs": [],
+ "userAuthenticated": false
+}

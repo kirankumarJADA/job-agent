@@ -1,0 +1,93 @@
+User-Agent: *
+Allow: /
+Disallow: /private/
+Disallow: /admin/
+
+User-Agent: GPTBot
+Allow: /
+
+User-Agent: ChatGPT-User
+Allow: /
+
+User-Agent: OAI-SearchBot
+Allow: /
+
+User-Agent: ClaudeBot
+Allow: /
+
+User-Agent: Claude-SearchBot
+Allow: /
+
+User-Agent: Google-Extended
+Allow: /
+
+User-Agent: PerplexityBot
+Allow: /
+
+User-Agent: Amazonbot
+Allow: /
+
+User-Agent: Applebot-Extended
+Allow: /
+
+User-Agent: Meta-ExternalAgent
+Allow: /
+
+User-Agent: cohere-ai
+Allow: /
+
+User-Agent: Bytespider
+Allow: /
+
+User-Agent: Diffbot
+Allow: /
+
+User-Agent: DeepSeekBot
+Allow: /
+
+User-Agent: Google-CloudVertexBot
+Allow: /
+
+User-Agent: Gemini-Deep-Research
+Allow: /
+
+User-Agent: GoogleAgent-Mariner
+Allow: /
+
+User-Agent: Google-NotebookLM
+Allow: /
+
+User-Agent: Perplexity-User
+Allow: /
+
+User-Agent: MistralAI-User
+Allow: /
+
+User-Agent: CCBot
+Allow: /
+
+User-Agent: PetalBot
+Allow: /
+
+User-Agent: Claude-Web
+Allow: /
+
+User-Agent: Crawl4AI
+Allow: /
+
+User-Agent: FirecrawlAgent
+Allow: /
+
+User-Agent: ChatGLM-Spider
+Allow: /
+
+User-Agent: Meta-ExternalFetcher
+Allow: /
+
+User-Agent: AmazonBuyForMe
+Allow: /
+
+User-Agent: TikTokSpider
+Allow: /
+
+Sitemap: https://tsenta.com/sitemap-index.xml

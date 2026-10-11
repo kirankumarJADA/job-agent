@@ -175,7 +175,9 @@ public class ApplyReadinessService {
             item.put("answerState", answerState);
             item.put("answerOrigin", answer == null ? null : answer.answerOrigin());
             item.put("answerId", answer == null ? null : String.valueOf(answer.id()));
-            item.put("source", question.source());
+            // Phase 8.2.5 source hiding: the capture source names the ATS platform
+            // (e.g. GREENHOUSE_PUBLIC_FORM), so it is kept server-side only. The
+            // employer's own form URL is still shown.
             item.put("formUrl", question.formUrl());
             items.add(item);
 
@@ -208,7 +210,6 @@ public class ApplyReadinessService {
         }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("formCaptured", !captured.isEmpty());
-        out.put("source", captured.isEmpty() ? null : captured.get(0).source());
         out.put("formUrl", captured.isEmpty() ? null : captured.get(0).formUrl());
         out.put("items", items);
         out.put("storedAnswerCount", stored.size());

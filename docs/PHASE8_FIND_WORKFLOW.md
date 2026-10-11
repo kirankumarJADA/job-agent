@@ -525,3 +525,242 @@ strengthened):**
 submits anything, no employer-side mutation exists, `submissionEnabled` is always `false`, no
 submission receipt is fabricated, and worker requests can never grant submission approval.
 
+
+---
+
+# Phase 8.2.5 — FIND across the 30 Tsenta-listed platforms + Tsenta
+
+Branch `phase8.2.5-ats-discovery-expansion`, parent `bf38078` (tip of `phase8.2-apply-workflow`).
+Phase 8.3 TRACK was not started. Nothing was merged or deployed. `REAL_SUBMIT` stays hard-stopped.
+
+## 12.1 Platform list and how it was verified
+
+The platform list is Tsenta's own published list ("Supported Job Platforms",
+https://tsenta.com/ai-disclosure, read 2026-10-10): Workday, Greenhouse, Lever, Ashby, Rippling,
+iCIMS, BambooHR, Workable, JazzHR, Jobvite, BreezyHR, Oracle Cloud, SmartRecruiters, Paylocity,
+UltiPro, ADP, Dover, Gem, Zoho Recruit, BrassRing, CareerPlug, Dayforce, Hireology, Join, Phenom,
+Pinpoint, Polymer, Recruitee, SAP SuccessFactors, Teamtailor. The names in the manifest
+(`discovery/platform/PlatformKind`) match that list byte-for-byte and in order; aliases (UKG Pro,
+Kenexa, Oracle Recruiting Cloud, Tellent Recruitee, …) resolve to the same entries.
+`PlatformCoverageAuditTest` fails if the manifest drifts from that list.
+
+Every adapter below was built against responses fetched live from a real public board during this
+phase (tenant named in the table). The captured responses, trimmed, are the test fixtures under
+`backend/src/test/resources/discovery/platforms/`. Nothing was modelled from documentation alone.
+
+## 12.2 Coverage inventory
+
+Readiness is a statement about the implementation. The candidate-independent **coverage status**
+(`GET /api/v1/sources/coverage`) is derived at runtime: `BLOCKED` / `UNVERIFIED` from readiness;
+for live-validated adapters `NEEDS_BOARD_CONFIGURATION` until an enabled board of that platform is
+configured, `TEMPORARILY_UNAVAILABLE` when every enabled board's last run failed, otherwise
+`SUPPORTED`. A fresh database therefore reports every live-validated platform except Greenhouse
+(which has the seeded Stripe board) as `NEEDS_BOARD_CONFIGURATION` — that is accurate: nothing is
+discovered from a platform until a board is configured.
+
+| # | Platform | Readiness | Method (verified 2026-10-10) | Board identifier / config | Validated tenant | Listing complete? |
+|---|---|---|---|---|---|---|
+| 1 | Workday | LIVE_VALIDATED | CXS JSON: `POST /wday/cxs/{tenant}/{site}/jobs` (limit/offset; `total` only on page 1), detail `GET …{externalPath}` | `tenant.wdN/site` (derived from any `*.myworkdayjobs.com` URL) | nvidia.wd5/NVIDIAExternalCareerSite | yes, unless page cap hit |
+| 2 | Greenhouse | LIVE_VALIDATED | Job Board API (existing `GreenhouseProvider`) | board token | stripe (seeded) | yes |
+| 3 | Lever | LIVE_VALIDATED | Postings API `?mode=json&skip&limit`, EU host supported | site, `eu:site` | palantir | yes |
+| 4 | Ashby | LIVE_VALIDATED | Posting API (existing `AshbyProvider`) | board name | ramp | yes |
+| 5 | Rippling | LIVE_VALIDATED | `api.rippling.com/platform/api/ats/v1/board/{slug}/jobs` + per-job detail | board slug | rippling | yes |
+| 6 | iCIMS | LIVE_VALIDATED | Server-rendered `/jobs/search?pr=N&in_iframe=1` following `<link rel=next>`; JSON-LD job pages | portal host `*.icims.com` | us-erac.icims.com | yes |
+| 7 | BambooHR | UNVERIFIED | `/{sub}.bamboohr.com/careers/list` answers (`{meta,result}`) but the only tenants found had zero openings, so the job schema could not be validated | company subdomain | — | — |
+| 8 | Workable | LIVE_VALIDATED | Widget API `/api/v1/widget/accounts/{account}?details=true` | account | huggingface | yes |
+| 9 | JazzHR | LIVE_VALIDATED | Public XML feed `app.jazz.co/feeds/export/jobs/{sub}` (served as `text/html`; still parsed only as XML with a `jobs` root) | applytojob subdomain | labelmaster | yes |
+| 10 | Jobvite | LIVE_VALIDATED | Server-rendered `jobs.jobvite.com/{slug}/jobs` + job pages (a posting with no description keeps it unknown) | company slug | oneco (fixtures), egnyte (live suite) | yes |
+| 11 | BreezyHR | LIVE_VALIDATED | `{sub}.breezy.hr/json` + job page description | portal subdomain | breezy | yes |
+| 12 | Oracle Cloud | LIVE_VALIDATED | `recruitingCEJobRequisitions` (finder findReqs, limit/offset, TotalJobsCount) + `recruitingCEJobRequisitionDetails` | `host/siteNumber` | eeho.fa.us2.oraclecloud.com/CX_45001 | yes |
+| 13 | SmartRecruiters | LIVE_VALIDATED | Posting API (`limit/offset`, `totalFound`) + posting detail | company identifier | BoschGroup | yes |
+| 14 | Paylocity | LIVE_VALIDATED | `Recruiting/Jobs/All/{guid}` (`window.pageData`) + JSON-LD job pages | company GUID | 3876b9cb-… (BCI Burke) | yes |
+| 15 | UltiPro (UKG Pro) | LIVE_VALIDATED | `JobBoardView/LoadSearchResults` (Top/Skip, totalCount) + embedded `CandidateOpportunityDetail` | `host/tenant/boardGuid` | recruiting2.ultipro.com/HEL1006HELI/73d20f56-… | yes |
+| 16 | ADP | UNVERIFIED | No public Workforce Now / Recruiting Management tenant (cid) could be found to validate against | — | — | — |
+| 17 | Dover | UNVERIFIED | Careers pages are a JS app (Cloudflare Turnstile on the page); no public listing endpoint identified | — | — | — |
+| 18 | Gem | LIVE_VALIDATED | `api.gem.com/job_board/v0/{board}/job_posts/` | board | gem | yes |
+| 19 | Zoho Recruit | LIVE_VALIDATED | `/recruit/v2/public/Job_Openings?pagename=Careers` | career-site host | sehyog.zohorecruit.in | **never** (pagination unobserved) |
+| 20 | BrassRing | **BLOCKED** | Search results are only returned to a POST carrying a session-bound `__RequestVerificationToken`; the initial page lists no jobs. Replaying anti-forgery tokens is outside "public listing" scope | — | — | — |
+| 21 | CareerPlug | UNVERIFIED | Tested subdomains redirect to a single application or a sign-in page; no public listing endpoint confirmed | — | — | — |
+| 22 | Dayforce | UNVERIFIED | Page is client-rendered; the search API answered 403 to a plain public request | — | — | — |
+| 23 | Hireology | UNVERIFIED | No public tenant or listing endpoint confirmed | — | — | — |
+| 24 | Join | LIVE_VALIDATED | `__NEXT_DATA__` job list with `pagination.pageCount` + JSON-LD job pages | company slug | join | yes |
+| 25 | Phenom | LIVE_VALIDATED | `POST https://{careers host}/widgets` (`refineSearch`, from/size, totalHits) + JSON-LD job pages; custom domains accepted only via the import flow's page signature check | `host/country/lang` | careers.phenom.com/us/en | yes |
+| 26 | Pinpoint | LIVE_VALIDATED | `{sub}.pinpointhq.com/postings.json` | subdomain | workwithus | yes |
+| 27 | Polymer | UNVERIFIED | `api.polymer.co/v1/hire/organizations/{org}/jobs` exists but rejected every real slug tried (`organization could not be found`) | — | — | — |
+| 28 | Recruitee | LIVE_VALIDATED | `{sub}.recruitee.com/api/offers/` | subdomain | vandebron | yes |
+| 29 | SAP SuccessFactors | UNVERIFIED | Classic career sites render jobs client-side; no stable public listing endpoint validated | — | — | — |
+| 30 | Teamtailor | LIVE_VALIDATED | `{host}/jobs.rss` (full descriptions) | `*.teamtailor.com` host | career.teamtailor.com | **never** (feed not documented as exhaustive) |
+| 31 | Tsenta (aggregator) | LIVE_VALIDATED | Public SSR pages (see 12.4) | scope `jobs`, `jobs/remote`, `jobs/internships`, `jobs/entry-level` | tsenta.com/jobs | **never** |
+
+Totals: 21 of 30 ATS platforms LIVE_VALIDATED (adapter + real fixtures + live fetch), 8
+UNVERIFIED, 1 BLOCKED; Tsenta LIVE_VALIDATED. Unverified/blocked platforms have **no adapter** —
+no placeholder that returns nothing or fake data — but their URLs are still recognised, so an
+import explains exactly which platform it is and why it cannot be followed yet.
+
+Live re-validation is a separate, opt-in suite: `PlatformLiveIT` (tag `live`) runs only with
+`-Dlive.discovery=true` and lists one page (+ up to three postings) of every tenant above through the
+production client; each posting needs a title and a genuine https application URL, and at least one
+must carry a description. Fixture tests prove parsers; only that suite proves an endpoint still answers.
+Last run 2026-10-11: 22/22 pass (21 ATS boards + Tsenta). That run first exposed and then confirmed
+fixes for JazzHR's `text/html`-labelled XML feed and Jobvite postings that have no description.
+
+## 12.3 Architecture (one registry, one run path, one identity model)
+
+- `PlatformRegistry` is the only adapter registry (Greenhouse and Ashby are wrapped by
+  `ProviderBackedAdapter`, so their existing providers remain the single parser for those
+  platforms). Scheduler, `POST /discovery/run`, source health check and URL import all resolve
+  adapters through it; there is no second source registry or identity system.
+- `BoardAdapter` is two-phase: `list` enumerates a board and says whether the enumeration is
+  COMPLETE (ended on the platform's own end-of-list signal — never on a page cap, budget, timeout or
+  error); `detail` completes one entry when the listing lacks a description.
+- `BoardDiscoveryService` runs a source: listing → complete entries ingested; detail-needing entries
+  are touched if this source already knows them, otherwise fetched within a per-run detail budget,
+  the rest deferred to the next run → completeness-gated removal → run metadata and health.
+- `SafeHttpClient` is the only HTTP client adapters use: SSRF guard on every URL and every redirect
+  hop (https only, default port, no credentials, no IP literals or internal names, host must resolve
+  only to public unicast addresses — loopback, RFC 1918, CGNAT, link-local incl. 169.254.169.254,
+  multicast, IPv6 ULA/link-local and mapped forms refused), redirects followed manually (max 3),
+  20 s timeouts, 8 MB response cap (2 MB for import sniffing), content-type allowlist, bounded
+  retries with exponential backoff + jitter on 429/5xx/timeouts honouring `Retry-After` (capped at
+  10 s), a hard per-run request budget and a minimum interval between requests. Error messages
+  carry category and status only — never headers or bodies.
+- Known limitation: the JDK client re-resolves DNS at connect time, so a hostile resolver could
+  answer differently between check and connect (rebinding). Platform hosts are pinned to the
+  platform's own domains wherever it has one; Phenom (custom domains) relies on the check alone.
+
+Normalisation into the existing `jobs` model is conservative (`Normalize`): unknown stays unknown.
+Not parsed on purpose: relative dates ("Posted Today"), locale-ambiguous dates (Zoho `02/06/2026`),
+dates more than a day in the future (Tsenta showed `2029-04-09`), salary numbers without an ISO
+currency, currency symbols, a currency without an amount, salaries a platform marks hidden
+(Pinpoint `compensation_visible=false`, UKG `PayRangeVisible=false`), placeholder locations
+(`UNAVAILABLE`), and a single city/country for multi-location postings. Sponsorship is never
+stored. Where a listing's structured date and a page's JSON-LD disagree, the listing wins (Phenom
+JSON-LD reported the fetch date; Paylocity's was shifted by hours).
+
+## 12.4 Tsenta
+
+Permission: the project owner confirmed permission to collect Tsenta's public job listings. Scope
+kept to: `robots.txt` (fetched first every run; `/jobs` allowed, `/private/` and `/admin/`
+disallowed — a disallow, or an unreadable robots file, stops the run), the public listing pages
+`/jobs[/remote|/internships|/entry-level]?page=N` and the public detail pages `/jobs/{slug}-{uuid}`.
+No dashboard, account, API or authenticated surface; a 401/403/challenge is reported as
+`ACCESS_DENIED`, never retried around.
+
+Page structure found: Next.js App Router, fully server-rendered; 20 cards per page; `?page=N`
+paginates server-side with disjoint pages (the site reports 7.6M postings). Each detail page
+embeds a schema.org `JobPosting` and a React Server Component payload; the RSC `job` object for the
+posting's own uuid carries `companyName`, `workplaceType`, `employmentType`, `locations`,
+`salaryMin/Max/Currency/Period`, `datePosted`, `active`, `atsType` and `url` — the **original
+employer application URL** (e.g. a `*.zohorecruit.in` or `*.csod.com` requisition page). The page
+also contains Tsenta's own `dashboard.tsenta.com/dashboard?apply={uuid}` link; it is never used.
+
+Extraction: listing cards → posting ids; detail → JSON-LD for title/description/salary, RSC job
+object (decoded from the `self.__next_f.push` string chunks with a JSON parser, scanned linearly;
+only the object whose `id` equals this posting's uuid) for employer, workplace, locations,
+employment type, date, active flag and the employer URL. Any URL on a Tsenta host is rejected as an
+application URL. A posting without a provable employer URL is **not stored** (it would otherwise
+need a Tsenta URL as its apply link) and is counted as `skipped_no_employer_url`.
+
+Identity: the Tsenta uuid is the source-scoped id; the employer URL usually carries an ATS job id
+(`ats:` key), so a Tsenta posting joins the same posting found directly on the employer's ATS.
+
+Refresh/staleness: every Tsenta listing is PARTIAL by definition (no run can enumerate millions of
+postings), so absence from a run never removes anything. A Tsenta posting is closed only when its
+own detail page says `active:false` (or `validThrough` has passed); otherwise it ages out through
+the existing 30-day staleness/archival. A failed or incomplete Tsenta crawl therefore cannot stale
+the Tsenta job set. Defaults: 3 pages and 40 detail pages per run, 1.5 s between requests, request
+budget = robots + pages + details; every 12 hours when configured through import.
+
+## 12.5 Cross-source identity and deduplication
+
+`JobIdentity` derives, strongest first: `src:{sourceId}:{externalId}`, `ats:{platform job id}`
+from the job or application URL (formats for 21 platforms; the Phase 8.2 `greenhouse:`/`ashby:`
+forms are unchanged), `req:{employer}:{requisition id}`, and `url:{normalised URL}` (tracking
+parameters, fragments, case, default ports and trailing slashes ignored). Employer + title is never
+a key — the old company|title|location `dedup_key` is still stored but no longer merges postings.
+
+Ingestion (`JobDiscoveryService.ingestJob`) takes transaction-scoped advisory locks on every key in
+a fixed order, resolves the strongest matching key in `job_identity_keys` (V037), and stores the
+posting's keys (first writer wins; a key bound to another job is conflicting evidence and is left
+alone, nothing is merged on it). A match from a different source is a cross-source duplicate: it
+refreshes `last_seen_at`, records provenance for that route, may upgrade a weaker application URL
+(ATS job URL > employer page; aggregator URLs are never application URLs) and replaces an aggregator
+canonical URL — but never rewrites content or bumps `repost_count`. A job first found through
+Tsenta is promoted to the employer's ATS source (its text becomes authoritative) when that source
+lists it. Re-ingestion is idempotent. Existing jobs got `src:` keys in V037 and URL/ATS keys at
+startup (`JobIdentityBackfill`, same Java normalisation, idempotent, never merges old rows).
+
+Changed behaviour (documented): the same-source UPDATED path now also refreshes `title` and
+`description_text` (previously only the hash changed, leaving stale text).
+
+## 12.6 Removal and source health
+
+- Only a COMPLETE listing may mark this source's unseen postings `MISSING`
+  (`job_source_observations.source_status/removed_at`, with `source_id`). A job gets `deleted_at`
+  only when **no** source still lists it, and is restored automatically when any source lists it
+  again. A failed, capped, budget-limited, partial, Teamtailor, Zoho Recruit or Tsenta listing removes nothing.
+- A source's own `active:false` / passed `validThrough` closes that observation (`CLOSED`).
+- Every run records `last_attempted_at`, `last_success_at`, `last_run` (listed, created, updated,
+  unchanged, cross-source duplicates, deferred, closed, removed, skipped, detail failures, pages,
+  requests, duration, completeness, failure category) and `health`
+  (`ok`/`degraded`/`failed` + `failure_streak` + circuit). Disabled sources (flag or policy) are
+  never fetched by scheduler, run, health check or import, and import never re-enables one.
+
+## 12.7 URL import (`POST /api/v1/jobs/import-url`)
+
+Request `{url, platform?, board?, preview?, confirm?, employer_name?}`. Validate (≤2048 chars,
+http(s) only — http upgraded to https, no credentials, default ports, no IP literals/internal
+names, host resolves only to public addresses) → detect from URL patterns → if nothing matches,
+ONE guarded page fetch looking for an embedded board link or the Phenom signature (no crawling)
+→ respond `RESOLVED` / `NEEDS_CONFIGURATION` (with the platform's board format) / `UNSUPPORTED`
+(platform named with its readiness and reason) / `UNRECOGNIZED`. `preview=true` lists one page so
+the board can be inspected; `confirm=true` creates a `DISCOVERY_ONLY` source on a 6-hour schedule
+and runs it once (`CONFIGURED`). At most two imports run concurrently; the endpoint shares the
+per-account `discovery` rate-limit bucket. Malformed or unsafe URLs are 400.
+
+## 12.8 Source hiding (UI decision)
+
+Candidate-facing views — feed, job cards, search, job detail, PREP, APPLY, dashboard — never say
+which website, ATS platform or aggregator surfaced a posting. Enforced in the API, not just the UI:
+the candidate job DTO (`JobsController.toWire`) no longer contains `source_id`, `source_name`,
+`source_kind`, `external_id` or `canonical_url`; the APPLY readiness payload no longer contains the
+form-capture source (`GREENHOUSE_PUBLIC_FORM`); the duplicate-application message no longer names
+a platform ("same employer requisition identifier"). The frontend types drop those fields; the job
+card's "via …", the detail page's "Source" row, the feed's per-source discovery panel and the
+dashboard's platform wording were removed. Employer, title and the employer's genuine application
+link stay visible and unaltered (an ATS-hosted application page is the employer's real form and is
+shown as such; it is rendered as a labelled link rather than spelled out). An aggregator URL is
+never offered as an application link (`application_url` is nulled in the DTO if one ever reaches
+it). Provenance stays in the database (`jobs.source_id`, `job_source_observations`,
+`job_identity_keys`) and in the operational Job Sources page, which shows sources, recorded health
+(no source is ever shown "healthy" without a recorded OK run — the previous page hard-coded
+"Healthy"), run counters, URL import and platform coverage. Robin is never presented as the
+employer.
+
+## 12.9 Migration V037 and API changes
+
+`V037__platform_discovery_expansion.sql` (additive): `job_sources.kind` check widened to the 31
+manifest kinds + the 3 legacy kinds; `job_sources.last_attempted_at/last_success_at/last_run`;
+`job_identity_keys` (+ `src:` backfill); `job_identity_backfill_skips`;
+`job_source_observations.source_id/removed_at` (+ backfill from `job-source:<uuid>` provider names)
+and an index. Nothing is dropped.
+
+API: `GET /api/v1/sources/coverage` (new); `GET /api/v1/sources` adds run metadata;
+`POST /api/v1/sources/{id}/health-check` runs every supported platform through the run service and
+returns the recorded state plus `run`; `POST /api/v1/discovery/run` returns the run report
+(counts, completeness, failure category, `ingested` actions) for every supported platform;
+`POST /api/v1/jobs/import-url` is implemented (was a `RESOLUTION_PENDING` stub); candidate job DTO
+and APPLY readiness lose the provenance fields listed in 12.8.
+
+## 12.10 Known limitations
+
+- 8 platforms UNVERIFIED and 1 BLOCKED (12.2): no discovery from them until a public endpoint and
+  a real tenant with openings can be validated; imports of their URLs say so.
+- Detail-needing platforms refresh content only for new postings; already-known postings are
+  touched (kept fresh) without re-fetching their description, so description edits on those
+  platforms are picked up only if the listing itself changes identity.
+- Teamtailor, Zoho Recruit and Tsenta listings never drive removals; their postings rely on staleness.
+- DNS-rebinding window described in 12.3.
+- Zoho Recruit pagination beyond the first public response has not been observed (the validated
+  tenant has 8 openings), so its listings are reported partial and never remove anything.
+- Workday hosts on `*.myworkdaysite.com` are not recognised (only `*.myworkdayjobs.com`).

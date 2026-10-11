@@ -185,7 +185,15 @@ export const ApplyWorkspace: React.FC<{
               </div>
               <div>
                 <dt className="text-ink-muted">Application URL</dt>
-                <dd className="break-all text-ink-body">{readiness.application.applicationUrl || '—'}</dd>
+                <dd className="break-all text-ink-body">
+                  {readiness.application.applicationUrl ? (
+                    <a href={readiness.application.applicationUrl} target="_blank" rel="noopener noreferrer" className="underline">
+                      Employer application page
+                    </a>
+                  ) : (
+                    '—'
+                  )}
+                </dd>
               </div>
             </dl>
             <p className="mt-3 text-xs text-ink-faint">{readiness.note}</p>
@@ -219,7 +227,7 @@ export const ApplyWorkspace: React.FC<{
             title="Employer questions"
             hint={
               readiness.questions.formCaptured
-                ? `captured from ${readiness.questions.source ?? 'the employer form'}`
+                ? 'captured from the employer form'
                 : 'form not captured'
             }
           >
@@ -449,7 +457,10 @@ const QuestionRow: React.FC<{
       )}
     </div>
     <p className="mt-1 text-xs text-ink-muted">
-      Source: {question.source} · form: {question.formUrl}
+      From the employer&apos;s application form ·{' '}
+      <a href={question.formUrl} target="_blank" rel="noopener noreferrer" className="underline">
+        open form
+      </a>
     </p>
   </li>
 );

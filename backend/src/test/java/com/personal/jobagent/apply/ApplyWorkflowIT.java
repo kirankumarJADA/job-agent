@@ -182,10 +182,19 @@ class ApplyWorkflowIT {
                 .andExpect(jsonPath("$.questions.items[0].requiredState").value("REQUIRED"))
                 .andExpect(jsonPath("$.questions.items[0].answerState").value("CONFIRMED"))
                 .andExpect(jsonPath("$.questions.items[0].answerOrigin").value("CANDIDATE_CONFIRMED"))
-                .andExpect(jsonPath("$.questions.items[0].source").value("GREENHOUSE_PUBLIC_FORM"))
+                // Phase 8.2.5 source hiding: the candidate payload no longer names the
+                // platform the form was captured from (this assertion previously required
+                // "GREENHOUSE_PUBLIC_FORM"); provenance is still recorded, see below.
+                .andExpect(jsonPath("$.questions.items[0].source").doesNotExist())
+                .andExpect(jsonPath("$.questions.source").doesNotExist())
+                .andExpect(jsonPath("$.questions.items[0].formUrl").isNotEmpty())
                 .andExpect(jsonPath("$.duplicates.status").value("NONE"))
                 .andExpect(jsonPath("$.packageReady").value(true));
         assertThat(answerId).isNotNull();
+        assertThat(jdbc.queryForObject("""
+                select source from job_form_questions
+                where job_id = (select job_id from applications where id = ?) and question_key = 'question_42'
+                """, String.class, applicationId)).isEqualTo("GREENHOUSE_PUBLIC_FORM");
     }
 
     @Test

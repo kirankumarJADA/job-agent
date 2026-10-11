@@ -18,13 +18,16 @@ public class DiscoveryController {
     private final DiscoveryOrchestrator orchestrator;
     private final LinkedInDiscoveryService linkedInDiscovery;
     private final JdbcTemplate jdbcTemplate;
+    private final com.personal.jobagent.discovery.platform.BoardDiscoveryService boards;
 
     public DiscoveryController(JobDiscoveryService discoveryService, DiscoveryOrchestrator orchestrator,
-                               LinkedInDiscoveryService linkedInDiscovery, JdbcTemplate jdbcTemplate) {
+                               LinkedInDiscoveryService linkedInDiscovery, JdbcTemplate jdbcTemplate,
+                               com.personal.jobagent.discovery.platform.BoardDiscoveryService boards) {
         this.discoveryService = discoveryService;
         this.orchestrator = orchestrator;
         this.linkedInDiscovery = linkedInDiscovery;
         this.jdbcTemplate = jdbcTemplate;
+        this.boards = boards;
     }
 
     @PostMapping("/ingest")
@@ -43,10 +46,10 @@ public class DiscoveryController {
      *   <li>with {@code url} — generic URL discovery through the configured
      *       scraper providers (unchanged behavior);</li>
      *   <li>without {@code url} — kind-aware dispatch: the source row in
-     *       {@code job_sources} decides the connector. Currently
-     *       {@code kind = GREENHOUSE} and {@code kind = ASHBY} use the
-     *       source's {@code org_identifier} as the board token/name; a hosted
-     *       Ashby URL is accepted only when it matches that persisted source.</li>
+     *       {@code job_sources} decides the board adapter (every supported
+     *       platform, Phase 8.2.5) and the run goes through
+     *       {@link com.personal.jobagent.discovery.platform.BoardDiscoveryService};
+     *       a hosted Ashby URL is accepted only when it matches that persisted source.</li>
      * </ul>
      * The source id and org identifier come from the source row. When an Ashby
      * URL is supplied it must match the source board, preventing cross-source
@@ -72,7 +75,7 @@ public class DiscoveryController {
                 if (!board.equalsIgnoreCase(registeredBoard)) {
                     return badRequest(request, "Ashby URL board does not match the registered source");
                 }
-                return ResponseEntity.ok(orchestrator.discoverAshbyBoard(sourceId, registeredBoard));
+                return runBoard(sourceId, request);
             } catch (IllegalArgumentException e) {
                 return badRequest(request, e.getMessage());
             }
@@ -81,30 +84,14 @@ public class DiscoveryController {
             return ResponseEntity.ok(orchestrator.discover(sourceId, sourceType, url));
         }
 
-        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
-                "select kind, org_identifier, enabled from job_sources where id = ?", sourceId);
-        if (rows.isEmpty()) {
-            return notFound(request, "Discovery source not found");
-        }
-        Map<String, Object> source = rows.get(0);
-        String kind = String.valueOf(source.get("kind"));
-        if (!Boolean.TRUE.equals(source.get("enabled"))) {
-            return badRequest(request, "Discovery source is disabled");
-        }
-        String orgIdentifier = source.get("org_identifier") == null ? null : String.valueOf(source.get("org_identifier"));
-        if (orgIdentifier == null || orgIdentifier.isBlank()) {
-            return badRequest(request, kind + " source has no org_identifier");
-        }
+        return runBoard(sourceId, request);
+    }
+
+    private ResponseEntity<?> runBoard(java.util.UUID sourceId, HttpServletRequest request) {
         try {
-            if (GreenhouseProvider.SOURCE_KIND.equals(kind)) {
-                return ResponseEntity.ok(orchestrator.discoverGreenhouseBoard(sourceId, orgIdentifier));
-            }
-            if (AshbyProvider.SOURCE_KIND.equals(kind)) {
-                return ResponseEntity.ok(orchestrator.discoverAshbyBoard(sourceId, orgIdentifier));
-            }
-            return badRequest(request, "url is required for discovery kind " + kind);
-        } catch (IllegalArgumentException e) {
-            return badRequest(request, e.getMessage());
+            return ResponseEntity.ok(boards.run(sourceId, com.personal.jobagent.discovery.platform.BoardDiscoveryService.Mode.MANUAL));
+        } catch (com.personal.jobagent.discovery.platform.BoardDiscoveryService.RunRefused refused) {
+            return refused.notFound() ? notFound(request, refused.getMessage()) : badRequest(request, refused.getMessage());
         }
     }
 

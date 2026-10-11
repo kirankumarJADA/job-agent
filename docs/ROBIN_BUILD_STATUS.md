@@ -15,6 +15,8 @@ Persistent engineering handoff. Update this file after every completed phase and
 - Phase 7.3 (approval-rule health and observability): `5e75e31`, on branch `phase7-approval-rules-ui`.
 - Phase 8.0 (architecture audit, workflow dashboard, FIND slice): branch `phase8-find-workflow` = `226c750` (unverified first pass) + the Phase 8.0 completion commit on top. Parent `d57f498`.
 - Phase 8.1 (PREP): branch `phase8.1-prep-workflow`, parent `aa4c7f8`.
+- Phase 8.2 (APPLY): branch `phase8.2-apply-workflow` = `bf38078`.
+- Phase 8.2.5 (FIND across 30 platforms + Tsenta): branch `phase8.2.5-ats-discovery-expansion`, parent `bf38078`.
 - `ROBIN_PROJECT_HANDOFF.md` does not exist in this repository (checked all branches and history). This file is the persistent engineering handoff.
 - Do not infer the state of a separate Windows working tree from this GitHub branch.
 
@@ -145,9 +147,10 @@ Persistent engineering handoff. Update this file after every completed phase and
 - `ApplicationPipelineIT` (+1 test, 9 total): with the rule genuinely unreadable, the match queues for review, no application is created, and exactly one durable `APPROVAL_RULE_UNAVAILABLE` notification lands for that owner.
 
 ## Next Exact Task
-Phase 8.2 (APPLY) is verified locally on `phase8.2-apply-workflow` with a draft PR targeting `phase8.1-prep-workflow`. Do not merge or deploy. Next, only when requested: Phase 8.3 TRACK (receipt evidence source, owner timeline, recruiter messages with inferred-vs-confirmed labelling), or the PREP follow-ups (second typeface, CJK/emoji coverage, pre-8.1 CV regeneration prompts). `REAL_SUBMIT` stays hard-stopped.
+Phase 8.2.5 (FIND expansion) is verified locally on `phase8.2.5-ats-discovery-expansion` (draft PR targeting `phase8.2-apply-workflow`). Do not merge or deploy. Next, only when requested: Phase 8.3 TRACK (receipt evidence source, owner timeline, recruiter messages with inferred-vs-confirmed labelling), or the PREP follow-ups (second typeface, CJK/emoji coverage, pre-8.1 CV regeneration prompts). `REAL_SUBMIT` stays hard-stopped.
 
 ## Last Verified Baseline
+- Phase 8.2.5: backend 862 unit + 145 integration, 0 failures, 0 errors (2 skipped: a Redis-only diagnostic assumption and the opt-in live suite), BUILD SUCCESS. Frontend: 251 tests (26 files), tsc clean, build clean. Worker: 19/19 pass. Live public-board suite: 22/22 pass when run explicitly (21 ATS boards + Tsenta), 2026-10-11.
 - Phase 8.2: backend 657 unit + 134 integration = 791, 0 failures, 0 errors (1 unit skip: `RedisConnectivityDiagnosticsTest`, its Redis-availability assumption; 0 IT skips — `UserDataIsolationIT` 19/19 ran via `-Dit.postgres.url`), BUILD SUCCESS. Frontend: 240 tests (24 files), tsc clean, build clean. Worker: 19/19.
 - Phase 8.1: backend 613 unit + 123 integration = 736, 0 failures, 0 errors (1 + 19 skipped), BUILD SUCCESS; frontend 229 tests (23 files), tsc clean, build clean; worker 19/19.
 - Phase 8.0: backend 593 unit + 117 integration = 710, 0 failures, 0 errors (1 + 19 skipped), BUILD SUCCESS; frontend 212 tests (20 files), tsc clean, build clean; worker 19/19.
@@ -270,3 +273,35 @@ Frontend: `components/ApplyWorkspace.tsx` (new), `components/ApplyWorkspace.test
 - A plan reaches `AWAITING_APPROVAL` only after a validation report (worker `complete` with `HUMAN_REQUIRED`); the worker suite covers the report path, a real browser run remains for Phase 8.3/ops.
 - PDF limitations from 8.1 persist (single typeface, no CJK/emoji).
 - Not deployed, not merged, branch CI pending.
+
+## Phase 8.2.5 Implementation: FIND across the 30 Tsenta-listed ATS platforms + Tsenta
+
+Full detail (platform inventory, methods, tenants, Tsenta logic, identity, removal rules, import flow, source-hiding decision, migration): `docs/PHASE8_FIND_WORKFLOW.md` sections 12.1–12.10.
+
+- Branch `phase8.2.5-ats-discovery-expansion`, parent `bf38078` (tip of `phase8.2-apply-workflow`). Phase 8.3 TRACK not started; nothing merged or deployed; production configuration unchanged; `REAL_SUBMIT` hard-stopped.
+- **Coverage (readiness):** 21/30 ATS platforms LIVE_VALIDATED — Workday, Greenhouse, Lever, Ashby, Rippling, iCIMS, Workable, JazzHR, Jobvite, BreezyHR, Oracle Cloud, SmartRecruiters, Paylocity, UltiPro, Gem, Zoho Recruit, Join, Phenom, Pinpoint, Recruitee, Teamtailor (real adapter + fixtures captured from a real public board + live fetch on 2026-10-10). 8 UNVERIFIED — BambooHR, ADP, Dover, CareerPlug, Dayforce, Hireology, Polymer, SAP SuccessFactors (no adapter; URL still recognised and explained). 1 BLOCKED — BrassRing (search needs a session-bound anti-forgery token). Tsenta LIVE_VALIDATED as the separate 31st source. Runtime status per platform at `GET /api/v1/sources/coverage` (SUPPORTED / NEEDS_BOARD_CONFIGURATION / TEMPORARILY_UNAVAILABLE / BLOCKED / UNVERIFIED).
+- **One registry, one run path:** `discovery/platform/PlatformRegistry` (Greenhouse/Ashby wrap their existing providers) and `BoardDiscoveryService` for scheduler, `/discovery/run`, health check and import. `SafeHttpClient` gives every adapter SSRF checks on each hop, timeouts, size/content-type limits, bounded retries with backoff, request budget and pacing.
+- **Identity:** strong keys only (`src`/`ats`/`req`/`url`) in `job_identity_keys`, advisory-locked; employer+title never merges; cross-source matches keep provenance and the best application URL, never rewrite content; aggregator-first jobs promoted to their ATS source.
+- **Removal:** only after a COMPLETE listing, and only when no source still lists the job; restored when listed again. Tsenta, Teamtailor and Zoho listings never remove.
+- **Tsenta:** robots-checked public SSR pages only; employer application URL from the posting's own RSC job object; Tsenta/dashboard URLs never stored as application URLs (postings without an employer URL are skipped); future dates dropped; never complete.
+- **Import-url** implemented (was a stub): validate, SSRF-safe detection with at most one guarded fetch, explain/ask for config, preview, configure on confirm.
+- **Source hiding:** candidate job DTO drops `source_id/source_name/source_kind/external_id/canonical_url`; APPLY readiness drops the form-capture platform; duplicate message no longer names a platform; UI removes "via …", the detail "Source" row, the feed discovery panel and dashboard platform wording. Provenance stays in the DB and the operational Job Sources page (which also no longer claims "Healthy" for unchecked sources).
+- **Changed behaviour (documented):** same-source UPDATED now refreshes `title`/`description_text`; `/discovery/run` returns the run report; health-check covers every supported platform; scheduler schedules every supported platform; `describeMatch` wording neutral.
+
+### Phase 8.2.5 files changed
+Backend new: `discovery/platform/*` (`PlatformKind`, `BoardAdapter`, `BoardConfigException`, `FailureCategory`, `NormalizedJob`, `Normalize`, `Parsing`, `AddressGuard`, `SafeHttpClient`, `JobIdentity`, `JobIdentityBackfill`, `PlatformRegistry`, `BoardDiscoveryService`, `PlatformCoverageService`, `BoardImportService`), `discovery/platform/adapters/*` (`WorkdayAdapter`, `LeverAdapter`, `RipplingAdapter`, `ProviderBackedAdapter`, `SinglePayloadAdapters`, `DetailFetchAdapters`, `MarkupAdapters`, `TsentaJobSource`, `Crawl`), `db/migration/V037__platform_discovery_expansion.sql`.
+Backend modified: `discovery/JobDiscoveryService`, `discovery/DiscoveryController`, `discovery/DiscoveryScheduler`, `sources/SourcesController`, `jobs/JobsController`, `apply/ApplicationIdentityService`, `apply/ApplyReadinessService`, `security/RateLimitService` (import-url joins the discovery bucket).
+Backend tests new: `PlatformAdapterFixtureTest`, `SafeHttpClientTest`, `JobIdentityTest`, `TsentaJobSourceTest`, `BoardDiscoveryServiceTest`, `BoardImportServiceTest`, `PlatformCoverageAuditTest`, `ProviderBackedAdapterTest`, `CandidateSourceVisibilityTest`, `CrossSourceDiscoveryIT` (PostgreSQL), `PlatformLiveIT` (tag `live`, opt-in), 38 fixtures under `src/test/resources/discovery/platforms/`. Tests updated to the new contracts (assertions kept or strengthened, rationale in-file): `DiscoverySchedulerTest`, `SourcesControllerTest`, `AshbyDiscoveryTest`, `JobDiscoveryServiceTest`, `JobFeedIT`, `ApplyWorkflowIT`.
+Frontend: `types.ts`, `components/ui.tsx`, `components/ApplyWorkspace.tsx`, `pages/JobsFeedPage.tsx`, `pages/JobDetailPage.tsx`, `pages/DashboardPage.tsx`, `pages/SourcesPage.tsx`; tests `SourcesPage.test.tsx` (new), `SourceVisibility.test.tsx` (new), updated `JobsFeedPage`, `JobDetailPage`, `DashboardPage`, `ApplyWorkspace` tests.
+
+### Phase 8.2.5 verification
+Run on Windows, 2026-10-11, against the branch working tree that was committed (hash-verified identical to the authoring copy).
+- `mvn -B -o -f backend/pom.xml verify -Dit.postgres.url=jdbc:postgresql://127.0.0.1:55433/jobagent ...`: BUILD SUCCESS. Unit 862 run, 0 failures, 0 errors, 1 skipped (`RedisConnectivityDiagnosticsTest` assumption needing a live Redis). Integration 145 run, 0 failures, 0 errors, 1 skipped (`PlatformLiveIT`, opt-in). PostgreSQL ITs include `CrossSourceDiscoveryIT` 10/10 (with 16-thread concurrent ingest), `GreenhouseDiscoveryIT` 5/5, `JobFeedIT` 7/7, `ApplyWorkflowIT` 11/11, `UserDataIsolationIT` 19/19. Testcontainers ITs use their own containers.
+- `UserDataIsolationIT` ran against a disposable `postgres:16` container on port 55433 with a random password. The existing `robin-it-pg` container (port 55432) refused password auth with the credentials in its own environment; it was left untouched and not reset. The disposable container was removed after the run.
+- Coverage audit `PlatformCoverageAuditTest` (31 kinds: every platform has a real adapter + fixtures or an explicit UNVERIFIED/BLOCKED reason), `PlatformAdapterFixtureTest`, `TsentaJobSourceTest`, `CandidateSourceVisibilityTest`: all pass inside the unit count.
+- Frontend: `npx tsc -b` clean; `npm test` 251/251 (26 files); `npm run build` clean (chunk-size warning only). Worker: `npm test` 19/19.
+- Live suite (separate, not part of the counts above): `mvn ... verify -Dit.test=PlatformLiveIT -Dlive.discovery=true` → 22/22 against real public boards (21 ATS + Tsenta), each listing parsed, up to three postings parsed with a title and a genuine https application URL, and at least one description. The first live run found two real defects, fixed with fixture tests: JazzHR's feed is served as `text/html` (now accepted, but still parsed only as XML with a `jobs` root), and Jobvite postings with no description failed the parse (now kept with an unknown description; non-job pages are still rejected). The live Jobvite board moved from the `oneco` sandbox (mostly empty test postings) to `egnyte`.
+- A fixture or live pass shows the adapter works against that board on that date. It does not guarantee every tenant of the platform, or future markup.
+
+### Phase 8.2.5 known limitations
+See `PHASE8_FIND_WORKFLOW.md` 12.10: 9 platforms without an adapter; detail-needing platforms do not re-fetch known postings' descriptions; Teamtailor/Zoho/Tsenta rely on staleness; DNS-rebinding window; `myworkdaysite.com` hosts not recognised. Not deployed, not merged, branch CI pending.

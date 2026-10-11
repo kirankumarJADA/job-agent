@@ -162,8 +162,14 @@ class JobFeedIT {
         assertThat(item.get("location_raw").asText()).isEqualTo("Manchester");
         assertThat(item.get("remote_type").asText()).isEqualTo("HYBRID");
         assertThat(item.get("skills_extracted").size()).isEqualTo(2);
-        assertThat(item.get("source_name").asText()).isEqualTo("Feed Fixture (Greenhouse)");
-        assertThat(item.get("source_kind").asText()).isEqualTo("GREENHOUSE");
+        // Phase 8.2.5 source hiding: the candidate feed no longer names the
+        // discovery source (this assertion previously required it). Provenance
+        // stays in the database and the operational Sources views.
+        assertThat(item.has("source_name")).isFalse();
+        assertThat(item.has("source_kind")).isFalse();
+        assertThat(item.has("source_id")).isFalse();
+        assertThat(item.has("canonical_url")).isFalse();
+        assertThat(item.toString()).doesNotContain("Feed Fixture (Greenhouse)", "GREENHOUSE");
         assertThat(item.has("first_seen_at")).isTrue();
         assertThat(item.has("last_seen_at")).isTrue();
         assertThat(item.has("companyNameRaw")).isFalse();

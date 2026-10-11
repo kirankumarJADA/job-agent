@@ -85,7 +85,9 @@ public class RateLimitService {
                 || path.equals("/api/v1/discovery/ingest")
                 || path.equals("/api/v1/discovery/linkedin/search")
                 || path.equals("/api/v1/discovery/maintenance")
-                || path.equals("/api/v1/jobs/seed-uk")) return "discovery";
+                || path.equals("/api/v1/jobs/seed-uk")
+                // URL import may resolve a page and run a board fetch (Phase 8.2.5).
+                || path.equals("/api/v1/jobs/import-url")) return "discovery";
         // A source health check performs a live board fetch and ingestion for
         // Greenhouse/Ashby sources (SourcesController), and the FIND page uses
         // it as its Discover action, so it shares the discovery quota rather

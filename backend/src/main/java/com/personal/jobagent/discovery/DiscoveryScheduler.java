@@ -7,6 +7,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import com.personal.jobagent.discovery.platform.BoardDiscoveryService;
+import com.personal.jobagent.discovery.platform.PlatformRegistry;
 
 import java.time.Instant;
 import java.time.ZoneId;
@@ -22,11 +24,13 @@ import java.util.UUID;
  * it — discovery only happened when someone called {@code POST
  * /discovery/run} by hand.
  *
- * <p>Scheduling contract: {@code schedule_cron} is a standard 5-field cron in
- * the server's timezone; only GREENHOUSE and ASHBY sources with an
- * {@code org_identifier} are schedulable today (the only kinds with a
- * deterministic board API). A malformed cron is skipped with a warning and
- * recorded in the source's health JSON — never fatal to the sweep.
+ * <p>Scheduling contract: {@code schedule_cron} is a Spring cron in the
+ * server's timezone; every source whose kind has a registered board adapter
+ * (Phase 8.2.5: all live-validated platforms and Tsenta) and an
+ * {@code org_identifier} is schedulable. A malformed cron is skipped with a
+ * warning and recorded in the source's health JSON — never fatal to the sweep.
+ * The run itself, and its health/run-metadata recording, is
+ * {@link BoardDiscoveryService} — the same path as manual runs.
  *
  * <p>Reliability model: the orchestrator already isolates provider failures
  * per run, and ingestion is idempotent (dedup key + (source_id, external_id)
@@ -42,17 +46,19 @@ public class DiscoveryScheduler {
     private static final Logger log = LoggerFactory.getLogger(DiscoveryScheduler.class);
 
     private final JdbcTemplate db;
-    private final DiscoveryOrchestrator orchestrator;
+    private final BoardDiscoveryService boards;
+    private final PlatformRegistry registry;
     private final int circuitOpenAfterFailures;
     private final AutomationMetrics metrics;
     private final boolean enabled;
 
-    public DiscoveryScheduler(JdbcTemplate db, DiscoveryOrchestrator orchestrator,
+    public DiscoveryScheduler(JdbcTemplate db, BoardDiscoveryService boards, PlatformRegistry registry,
                               @Value("${app.discovery.circuit-open-after-failures:10}") int circuitOpenAfterFailures,
                               @Value("${app.discovery.scheduler-enabled:true}") boolean enabled,
                               AutomationMetrics metrics) {
         this.db = db;
-        this.orchestrator = orchestrator;
+        this.boards = boards;
+        this.registry = registry;
         this.circuitOpenAfterFailures = circuitOpenAfterFailures;
         this.enabled = enabled;
         this.metrics = metrics;
@@ -66,14 +72,16 @@ public class DiscoveryScheduler {
         if (!enabled) {
             return; // integration tests disable live board polling entirely
         }
+        List<String> kinds = registry.supportedKinds().stream().map(Enum::name).toList();
+        if (kinds.isEmpty()) return;
         List<Map<String, Object>> rows = db.queryForList("""
                 select id, kind, org_identifier, schedule_cron, rate_limit_per_min, last_run_at
                 from job_sources
                 where enabled = true and policy <> 'DISABLED'
-                  and kind in ('GREENHOUSE','ASHBY')
+                  and kind in (%s)
                   and coalesce(org_identifier, '') <> ''
                   and coalesce(schedule_cron, '') <> ''
-                """);
+                """.formatted(String.join(",", java.util.Collections.nCopies(kinds.size(), "?"))), kinds.toArray());
         for (Map<String, Object> row : rows) {
             SchedulableSource source = new SchedulableSource(
                     (UUID) row.get("id"),
@@ -130,21 +138,19 @@ public class DiscoveryScheduler {
     }
 
     private void run(SchedulableSource source) {
-        DiscoveryOrchestrator.DiscoveryRun run = "ASHBY".equals(source.kind())
-                ? orchestrator.discoverAshbyBoard(source.id(), source.orgIdentifier())
-                : orchestrator.discoverGreenhouseBoard(source.id(), source.orgIdentifier());
-        metrics.scheduledDiscoveryRun(run.errors() == null || run.errors().isEmpty() ? "ok" : "failed");
-        if (run.errors() == null || run.errors().isEmpty()) {
-            log.info("Scheduled discovery for source {} ({}) ingested {} job(s)",
-                    source.id(), source.kind(), run.ingested().size());
-            db.update("""
-                    update job_sources set last_run_at = now(), failure_streak = 0, health = ?::jsonb
-                    where id = ?
-                    """, healthJson("ok", null, run.ingested().size() + " job(s) this run"), source.id());
+        BoardDiscoveryService.SourceRunReport report;
+        try {
+            report = boards.run(source.id(), BoardDiscoveryService.Mode.SCHEDULED);
+        } catch (BoardDiscoveryService.RunRefused refused) {
+            // Disabled between the query and the run: nothing to record.
+            log.info("Scheduled discovery for source {} skipped: {}", source.id(), refused.getMessage());
+            return;
+        }
+        metrics.scheduledDiscoveryRun(report.ok() ? "ok" : "failed");
+        if (report.ok()) {
+            log.info("Scheduled discovery for source {} ({}) finished: {}", source.id(), source.kind(), report.counts());
         } else {
-            log.warn("Scheduled discovery for source {} ({}) failed: {}",
-                    source.id(), source.kind(), run.errors());
-            recordFailure(source, String.join(",", run.errors()));
+            log.warn("Scheduled discovery for source {} ({}) failed: {}", source.id(), source.kind(), report.failureCategory());
         }
     }
 
