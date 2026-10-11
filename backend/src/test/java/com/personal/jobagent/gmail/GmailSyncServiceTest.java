@@ -113,7 +113,8 @@ class GmailSyncServiceTest {
         assertThat(outcome.status()).isEqualTo("OK");
         verify(oauth).get(contains("/history?startHistoryId=100"), eq("access-token"));
         verify(oauth, never()).get(contains("?q="), anyString());
-        verify(connections).updateSyncState(eq(PROFILE), eq(200L), any(), eq("OK"), eq(null));
+        verify(connections).updateHistorySyncState(eq(PROFILE), eq(200L), any(), eq("OK"), eq(null),
+                org.mockito.ArgumentMatchers.argThat(java.util.List::isEmpty));
     }
 
     @Test
