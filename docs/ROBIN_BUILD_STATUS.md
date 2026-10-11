@@ -191,8 +191,11 @@ inbound-email service + domain + DNS (documented, not invented).
   (includes the mailbox-verification resolve endpoint tests: success, bad or
   missing worker token, replay prevention, no-match 404).
 - Worker: 25/25. Frontend: 300/300 + production build.
-- CI on `phase8.5-managed-mail` head: triggered by push (ci.yml now includes
-  this branch); verify the three jobs on GitHub before merging PR #7.
+- CI on `phase8.5-managed-mail`: **all three jobs green** for both heads —
+  run 38163111568 (`05e68c9`): backend/worker/frontend success; run
+  38164091197 (`027b8e8`, docs commit): backend/worker/frontend success.
+  Run URLs: https://github.com/kirankumarJADA/job-agent/actions/runs/38163111568
+  and https://github.com/kirankumarJADA/job-agent/actions/runs/38164091197
 
 ## Next Exact Task
 Phase 8.4 (read-only Gmail) closure audit is verified locally (full Windows suite) on `phase8.4-gmail-integration` (draft PR #6 targeting `phase8.2.5-ats-discovery-expansion`); check PR #6 for the CI result of its head commit. Do not merge or deploy. The remaining step needs the operator: configure the Google OAuth client and deployment variables, then run the live test-account check in `PHASE8_FIND_WORKFLOW.md` 14.4. Until then no live mailbox or verified receipt is claimed. `REAL_SUBMIT` stays hard-stopped.
