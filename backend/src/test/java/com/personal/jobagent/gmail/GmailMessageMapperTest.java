@@ -56,6 +56,38 @@ class GmailMessageMapperTest {
     }
 
     @Test
+    void gmailsOwnDkimFormatReportsTheSigningDomainThroughHeaderI() throws Exception {
+        // Gmail writes "dkim=pass header.i=@domain header.s=selector header.b=hash" (not header.d=).
+        String gmailFormat = "mx.google.com; dkim=pass header.i=@employer.example header.s=s1 header.b=AbCdEf12;"
+                + " spf=pass (google.com: domain of bounce@employer.example designates 192.0.2.1 as permitted sender)"
+                + " smtp.mailfrom=bounce@employer.example; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=employer.example";
+        GmailMessageMapper.GmailMessage mapped = GmailMessageMapper.fromApi(
+                parse(message("no-reply@employer.example", "candidate@example.com", "Application received",
+                        gmailFormat, "We have received your application.")), "candidate@example.com");
+
+        assertThat(mapped.authentication().dkim()).isEqualTo("pass");
+        assertThat(mapped.authentication().dkimDomain()).isEqualTo("employer.example");
+        assertThat(mapped.authentication().spf()).isEqualTo("pass");
+        assertThat(mapped.authentication().dmarc()).isEqualTo("pass");
+    }
+
+    @Test
+    void aFullDkimIdentityYieldsItsDomainAndANonGmailFirstHeaderStillFailsClosed() throws Exception {
+        GmailMessageMapper.GmailMessage identity = GmailMessageMapper.fromApi(
+                parse(message("jobs@mail.employer.example", "candidate@example.com", "Application received",
+                        "mx.google.com; dkim=pass header.i=jobs@mail.employer.example header.s=s1 header.b=Zz; spf=pass; dmarc=pass",
+                        "Body")), "candidate@example.com");
+        assertThat(identity.authentication().dkimDomain()).isEqualTo("mail.employer.example");
+
+        GmailMessageMapper.GmailMessage forged = GmailMessageMapper.fromApi(
+                parse(message("no-reply@employer.example", "candidate@example.com", "Application received",
+                        "attacker.example; dkim=pass header.i=@employer.example header.s=s1 header.b=Zz; spf=pass; dmarc=pass",
+                        "Body")), "candidate@example.com");
+        assertThat(forged.authentication().dkim()).isNull();
+        assertThat(forged.authentication().dkimDomain()).isNull();
+    }
+
+    @Test
     void missingAuthenticationResultsYieldsNoneSoReceiptsStayUnverified() throws Exception {
         GmailMessageMapper.GmailMessage mapped = GmailMessageMapper.fromApi(
                 parse(message("no-reply@unknown.example", "candidate@example.com", "Application received", null, "Body")),

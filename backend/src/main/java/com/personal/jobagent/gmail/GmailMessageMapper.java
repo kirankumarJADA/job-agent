@@ -21,6 +21,13 @@ public final class GmailMessageMapper {
     private static final String GOOGLE_AUTHSERV_ID = "mx.google.com";
     private static final Pattern DKIM_DOMAIN = Pattern.compile(
             "(?:^|\\s)header\\.d=([A-Za-z0-9.-]+)", Pattern.CASE_INSENSITIVE);
+    /**
+     * Gmail reports the DKIM signer as the agent/user identity ("header.i=@domain"),
+     * not "header.d=". RFC 6376 requires that identity's domain to equal the signing
+     * domain or be a subdomain of it, so using it for alignment is never looser.
+     */
+    private static final Pattern DKIM_IDENTITY_DOMAIN = Pattern.compile(
+            "(?:^|\\s)header\\.i=[^@\\s;]*@([A-Za-z0-9.-]+)", Pattern.CASE_INSENSITIVE);
 
     private GmailMessageMapper() {}
 
@@ -124,8 +131,10 @@ public final class GmailMessageMapper {
         for (String part : results.split(";")) {
             String trimmed = part.trim();
             if (!trimmed.toLowerCase(Locale.ROOT).startsWith("dkim=")) continue;
-            Matcher matcher = DKIM_DOMAIN.matcher(trimmed);
-            return matcher.find() ? matcher.group(1) : null;
+            Matcher signingDomain = DKIM_DOMAIN.matcher(trimmed);
+            if (signingDomain.find()) return signingDomain.group(1);
+            Matcher identityDomain = DKIM_IDENTITY_DOMAIN.matcher(trimmed);
+            return identityDomain.find() ? identityDomain.group(1) : null;
         }
         return null;
     }
