@@ -3,7 +3,7 @@
 Persistent engineering handoff. Update this file after every completed phase and at the end of every session.
 
 ## Current Date
-2026-10-10
+2026-10-11
 
 ## Repository State
 - Phase 1–5 commits: `72d18fd`, `f8008c3`, `aecc7e9`, `a32c2da`, `48b7d56`.
@@ -16,7 +16,8 @@ Persistent engineering handoff. Update this file after every completed phase and
 - Phase 8.0 (architecture audit, workflow dashboard, FIND slice): branch `phase8-find-workflow` = `226c750` (unverified first pass) + the Phase 8.0 completion commit on top. Parent `d57f498`.
 - Phase 8.1 (PREP): branch `phase8.1-prep-workflow`, parent `aa4c7f8`.
 - Phase 8.2 (APPLY): branch `phase8.2-apply-workflow` = `bf38078`.
-- Phase 8.2.5 (FIND across 30 platforms + Tsenta): branch `phase8.2.5-ats-discovery-expansion`, parent `bf38078`.
+- Phase 8.2.5 (FIND across 30 platforms + Tsenta): branch `phase8.2.5-ats-discovery-expansion` = `c2b7cbc`, parent `bf38078` (draft PR #4, not merged).
+- Phase 8.3 (TRACK): branch `phase8.3-track-workflow`, parent `c2b7cbc` (draft PR targeting `phase8.2.5-ats-discovery-expansion`, not merged).
 - `ROBIN_PROJECT_HANDOFF.md` does not exist in this repository (checked all branches and history). This file is the persistent engineering handoff.
 - Do not infer the state of a separate Windows working tree from this GitHub branch.
 
@@ -37,6 +38,8 @@ Persistent engineering handoff. Update this file after every completed phase and
 | 8.0 - Architecture audit, workflow dashboard, FIND slice | `phase8-find-workflow` | Backend: 593 unit (0 fail, 1 skip) + 117 IT (0 fail, 19 skip) = 710. Frontend: 212 tests (20 files), tsc clean, build clean. Worker: 19/19 |
 | 8.1 - PREP: documents, validation, comparison, readiness + V035 | `phase8.1-prep-workflow` | Backend: 613 unit (0 fail, 1 skip) + 123 IT (0 fail, 19 skip) = 736. Frontend: 229 tests (23 files), tsc clean, build clean. Worker: 19/19 |
 | 8.2 - APPLY: exact document selection, readiness gate, employer questions, duplicate protection + V036 | `phase8.2-apply-workflow` | Backend: 657 unit (0 fail, 1 skip) + 134 IT (0 fail, 0 skip) = 791. Frontend: 240 tests (24 files), tsc clean, build clean. Worker: 19/19 |
+| 8.2.5 - FIND across 30 ATS platforms + Tsenta + V037 | `c2b7cbc` | Backend: 862 unit (0 fail, 1 skip) + 145 IT (0 fail, 1 skip) = 1007. Frontend: 251 tests (26 files), tsc clean, build clean. Worker: 19/19. Branch CI green |
+| 8.3 - TRACK: evidence timeline, receipts, reconciliation, employer-message review + V038 | `phase8.3-track-workflow` | Backend: 953 unit (0 fail, 1 skip) + 165 IT (0 fail, 1 skip) = 1118. Frontend: 290 tests (29 files), tsc clean, build clean. Worker: 19/19 |
 
 ## Phase 7 Implementation: Auto-Approval Rule Engine (corrected here in 7.2)
 - `V034__approval_rules.sql` creates `user_approval_rules` with exactly three value columns: `auto_approve_enabled` (boolean, default false) and `min_score` (integer, default 85, `CHECK (min_score BETWEEN 1 AND 100)`), plus `updated_at`. (Earlier drafts of this document invented `max_daily_auto` and `require_cover_letter` columns that were never created; they do not exist.) Owner-isolated by `profile_id` with a unique constraint.
@@ -147,9 +150,10 @@ Persistent engineering handoff. Update this file after every completed phase and
 - `ApplicationPipelineIT` (+1 test, 9 total): with the rule genuinely unreadable, the match queues for review, no application is created, and exactly one durable `APPROVAL_RULE_UNAVAILABLE` notification lands for that owner.
 
 ## Next Exact Task
-Phase 8.2.5 (FIND expansion) is verified locally on `phase8.2.5-ats-discovery-expansion` (draft PR targeting `phase8.2-apply-workflow`). Do not merge or deploy. Next, only when requested: Phase 8.3 TRACK (receipt evidence source, owner timeline, recruiter messages with inferred-vs-confirmed labelling), or the PREP follow-ups (second typeface, CJK/emoji coverage, pre-8.1 CV regeneration prompts). `REAL_SUBMIT` stays hard-stopped.
+Phase 8.3 (TRACK) is verified locally on `phase8.3-track-workflow` (draft PR targeting `phase8.2.5-ats-discovery-expansion`; PR #4 for 8.2.5 is still open and unmerged). Do not merge or deploy. Next, only when requested: a real mailbox connection (OAuth consent with the minimum scope, durable encrypted token storage, provider `Authentication-Results`, see `PHASE8_FIND_WORKFLOW.md` 13.4) — without it no submission can reach "confirmed" — or the PREP follow-ups (second typeface, CJK/emoji coverage, pre-8.1 CV regeneration prompts). `REAL_SUBMIT` stays hard-stopped.
 
 ## Last Verified Baseline
+- Phase 8.3: backend 953 unit + 165 integration, 0 failures, 0 errors (2 skipped: the Redis-only diagnostic assumption and the opt-in live suite), BUILD SUCCESS; `UserDataIsolationIT` 21/21, `ApplicationTrackingIT` 17/17 and `TrackMigrationCompatibilityIT` 1/1 on PostgreSQL 16. Frontend: 290 tests (29 files), tsc clean, build clean. Worker: 19/19 pass. 2026-10-11.
 - Phase 8.2.5: backend 862 unit + 145 integration, 0 failures, 0 errors (2 skipped: a Redis-only diagnostic assumption and the opt-in live suite), BUILD SUCCESS. Frontend: 251 tests (26 files), tsc clean, build clean. Worker: 19/19 pass. Live public-board suite: 22/22 pass when run explicitly (21 ATS boards + Tsenta), 2026-10-11.
 - Phase 8.2: backend 657 unit + 134 integration = 791, 0 failures, 0 errors (1 unit skip: `RedisConnectivityDiagnosticsTest`, its Redis-availability assumption; 0 IT skips — `UserDataIsolationIT` 19/19 ran via `-Dit.postgres.url`), BUILD SUCCESS. Frontend: 240 tests (24 files), tsc clean, build clean. Worker: 19/19.
 - Phase 8.1: backend 613 unit + 123 integration = 736, 0 failures, 0 errors (1 + 19 skipped), BUILD SUCCESS; frontend 229 tests (23 files), tsc clean, build clean; worker 19/19.
@@ -305,3 +309,32 @@ Run on Windows, 2026-10-11, against the branch working tree that was committed (
 
 ### Phase 8.2.5 known limitations
 See `PHASE8_FIND_WORKFLOW.md` 12.10: 9 platforms without an adapter; detail-needing platforms do not re-fetch known postings' descriptions; Teamtailor/Zoho/Tsenta rely on staleness; DNS-rebinding window; `myworkdaysite.com` hosts not recognised. Not deployed, not merged, branch CI pending.
+
+## Phase 8.3 Implementation: TRACK — Evidence-Backed Timeline, Receipts and Employer Messages
+
+Full detail (architecture as found, event model, receipt policy, classification and matching, reconciliation rules, API, migration, privacy, idempotency, live vs fixture-only, limitations): `docs/PHASE8_FIND_WORKFLOW.md` section 13.
+
+- Branch `phase8.3-track-workflow`, parent `c2b7cbc` (tip of `phase8.2.5-ats-discovery-expansion`, verified against GitHub; PR #4 not merged). Nothing merged or deployed; production configuration unchanged; `REAL_SUBMIT` hard-stopped; no application submitted and no message sent by Robin.
+- **Timeline:** `application_events` extended additively (V038) with owner, classification (INTERNAL / EXTERNAL / INFERRED / CANDIDATE_REPORTED), verification, actual time + precision (EXACT / DATE / UNKNOWN — never invented), evidence references, provenance, idempotency key and `supersedes_event_id`; append-only and owner-checked by trigger. Merged at read time with the append-only audit records of CV, cover-letter, package and plan actions; neutral types; keyset pagination.
+- **Receipts:** `application_receipts` + `track-receipt-policy-v1`. VERIFIED only for an employer acknowledgement retrieved by an authorised mailbox connector, sender DKIM-aligned with no SPF/DMARC fail, delivered to the connected address, identifying exactly this application by a strong identifier, and explicitly confirming receipt. Candidate statements and candidate-added messages stay UNVERIFIED (also enforced by CHECK constraints). Wrong-application / future-dated evidence REJECTED; non-identifying evidence UNKNOWN. Package, approval, queueing are never receipts.
+- **Reconciliation:** `ApplicationReconciler` (`track-reconcile-v1`) derives the candidate-facing status at read time from recorded status history, candidate reports, receipts and confirmed messages; inferences never set a stage; conflicts → NEEDS_REVIEW; status ahead of all evidence → UNKNOWN; submission (CONFIRMED / UNVERIFIED / UNKNOWN / CONFLICTING) and acknowledgement reported separately. `applications.status` keeps its meaning and is never written by TRACK.
+- **Employer messages:** no mailbox connection exists — messages come only from the candidate (UI or `POST /emails/ingest`); the connector path is a fixture-tested boundary. Deterministic classifier `track-email-rules-v1` (negation/conditional aware, rule-strength score labelled as not proof), matcher `track-match-v1` (strong identifiers link; company/title only propose; similar titles never decided by Robin), candidate review recorded as manual confirmation, bodies kept only for sign-in codes, redacted 240-character excerpts, neutral notifications. Ingestion no longer changes application status.
+- **API:** `GET /applications/{id}/track`, `GET /applications/{id}/track/timeline`, `POST /applications/{id}/track/reports`, `POST /applications/{id}/track/receipts/{rid}/review`, `GET /track/reviews`, `POST /track/emails/{emailId}/review`; `GET /applications` rows gain `track`; `/emails/ingest` gains `applicationId`, optional `receivedAt`, validation and 503-on-failure; new `track` rate-limit bucket (30/min per account).
+- **Frontend:** Applications page status pill = reconciled label (recorded status still shown); employer-message review queue; per-application TRACK panel (status and reason, submission and acknowledgement, attention / conflicts / unknowns, evidence with policy reasons, confirm/reject, "Record an update yourself", "Add an employer message", paginated timeline). Explicit loading, empty, error, unavailable and permission-denied states; green only for verified evidence.
+- **Behaviour changes (documented):** email ingestion no longer transitions status and uses the new category taxonomy; message bodies minimised; empty messages refused; missing `receivedAt` recorded as unknown; `/emails/ingest` rate-limited; notification wording neutral (`CONFIRMATION_EMAIL_RECEIVED` only for VERIFIED); `/applications` gains `track`; `application_events` append-only; `STATUS_CHANGED` rows classified by trigger; `JobIdentity.employerKey` public.
+
+### Phase 8.3 files changed
+Backend new: `track/` (`TrackVocabulary`, `TrackText`, `TrackEmailClassifier`, `EmailApplicationMatcher`, `ReceiptVerificationPolicy`, `TrackModels`, `ApplicationReconciler`, `TrackRepository`, `TrackEvidenceRecorder`, `TrackTimelineMapper`, `ApplicationTrackingService`, `TrackController`), `db/migration/V038__application_tracking.sql`.
+Backend modified: `email/EmailIntelligenceService` (rewritten ingestion), `email/EmailController`, `application/ApplicationController` (`track` summaries), `security/RateLimitService` (`track` bucket), `discovery/platform/JobIdentity` (`employerKey` public).
+Backend tests new: `ApplicationReconcilerTest`, `TrackEmailClassifierTest`, `EmailApplicationMatcherTest`, `ReceiptVerificationPolicyTest`, `TrackTimelineMapperTest`, `TrackTextTest`, `ApplicationTrackingIT`, `TrackMigrationCompatibilityIT`. Updated: `UserDataIsolationIT` (+2 TRACK isolation tests), `RateLimitServiceTest` (+2), `UserDataScopingTest` (constructs the rewritten service; assertions unchanged).
+Frontend new: `components/ApplicationTrackPanel.tsx`, `components/TrackReviewQueue.tsx`, `components/trackShared.tsx`; tests `ApplicationTrackPanel.test.tsx`, `TrackReviewQueue.test.tsx`, `pages/ApplicationsPage.track.test.tsx`. Modified: `types.ts`, `pages/ApplicationsPage.tsx`, `pages/SourceVisibility.test.tsx` (+3 TRACK source-hiding cases).
+
+### Phase 8.3 verification
+Run on Windows, 2026-10-11, against the working tree whose code was hash-verified identical to the authoring copy (tree of everything except `docs/` = `8326874fd75f26dc8dfa39aff3fa9a3228afd2c4`); the commits add only this file and `PHASE8_FIND_WORKFLOW.md` on top of it.
+- `mvn -B verify -Dit.postgres.url=jdbc:postgresql://127.0.0.1:55436/jobagent ...`: BUILD SUCCESS. Unit 953 run, 0 failures, 0 errors, 1 skipped (`RedisConnectivityDiagnosticsTest` assumption). Integration 165 run, 0 failures, 0 errors, 1 skipped (`PlatformLiveIT`, opt-in). TRACK: 89 new unit tests; `ApplicationTrackingIT` 17/17 (including sessions and CSRF on every TRACK endpoint) and `TrackMigrationCompatibilityIT` 1/1 (Testcontainers PostgreSQL 16); `UserDataIsolationIT` 21/21.
+- `UserDataIsolationIT` used a disposable `postgres:16` container on `127.0.0.1:55436`, chosen after inspecting `docker ps` and listening ports; the native/other PostgreSQL services on 5432/5433 and the stale `robin-it-pg` container were not touched. The container was confirmed to hold the V38 schema and the isolation accounts after the run, then removed.
+- Frontend: `npx tsc -b` clean; `npm test` 290/290 (29 files); `npm run build` clean (chunk-size warning only). Worker: `npm test` 19/19.
+- Authoring copy (Linux, during development): all 26 non-live IT classes passed (163/163, then `ApplicationTrackingIT` 17/17 after the authentication/CSRF test was added); frontend 290/290; the unit run differs only by `ActuatorInfoExposureTest`, which needs Maven's `build-info.properties` (passes under Maven). The Windows results are the ones for the committed tree.
+
+### Phase 8.3 known limitations
+See `PHASE8_FIND_WORKFLOW.md` 13.13: no mailbox connection, so nothing a candidate adds can be verified and no real application can reach "Submission confirmed" yet; English phrase rules; association needs a strong identifier in the message; legacy owner transition endpoint unchanged (results labelled as reported by the candidate); pre-8.3 email bodies remain until purge. Not deployed, not merged.

@@ -59,13 +59,17 @@ user-facing workflow exists; **Missing** = no working implementation.
 
 ### TRACK
 
+> Phase 8.0 snapshot. Superseded by Phase 8.3 (section 13 below): the evidence timeline,
+> receipts with a verification policy, reconciliation and employer-message review are now
+> implemented and integration-tested; a live mailbox connection is still missing.
+
 | Capability | Components | Status |
 |---|---|---|
 | Owner-scoped application list, detail and timeline | `ApplicationController`, `ApplicationStatusService`, `application_events` | Verified by unit isolation tests; the Postgres `UserDataIsolationIT` only runs when `-Dit.postgres.url` is set, so it is skipped in a default `mvn verify` |
 | Lifecycle transitions with audit | `ApplicationStatusService.ALLOWED`, audit log | Verified |
 | Notifications | `NotificationService`, `NotificationEventHandler` | Verified |
-| Recruiter email classification | `EmailIntelligenceService` | Needs IT (real mailbox is roadmap Phase 13) |
-| Receipt-backed "submitted" status | none | Missing |
+| Recruiter email classification | `EmailIntelligenceService` | Needs IT (real mailbox is roadmap Phase 13). Phase 8.3: rewritten as inference-only classification with candidate review, verified by PostgreSQL ITs; still no mailbox |
+| Receipt-backed "submitted" status | none | Missing. Phase 8.3: `application_receipts` + policy (13.3); reachable as VERIFIED only through a mailbox connector that does not exist yet |
 
 ### Frontend
 
@@ -137,6 +141,9 @@ Gaps later phases must close without adding a second status table or a workflow 
    with no evidence. That is acceptable only as a user-reported manual action; TRACK must record
    the evidence source (user-reported, worker receipt, employer email) in the event payload and
    the UI must label it. An approval, a prepared plan or an email mention must never set them.
+   (Phase 8.3: addressed without changing the endpoint — such transitions are classified
+   `CANDIDATE_REPORTED`, email ingestion no longer transitions anything, and the candidate-facing
+   status is reconciled from evidence; see 13.5.)
 3. Per-candidate hard-filter outcomes are not persisted. Showing "why a job was filtered for you"
    needs an owner-scoped record (for example on `application_decisions` or `job_matches.breakdown`),
    not the shared `jobs.filter_reasons`.
@@ -171,6 +178,7 @@ readiness checks shown before approval. `REAL_SUBMIT` stays hard-stopped; any li
 needs its own safety review and the full checklist in `ROBIN_BUILD_STATUS.md`.
 
 ### TRACK (Phase 8.3)
+Implemented in Phase 8.3 — see section 13. Original specification:
 Reuse `application_events`, the status machine, notifications and `EmailIntelligenceService`.
 Deliver: owner-scoped timeline UI; receipts with an evidence source; recruiter messages,
 interviews, rejection, withdrawal, failed operations and recovery. AI email classifications are
@@ -764,3 +772,416 @@ and APPLY readiness lose the provenance fields listed in 12.8.
 - Zoho Recruit pagination beyond the first public response has not been observed (the validated
   tenant has 8 openings), so its listings are reported partial and never remove anything.
 - Workday hosts on `*.myworkdaysite.com` are not recognised (only `*.myworkdayjobs.com`).
+
+---
+
+# Phase 8.3 — TRACK: evidence-backed timeline, receipts and employer messages
+
+Branch `phase8.3-track-workflow`, created from `phase8.2.5-ats-discovery-expansion` at `c2b7cbc`
+(verified against GitHub before branching; PR #4 not merged). Nothing here is deployed or merged.
+`REAL_SUBMIT` remains hard-stopped.
+
+The rule this phase implements: Robin never says an application was submitted or received unless
+the evidence meets the verification policy in 13.3. Everything else is labelled as what it is: a
+Robin record, a statement the candidate made, Robin's inference, or employer evidence that could
+not be verified.
+
+## 13.1 TRACK architecture as found (before Phase 8.3)
+
+| What | Where it lived | Evidence quality |
+|---|---|---|
+| Application created, preparation steps (CV / cover letter / answers OK or FAILED), form-plan created, package deferred, plan failed | `application_events` rows written by the pipeline and plan code | Persisted Robin records |
+| Status transitions | `ApplicationStatusService` (owner API) → `applications.status` + `STATUS_CHANGED` event + audit | Persisted, but with **no evidence source**: `APPLICATION_SUBMITTED` / `CONFIRMATION_RECEIVED` could be set by the owner with nothing behind them |
+| Email-driven transitions | `EmailIntelligenceService` (pre-8.3): keyword classification with a constant 0.95 "confidence", attached to whichever application's company name appeared in the text, whole body stored, then **moved the status** (event key `email:<id>`) | Inference presented as fact |
+| CV reviewed/approved, cover letter generated/corrected/approved, package created/refused, form reviewed, package approved for submission, approval invalidated, plan outcomes, match approved | append-only `audit_logs` (V008 trigger) | Persisted Robin/candidate records, but not on the application timeline |
+| Worker activity | `worker_events` | Worker telemetry, including the mock `APPLICATION_SUBMITTED` events of the fixture flow. **Not evidence** |
+| "Prepared" | inferred from `applications.status = READY_TO_APPLY` and the plan status | No event of its own |
+| Submission receipts, employer acknowledgements | nothing | No record existed |
+| Mailbox access | `identity/ExternalMailboxProviders` (Gmail / Outlook classes that refuse to poll), `CredentialVault` (in-memory) | No live connector |
+
+Decision: keep `applications.status` as Robin's internal workflow status with its meaning unchanged
+(it is still shown, labelled "Recorded workflow status"), extend `application_events` additively into
+the persisted evidence timeline, add two narrow tables (`application_receipts`,
+`email_application_links`), and derive the candidate-facing status at read time. No second
+lifecycle model, no workflow engine, no stored "reconciled status" that could drift.
+
+## 13.2 Timeline event model
+
+The timeline is `application_events` (persisted, now append-only) plus a read-time projection of the
+append-only audit records listed below, merged in one keyset-paginated query ordered by
+`(coalesce(event_time, occurred_at), id)`. Both sources are owner-checked in SQL.
+
+Each event carries: stable id; owning profile and application (owner filled and checked by a
+trigger); `type` and a neutral `summary`; `event_time` (actual time, when known) and
+`event_time_precision` (`EXACT` / `DATE` / `UNKNOWN`); `occurred_at` (when Robin recorded it);
+`classification`; `verification_status`; `external_id` (provider message id or quoted reference);
+`email_id` / `receipt_id` evidence references; `supersedes_event_id`; `provenance` (channel,
+classifier/matcher/policy versions, sender-authenticated flag); `event_key` (idempotency).
+
+| `classification` | Meaning | Actor shown | Label |
+|---|---|---|---|
+| `INTERNAL` | Robin's own record (created, prepared, plan built, package built…) | Robin | Robin activity |
+| `CANDIDATE_REPORTED` | Something the candidate stated or confirmed | You | Reported by you |
+| `INFERRED` | Robin's interpretation of an employer message, not confirmed | Employer (message) / Robin | Inferred by Robin — not confirmed |
+| `EXTERNAL` + `VERIFIED` | Employer evidence that passed the policy | Employer | Verified employer evidence |
+| `EXTERNAL` + `UNVERIFIED` | Employer evidence that identifies the application but could not be verified | Employer | Employer evidence — unverified |
+| `EXTERNAL` + `REJECTED` | Contradictory or wrong-application evidence | Employer | Evidence rejected |
+| `EXTERNAL` + `UNKNOWN` | Employer evidence that does not establish anything by itself | Employer | Employer evidence — insufficient to verify |
+
+`VERIFIED` is only possible on `EXTERNAL` rows (CHECK constraint).
+
+Event types recorded (all grounded in an action or a piece of evidence):
+`APPLICATION_CREATED`, `PREPARATION_STEP` (CV / cover letter / answers prepared or failed),
+`FORM_PLAN_PREPARED`, `PACKAGE_DEFERRED`, `FORM_PLAN_FAILED`, `STATUS_RECORDED` (legacy status
+changes, labelled as yours or as a pre-8.3 inference), `EMPLOYER_MESSAGE_RECEIVED`,
+`RECEIPT_RECORDED`, `CANDIDATE_REPORT` (submitted / acknowledged / recruiter contact / assessment /
+interview / offer / not progressed / withdrawn), `MESSAGE_REVIEWED`, `RECEIPT_REVIEWED`; and,
+projected from audit: `CV_GENERATED`, `CV_APPROVED`, `CV_APPROVAL_WITHDRAWN`,
+`COVER_LETTER_GENERATED`, `COVER_LETTER_CORRECTED`, `COVER_LETTER_APPROVED`,
+`COVER_LETTER_APPROVAL_WITHDRAWN`, `PACKAGE_CREATED` ("nothing was sent to the employer"),
+`PACKAGE_REFUSED`, `FORM_REVIEWED`, `PACKAGE_APPROVED` ("submission is disabled, nothing was sent"),
+`PACKAGE_APPROVAL_REFUSED`, `PACKAGE_APPROVAL_WITHDRAWN`, `FORM_FILL_PAUSED`, `FORM_FILL_FAILED`,
+`FORM_FILL_BLOCKED`, `FORM_INSPECTED`, `MATCH_APPROVED`. Unknown internal types map to
+`INTERNAL_EVENT` ("Robin recorded an internal step"); free-text payload fields are never copied.
+
+Not on the timeline, by design: `worker_events` (telemetry, including mock submissions) and
+"submission queued / attempted" — with `REAL_SUBMIT` hard-stopped no submission is ever queued or
+attempted, so no such event can truthfully exist. When a submission capability is built it must
+write an `INTERNAL` "attempted" event, which the reconciler does not treat as evidence.
+
+Timestamps are never invented. A message without a received time is stored with
+`received_time_known = false`; its events have precision `UNKNOWN`, render as "Date unknown", and
+are ordered by when Robin recorded them. A candidate report with only a date is `DATE` precision
+and renders without a time of day.
+
+History is preserved: `application_events` is append-only (UPDATE and direct DELETE raise; only a
+cascade from deleting the application, the owner or the source message can remove rows).
+Corrections are new rows: confirming or re-classifying a message writes `MESSAGE_REVIEWED` with
+`supersedes_event_id` pointing at the inferred row; the UI keeps the earlier row, marked
+"Corrected later — kept as history". Every candidate decision is also audited
+(`TRACK_CANDIDATE_REPORT`, `TRACK_RECEIPT_RECORDED`, `TRACK_RECEIPT_REVIEWED`,
+`TRACK_MESSAGE_REVIEWED`, `TRACK_MESSAGE_RECLASSIFIED`).
+
+## 13.3 Submission evidence and the verification policy (`track-receipt-policy-v1`)
+
+`application_receipts` records one row per piece of evidence and application: owner and
+application, `evidence_type`, `channel`, `email_id`, `provider_message_id`, `external_reference`
+(an application reference quoted by the message, never generated), `sender_domain`,
+`evidence_time` + precision, `captured_at`, `fingerprint` (unique per application), outcome
+`verification_status` with its `verification_reasons` and `policy_version`, a minimal `summary`,
+the identity evidence used, and the candidate's review (`candidate_review`, time, note,
+`review_version`).
+
+Evidence types actually supported:
+
+| Evidence type | How it arrives | Best possible outcome |
+|---|---|---|
+| `EMPLOYER_ACKNOWLEDGEMENT_EMAIL` via `CANDIDATE_FORWARDED` | The candidate adds an employer message (Applications page or `POST /emails/ingest`) | `UNVERIFIED` — the sender cannot be authenticated |
+| `EMPLOYER_ACKNOWLEDGEMENT_EMAIL` via `MAILBOX_CONNECTOR` | `EmailIntelligenceService.ingestFromMailboxConnector` — a processing boundary only; **no connector exists**, exercised by fixture tests | `VERIFIED` when every condition below holds |
+| `CANDIDATE_STATEMENT` via `CANDIDATE_ENTERED` | "I submitted this application myself" | `UNVERIFIED`, always |
+
+Not supported, because they do not exist: an ATS confirmation response (Robin never submits),
+a worker receipt, a scraped confirmation page.
+
+The policy, in order:
+
+1. A candidate statement → `UNVERIFIED` ("your own statement; it cannot be verified").
+2. Evidence dated more than one day in the future → `REJECTED` (contradictory).
+3. The message's own strong identifiers belong to a different application only → `REJECTED`.
+4. Nothing identifies this application, or several applications are identified → `UNKNOWN`.
+5. Otherwise `VERIFIED` only if **all** hold, else `UNVERIFIED` with each failing reason listed:
+   retrieved by an authorised mailbox connector; the provider reported DKIM `pass` for a signing
+   domain aligned with the From domain (equal or parent) and no SPF/DMARC `fail`; delivered to the
+   connected mailbox address; identifies exactly this application by job link, posting
+   identifier or requisition number; explicitly says the application was received.
+
+The schema enforces the two hard limits independently of the code: a `CANDIDATE_STATEMENT` can
+never be `VERIFIED`, and only `MAILBOX_CONNECTOR` evidence can be `VERIFIED` (CHECK constraints;
+an IT proves a forged insert is refused).
+
+A candidate can confirm or reject a receipt for an application (`review_version` optimistic
+check). Confirmation is recorded as `CANDIDATE_CONFIRMED`; it never changes
+`verification_status`. Rejection excludes the receipt from reconciliation; the row stays.
+
+Never receipts: a prepared package, an approval, a queued or attempted action, a vague recruiter
+message without a receipt phrase, a message identifying a different job or person.
+Conflicting receipts (two acknowledgements quoting different application references) stay
+recorded and make the application `NEEDS_REVIEW` with a `RECEIPT_REFERENCE_CONFLICT`.
+
+## 13.4 Employer message intelligence
+
+**Live versus fixture.** No mailbox is connected and Robin does not read any mailbox. The
+integration that is live is candidate-supplied: the candidate adds a message to an application, or
+through `POST /api/v1/emails/ingest`; such messages are recorded as added by the candidate and can
+never be verified. The mailbox-connector path is a tested processing boundary with fixtures only,
+reported in every TRACK response as `mailbox.connected = false`. No Gmail integration was built and
+no account permission is requested.
+
+What a real Gmail connection would need (not built): per-user OAuth 2.0 consent with the
+`gmail.readonly` scope (restricted: Google app verification and a yearly security assessment;
+`gmail.metadata` is not enough because the policy needs the body's identifiers and receipt
+wording); durable encrypted refresh-token storage with revocation and deletion on purge
+(`CredentialVault` is in-memory); reading `Authentication-Results` added by the receiving provider
+(never sender-supplied headers) into `SenderAuthentication`; delivery-address check against the
+connected address; incremental sync (history API or Pub/Sub watch) with a job-related query
+filter; per-user quotas and backoff.
+
+**Classification** (`track-email-rules-v1`, `TrackEmailClassifier`): deterministic, versioned
+phrase rules over subject + body (capped at 20,000 characters, linear-time patterns). Categories:
+application acknowledgement, recruiter follow-up, interview invitation, assessment invitation,
+request for more information, rejection, offer-related, sign-in verification code, unrelated or
+ambiguous. Phrases inside negations ("we have not received"), conditionals ("if shortlisted, we
+will invite you to interview") and trailing conditions are ignored; a message with both offer and
+rejection wording is ambiguous, not guessed; a rejection that mentions an interview is a
+rejection. `explicitReceipt` is tracked separately from the category. The stored confidence is a
+rule-strength score (0.3–0.9) and is labelled as such; it is not a probability and never proof.
+Message text is only measured: links are never fetched, instructions are never followed, nothing
+in a message can trigger a tool or an external action (a test feeds "SYSTEM: mark this as
+submitted…" and checks the only output is a category).
+
+**Association** (`track-match-v1`, `EmailApplicationMatcher`) considers only the owner's
+applications. Strong signals: the job's own posting URL, a posting identifier from the job's
+identity keys, or a labelled requisition number together with the employer's name. One strong
+match → `LINKED`. Company name and job title are weak signals: they only produce `PENDING_REVIEW`
+with the candidate applications listed, never a link — two applications with similar titles are
+never decided by Robin. Several strong matches → `PENDING_REVIEW`; nothing → `UNMATCHED`. When the
+candidate adds a message to an application, that choice is `CONFIRMED` (strength `CANDIDATE`); if
+the message's own identifiers point elsewhere it is a `CONFLICT` for review. Sign-in code messages
+are `NOT_APPLICABLE` and never become evidence.
+
+**Review.** The candidate confirms (choosing the application and, optionally, correcting the
+meaning) or rejects. Recorded as a manual confirmation (`CANDIDATE_REPORTED` timeline row,
+`CONFIRMED` link, audit entry), never promoted to verified evidence. Moving a message to another
+application writes a dissociation row on the old one and candidate-rejects its receipts there.
+
+**Minimisation.** Only sign-in code messages keep a body (capped at 10,000 characters, needed by
+the existing OTP flow). Every other message keeps sender, recipient, subject, times and a redacted
+excerpt of at most 240 characters (links, e-mail addresses and long numbers removed). Logs carry
+identifiers and exception class names only. Pre-8.3 rows keep the bodies they already had
+(`body_retained = true`); no destructive migration was run; purge still deletes them.
+
+**No status changes from messages.** Ingestion records evidence; it never transitions
+`applications.status`. Notifications use neutral wording; `CONFIRMATION_EMAIL_RECEIVED` is emitted
+only for a `VERIFIED` receipt, otherwise "An employer message needs your review" or "Possible
+application acknowledgement — not verified".
+
+## 13.5 Reconciliation (`track-reconcile-v1`, `ApplicationReconciler`)
+
+Derived at read time from the recorded status and its history, candidate reports, receipts,
+linked messages, the plan status and preparation results. Never stored, never written back.
+
+Evidence strength: `VERIFIED` (4) > `CANDIDATE_CONFIRMED` = `CANDIDATE_REPORTED` (3) >
+`UNVERIFIED` (2) > `INTERNAL` (1) > `INFERRED` (0). Only verified evidence and the candidate's own
+reports/confirmations can set a stage; unverified employer evidence can set only Applied or
+Acknowledged; Robin's inferences never set a stage (they create "Confirm what this message means"
+and a pending suggestion instead).
+
+Rules:
+- The furthest stage supported by eligible evidence wins (ties: stronger basis, then later time).
+  Older or weaker evidence never regresses it.
+- A rejection or reported withdrawal ends progress unless it is older than the progress evidence;
+  same-day ordering that cannot be established (date-only vs exact) is treated as unknown order.
+  An offer and a rejection on the same day are an `OUTCOME_CONFLICT`.
+- `NEEDS_REVIEW` when evidence conflicts (`RECEIPT_REFERENCE_CONFLICT`, `ASSOCIATION_CONFLICT`,
+  `OUTCOME_CONFLICT`) or when the recorded status came from a pre-8.3 email inference
+  (`RECORDED_STATUS_INFERRED`).
+- A recorded status that is ahead of all evidence and has no history → `UNKNOWN` ("Status
+  unknown"), never assumed. Recorded `WITHDRAWN` stays withdrawn (later activity is flagged);
+  `FAILED` → "Stopped".
+- Submission is its own dimension: `CONFIRMED` only with a verified receipt; `UNVERIFIED` when the
+  candidate reported or confirmed it or unverified employer evidence identifies the application;
+  `CONFLICTING`; otherwise `UNKNOWN` ("No evidence of submission"). Acknowledgement likewise
+  (`VERIFIED` / `UNVERIFIED` / `NONE`).
+- Every view lists what needs the candidate (`attention`), what conflicts, and what is unknown
+  (always including "Robin cannot read your mailbox" while no connector exists).
+- `robinSubmission.submitted` is always `false`: Robin has not submitted anything.
+
+| Situation | Status shown | Submission |
+|---|---|---|
+| Package prepared (`READY_TO_APPLY`) | Prepared — not submitted | No evidence of submission |
+| Package approved for submission (`READY_TO_SUBMIT`) | Prepared — not submitted ("an approval is not a submission") | No evidence of submission |
+| Candidate: "I applied myself" | Applied — reported by you | Not verified |
+| Forwarded acknowledgement identifying the job | Acknowledged by the employer — not verified | Not verified |
+| Fixture connector acknowledgement, authenticated, delivered, identifying, explicit | Acknowledged by the employer — verified | Confirmed by verified employer evidence |
+| Interview email inferred | unchanged + "Confirm what this message means" | unchanged |
+| Interview email confirmed by the candidate | Interview — confirmed by you | unchanged |
+| Two acknowledgements with different references | Needs your review | Conflicting evidence |
+
+Failure mode: if the database cannot be read, the TRACK endpoints answer 503
+`{availability: "UNAVAILABLE"}` and the applications list carries `track.availability =
+"UNAVAILABLE"`; the UI says the status is unavailable and guesses nothing.
+
+## 13.6 API
+
+All routes are under `/api/v1`, authenticated, owner-scoped from the session (never from a body),
+404 for another account's application, message or evidence (indistinguishable from missing),
+CSRF-protected for writes, and audited.
+
+| Method and path | Purpose | Notes |
+|---|---|---|
+| `GET /applications/{id}/track` | Reconciled status, reason, submission/acknowledgement, attention, unknowns, conflicts, receipts with policy reasons, messages awaiting review, mailbox state, rule versions | 404 / 503 as above |
+| `GET /applications/{id}/track/timeline?cursor=&limit=` | Chronological page (default 50, max 100), opaque keyset cursor, `nextCursor` `""` at the end | 400 for a bad cursor or limit |
+| `POST /applications/{id}/track/reports` | `{kind, occurredOn?, note?, clientReportId?}` candidate report | `kind` ∈ SUBMITTED, ACKNOWLEDGED, RECRUITER_CONTACT, ASSESSMENT, INTERVIEW, OFFER, REJECTED, WITHDRAWN; date 2000-01-01..tomorrow; note ≤ 500; replay returns `replayed: true` |
+| `POST /applications/{id}/track/receipts/{receiptId}/review` | `{decision: CONFIRM|REJECT, note?, expectedVersion?}` | 409 on a stale version |
+| `GET /track/reviews` | Employer messages awaiting the candidate (≤ 50) with candidates and match signals | `mailboxConnected` |
+| `POST /track/emails/{emailId}/review` | `{decision, applicationId (confirm), category?, expectedVersion?}` | 409 stale; 409 for a sign-in code message; 400 for a code category |
+
+Changed endpoints (behaviour changes, documented):
+- `GET /applications` rows gain `track` (`availability`, `status`, `label`, `basis`, `submission`,
+  `needsReview`, `attentionCount`, `pending`). `status` is unchanged in meaning.
+- `POST /emails/ingest`: accepts `applicationId` (the candidate's choice, checked against the
+  message); `receivedAt` is optional (missing = unknown, no longer "now"); refuses an empty message
+  (400), oversized fields (400) and a foreign application (404); returns `associationStatus`,
+  `needsReview`, `receiptVerification`; 503 on a database failure with nothing stored; no longer
+  changes application status; joins the new `track` rate-limit bucket (30 requests per minute per
+  account, shared with the TRACK writes).
+
+## 13.7 Migration V038 (`V038__application_tracking.sql`, additive)
+
+- `application_events`: new nullable/defaulted columns (13.2); backfilled `profile_id`; legacy
+  `STATUS_CHANGED` rows classified (`email:%` keys → `INFERRED`/`UNVERIFIED`, others →
+  `CANDIDATE_REPORTED`); unique `(application_id, event_key)`; timeline indexes; guard trigger
+  (owner fill/check on insert, STATUS_CHANGED classification for the unchanged legacy writer,
+  append-only).
+- `application_receipts` (13.3) with owner trigger and CHECK constraints.
+- `emails`: `channel` (legacy rows `CANDIDATE_FORWARDED`), `content_fingerprint` unique per owner,
+  `body_retained`, `processing_version`, `sender_authentication`, `received_time_known`.
+- `email_application_links`: one row per message; every pre-8.3 company-name correlation becomes a
+  `PENDING_REVIEW` / `LEGACY` proposal with confidence 0.30 (the stored 0.95 was a constant), never
+  a link.
+- `audit_logs_entity_idx` for the projection.
+
+Nothing is promoted: no receipt is created for legacy data, no legacy row is verified, and
+`applications.status` is untouched. `TrackMigrationCompatibilityIT` migrates a database to V037,
+writes pre-8.3 rows exactly as the old code did, migrates to V038 and checks all of this.
+
+## 13.8 Ownership, privacy, audit and source hiding
+
+- Every repository query filters on the session's profile; foreign ids answer 404.
+- The database refuses cross-owner rows independently: the `application_events` trigger and
+  `track_assert_owner()` on receipts and links (application owner, and message owner for links).
+- Writes are audited; logs carry identifiers only; message bodies are minimised (13.4).
+- Purge (profile delete) cascades through events, receipts, links and messages. In the product
+  only purge deletes applications; if an application row is deleted, its events and receipts go
+  with it and links to it are cleared (`SET NULL`), so no orphaned evidence remains (the
+  pre-existing `emails.application_id` reference has no delete action and still has to be
+  cleared first, as before).
+- Source hiding (Phase 8.2.5) holds on every TRACK surface: timeline types are neutral
+  (`GREENHOUSE_PLAN_CREATED` → `FORM_PLAN_PREPARED`, `GREENHOUSE_SUBMIT_APPROVED` →
+  `PACKAGE_APPROVED`), TRACK responses carry no source, platform or canonical-URL field, and
+  evidence is described by its channel ("Employer acknowledgement evidence", "Added by you",
+  "Retrieved from your connected mailbox"). Internal provenance stays in the database. A message's
+  own sender, subject and excerpt are the candidate's message content, shown redacted, not
+  discovery provenance. Regression tests: backend `candidateFacingTrackResponsesNeverNameTheDiscoverySource`,
+  frontend `SourceVisibility.test.tsx` (TRACK panel, review queue and Applications page with
+  provider names planted in every payload).
+
+## 13.9 Idempotency, retries and concurrency
+
+- Timeline: unique `(application_id, event_key)` with `on conflict do nothing`; keys are derived
+  from the evidence (`track-email:<emailId>`, `track-receipt:<receiptId>`,
+  `track-report:<kind>:<clientReportId or content hash>`, `track-…-review:<id>:v<n>`).
+- Messages: unique `(profile_id, message_id)` and `(profile_id, content_fingerprint)`; a losing
+  concurrent insert reports a replay. Links: unique `email_id`. Receipts: unique
+  `(application_id, fingerprint)`.
+- Reviews use optimistic versions (`decision_version`, `review_version`); a stale decision is 409,
+  never a silent overwrite.
+- Each ingestion, report and review is one transaction; a failing write rolls the whole operation
+  back, the API answers 503 (ingest) or 503 / 409 (TRACK), and a retry succeeds exactly once
+  (`aFailedTimelineWriteRollsBackTheWholeOperation`).
+- Proven with 16 concurrent ingestions of the same message: one message, one link, one receipt,
+  one timeline row.
+- Deleted applications: links survive with `application_id = null` and are not shown as
+  candidates; reviews and reports on a missing application answer 404.
+
+## 13.10 Frontend
+
+`ApplicationsPage` shows the reconciled label in each card's status pill (never the raw recorded
+status; "Status unavailable" when TRACK is unavailable; "Recorded: …" only for a server without
+TRACK data) and keeps "Recorded workflow status". Above the list, `TrackReviewQueue` lists employer
+messages awaiting the candidate. Each card has an `ApplicationTrackPanel` (loaded on demand): status
+and reason, submission and acknowledgement, messages count, the Robin-has-not-submitted note,
+pending suggestion, conflicts, attention, unknowns, submission evidence with the policy text and
+per-receipt reasons, confirm/reject for employer evidence, messages to review, "Record an update
+yourself" (stable `clientReportId` per draft so a retried report is recorded once), "Add an
+employer message", and the paginated timeline with labels, honest dates and corrected-history
+marks. Loading, empty, error (with retry, no backend detail), unavailable (503) and
+permission-denied (401/403/404) states are explicit. Green is used only for verified evidence; no
+request success, approval or worker result is ever shown as a submission.
+
+## 13.11 Verification
+
+Run on Windows, 2026-10-11, against the branch working tree whose code was hash-verified
+identical to the authoring copy (`git write-tree` of everything except `docs/` =
+`8326874fd75f26dc8dfa39aff3fa9a3228afd2c4` on both sides). The commits contain exactly that tree
+plus these two documentation files. (A first full run on the previous tree passed with one TRACK IT
+fewer; the authentication/CSRF IT was then added and everything below was re-run.)
+
+- `mvn -B verify -Dit.postgres.url=jdbc:postgresql://127.0.0.1:55436/jobagent ...` (in `backend/`):
+  **BUILD SUCCESS**. Unit: 953 run, 0 failures, 0 errors, 1 skipped
+  (`RedisConnectivityDiagnosticsTest`, its Redis-availability assumption). Integration: 165 run,
+  0 failures, 0 errors, 1 skipped (`PlatformLiveIT`, the opt-in live suite).
+- New TRACK unit tests (89): `ApplicationReconcilerTest` 27, `TrackEmailClassifierTest` 24,
+  `EmailApplicationMatcherTest` 14, `ReceiptVerificationPolicyTest` 11, `TrackTimelineMapperTest` 7,
+  `TrackTextTest` 6; plus `RateLimitServiceTest` +2 (7 total). `UserDataScopingTest` 18/18 with the
+  rewritten email service.
+- PostgreSQL ITs: `ApplicationTrackingIT` 17/17 (Testcontainers `postgres:16`; forwarded vs
+  fixture-connector acknowledgements, forged VERIFIED refused by the schema, approval never a
+  submission, similar titles left to the candidate, inferred → confirmed → reclassified with history
+  kept, 16-thread duplicate ingestion, report idempotency, rollback of a failed event write and
+  retry, reconciliation over time, legacy and history-less statuses, pagination and unknown times,
+  validation, sessions and CSRF required on every TRACK endpoint, cross-account isolation, source
+  hiding, deletion and purge);
+  `TrackMigrationCompatibilityIT` 1/1 (V037 + legacy rows → V038); `UserDataIsolationIT` 21/21
+  (19 existing + 2 TRACK). Unchanged suites still green, e.g. `ApplyWorkflowIT` 11/11,
+  `ApplicationPipelineIT` 9/9, `CrossSourceDiscoveryIT` 10/10, `JobFeedIT` 7/7.
+- `UserDataIsolationIT` ran against a disposable `postgres:16` container published on
+  `127.0.0.1:55436`, chosen after inspecting `docker ps` and the listening ports (the machine's other
+  PostgreSQL services on 5432 and 5433, and the stale `robin-it-pg` container, were not used or
+  touched). After the run the container held the V38 schema and the two isolation accounts, which
+  confirms the suite used it; it was then removed.
+- Surefire printed "going to kill self fork JVM ... 30 seconds after System.exit(0)" during
+  teardown, exactly as in every Phase 8.2.5 run; results are unaffected.
+- Frontend: `npx tsc -b` clean; `npm test` 290/290 (29 files; +39: `ApplicationTrackPanel` 18,
+  `TrackReviewQueue` 12, `ApplicationsPage.track` 6, `SourceVisibility` +3 TRACK cases);
+  `npm run build` clean (chunk-size warning only).
+- Worker: `npm test` 19/19.
+- Authoring copy (Linux, during development, not the final tree): every non-live IT class
+  163/163 including `UserDataIsolationIT` 21/21, and `ApplicationTrackingIT` 17/17 once the
+  authentication/CSRF test was added; unit tests through the JUnit launcher 945 passed, 2 skipped,
+  4 aborted (Redis assumptions), 2 failed only in `ActuatorInfoExposureTest`, which needs the
+  Maven-generated `build-info.properties` and passes under Maven above; frontend 290/290, tsc and
+  build clean. The Windows results above are the ones for the committed tree.
+
+## 13.12 Live versus fixture-only
+
+| Capability | State |
+|---|---|
+| Timeline, reports, receipts, reconciliation, reviews | Live in the application (PostgreSQL ITs) |
+| Candidate-added employer messages | Live (UI and API) — always unverified |
+| Mailbox connector (Gmail/Outlook) | Not built; boundary exercised by fixtures only; responses say no mailbox is connected |
+| `VERIFIED` receipts | Reachable only through the connector boundary, so fixture-only today |
+| Employer-side submission and its confirmation | Not available: `REAL_SUBMIT` hard-stopped |
+
+## 13.13 Known limitations
+
+- No mailbox connection: employer messages exist only when the candidate adds them, and nothing
+  the candidate adds can be verified, so no real application can reach "Submission confirmed"
+  yet. Building the connector is the next prerequisite (13.4 lists what it needs).
+- The classifier is phrase-based English; other languages and unusual wording fall to
+  "Unrelated or unclear" and the candidate's review.
+- Association needs a job URL, posting identifier or requisition number in the message; many
+  real acknowledgements carry none and will wait for the candidate.
+- The owner transition API (`POST /applications/{id}/status`) still accepts legacy statuses
+  without evidence; TRACK labels the result as reported by the candidate, but the endpoint itself
+  is unchanged for compatibility.
+- Pre-8.3 email bodies remain stored until purge.
+- The legacy `/applications/{id}/timeline` endpoint (raw events, unpaginated) is kept for the
+  APPLY decision panel.
+- No live or production run; not deployed.
+
+## 13.14 REAL_SUBMIT
+
+Unchanged and hard-stopped. TRACK adds no submission path, no employer-side action and no outbound
+message. Approving a package still records approval only; the timeline and every status say
+nothing was sent.
