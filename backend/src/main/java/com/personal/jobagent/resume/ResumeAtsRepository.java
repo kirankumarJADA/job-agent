@@ -30,6 +30,16 @@ public class ResumeAtsRepository {
 
     @Transactional
     public ResumeAtsAnalysis insert(ResumeAtsAnalysis a, String title, boolean approved) {
+        return insert(a, title, approved, artifacts.renderPdf(a.resumeMarkdown()));
+    }
+
+    /**
+     * Persists a tailored CV with the EXACT PDF bytes the caller rendered and
+     * hashed. Rendering once and storing those bytes is what guarantees the
+     * recorded content_sha256 is the hash of the file a user downloads.
+     */
+    @Transactional
+    public ResumeAtsAnalysis insert(ResumeAtsAnalysis a, String title, boolean approved, byte[] pdf) {
         if (a.applicationId() != null) {
             // The application id arrives from the request body, so the
             // existence check must be scoped to the caller's own profile: a
@@ -46,7 +56,7 @@ public class ResumeAtsRepository {
         UUID id = a.id() == null ? UuidV7.generate() : a.id();
         UUID cvId = UuidV7.generate();
         UUID fileId = UuidV7.generate();
-        byte[] pdf = artifacts.renderPdf(a.resumeMarkdown());
+        if (pdf == null || pdf.length == 0) throw new IllegalArgumentException("CV_ARTIFACT_EMPTY");
         String artifactSha256 = sha256(pdf);
         if (a.contentSha256() != null && !a.contentSha256().equals(artifactSha256)) {
             throw new IllegalArgumentException("CV_ARTIFACT_CHECKSUM_MISMATCH");
@@ -133,6 +143,73 @@ public class ResumeAtsRepository {
                 analysis.role(), analysis.domain(), analysis.requiredSkills(), analysis.preferredSkills(), analysis.normalizedSkills(),
                 analysis.verifiedEvidence(), analysis.gaps(), analysis.atsReport(), analysis.cvVersionId(), analysis.resumeMarkdown(),
                 analysis.profileRevision(), analysis.profileSnapshotHash(), contentSha);
+    }
+
+    /**
+     * The owner's most recent tailored CV for a job. With an application id,
+     * only a CV generated for that application qualifies (that is the version
+     * the application and execution package use).
+     */
+    public Optional<ResumeAtsAnalysis> findLatest(UUID profileId, UUID jobId, UUID applicationId) {
+        String sql = "select r.*, c.body_markdown, c.content_sha256 from resume_ats_analyses r join cv_versions c on c.id=r.cv_version_id "
+                + "where r.profile_id=? and r.job_id=? and c.profile_id=? "
+                + "and (?::uuid is null or r.application_id=?::uuid) order by r.created_at desc, r.id desc limit 1";
+        return jdbc.query(sql, (rs, n) -> map(rs), profileId, jobId, profileId, applicationId, applicationId).stream().findFirst();
+    }
+
+    /** The owner's analysis for one CV version, or empty when the caller does not own it. */
+    public Optional<ResumeAtsAnalysis> findByCvVersion(UUID profileId, UUID cvVersionId) {
+        String sql = "select r.*, c.body_markdown, c.content_sha256 from resume_ats_analyses r join cv_versions c on c.id=r.cv_version_id "
+                + "where c.id=? and c.profile_id=? and r.profile_id=? order by r.created_at desc limit 1";
+        return jdbc.query(sql, (rs, n) -> map(rs), cvVersionId, profileId, profileId).stream().findFirst();
+    }
+
+    /** Stored bytes plus the digests that must all agree for the artifact to be trusted. */
+    public record ArtifactCheck(byte[] bytes, String recordedSha256, String fileSha256, String actualSha256) {
+        public boolean intact() {
+            return bytes != null && actualSha256 != null && actualSha256.equals(recordedSha256)
+                    && (fileSha256 == null || actualSha256.equals(fileSha256));
+        }
+    }
+
+    public Optional<ArtifactCheck> checkedArtifact(UUID profileId, UUID cvVersionId) {
+        return jdbc.query("""
+                select c.content_sha256 as recorded, coalesce(f.sha256, lf.sha256) as file_sha,
+                       coalesce(f.content, lf.content) as content
+                from cv_versions c
+                left join files f on f.id=c.pdf_file_id
+                left join cv_artifact_links l on l.cv_version_id=c.id
+                left join files lf on lf.id=l.file_id
+                where c.id=? and c.profile_id=? and c.kind='TAILORED'
+                """, (rs, n) -> {
+            byte[] content = rs.getBytes("content");
+            return new ArtifactCheck(content, rs.getString("recorded"), rs.getString("file_sha"),
+                    content == null ? null : sha256(content));
+        }, cvVersionId, profileId).stream().findFirst();
+    }
+
+    public record Review(boolean approved, String decidedBy, java.time.Instant decidedAt, String contentSha256) {}
+
+    public Optional<Review> review(UUID profileId, UUID cvVersionId) {
+        return jdbc.query("select approved, decided_by, decided_at, content_sha256 from cv_version_reviews where cv_version_id=? and profile_id=?",
+                (rs, n) -> new Review(rs.getBoolean("approved"), rs.getString("decided_by"),
+                        rs.getTimestamp("decided_at").toInstant(), rs.getString("content_sha256")),
+                cvVersionId, profileId).stream().findFirst();
+    }
+
+    /**
+     * Records the owner's review of an immutable CV version. The CV row itself
+     * is never updated (V013 trigger); the decision lives beside it and is bound
+     * to the artifact digest that was reviewed.
+     */
+    public void saveReview(UUID profileId, UUID cvVersionId, boolean approved, String actor, String contentSha256) {
+        jdbc.update("""
+                insert into cv_version_reviews(cv_version_id, profile_id, approved, decided_by, decided_at, content_sha256)
+                select c.id, c.profile_id, ?, ?, now(), ? from cv_versions c where c.id=? and c.profile_id=?
+                on conflict (cv_version_id) do update set approved=excluded.approved, decided_by=excluded.decided_by,
+                    decided_at=now(), content_sha256=excluded.content_sha256
+                where cv_version_reviews.profile_id = excluded.profile_id
+                """, approved, actor, contentSha256, cvVersionId, profileId);
     }
 
     public Optional<byte[]> artifact(UUID profileId, UUID cvVersionId) {

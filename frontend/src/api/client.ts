@@ -111,6 +111,84 @@ export async function apiFetch<T>(endpoint: string, options: RequestInit = {}): 
   return res.json();
 }
 
+/** Result of an authenticated binary download whose bytes were checked against the server digest. */
+export interface VerifiedDownload {
+  blob: Blob;
+  filename: string;
+  sha256: string;
+}
+
+async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', buffer);
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function filenameFrom(disposition: string | null, fallback: string): string {
+  if (!disposition) return fallback;
+  const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+  return match ? decodeURIComponent(match[1]) : fallback;
+}
+
+/**
+ * Downloads a protected file through the same authenticated path as apiFetch
+ * (Firebase bearer token + session cookie). A plain <a href> would send no
+ * Authorization header, so Firebase-only sessions would get 401.
+ *
+ * The bytes are hashed in the browser and compared with the server's
+ * X-Content-SHA256 header; a missing or mismatching digest is an error, so
+ * the caller never saves a file that is not the recorded artifact.
+ */
+export async function apiDownload(endpoint: string, fallbackName: string): Promise<VerifiedDownload> {
+  const url = endpoint.startsWith('http') ? endpoint : `${API_BASE}${endpoint}`;
+  const headers = new Headers();
+  if (idTokenProvider) {
+    try {
+      const token = await idTokenProvider();
+      if (token) headers.set('Authorization', `Bearer ${token}`);
+    } catch {
+      // Fall back to the session cookie, exactly like apiFetch.
+    }
+  }
+  const res = await fetch(url, { method: 'GET', headers, credentials: 'include' });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      detail = body.detail || body.error || body.title || detail;
+    } catch {
+      // keep the status text
+    }
+    throw new ApiError(res.status, detail);
+  }
+  const expected = res.headers.get('X-Content-SHA256');
+  const buffer = await res.arrayBuffer();
+  if (!expected) {
+    throw new ApiError(500, 'The server did not provide a checksum for this file, so it was not saved.');
+  }
+  const actual = await sha256Hex(buffer);
+  if (actual !== expected.toLowerCase()) {
+    throw new ApiError(500, 'The downloaded file does not match its recorded checksum, so it was not saved.');
+  }
+  const type = res.headers.get('Content-Type') || 'application/octet-stream';
+  return {
+    blob: new Blob([buffer], { type }),
+    filename: filenameFrom(res.headers.get('Content-Disposition'), fallbackName),
+    sha256: actual,
+  };
+}
+
+/** Hands a verified download to the browser as a file save. */
+export function saveDownload(download: VerifiedDownload): void {
+  const objectUrl = URL.createObjectURL(download.blob);
+  const link = document.createElement('a');
+  link.href = objectUrl;
+  link.download = download.filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+}
+
 /** Public registration policy, used to label the sign-up form honestly. */
 export interface RegistrationPolicy {
   inviteCodeRequired: boolean;

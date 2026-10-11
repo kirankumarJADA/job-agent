@@ -14,6 +14,7 @@ Persistent engineering handoff. Update this file after every completed phase and
 - Phase 7.2 (auto-approval safety audit + fail-closed correction): `bb449a4`; status record `9f2f4e2`.
 - Phase 7.3 (approval-rule health and observability): `5e75e31`, on branch `phase7-approval-rules-ui`.
 - Phase 8.0 (architecture audit, workflow dashboard, FIND slice): branch `phase8-find-workflow` = `226c750` (unverified first pass) + the Phase 8.0 completion commit on top. Parent `d57f498`.
+- Phase 8.1 (PREP): branch `phase8.1-prep-workflow`, parent `aa4c7f8`.
 - `ROBIN_PROJECT_HANDOFF.md` does not exist in this repository (checked all branches and history). This file is the persistent engineering handoff.
 - Do not infer the state of a separate Windows working tree from this GitHub branch.
 
@@ -32,6 +33,7 @@ Persistent engineering handoff. Update this file after every completed phase and
 | 7.2 — Auto-approval safety audit (fail-closed) | `bb449a4` | Backend: 564 unit (0 fail, 1 skip) + 109 IT (0 fail, 19 skip) = 673. Frontend: 185 tests, tsc clean, build clean. Worker: 19/19 |
 | 7.3 — Approval-rule health & observability | `5e75e31` | Backend: 592 unit (0 fail, 1 skip) + 110 IT (0 fail, 19 skip) = 702. Frontend: 190 tests, tsc clean, build clean. Worker: 19/19 |
 | 8.0 - Architecture audit, workflow dashboard, FIND slice | `phase8-find-workflow` | Backend: 593 unit (0 fail, 1 skip) + 117 IT (0 fail, 19 skip) = 710. Frontend: 212 tests (20 files), tsc clean, build clean. Worker: 19/19 |
+| 8.1 - PREP: documents, validation, comparison, readiness + V035 | `phase8.1-prep-workflow` | Backend: 613 unit (0 fail, 1 skip) + 123 IT (0 fail, 19 skip) = 736. Frontend: 229 tests (23 files), tsc clean, build clean. Worker: 19/19 |
 
 ## Phase 7 Implementation: Auto-Approval Rule Engine (corrected here in 7.2)
 - `V034__approval_rules.sql` creates `user_approval_rules` with exactly three value columns: `auto_approve_enabled` (boolean, default false) and `min_score` (integer, default 85, `CHECK (min_score BETWEEN 1 AND 100)`), plus `updated_at`. (Earlier drafts of this document invented `max_daily_auto` and `require_cover_letter` columns that were never created; they do not exist.) Owner-isolated by `profile_id` with a unique constraint.
@@ -142,9 +144,10 @@ Persistent engineering handoff. Update this file after every completed phase and
 - `ApplicationPipelineIT` (+1 test, 9 total): with the rule genuinely unreadable, the match queues for review, no application is created, and exactly one durable `APPROVAL_RULE_UNAVAILABLE` notification lands for that owner.
 
 ## Next Exact Task
-Phase 8.0 is verified locally and pushed on `phase8-find-workflow`. Do not merge or deploy. Next, only when requested: Phase 8.1 PREP (see `docs/PHASE8_FIND_WORKFLOW.md` section 6). `REAL_SUBMIT` stays hard-stopped. Phase 6 hardening PR #1 against `phase5-ready` remains open and was not touched.
+Phase 8.1 (PREP) is verified locally and pushed on `phase8.1-prep-workflow` with a draft PR for CI. Do not merge or deploy. Next, only when requested: Phase 8.2 APPLY readiness (see the PREP limitations in `docs/PHASE8_FIND_WORKFLOW.md` section 10, starting with `ExecutionPackageService` binding only approved, validated, digest-intact documents). `REAL_SUBMIT` stays hard-stopped.
 
 ## Last Verified Baseline
+- Phase 8.1: backend 613 unit + 123 integration = 736, 0 failures, 0 errors (1 + 19 skipped), BUILD SUCCESS; frontend 229 tests (23 files), tsc clean, build clean; worker 19/19.
 - Phase 8.0: backend 593 unit + 117 integration = 710, 0 failures, 0 errors (1 + 19 skipped), BUILD SUCCESS; frontend 212 tests (20 files), tsc clean, build clean; worker 19/19.
 - Phase 7.3 backend local verify: 592 unit + 110 integration = 702 test cases, 0 failures, 0 errors (1 + 19 skipped). BUILD SUCCESS.
 - Phase 7.3 frontend verify: 190 tests pass (17 files), tsc clean, build clean.
@@ -195,3 +198,29 @@ Docs: `PHASE8_FIND_WORKFLOW.md` (rewritten), `ROBIN_BUILD_STATUS.md`.
 1. Phase 8.1 PREP: readiness derived from linked artifacts, evidence-grounded validation, master-vs-tailored diff, artifact hashes, PDFs, ATS required-field analysis.
 2. Phase 8.2 APPLY: required-answer validation, ATS field mapping, artifact-bound document selection, cross-source duplicate protection, readiness gate before approval. `REAL_SUBMIT` stays hard-stopped.
 3. Phase 8.3 TRACK: timeline UI, receipt evidence source, recruiter messages, interviews/rejection/withdrawal, failure recovery; AI email classifications labelled as inferred.
+
+## Phase 8.1 Implementation: PREP — Production-Quality Application Preparation
+
+Full detail (architecture as found, evidence model, PDF, validation, comparison, readiness rules, APIs, migration, limitations): `docs/PHASE8_FIND_WORKFLOW.md` sections 8–10.
+
+- Branch `phase8.1-prep-workflow`, parent `aa4c7f8` (verified tip of `phase8-find-workflow`).
+- Defects found and fixed: CV PDFs were unreadable (literal `\n` in the content stream), ASCII-only, single-page and truncated at 51 lines; CV bullets rendered as Java map strings, with no name/contact/dates/certifications; PDF rendered twice (hash vs stored bytes); CV download was a plain link that drops the Firebase bearer token; `cover_letters unique(job_id, version)` was global (second candidate collided); generated letters were inserted already approved and failed letters could be approved; `applicationId` in letter/answer requests was not owner/job checked.
+- New: Apache PDFBox 3.0.3 renderer (Unicode via bundled Liberation Sans, multi-page, deterministic); shared deterministic fact validator (blockers vs heuristic warnings) applied to CVs, letters and answers; deterministic profile-vs-CV comparison; CV review gate (`cv_version_reviews`, bound to the artifact digest); letter correction as new versions with lineage; letter PDFs; integrity-checked downloads with `X-Content-SHA256` and audit; readiness derived from linked records (`GET /api/v1/prep/jobs/{jobId}/readiness`); frontend PREP workspace and authenticated, checksum-verified downloads.
+- Migration: `V035__prep_document_review.sql` (additive).
+- `REAL_SUBMIT` remains hard-stopped. Nothing in PREP submits or claims submission.
+
+### Phase 8.1 files changed
+Backend main: `pom.xml` (pdfbox), `documents/PdfDocumentRenderer.java` (new), `documents/MarkdownBlocks.java` (new), `documents/DocumentFactValidator.java` (new), `prep/PrepReadinessService.java` (new), `prep/PrepController.java` (new), `resume/CvComparisonService.java` (new), `resume/CvArtifactService.java`, `resume/ResumeAtsIntelligenceService.java`, `resume/ResumeAtsRepository.java`, `resume/ResumeAtsController.java`, `coverletter/CoverLetterService.java`, `coverletter/CoverLetterController.java`, `coverletter/CoverLetterRepository.java`, `coverletter/CoverLetterRecord.java`, `qa/ApplicationAnswerService.java`, `qa/ApplicationAnswerController.java`, `qa/ApplicationAnswerRepository.java`, `profile/ContactRecord.java` (new), `profile/ProfileRepository.java`, `security/SecurityConfig.java` (CORS exposed headers), `db/migration/V035__prep_document_review.sql` (new).
+Backend tests: `CvArtifactServiceTest` (1 → 5), `ResumeAtsIntelligenceServiceTest` (1 → 2), `DocumentFactValidatorTest` (new, 8), `CoverLetterReviewTest` (new, 7), `PrepWorkflowIT` (new, 6, PostgreSQL).
+Frontend: `api/client.ts` (`apiDownload`, `saveDownload`), `types.ts`, `components/PrepWorkspace.tsx` (new), `components/ApplicationPrepStatus.tsx` (new), `pages/JobDetailPage.tsx`, `pages/ApplicationsPage.tsx`; tests `PrepWorkspace.test.tsx` (new, 10), `download.test.ts` (new, 4), `ApplicationPrepStatus.test.tsx` (new, 2), `JobDetailPage.test.tsx` (+1).
+
+### Phase 8.1 verification (local Windows checkout)
+- Before the renderer replacement, the new `CvArtifactServiceTest` cases were run against the old writer: 5 run, 4 failed (readability, multi-page, Unicode, long token). After: 5/5.
+- Backend `mvn -B verify`: BUILD SUCCESS (6:26). Unit 613 run, 0 failures, 0 errors, 1 skipped (`RedisConnectivityDiagnosticsTest`). Integration 123 run, 0 failures, 0 errors, 19 skipped (all `UserDataIsolationIT`, runs only with `-Dit.postgres.url`). Total 736. `PrepWorkflowIT` 6/6, `JobFeedIT` 7/7, `ArchModuleBoundaryTest` 4/4.
+- Frontend: `npx tsc -b` clean; `npm test` 23 files, 229 tests, 0 failures; `npm run build` succeeds (Vite warns that the main chunk exceeds 500 kB; not an error).
+- Worker: `npm test` 19/19.
+
+### What remains before APPLY readiness and TRACK
+1. APPLY (8.2): `ExecutionPackageService` must bind only an approved, currently validated, digest-intact letter and the reviewed CV digest; required-answer validation against real ATS form questions; field mapping; cross-source duplicate protection; readiness gate before approval. `REAL_SUBMIT` stays hard-stopped.
+2. TRACK (8.3): receipts with an evidence source; owner timeline; recruiter messages with inferred-vs-confirmed labelling.
+3. PREP follow-ups: a second typeface for real bold, CJK/emoji font coverage, and regeneration prompts for pre-8.1 CVs.

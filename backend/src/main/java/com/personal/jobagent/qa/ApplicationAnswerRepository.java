@@ -42,6 +42,15 @@ public class ApplicationAnswerRepository {
         );
     }
 
+    /** True when the application is the caller's own application for this job (or none was given). */
+    public boolean applicationBelongs(UUID profileId, UUID jobId, UUID applicationId) {
+        if (applicationId == null) return true;
+        Integer n = jdbcTemplate.queryForObject(
+                "select count(*) from applications where id = ? and profile_id = ? and job_id = ?",
+                Integer.class, applicationId, profileId, jobId);
+        return n != null && n > 0;
+    }
+
     public Optional<ApplicationAnswerRecord> findById(UUID id) {
         return jdbcTemplate.query("select * from application_answers where id = ?", rowMapper(), id)
                 .stream().findFirst();

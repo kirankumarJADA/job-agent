@@ -230,6 +230,10 @@ public class SecurityConfig {
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("*"));
         configuration.setAllowCredentials(true);
+        // Lets the cross-origin SPA read the download filename and the
+        // artifact digest it verifies downloaded PDF bytes against. Exposing
+        // response headers widens nothing about who may call the API.
+        configuration.setExposedHeaders(List.of("Content-Disposition", "X-Content-SHA256"));
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         // Registered for EVERY path, not just /api/**: a request that misses

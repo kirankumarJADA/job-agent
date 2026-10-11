@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../api/client';
 import { ApplicationSummary, ApplicationTimelineEvent, AutomationPackageView } from '../types';
+import { ApplicationPrepStatus } from '../components/ApplicationPrepStatus';
 import {
   EmptyState,
   Loading,
@@ -147,6 +148,7 @@ export const ApplicationsPage: React.FC = () => {
                   </dd>
                 </div>
               </dl>
+              <ApplicationPrepStatus jobId={application.jobId} applicationId={application.id} />
 
               {application.planId && (
                 <div className="mt-3 rounded-lg border border-line bg-surface-sunken px-3 py-2">

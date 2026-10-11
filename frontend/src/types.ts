@@ -364,10 +364,100 @@ export interface CoverLetter {
   claimsValidation: {
     passed: boolean;
     issues?: string[];
+    findings?: ValidationFinding[];
+    validator_version?: string;
+    blocker_count?: number;
+    warning_count?: number;
+    scope?: string;
   };
   isApproved: boolean;
   createdAt: string;
   updatedAt: string;
+  contentSha256?: string | null;
+  parentVersionId?: string | null;
+  origin?: 'GENERATED' | 'USER_CORRECTED';
+  pdfStored?: boolean;
+}
+
+/** One finding from the backend DocumentFactValidator. */
+export interface ValidationFinding {
+  code: string;
+  severity: 'BLOCKER' | 'WARNING';
+  kind: 'DETERMINISTIC' | 'HEURISTIC';
+  claim: string;
+  message: string;
+}
+
+export interface DocumentValidation {
+  validator_version: string;
+  passed: boolean;
+  blocker_count: number;
+  warning_count: number;
+  findings: ValidationFinding[];
+  scope?: string;
+}
+
+/** GET /resume-intelligence/job/{jobId} */
+export interface LatestCvResponse {
+  cv: null | {
+    analysis: ResumeAtsAnalysis;
+    artifact: { present: boolean; intact: boolean; sha256: string | null; byteSize: number };
+    review: null | { approved: boolean; decidedBy: string; decidedAt: string; contentSha256: string };
+  };
+}
+
+export interface ComparisonItem { id: string; label: string }
+export interface ComparisonEntry extends ComparisonItem {
+  status: 'RETAINED' | 'SHORTENED' | 'OMITTED';
+  sourceBullets: number;
+  renderedBullets: number;
+}
+
+/** GET /resume-intelligence/cv/{id}/comparison */
+export interface CvComparison {
+  cvVersionId: string;
+  generatedFromProfileRevision: number;
+  currentProfileRevision: number;
+  sourceMatchesGeneration: boolean;
+  sourceNote: string;
+  method: string;
+  skills: { emphasisedForJob: ComparisonItem[]; retained: ComparisonItem[]; omitted: ComparisonItem[] };
+  requirements: {
+    evidenced: Array<{ requirement: string; sourceType: string; sourceId: string; sourceLabel: string }>;
+    missingFromProfile: string[];
+    preferred: string[];
+    note: string;
+  };
+  sections: Array<{ section: string; items: ComparisonEntry[] }>;
+  inCvButNotInCurrentProfile: string[];
+  attention: Array<{ severity: string; kind: string; message: string }>;
+  sourceRecords: {
+    summaryPresent: boolean;
+    skills: ComparisonItem[];
+    experiences: ComparisonItem[];
+    projects: ComparisonItem[];
+    education: ComparisonItem[];
+    certifications: ComparisonItem[];
+  };
+}
+
+export interface PrepItem { area: string; code: string; message: string }
+
+/** GET /prep/jobs/{jobId}/readiness */
+export interface PrepReadiness {
+  jobId: string;
+  applicationId: string | null;
+  applicationStatus: string | null;
+  overall: 'NOT_STARTED' | 'BLOCKED' | 'IN_PROGRESS' | 'READY_FOR_REVIEW';
+  overallLabel: string;
+  cv: { state: string; cvVersionId?: string; linkedToApplication?: boolean | null; artifactIntact?: boolean; approved?: boolean };
+  coverLetter: { state: string; requirement: string; versions: number; coverLetterId?: string; version?: number; approved?: boolean };
+  answers: { total: number; confirmed: number; unconfirmed: number; needsInput: number; requiredQuestionsKnown: boolean };
+  blockers: PrepItem[];
+  actions: PrepItem[];
+  notChecked: string[];
+  note: string;
+  computedAt: string;
 }
 export interface ApplicationAnswer {
   id: string;

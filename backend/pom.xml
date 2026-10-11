@@ -126,6 +126,17 @@
       <version>1.18.3</version>
     </dependency>
 
+    <!-- Phase 8.1: production CV / cover-letter PDFs. Apache PDFBox
+         (Apache-2.0, maintained by the ASF). Replaces a hand-written PDF
+         serializer that was ASCII-only, single-page and truncated after 51
+         lines. Unicode text uses the Liberation Sans font shipped inside the
+         PDFBox jar (SIL OFL 1.1, embeddable in documents). -->
+    <dependency>
+      <groupId>org.apache.pdfbox</groupId>
+      <artifactId>pdfbox</artifactId>
+      <version>3.0.3</version>
+    </dependency>
+
     <!-- Observability -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
