@@ -32,14 +32,37 @@ import java.util.*;
 @RestController
 @RequestMapping("/api/v1/applications")
 public class ApplicationController {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(ApplicationController.class);
     private final ApplicationStatusService service;
     private final OwnerContext ownerContext;
     private final NotificationService notifications;
-    public ApplicationController(ApplicationStatusService service, OwnerContext ownerContext, NotificationService notifications){this.service=service;this.ownerContext=ownerContext;this.notifications=notifications;}
+    private final com.personal.jobagent.track.ApplicationTrackingService tracking;
+    public ApplicationController(ApplicationStatusService service, OwnerContext ownerContext, NotificationService notifications,
+                                 com.personal.jobagent.track.ApplicationTrackingService tracking){this.service=service;this.ownerContext=ownerContext;this.notifications=notifications;this.tracking=tracking;}
     public record TransitionRequest(String targetStatus,String eventKey,String actor,Map<String,Object> context){}
-    /** The caller's own applications, newest first (the READY_TO_APPLY queue view). */
+    /**
+     * The caller's own applications, newest first. Each row carries {@code track}:
+     * the evidence-reconciled status (Phase 8.3). {@code status} stays Robin's
+     * internal workflow status, unchanged in meaning. If tracking cannot be
+     * computed the list is still served, with {@code track.availability =
+     * UNAVAILABLE} rather than a guessed status.
+     */
     @GetMapping public ResponseEntity<?> list(){
-        return ResponseEntity.ok(Map.of("items", service.listForOwner(ownerContext.profileIdOrNull())));
+        UUID profileId = ownerContext.profileIdOrNull();
+        List<Map<String,Object>> items = service.listForOwner(profileId);
+        Map<UUID, Map<String,Object>> track;
+        try {
+            track = tracking.summaries(profileId);
+        } catch (RuntimeException e) {
+            log.warn("Tracking summaries unavailable: {}", e.getClass().getSimpleName());
+            track = null;
+        }
+        for (Map<String,Object> item : items) {
+            Object id = item.get("id");
+            Map<String,Object> summary = track == null ? null : track.get(id instanceof UUID u ? u : null);
+            item.put("track", summary != null ? summary : Map.of("availability", "UNAVAILABLE"));
+        }
+        return ResponseEntity.ok(Map.of("items", items));
     }
     @GetMapping("/{id}") public ResponseEntity<?> get(@PathVariable UUID id){return service.find(ownerContext.profileIdOrNull(), id).<ResponseEntity<?>>map(ResponseEntity::ok).orElseGet(()->ResponseEntity.notFound().build());}
     @GetMapping("/{id}/timeline") public ResponseEntity<?> timeline(@PathVariable UUID id){UUID profileId=ownerContext.profileIdOrNull();if(!service.existsForOwner(profileId, id))return ResponseEntity.notFound().build();return ResponseEntity.ok(Map.of("items",service.timeline(profileId, id)));}
