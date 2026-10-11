@@ -4,92 +4,112 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.personal.jobagent.track.ReceiptVerificationPolicy;
 
 import java.time.Instant;
-import java.time.format.DateTimeFormatter;
-import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
- * Maps a Gmail API message resource to the connector contract: headers, the
- * minimal body needed for classification, and the sender-authentication
- * evidence parsed from the Authentication-Results headers that Gmail itself
- * evaluated at delivery time (retrieved through the authenticated API —
- * never taken from a request body or message content).
+ * Maps a Gmail API resource into the TRACK connector contract.
+ *
+ * Authentication-Results is accepted only from Gmail's expected receiver authserv-id
+ * in the first such header. A sender-supplied arbitrary Authentication-Results header
+ * is untrusted input, even when fetched through an authenticated Gmail API.
  */
 public final class GmailMessageMapper {
 
-    private GmailMessageMapper() {
-    }
+    private static final String GOOGLE_AUTHSERV_ID = "mx.google.com";
+    private static final Pattern DKIM_DOMAIN = Pattern.compile(
+            "(?:^|\\s)header\\.d=([A-Za-z0-9.-]+)", Pattern.CASE_INSENSITIVE);
+
+    private GmailMessageMapper() {}
 
     public record GmailMessage(String messageId, String threadId, Long historyId, String from, String to,
                                String subject, Instant receivedAt, String bodyText,
                                ReceiptVerificationPolicy.SenderAuthentication authentication,
                                String connectedAddress) {}
 
-    private static final String[] HEADERS = {"From", "To", "Subject", "Date", "Message-Id", "Delivered-To"};
+    /**
+     * A mailbox item is eligible as delivered-email evidence only when Gmail's
+     * structured message resource says it is in INBOX and not SENT/DRAFT/SPAM/TRASH.
+     * Message To/Delivered-To headers are sender-controlled and are not sufficient.
+     */
+    public static boolean isInboxReceived(JsonNode message) {
+        JsonNode labels = message.path("labelIds");
+        if (!labels.isArray()) return false;
+        boolean inbox = false;
+        for (JsonNode label : labels) {
+            String value = label.asText("");
+            if ("INBOX".equals(value)) inbox = true;
+            if ("SENT".equals(value) || "DRAFT".equals(value) || "SPAM".equals(value)
+                    || "TRASH".equals(value)) return false;
+        }
+        return inbox;
+    }
 
     public static GmailMessage fromApi(JsonNode message, String connectedAddress) {
         String messageId = message.path("id").asText(null);
         String threadId = message.path("threadId").asText(null);
-        long historyId = message.path("historyId").asLong(0);
+        Long historyId = message.path("historyId").isNumber()
+                || message.path("historyId").isTextual()
+                ? message.path("historyId").asLong() : null;
 
-        String from = null, to = null, subject = null, date = null, deliveredTo = null;
+        String from = null, to = null, subject = null;
         JsonNode headers = message.path("payload").path("headers");
         if (headers.isArray()) {
             for (JsonNode header : headers) {
                 String name = header.path("name").asText("");
                 String value = header.path("value").asText("");
-                switch (name) {
-                    case "From" -> from = value;
-                    case "To" -> to = value;
-                    case "Subject" -> subject = value;
-                    case "Date" -> date = value;
-                    case "Delivered-To" -> deliveredTo = value;
-                    default -> { }
-                }
+                if ("From".equalsIgnoreCase(name)) from = value;
+                else if ("To".equalsIgnoreCase(name)) to = value;
+                else if ("Subject".equalsIgnoreCase(name)) subject = value;
             }
         }
 
         ReceiptVerificationPolicy.SenderAuthentication auth = senderAuthentication(headers);
         String body = bodyText(message);
-        Instant receivedAt = parseDate(date);
 
-        // Delivered-to: the connected mailbox address appears in To or Delivered-To.
-        String toAddress = TrackAddress.addressOf(to);
+        // Gmail's internalDate is provider-generated; the RFC 2822 Date header can
+        // be supplied by the sender and must not be treated as the receipt time.
+        long internalDate = message.path("internalDate").asLong(0);
+        Instant receivedAt = internalDate > 0 ? Instant.ofEpochMilli(internalDate) : null;
+
         String connected = TrackAddress.addressOf(connectedAddress);
-        boolean delivered = toAddress != null && toAddress.equalsIgnoreCase(connected)
-                || (deliveredTo != null && connected != null && deliveredTo.equalsIgnoreCase(connected));
-
-        String toForMessage = delivered ? connectedAddress : to;
+        boolean deliveredToConnectedMailbox = isInboxReceived(message);
+        // EmailIntelligenceService derives its trusted delivery boolean by comparing
+        // this value with mailboxAddress. Set it from Gmail's structured labels, not
+        // from a potentially forged To or Delivered-To header.
+        String toForMessage = deliveredToConnectedMailbox ? connectedAddress : to;
         return new GmailMessage(messageId, threadId, historyId, from, toForMessage, subject,
                 receivedAt, body, auth, connected);
     }
 
     /**
-     * Parses Gmail's Authentication-Results header (added by Gmail at delivery
-     * time and retrieved through the authenticated API): dkim=pass with the
-     * signing domain, plus spf/dmarc outcomes for the receipt policy.
+     * Trust only the first Authentication-Results header and only when its authserv-id
+     * is Gmail's receiver identity. If an untrusted one comes first, fail closed rather
+     * than searching later headers for a convenient pass result.
      */
     private static ReceiptVerificationPolicy.SenderAuthentication senderAuthentication(JsonNode headers) {
-        String dkim = null, dkimDomain = null, spf = null, dmarc = null;
-        if (headers.isArray()) {
-            for (JsonNode header : headers) {
-                if (!"Authentication-Results".equalsIgnoreCase(header.path("name").asText(""))) continue;
-                String value = header.path("value").asText("");
-                if (dkim == null) {
-                    dkim = outcome(value, "dkim");
-                    dkimDomain = headerDomain(value, "header.d=");
-                    spf = outcome(value, "spf");
-                    dmarc = outcome(value, "dmarc");
-                }
+        if (!headers.isArray()) return ReceiptVerificationPolicy.SenderAuthentication.none();
+        for (JsonNode header : headers) {
+            if (!"Authentication-Results".equalsIgnoreCase(header.path("name").asText(""))) continue;
+            String value = header.path("value").asText("");
+            int separator = value.indexOf(';');
+            if (separator < 0 || !GOOGLE_AUTHSERV_ID.equalsIgnoreCase(value.substring(0, separator).trim())) {
+                return ReceiptVerificationPolicy.SenderAuthentication.none();
             }
+            String results = value.substring(separator + 1);
+            String dkim = outcome(results, "dkim");
+            String dkimDomain = dkimDomain(results);
+            String spf = outcome(results, "spf");
+            String dmarc = outcome(results, "dmarc");
+            return new ReceiptVerificationPolicy.SenderAuthentication(dkim, dkimDomain, spf, dmarc);
         }
-        return new ReceiptVerificationPolicy.SenderAuthentication(dkim, dkimDomain, spf, dmarc);
+        return ReceiptVerificationPolicy.SenderAuthentication.none();
     }
 
-    /** The first "mechanism=result" outcome for a mechanism, e.g. dkim=pass. */
-    private static String outcome(String authenticationResults, String mechanism) {
-        for (String part : authenticationResults.split(";")) {
+    private static String outcome(String results, String mechanism) {
+        for (String part : results.split(";")) {
             String trimmed = part.trim().toLowerCase(Locale.ROOT);
             if (trimmed.startsWith(mechanism.toLowerCase(Locale.ROOT) + "=")) {
                 int space = trimmed.indexOf(' ');
@@ -100,23 +120,17 @@ public final class GmailMessageMapper {
         return null;
     }
 
-    /** The signing domain from header.d=<domain> in the DKIM mechanism. */
-    private static String headerDomain(String authenticationResults, String prefix) {
-        int at = authenticationResults.toLowerCase(Locale.ROOT).indexOf(prefix.toLowerCase(Locale.ROOT));
-        if (at == -1) return null;
-        String rest = authenticationResults.substring(at + prefix.length());
-        int end = rest.length();
-        for (int i = 0; i < rest.length(); i++) {
-            char c = rest.charAt(i);
-            if (!(Character.isLetterOrDigit(c) || c == '.' || c == '-' || c == '_')) {
-                end = i;
-                break;
-            }
+    private static String dkimDomain(String results) {
+        for (String part : results.split(";")) {
+            String trimmed = part.trim();
+            if (!trimmed.toLowerCase(Locale.ROOT).startsWith("dkim=")) continue;
+            Matcher matcher = DKIM_DOMAIN.matcher(trimmed);
+            return matcher.find() ? matcher.group(1) : null;
         }
-        return rest.substring(0, end);
+        return null;
     }
 
-    /** Decodes the first text/plain part, falling back to the snippet. Never HTML. */
+    /** Decodes the first text/plain part, falling back to Gmail's safe snippet. */
     private static String bodyText(JsonNode message) {
         JsonNode parts = message.path("payload").path("parts");
         String text = findTextPlain(parts);
@@ -153,24 +167,6 @@ public final class GmailMessageMapper {
         }
     }
 
-    private static Instant parseDate(String rfc2822) {
-        if (rfc2822 == null || rfc2822.isBlank()) return null;
-        try {
-            return DateTimeFormatter.RFC_1123_DATE_TIME.parse(rfc2822.trim(), Instant::from);
-        } catch (Exception ignored) {
-            // fall through: real mail often uses single-digit days
-        }
-        try {
-            return java.time.format.DateTimeFormatter
-                    .ofPattern("EEE, d MMM yyyy HH:mm:ss Z", Locale.ROOT)
-                    .withZone(java.time.ZoneOffset.UTC)
-                    .parse(rfc2822.trim(), Instant::from);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    /** Minimal address extraction: the part after the last angle bracket, if any. */
     private static final class TrackAddress {
         private static String addressOf(String header) {
             if (header == null || header.isBlank()) return null;

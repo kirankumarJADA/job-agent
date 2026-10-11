@@ -14,6 +14,7 @@ create table if not exists gmail_connections (
     status                  text not null default 'CONNECTED'
         check (status in ('CONNECTED', 'REAUTH_REQUIRED', 'DISCONNECTED')),
     history_id              bigint,
+    initial_page_token      text,
     last_sync_at            timestamptz,
     last_sync_status        text,
     last_sync_error         text,

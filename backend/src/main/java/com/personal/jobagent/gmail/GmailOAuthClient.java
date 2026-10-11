@@ -35,7 +35,7 @@ public class GmailOAuthClient {
 
     private static final String TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
     private static final String REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke";
-    private static final String GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
+    private static final String GMAIL_API = "https://gmail.googleapis.com/gmail/v1";
 
     private final String clientId;
     private final String clientSecret;
@@ -106,9 +106,18 @@ public class GmailOAuthClient {
         }
     }
 
+    /** Builds a path under the fixed Gmail API origin. Package-private for contract tests. */
+    static URI apiUri(String pathWithQuery) {
+        if (pathWithQuery == null || !pathWithQuery.startsWith("/")
+                || pathWithQuery.startsWith("//") || pathWithQuery.contains("#")) {
+            throw new IllegalArgumentException("Gmail API path must be an absolute path under the fixed API origin");
+        }
+        return URI.create(GMAIL_API + pathWithQuery);
+    }
+
     /** GET on the Gmail REST API with a Bearer access token; returns the parsed JSON tree. */
     public JsonNode get(String pathWithQuery, String accessToken) throws Exception {
-        HttpRequest req = HttpRequest.newBuilder(URI.create(GMAIL_API + pathWithQuery))
+        HttpRequest req = HttpRequest.newBuilder(apiUri(pathWithQuery))
                 .header("Authorization", "Bearer " + accessToken)
                 .timeout(Duration.ofSeconds(20))
                 .GET()
@@ -122,10 +131,22 @@ public class GmailOAuthClient {
 
     public record TokenSet(String accessToken, String refreshToken, long expiresInSeconds, String scope) {}
 
-    /** Re-checks the granted scopes at exchange time: read-only or nothing. */
+    /**
+     * Re-checks explicit granted scopes at exchange time. OAuth 2.0 permits
+     * Google's token response to omit "scope" when it is identical to the
+     * requested scope; in that case the consent request above asked for exactly
+     * gmail.readonly and did not use include_granted_scopes. When Google does
+     * return a scope list, fail closed unless it contains exactly the one
+     * requested read-only scope (substring matching could admit gmail.send).
+     */
     public static void assertReadonlyScopes(String grantedScope) {
-        if (grantedScope == null || !grantedScope.contains(SCOPE_READONLY)) {
-            throw new IllegalStateException("Gmail consent did not include the read-only scope");
+        if (grantedScope == null || grantedScope.isBlank()) {
+            return;
+        }
+        java.util.Set<String> granted = new java.util.HashSet<>(
+                java.util.Arrays.asList(grantedScope.trim().split("\\s+")));
+        if (!granted.equals(java.util.Set.of(SCOPE_READONLY))) {
+            throw new IllegalStateException("Gmail consent granted unexpected scopes; only gmail.readonly is permitted");
         }
     }
 

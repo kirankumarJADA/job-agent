@@ -56,6 +56,29 @@ public class GmailConnectionStore {
         return rows.isEmpty() ? Optional.empty() : Optional.of(map(rows.get(0)));
     }
 
+    public String initialPageToken(UUID profileId) {
+        List<String> rows = db.query("""
+                select initial_page_token from gmail_connections where profile_id = ?
+                """, (rs, n) -> rs.getString(1), profileId);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    /** Atomically advances the cursor snapshot and the bounded initial-list page token. */
+    public void updateInitialSyncState(UUID profileId, Long historyId, java.time.Instant lastSyncAt,
+                                       String status, String error, String nextPageToken) {
+        db.update("""
+                update gmail_connections
+                set history_id = coalesce(?, history_id),
+                    initial_page_token = ?,
+                    last_sync_at = coalesce(?, last_sync_at),
+                    last_sync_status = ?,
+                    last_sync_error = ?,
+                    updated_at = now()
+                where profile_id = ?
+                """, historyId, nextPageToken, lastSyncAt == null ? null : Timestamp.from(lastSyncAt),
+                status, error, profileId);
+    }
+
     public void updateSyncState(UUID profileId, Long historyId, java.time.Instant lastSyncAt,
                                 String status, String error) {
         db.update("""
