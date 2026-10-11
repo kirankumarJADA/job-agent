@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.audit.AuditEntry;
 import com.personal.jobagent.audit.AuditLogWriter;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.gmail.GmailConnectionStore;
 import com.personal.jobagent.security.OwnerContext;
 import com.personal.jobagent.track.ReceiptVerificationPolicy.SenderAuthentication;
 import com.personal.jobagent.track.TrackEvidenceRecorder.IdentityFacts;
@@ -84,25 +85,36 @@ public class ApplicationTrackingService {
     private final AuditLogWriter audit;
     private final OwnerContext ownerContext;
     private final TrackTimelineMapper timelineMapper;
+    private final GmailConnectionStore gmailConnections;
     private final ApplicationReconciler reconciler = new ApplicationReconciler();
     private final ReceiptVerificationPolicy policy = new ReceiptVerificationPolicy();
 
     public ApplicationTrackingService(TrackRepository repository, TrackEvidenceRecorder recorder, AuditLogWriter audit,
-                                      OwnerContext ownerContext, ObjectMapper json) {
+                                      OwnerContext ownerContext, ObjectMapper json,
+                                      GmailConnectionStore gmailConnections) {
         this.repository = repository;
         this.recorder = recorder;
         this.audit = audit;
         this.ownerContext = ownerContext;
         this.timelineMapper = new TrackTimelineMapper(json);
+        this.gmailConnections = gmailConnections;
     }
 
     /**
-     * No mailbox connector exists in this version: the provider classes refuse
-     * to poll, so Robin never reads a candidate's mailbox. Reported honestly in
-     * every view rather than implied.
+     * True when the signed-in candidate has an active Gmail connection
+     * (Phase 8.4). The reconciler only treats MAILBOX_CONNECTOR evidence as
+     * verifiable when this is backed by a real, connected mailbox.
      */
     public boolean mailboxConnected() {
-        return false;
+        try {
+            UUID profileId = ownerContext.profileIdOrNull();
+            if (profileId == null) return false;
+            return gmailConnections.find(profileId)
+                    .map(GmailConnectionStore.Connection::active)
+                    .orElse(false);
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     // ── reads ────────────────────────────────────────────────────────────
@@ -124,8 +136,11 @@ public class ApplicationTrackingService {
                 .toList();
         out.put("reviews", reviewMaps(profileId, concerning));
         out.put("mailbox", Map.of("connected", mailboxConnected(),
-                "note", "Robin cannot read your mailbox: no mailbox connection exists in this version. Add employer "
-                        + "messages yourself; they are recorded as added by you and cannot be verified."));
+                "note", mailboxConnected()
+                        ? "Connected to your Gmail account. Robin reads new employer messages read-only; they are "
+                          + "classified and verified under the same policy as everything else."
+                        : "Robin cannot read your mailbox: no mailbox connection exists in this version. Add employer "
+                          + "messages yourself; they are recorded as added by you and cannot be verified."));
         out.put("versions", Map.of("reconciler", ApplicationReconciler.VERSION, "receiptPolicy", ReceiptVerificationPolicy.VERSION,
                 "classifier", TrackEmailClassifier.VERSION, "matcher", EmailApplicationMatcher.VERSION));
         out.put("computedAt", Instant.now().toString());

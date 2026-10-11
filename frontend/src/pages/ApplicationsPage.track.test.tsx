@@ -114,6 +114,24 @@ describe('Applications page — TRACK status', () => {
     expect(await screen.findByText('No employer messages need your review.')).toBeTruthy();
   });
 
+  it('shows the Gmail mailbox card once for the account, not once per application', async () => {
+    mocked.mockImplementation((async (path: string) => {
+      if (path === '/applications') {
+        return { items: [application({ id: 'app-1', track: prepared }), application({ id: 'app-2', jobId: 'job-2', track: prepared })] };
+      }
+      if (path === '/track/reviews') return { items: [], mailboxConnected: false };
+      if (path === '/integrations/gmail/status') return { configured: true, connected: false };
+      if (path.startsWith('/prep/jobs/')) throw new ApiError(503, 'unavailable in this test');
+      if (path.startsWith('/apply/applications/')) throw new ApiError(503, JSON.stringify({ message: 'Not loaded in this test.' }));
+      throw new Error(`Unexpected API call: ${path}`);
+    }) as never);
+    renderPage();
+    expect((await screen.findAllByText('Platform Engineer')).length).toBe(2);
+    expect(screen.getAllByText('Gmail connection (read-only)')).toHaveLength(1);
+    expect(await screen.findAllByRole('button', { name: /Connect Gmail \(read-only\)/ })).toHaveLength(1);
+    expect(mocked.mock.calls.filter(([path]) => path === '/integrations/gmail/status')).toHaveLength(1);
+  });
+
   it('opens the tracking panel for one application on request', async () => {
     serve([application({ track: prepared })]);
     mocked.mockImplementation((async (path: string) => {
