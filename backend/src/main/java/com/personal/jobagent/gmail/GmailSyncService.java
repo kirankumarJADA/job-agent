@@ -188,9 +188,23 @@ public class GmailSyncService {
             int ingested = 0;
             int considered = 0;
             int fetched = 0;
+            int gone = 0;
             for (String id : messageIds) {
                 if (fetched >= MAX_MESSAGES_PER_SYNC) break;
-                JsonNode message = oauth.get("/users/me/messages/" + encodePathSegment(id) + "?format=full", accessToken);
+                JsonNode message;
+                try {
+                    message = oauth.get("/users/me/messages/" + encodePathSegment(id) + "?format=full", accessToken);
+                } catch (GmailOAuthClient.GmailApiException e) {
+                    if (e.status != 404) throw e;
+                    // The ID no longer resolves: history keeps messageAdded entries for
+                    // messages deleted since (for example replaced drafts), and a listed
+                    // message can be deleted before it is fetched. There is nothing to
+                    // ingest; stopping here would hold the cursor (or the stored backlog)
+                    // on this ID forever. Any other error still fails the whole run.
+                    fetched++;
+                    gone++;
+                    continue;
+                }
                 fetched++;
                 if (!GmailMessageMapper.isInboxReceived(message)) continue;
                 considered++;
@@ -214,10 +228,14 @@ public class GmailSyncService {
                 connections.updateHistorySyncState(profileId, newHistoryId, Instant.now(),
                         status, null, nextPendingHistoryIds);
             }
-            log.info("Gmail sync for profile {}: fetched {} message(s), considered {} inbox message(s), ingested {}",
-                    profileId, fetched, considered, ingested);
+            log.info("Gmail sync for profile {}: fetched {} message(s) ({} no longer exist), considered {} inbox "
+                    + "message(s), ingested {}", profileId, fetched, gone, considered, ingested);
             return new SyncOutcome(status, ingested, considered, newHistoryId,
                     partial ? "More messages remain; run sync again to continue safely." : null);
+        } catch (RefreshTokenRejected e) {
+            connections.markReauthRequired(profileId, "Google no longer accepts the stored refresh token (expired or revoked)");
+            return new SyncOutcome("REAUTH_REQUIRED", 0, 0, null,
+                    "Google no longer accepts Robin's access to this mailbox. Disconnect and connect again.");
         } catch (GmailOAuthClient.GmailApiException e) {
             if (e.status == 401 || e.status == 403) {
                 connections.markReauthRequired(profileId, "Gmail rejected the stored credentials (HTTP " + e.status + ")");
@@ -262,11 +280,23 @@ public class GmailSyncService {
             String token = oauth.refresh(refreshToken).getAccessToken();
             if (token == null || token.isBlank()) throw new IllegalStateException("Google returned an empty access token");
             return token;
-        } catch (com.google.api.client.googleapis.json.GoogleJsonResponseException e) {
-            if (e.getStatusCode() == 401 || e.getStatusCode() == 400) {
-                connections.markReauthRequired(profileId, "Google refused the stored refresh token");
+        } catch (com.google.api.client.auth.oauth2.TokenResponseException e) {
+            // The token endpoint reports an expired or revoked refresh token as
+            // invalid_grant (HTTP 400) — e.g. revoked in the Google account, or the
+            // 7-day expiry of an OAuth app in Testing status. Only reconnecting helps.
+            // Other token errors (invalid_client, unauthorized_client, 5xx) are
+            // deployment or provider faults and are reported as a failed sync.
+            if (e.getDetails() != null && "invalid_grant".equals(e.getDetails().getError())) {
+                throw new RefreshTokenRejected();
             }
             throw e;
+        }
+    }
+
+    /** The stored grant is no longer usable; the candidate must connect again. */
+    private static final class RefreshTokenRejected extends RuntimeException {
+        RefreshTokenRejected() {
+            super("refresh token rejected", null, false, false);
         }
     }
 

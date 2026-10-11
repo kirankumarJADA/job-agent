@@ -162,7 +162,8 @@ class GmailSyncServiceTest {
     }
 
     @Test
-    void aRevokedTokenMarksTheConnectionReauthRequired() throws Exception {
+    void anUnrecognisedRefreshFailureIsReportedAsAFailedSync() throws Exception {
+        // Not a token-endpoint invalid_grant: see anExpiredOrRevokedRefreshTokenMarksTheConnectionForReconnection.
         when(oauth.refresh("refresh-token")).thenThrow(new RuntimeException("401 Unauthorized"));
         var outcome = service.sync(PROFILE);
         assertThat(outcome.status()).isEqualTo("FAILED");
@@ -213,6 +214,109 @@ class GmailSyncServiceTest {
         verify(oauth, never()).get(contains("/history?startHistoryId="), anyString());
         verify(connections).updateHistorySyncState(eq(PROFILE), eq(100L), any(), eq("OK"), eq(null),
                 org.mockito.ArgumentMatchers.argThat(java.util.List::isEmpty));
+    }
+
+    // ── audit regressions (Phase 8.4 closure) ─────────────────────────────
+
+    @Test
+    void aHistoryMessageThatNoLongerExistsIsSkippedAndTheCursorStillAdvances() throws Exception {
+        // History keeps messageAdded entries for messages deleted since (for example a
+        // replaced draft); messages.get answers 404 for them. One such ID must not stall sync.
+        when(oauth.get(contains("/history?startHistoryId=100"), eq("access-token"))).thenReturn(parse(
+                "{\"historyId\":\"210\",\"history\":["
+                        + "{\"id\":\"201\",\"messagesAdded\":[{\"message\":{\"id\":\"m-gone\"}}]},"
+                        + "{\"id\":\"202\",\"messagesAdded\":[{\"message\":{\"id\":\"m-ok\"}}]}]}"));
+        when(oauth.get(contains("/messages/m-gone?format=full"), eq("access-token")))
+                .thenThrow(new GmailOAuthClient.GmailApiException(404, "Requested entity was not found."));
+        when(oauth.get(contains("/messages/m-ok?format=full"), eq("access-token"))).thenReturn(parse(
+                fullMessage("m-ok", "no-reply@employer.example", "candidate@example.com", "Update", null, "Hello")));
+        when(emailIntelligence.ingestFromMailboxConnector(eq(PROFILE), any()))
+                .thenReturn(new EmailIntelligenceService.IngestResult(UUID.randomUUID(), "OTHER", null, false));
+
+        var outcome = service.sync(PROFILE);
+
+        assertThat(outcome.status()).isEqualTo("OK");
+        assertThat(outcome.considered()).isEqualTo(1);
+        verify(emailIntelligence, org.mockito.Mockito.times(1)).ingestFromMailboxConnector(eq(PROFILE), any());
+        verify(connections).updateHistorySyncState(eq(PROFILE), eq(210L), any(), eq("OK"), eq(null),
+                org.mockito.ArgumentMatchers.argThat(java.util.List::isEmpty));
+        verify(connections, never()).updateSyncState(eq(PROFILE), any(), any(), eq("FAILED"), any());
+    }
+
+    @Test
+    void aBacklogMessageThatNoLongerExistsIsDrainedInsteadOfBlockingTheBacklogForever() throws Exception {
+        when(connections.pendingHistoryMessageIds(PROFILE)).thenReturn(java.util.List.of("m-gone", "m-ok"));
+        when(oauth.get(contains("/messages/m-gone?format=full"), eq("access-token")))
+                .thenThrow(new GmailOAuthClient.GmailApiException(404, "Requested entity was not found."));
+        when(oauth.get(contains("/messages/m-ok?format=full"), eq("access-token"))).thenReturn(parse(
+                fullMessage("m-ok", "no-reply@employer.example", "candidate@example.com", "Update", null, "Hello")));
+        when(emailIntelligence.ingestFromMailboxConnector(eq(PROFILE), any()))
+                .thenReturn(new EmailIntelligenceService.IngestResult(UUID.randomUUID(), "OTHER", null, false));
+
+        var outcome = service.sync(PROFILE);
+
+        assertThat(outcome.status()).isEqualTo("OK");
+        assertThat(outcome.considered()).isEqualTo(1);
+        verify(oauth, never()).get(contains("/history?startHistoryId="), anyString());
+        verify(connections).updateHistorySyncState(eq(PROFILE), eq(100L), any(), eq("OK"), eq(null),
+                org.mockito.ArgumentMatchers.argThat(java.util.List::isEmpty));
+    }
+
+    @Test
+    void anotherMessageFetchFailureStillFailsWithoutAdvancingTheCursor() throws Exception {
+        // Only "this message no longer exists" is skipped; any other error keeps the cursor.
+        stub(historyJson(200, "m-2"));
+        when(oauth.get(contains("/messages/m-2?format=full"), eq("access-token")))
+                .thenThrow(new GmailOAuthClient.GmailApiException(500, "backend error"));
+
+        var outcome = service.sync(PROFILE);
+
+        assertThat(outcome.status()).isEqualTo("FAILED");
+        verify(connections, never()).updateHistorySyncState(any(), any(), any(), any(), any(), any());
+        verify(connections).updateSyncState(eq(PROFILE), eq(null), eq(null), eq("FAILED"), anyString());
+    }
+
+    @Test
+    void anExpiredOrRevokedRefreshTokenMarksTheConnectionForReconnection() throws Exception {
+        // Google's token endpoint answers HTTP 400 invalid_grant for an expired or revoked
+        // refresh token (for example after 7 days on an OAuth app in Testing status).
+        when(oauth.refresh("refresh-token")).thenThrow(tokenEndpointError(400,
+                "{\"error\":\"invalid_grant\",\"error_description\":\"Token has been expired or revoked.\"}"));
+
+        var outcome = service.sync(PROFILE);
+
+        assertThat(outcome.status()).isEqualTo("REAUTH_REQUIRED");
+        verify(connections).markReauthRequired(eq(PROFILE), anyString());
+        verify(oauth, never()).get(anyString(), anyString());
+    }
+
+    @Test
+    void aMisconfiguredClientIsAFailureNotAReconnectionRequest() throws Exception {
+        // invalid_client is an operator configuration fault: reconnecting would not help.
+        when(oauth.refresh("refresh-token")).thenThrow(tokenEndpointError(401,
+                "{\"error\":\"invalid_client\",\"error_description\":\"The OAuth client was not found.\"}"));
+
+        var outcome = service.sync(PROFILE);
+
+        assertThat(outcome.status()).isEqualTo("FAILED");
+        verify(connections, never()).markReauthRequired(any(), any());
+    }
+
+    private static com.google.api.client.auth.oauth2.TokenResponseException tokenEndpointError(int status, String body)
+            throws Exception {
+        com.google.api.client.testing.http.MockHttpTransport transport =
+                new com.google.api.client.testing.http.MockHttpTransport.Builder()
+                        .setLowLevelHttpResponse(new com.google.api.client.testing.http.MockLowLevelHttpResponse()
+                                .setStatusCode(status)
+                                .setContentType("application/json; charset=UTF-8")
+                                .setContent(body))
+                        .build();
+        com.google.api.client.http.HttpResponse response = transport.createRequestFactory()
+                .buildPostRequest(new com.google.api.client.http.GenericUrl("https://oauth2.googleapis.com/token"), null)
+                .setThrowExceptionOnExecuteError(false)
+                .execute();
+        return com.google.api.client.auth.oauth2.TokenResponseException.from(
+                com.google.api.client.json.gson.GsonFactory.getDefaultInstance(), response);
     }
 
     private void stub(String... responses) throws Exception {
