@@ -1,21 +1,28 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { apiFetch } from '../api/client';
-import { ApplicationAnswer, CoverLetter, JobDetailResponse, ResumeAtsAnalysis } from '../types';
+import { JobDetailResponse } from '../types';
+import { PrepWorkspace } from '../components/PrepWorkspace';
 import {
   Alert,
   Chip,
-  DocumentPreview,
   JobStatusPill,
   Loading,
-  PageHeader,
   PageShell,
-  PrimaryButton,
   SecondaryButton,
   SectionCard,
+  STALE_AFTER_DAYS,
   StatusPill,
   WorkplacePill,
+  formatSalary,
 } from '../components/ui';
+
+/** Locale date, or null when absent/unparseable — never "Invalid Date" or an invented "Recently". */
+function formatDate(value?: string | null): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toLocaleDateString();
+}
 
 /**
  * Job Details — the deepest page in the product.
@@ -121,19 +128,19 @@ export const JobDetailPage: React.FC = () => {
             <div className="min-w-0">
               <h1 className="text-2xl font-bold tracking-tight text-ink">{job.title}</h1>
               <p className="mt-1 text-base font-medium text-ink-soft">
-                {job.company_name_raw || 'Direct employer'}
+                {job.company_name_raw || 'Company not stated'}
               </p>
-              <div className="mt-4 grid grid-cols-1 gap-x-8 gap-y-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
-                <MetaItem label="Location">{job.location_raw || 'United Kingdom'}</MetaItem>
-                <MetaItem label="Workplace type">{job.remote_type || 'HYBRID'}</MetaItem>
+              {/* Every value is what the posting states; missing data is shown as missing. */}
+              <div className="mt-4 grid grid-cols-1 gap-x-8 gap-y-3 text-sm sm:grid-cols-2 xl:grid-cols-3">
+                <MetaItem label="Location">{job.location_raw || 'Not listed'}</MetaItem>
+                <MetaItem label="Workplace type">
+                  {job.remote_type && job.remote_type !== 'UNKNOWN' ? job.remote_type : 'Not stated'}
+                </MetaItem>
                 <MetaItem label="Compensation">
-                  {job.salary_min
-                    ? `£${job.salary_min.toLocaleString()} – £${job.salary_max?.toLocaleString()}`
-                    : 'Competitive'}
+                  {formatSalary(job.salary_min, job.salary_max, job.salary_currency)}
                 </MetaItem>
-                <MetaItem label="Posted">
-                  {job.posted_at ? new Date(job.posted_at).toLocaleDateString() : 'Recently'}
-                </MetaItem>
+                <MetaItem label="Posted">{formatDate(job.posted_at) || 'Not stated by the board'}</MetaItem>
+                <MetaItem label="Last seen by discovery">{formatDate(job.last_seen_at) || 'Unknown'}</MetaItem>
               </div>
             </div>
             {job.application_url && (
@@ -144,7 +151,7 @@ export const JobDetailPage: React.FC = () => {
                   rel="noopener noreferrer"
                   className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-forest-900 px-5 py-2.5 text-sm font-semibold text-cream-50 shadow-raise transition-colors hover:bg-forest-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600 focus-visible:ring-offset-2"
                 >
-                  Apply on official board
+                  Apply with the employer
                   <svg viewBox="0 0 16 16" fill="none" className="h-3.5 w-3.5" aria-hidden="true">
                     <path
                       d="M4.5 11.5 11.5 4.5M6 4.5h5.5V10"
@@ -162,6 +169,31 @@ export const JobDetailPage: React.FC = () => {
             )}
           </div>
         </header>
+
+        {job.removed && (
+          <Alert tone="error">
+            This posting has been removed from the catalogue. It no longer appears in the Jobs Feed and should not be applied to.
+          </Alert>
+        )}
+        {!job.removed && job.stale && (
+          <Alert tone="info">
+            Discovery has not seen this posting for {STALE_AFTER_DAYS}+ days, so it may have closed. The review queue will refuse approval until the posting is refreshed by a discovery run.
+          </Alert>
+        )}
+
+        {/* Next steps in the workflow — links only to workflows that exist. */}
+        <nav aria-label="Next steps for this job" className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface px-4 py-3 text-xs shadow-card">
+          <span className="font-semibold text-ink-soft">Next steps:</span>
+          <Link to="/review-queue" className="rounded-md border border-line px-2.5 py-1 font-semibold text-ink-soft hover:border-forest-300 hover:bg-forest-50">
+            APPLY · Open review queue
+          </Link>
+          <Link to="/applications" className="rounded-md border border-line px-2.5 py-1 font-semibold text-ink-soft hover:border-forest-300 hover:bg-forest-50">
+            TRACK · Open applications
+          </Link>
+          <a href="#application-package" className="rounded-md border border-line px-2.5 py-1 font-semibold text-ink-soft hover:border-forest-300 hover:bg-forest-50">
+            PREP · Documents for this job
+          </a>
+        </nav>
 
         {/* Intelligence: description + sponsorship left, score + trace right */}
         <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
@@ -232,7 +264,7 @@ export const JobDetailPage: React.FC = () => {
                       <div key={factor} className="flex items-center justify-between text-ink-soft">
                         <span className="capitalize">{factor.replace(/_/g, ' ')}</span>
                         <span className="font-mono font-semibold text-ink">
-                          {match.breakdown?.[factor] ?? '—'} pts
+                          {match.breakdown?.[factor] != null ? `${match.breakdown[factor]}%` : '—'}
                         </span>
                       </div>
                     ))}
@@ -267,7 +299,7 @@ export const JobDetailPage: React.FC = () => {
                 <div className="rounded-lg border border-dashed border-line bg-cream-50 p-4 text-center">
                   <span className="text-2xl font-bold text-ink-faint">— / 100</span>
                   <p className="mt-2 text-xs leading-relaxed text-ink-muted">
-                    Scoring runs in Phase 3 after the rule-filtering gate.
+                    Not scored for you yet. Matching runs automatically after discovery when the posting passes your hard filters; a posting your filters reject is not scored.
                   </p>
                 </div>
               )}
@@ -300,7 +332,7 @@ export const JobDetailPage: React.FC = () => {
                 </div>
               ) : (
                 <p className="text-xs leading-relaxed text-ink-muted">
-                  Sponsorship evaluation fuses the Home Office register with JD analysis in Phase 3.
+                  No sponsorship analysis is available for this posting.
                 </p>
               )}
             </SectionCard>
@@ -321,7 +353,7 @@ export const JobDetailPage: React.FC = () => {
                 </ol>
               ) : (
                 <p className="text-xs leading-relaxed text-ink-muted">
-                  Decision steps are logged idempotently as each filter evaluates the job.
+                  No decision trace is returned for this posting yet.
                 </p>
               )}
             </SectionCard>
@@ -329,17 +361,8 @@ export const JobDetailPage: React.FC = () => {
         </div>
 
         {/* Application package — full width so documents are readable */}
-        <div className="space-y-4">
-          <PageHeader
-            eyebrow="Application package"
-            title="Apply with preparation"
-            subtitle="Everything Robin prepares for this specific job: a tailored CV snapshot, a grounded cover letter and drafted application answers."
-          />
-          <div className="space-y-6">
-            <TailoredCvSection jobId={job.id} />
-            <CoverLetterSection jobId={job.id} />
-            <ApplicationQASection jobId={job.id} />
-          </div>
+        <div id="application-package">
+          <PrepWorkspace jobId={job.id} />
         </div>
       </div>
     </PageShell>
@@ -369,338 +392,3 @@ const ScoreBar: React.FC<{ value: number }> = ({ value }) => (
     />
   </div>
 );
-
-const SectionHint: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <span className="text-[11px] text-ink-faint">{children}</span>
-);
-
-/* ------------------------------------------------------------------ */
-/* Tailored CV subsystem                                               */
-/* ------------------------------------------------------------------ */
-
-const TailoredCvSection: React.FC<{ jobId: string }> = ({ jobId }) => {
-  const [analysis, setAnalysis] = useState<ResumeAtsAnalysis | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const tailor = async () => {
-    setLoading(true); setError(null);
-    try { setAnalysis(await apiFetch<ResumeAtsAnalysis>('/resume-intelligence/tailor', { method: 'POST', body: JSON.stringify({ jobId }) })); }
-    catch (e) { setError(e instanceof Error ? e.message : 'Tailoring failed'); }
-    finally { setLoading(false); }
-  };
-  return (
-    <SectionCard
-      title="Job-specific ATS CV"
-      hint="Generated from your Master Profile — an immutable snapshot"
-      bodyClassName="space-y-4"
-    >
-      {error && <Alert tone="error">{error}</Alert>}
-      {analysis ? (
-        <>
-          <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
-            <Stat label="CV version" value={analysis.cvVersionId} mono />
-            <Stat label="Master revision" value={`r${analysis.profileRevision}`} />
-            <Stat label="Evidence claims" value={String(analysis.verifiedEvidence.length)} tone="text-forest-700" />
-            <Stat
-              label="Gaps"
-              value={analysis.gaps.length ? `${analysis.gaps.length}` : 'None'}
-              tone={analysis.gaps.length ? 'text-amber-700' : 'text-forest-700'}
-            />
-          </div>
-
-          {analysis.gaps.length > 0 && (
-            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900">
-              <span className="font-semibold">Gaps detected: </span>{analysis.gaps.join(' · ')}
-            </div>
-          )}
-
-          <div>
-            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-faint">
-              Matched verified evidence
-            </p>
-            <div className="flex flex-wrap gap-1.5">
-              {analysis.verifiedEvidence.map((item, index) => (
-                <StatusPill key={`${item.evidence_id}-${index}`} tone="emerald">
-                  {item.claim}
-                </StatusPill>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-cream-50 px-3.5 py-2.5 text-xs text-ink-soft">
-            <span>
-              ATS keyword coverage: <strong className="font-semibold text-forest-700">{String(analysis.atsReport.keyword_coverage ?? 0)}%</strong>
-            </span>
-            <span className="text-ink-faint">(heuristic, not a hiring guarantee)</span>
-          </div>
-
-          <div>
-            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-faint">
-              Tailored CV document
-            </p>
-            <DocumentPreview className="max-h-[32rem]">{analysis.resumeMarkdown}</DocumentPreview>
-          </div>
-
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-3.5">
-            <span className="text-[11px] text-ink-faint">
-              Immutable PDF artifact · SHA-256 {analysis.contentSha256.slice(0, 16)}…
-            </span>
-            <a
-              href={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1'}/resume-intelligence/cv/${analysis.cvVersionId}/artifact`}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-forest-900 px-4 py-2 text-xs font-semibold text-cream-50 transition-colors hover:bg-forest-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600 focus-visible:ring-offset-2"
-            >
-              Download exact CV PDF
-            </a>
-          </div>
-        </>
-      ) : (
-        <>
-          <p className="text-sm leading-relaxed text-ink-soft">
-            This never edits your Master Profile. It creates a distinct, provenance-linked CV tailored to this job.
-          </p>
-          <PrimaryButton onClick={tailor} disabled={loading}>
-            {loading ? 'Analysing verified evidence…' : 'Generate job-specific CV'}
-          </PrimaryButton>
-        </>
-      )}
-    </SectionCard>
-  );
-};
-
-const Stat: React.FC<{ label: string; value: string; mono?: boolean; tone?: string }> = ({
-  label,
-  value,
-  mono = false,
-  tone = 'text-ink',
-}) => (
-  <div>
-    <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-faint">{label}</p>
-    <p className={`mt-0.5 truncate font-semibold ${mono ? 'font-mono text-[11px]' : ''} ${tone}`} title={value}>
-      {value}
-    </p>
-  </div>
-);
-
-/* ------------------------------------------------------------------ */
-/* Cover letter subsystem                                              */
-/* ------------------------------------------------------------------ */
-
-const CoverLetterSection: React.FC<{ jobId: string }> = ({ jobId }) => {
-  const [coverLetters, setCoverLetters] = useState<CoverLetter[]>([]);
-  const [generating, setGenerating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchLetters = () => {
-    apiFetch<CoverLetter[]>(`/cover-letters/job/${jobId}`)
-      .then(setCoverLetters)
-      .catch(() => {});
-  };
-
-  useEffect(() => {
-    fetchLetters();
-  }, [jobId]);
-
-  const handleGenerate = async () => {
-    setGenerating(true);
-    setError(null);
-    try {
-      await apiFetch('/cover-letters/generate', {
-        method: 'POST',
-        body: JSON.stringify({ jobId }),
-      });
-      fetchLetters();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Generation failed');
-    } finally {
-      setGenerating(false);
-    }
-  };
-
-  const handleApproval = async (id: string, approved: boolean) => {
-    try {
-      await apiFetch(`/cover-letters/${id}/approval`, {
-        method: 'PUT',
-        body: JSON.stringify({ approved }),
-      });
-      fetchLetters();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Update failed');
-    }
-  };
-
-  const latest = coverLetters[0];
-
-  return (
-    <SectionCard
-      title="Cover letter"
-      hint="Every claim grounded in your verified evidence"
-      actions={latest ? <SectionHint>Version {latest.version + 1} available on regenerate</SectionHint> : undefined}
-      bodyClassName="space-y-4"
-    >
-      {error && <Alert tone="error">{error}</Alert>}
-
-      {latest ? (
-        <>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-sm font-semibold text-ink">{latest.title}</span>
-            <StatusPill tone={latest.isApproved ? 'emerald' : 'amber'}>
-              {latest.isApproved ? 'Approved' : 'Pending review'}
-            </StatusPill>
-          </div>
-
-          <div>
-            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-faint">
-              Letter document
-            </p>
-            <DocumentPreview className="max-h-[32rem]">{latest.bodyMarkdown}</DocumentPreview>
-          </div>
-
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-3.5">
-            <SecondaryButton onClick={() => handleApproval(latest.id, !latest.isApproved)}>
-              {latest.isApproved ? 'Mark unapproved' : 'Approve letter'}
-            </SecondaryButton>
-            <PrimaryButton onClick={handleGenerate} disabled={generating}>
-              {generating ? 'Regenerating…' : `Regenerate v${latest.version + 1}`}
-            </PrimaryButton>
-          </div>
-        </>
-      ) : (
-        <div className="space-y-3">
-          <p className="text-sm leading-relaxed text-ink-soft">
-            No cover letter generated yet for this job. Robin drafts it from your verified evidence — never invented claims.
-          </p>
-          <PrimaryButton onClick={handleGenerate} disabled={generating}>
-            {generating ? 'Synthesising with anti-fabrication checks…' : 'Generate ATS cover letter'}
-          </PrimaryButton>
-        </div>
-      )}
-    </SectionCard>
-  );
-};
-
-/* ------------------------------------------------------------------ */
-/* Application Q&A subsystem                                           */
-/* ------------------------------------------------------------------ */
-
-const ApplicationQASection: React.FC<{ jobId: string }> = ({ jobId }) => {
-  const [answers, setAnswers] = useState<ApplicationAnswer[]>([]);
-  const [questionText, setQuestionText] = useState('');
-  const [drafting, setDrafting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchAnswers = () => {
-    apiFetch<ApplicationAnswer[]>(`/application-answers/job/${jobId}`)
-      .then(setAnswers)
-      .catch(() => {});
-  };
-
-  useEffect(() => {
-    fetchAnswers();
-  }, [jobId]);
-
-  const handleDraft = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!questionText.trim()) return;
-    setDrafting(true);
-    setError(null);
-    try {
-      await apiFetch('/application-answers/draft', {
-        method: 'POST',
-        body: JSON.stringify({ jobId, questionText }),
-      });
-      setQuestionText('');
-      fetchAnswers();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Drafting failed');
-    } finally {
-      setDrafting(false);
-    }
-  };
-
-  return (
-    <SectionCard
-      title="Application Q&A"
-      hint="Drafted from verified facts only"
-      bodyClassName="space-y-4"
-    >
-      {error && <Alert tone="error">{error}</Alert>}
-
-      <form onSubmit={handleDraft} className="flex flex-col gap-3 sm:flex-row sm:items-end">
-        <div className="flex-1">
-          <label htmlFor="qa-question" className="mb-1 block text-xs font-semibold text-ink-soft">
-            Screening question
-          </label>
-          <input
-            id="qa-question"
-            type="text"
-            value={questionText}
-            onChange={(e) => setQuestionText(e.target.value)}
-            placeholder="e.g. Why do you want to work here?"
-            className="w-full rounded-lg border border-line bg-surface px-3.5 py-2 text-sm text-ink placeholder-ink-faint transition-colors focus:border-forest-600 focus:outline-none focus:ring-2 focus:ring-forest-600/20"
-          />
-        </div>
-        <button
-          type="submit"
-          disabled={drafting || !questionText.trim()}
-          className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-line bg-surface px-4 py-2 text-sm font-semibold text-ink-soft transition-colors hover:border-forest-300 hover:bg-forest-50 hover:text-forest-900 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600 focus-visible:ring-offset-2"
-        >
-          {drafting ? 'Drafting from verified facts…' : 'Draft grounded answer'}
-        </button>
-      </form>
-
-      {answers.length > 0 ? (
-        <div className="space-y-3 border-t border-line pt-4">
-          {answers.map((ans) => (
-            <div key={ans.id} className="rounded-lg border border-line bg-cream-50/70 p-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-sm font-semibold text-ink">{ans.questionText}</span>
-                <StatusPill tone={ans.status === 'ANSWERED' ? 'emerald' : ans.status === 'HARD_STOP' ? 'red' : 'amber'}>
-                  {ans.status}
-                </StatusPill>
-              </div>
-              <p className="mt-2 text-sm leading-relaxed text-ink-soft">{ans.answerText}</p>
-              {ans.validationNotes?.issues && ans.validationNotes.issues.length > 0 && (
-                <ul className="mt-2 space-y-0.5 border-t border-line pt-2 text-xs text-amber-800">
-                  {ans.validationNotes.issues.map((issue, i) => (
-                    <li key={i}>• {issue}</li>
-                  ))}
-                </ul>
-              )}
-              {ans.status === 'ANSWERED' && (
-                <button
-                  type="button"
-                  onClick={async () => {
-                    setError(null);
-                    try {
-                      await apiFetch(`/application-answers/${ans.id}`, {
-                        method: 'PUT',
-                        body: JSON.stringify({ confirmForAutofill: !ans.humanConfirmed }),
-                      });
-                      fetchAnswers();
-                    } catch (err: unknown) {
-                      setError(err instanceof Error ? err.message : 'Confirmation update failed');
-                    }
-                  }}
-                  className="mt-3 rounded-md border border-line bg-surface px-3 py-1.5 text-xs font-semibold text-ink-soft hover:border-forest-400"
-                >
-                  {ans.humanConfirmed ? 'Remove autofill confirmation' : 'I reviewed this answer — allow autofill'}
-                </button>
-              )}
-              <p className="mt-2 text-[11px] text-ink-faint">
-                {ans.humanConfirmed ? 'Explicitly reviewed by you; eligible for exact-question autofill.'
-                  : 'Draft only. It will not be autofilled until you review and confirm it.'}
-              </p>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <p className="border-t border-line pt-4 text-sm leading-relaxed text-ink-muted">
-          Drafted answers appear here. Robin only answers from your verified Master Profile evidence —
-          anything it cannot support is flagged for your input.
-        </p>
-      )}
-    </SectionCard>
-  );
-};

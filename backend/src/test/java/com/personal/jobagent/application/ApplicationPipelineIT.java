@@ -151,6 +151,21 @@ class ApplicationPipelineIT {
 , UUID.randomUUID(), profileId, mode);
     }
 
+    /**
+     * Phase 7.2: automatic creation in CONTROLLED_AUTO now requires an
+     * explicitly enabled rule. This IT's deployment posture therefore has to
+     * opt in explicitly; only APPLY-level matches reach the decision engine,
+     * so the threshold sits at the APPLY floor.
+     */
+    private void seedEnabledApprovalRule(UUID profileId, int minScore) {
+        jdbc.update("""
+                insert into user_approval_rules (id, profile_id, auto_approve_enabled, min_score)
+                values (?, ?, true, ?)
+                on conflict (profile_id) do update set auto_approve_enabled = true,
+                    min_score = excluded.min_score, updated_at = now()
+                """, UUID.randomUUID(), profileId, minScore);
+    }
+
     private void seedSourceAndJobs() {
         jdbc.update("""
                 insert into job_sources (id, kind, org_identifier, display_name, capabilities, policy)
@@ -194,6 +209,7 @@ class ApplicationPipelineIT {
         seedUser(USER_B, PROFILE_B, "pipeline-b@example.com", "PasswordB1!");
         seedSkills(PROFILE_A, List.of("Java", "Spring"));
         seedPreference(PROFILE_A, "CONTROLLED_AUTO");
+        seedEnabledApprovalRule(PROFILE_A, 70);
         seedSourceAndJobs();
 
         pipeline.onJobIngested(JOB_APPLY, "INSERTED");
@@ -424,6 +440,112 @@ class ApplicationPipelineIT {
         return jdbc.queryForObject(
                 "select id from applications where profile_id = ? and job_id = ? and status not in ('FAILED','WITHDRAWN')",
                 UUID.class, PROFILE_A, jobId);
+    }
+
+    /**
+     * Phase 7.2 safety proof: CONTROLLED_AUTO with no rule at all must NOT
+     * create an application. The match still reaches the decision engine, but
+     * the decision fails closed to NEEDS_REVIEW because "auto-apply
+     * everything" requires an explicit, enabled rule.
+     */
+    @Test
+    @Order(8)
+    void controlledAutoWithoutARuleQueuesForReviewInsteadOfAutoApplying() {
+        UUID userC = UUID.fromString("00000000-0000-7000-8000-00000000ab10");
+        UUID profileC = UUID.fromString("00000000-0000-7000-8000-00000000ab11");
+        UUID jobC = UUID.fromString("00000000-0000-7000-8000-00000000ab31");
+
+        seedUser(userC, profileC, "pipeline-c@example.com", "PasswordC1!");
+        seedSkills(profileC, List.of("Java", "Spring"));
+        seedPreference(profileC, "CONTROLLED_AUTO");
+        // Deliberately NO user_approval_rules row for profile C.
+        jdbc.update("""
+                insert into jobs (id, source_id, external_id, dedup_key, company_name_raw, title,
+                                  location_raw, description_text, skills_extracted, status, content_hash,
+                                  application_url)
+                values (?, ?, ?, ?, 'Pipeline Corp', 'Java Platform Engineer', 'London',
+                        'Java platform role', '{Java,Spring}'::text[], 'DISCOVERED', ?, ?)
+                on conflict (id) do nothing
+                """, jobC, SOURCE, "ext-" + jobC, "dedup-" + jobC, "hash-" + jobC,
+                "https://example.com/apply/" + jobC);
+
+        pipeline.onJobIngested(jobC, "INSERTED");
+
+        Awaitility.await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
+            // queryForList (not queryForMap) so a not-yet-written row is a
+            // retryable assertion failure rather than an immediate exception.
+            List<Map<String, Object>> decisions = jdbc.queryForList("""
+                    select decision, reason from application_decisions
+                    where profile_id = ? and job_id = ?
+                    """, profileC, jobC);
+            assertThat(decisions).hasSize(1);
+            assertThat(decisions.get(0).get("decision")).isEqualTo("NEEDS_REVIEW");
+            assertThat(String.valueOf(decisions.get(0).get("reason")))
+                    .contains("requires an enabled approval rule");
+        });
+        assertThat(countLiveApplications(profileC, jobC)).isZero();
+    }
+
+    /**
+     * Phase 7.3 end to end: an unreadable rule must (a) queue for human review
+     * rather than auto-apply, and (b) raise one durable, owner-scoped alert so
+     * the owner learns their auto-approval has stopped working.
+     *
+     * <p>The failure is injected by renaming the column the lookup selects, which
+     * makes the decision-time SELECT fail exactly as a real schema/database fault
+     * would. The column is restored in a finally block.
+     */
+    @Test
+    @Order(9)
+    void anUnreadableRuleQueuesForReviewAndRaisesOneOwnerAlert() {
+        UUID userD = UUID.fromString("00000000-0000-7000-8000-00000000ac10");
+        UUID profileD = UUID.fromString("00000000-0000-7000-8000-00000000ac11");
+        UUID jobD = UUID.fromString("00000000-0000-7000-8000-00000000ac31");
+
+        seedUser(userD, profileD, "pipeline-d@example.com", "PasswordD1!");
+        seedSkills(profileD, List.of("Java", "Spring"));
+        seedPreference(profileD, "CONTROLLED_AUTO");
+        // An enabled rule exists, so the only reason not to auto-apply is that it
+        // cannot be read.
+        seedEnabledApprovalRule(profileD, 70);
+        jdbc.update("""
+                insert into jobs (id, source_id, external_id, dedup_key, company_name_raw, title,
+                                  location_raw, description_text, skills_extracted, status, content_hash,
+                                  application_url)
+                values (?, ?, ?, ?, 'Pipeline Corp', 'Java Platform Engineer', 'London',
+                        'Java platform role', '{Java,Spring}'::text[], 'DISCOVERED', ?, ?)
+                on conflict (id) do nothing
+                """, jobD, SOURCE, "ext-" + jobD, "dedup-" + jobD, "hash-" + jobD,
+                "https://example.com/apply/" + jobD);
+
+        jdbc.execute("alter table user_approval_rules rename column min_score to min_score_p73_probe");
+        try {
+            pipeline.onJobIngested(jobD, "INSERTED");
+
+            Awaitility.await().atMost(Duration.ofSeconds(25)).untilAsserted(() -> {
+                List<Map<String, Object>> decisions = jdbc.queryForList("""
+                        select decision, reason from application_decisions
+                        where profile_id = ? and job_id = ?
+                        """, profileD, jobD);
+                assertThat(decisions).hasSize(1);
+                assertThat(decisions.get(0).get("decision")).isEqualTo("NEEDS_REVIEW");
+                assertThat(String.valueOf(decisions.get(0).get("reason")))
+                        .contains("could not be loaded");
+            });
+            assertThat(countLiveApplications(profileD, jobD)).isZero();
+
+            // The alert is emitted through the outbox fan-out, so it lands a moment
+            // after the decision itself.
+            Awaitility.await().atMost(Duration.ofSeconds(25)).untilAsserted(() -> {
+                Integer alerts = jdbc.queryForObject("""
+                        select count(*) from notifications
+                        where profile_id = ? and category = 'APPROVAL_RULE_UNAVAILABLE'
+                        """, Integer.class, profileD);
+                assertThat(alerts).isEqualTo(1);
+            });
+        } finally {
+            jdbc.execute("alter table user_approval_rules rename column min_score_p73_probe to min_score");
+        }
     }
 }
 

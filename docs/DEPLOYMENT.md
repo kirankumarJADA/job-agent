@@ -155,6 +155,18 @@ FREE-TIER: Upstash free tier is pay-per-command with a daily cap.
      you are willing to share with the people you want to invite; treat it as a
      shared secret and rotate it by changing the value and redeploying.
    - Optional LLM: `NIM_BASE_URL`, `NIM_API_KEY`, `GEMINI_API_KEY`
+   - **Robin-managed email (Phase 8.5, optional until employer registration is
+     used)** — `APP_MANAGED_MAIL_DOMAIN` (a receive-only subdomain whose MX
+     records point at Mailgun), `MAILGUN_WEBHOOK_SIGNING_KEY` (Mailgun → Settings →
+     API Security → HTTP webhook signing key; not the API key) and
+     `APP_SECRETS_KEY` (`openssl rand -base64 32`; also encrypts employer
+     credentials). Optional: `MAILGUN_WEBHOOK_MAX_AGE_SECONDS` (default 900),
+     `APP_MANAGED_MAIL_CONTENT_RETENTION_MINUTES` (default 120),
+     `APP_MANAGED_MAIL_METADATA_RETENTION_DAYS` (default 30),
+     `APP_MAILBOX_VERIFICATION_WINDOW_MINUTES` (default 30). Until all three are
+     set **and** a signed delivery has arrived, no address is offered for
+     registration. Mailgun route, DNS records and the end-to-end delivery check
+     are in `docs/ROBIN_BUILD_STATUS.md` ("Managed email — external setup").
 3. Health check path: `/api/v1/system/health` (Render defaults to `/`;
    set it explicitly).
 4. Port: 8080 (Render injects PORT; this app binds 8080 — set the health
@@ -237,6 +249,11 @@ mailbox unless a plan is explicitly supplied. Environment:
 
 - `WORKER_EVENT_URL=https://<render-backend>/api/v1/automation/events`
 - `WORKER_EVENT_TOKEN=<same value as Render backend>`
+- `WORKER_REGISTRATION_IDENTITY_URL=https://<render-backend>/api/v1/mailbox-verification/registration-identity`
+  and `WORKER_VERIFICATION_URL=https://<render-backend>/api/v1/mailbox-verification/resolve`
+  (employer account lifecycle: which address to register with — Robin-managed
+  by default — and the verification code for it; both bearer-authenticated
+  with `WORKER_EVENT_TOKEN`). Without them the lifecycle pauses for the human.
 - `WORKER_STATE_PATH=/data/worker-state.json`, `WORKER_ARTIFACT_DIR=/data/artifacts`
   (Render disk or ephemeral — state is a crash-recovery cache, not the
   source of truth; the backend DB owns durable state).

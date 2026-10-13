@@ -115,6 +115,24 @@ public class ApplicationAnswerService {
             }
         }
 
+        // Phase 8.1: the shared deterministic fact checks (figures, years of
+        // experience, degrees, certifications, work authorisation, clearance)
+        // also apply to answers. Year checks above are kept as they were; the
+        // shared report's date findings are not duplicated.
+        var profileRecord = profileRepository.findById(profileId);
+        com.personal.jobagent.documents.DocumentFactValidator.Report factReport =
+                new com.personal.jobagent.documents.DocumentFactValidator().validate(rawAnswer,
+                        new com.personal.jobagent.documents.DocumentFactValidator.CandidateFacts(skills, experiences,
+                                education, projects, profileRepository.findCertifications(profileId),
+                                profileRecord.map(com.personal.jobagent.profile.ProfileRecord::workEligibility).orElse(Map.of()),
+                                profileRecord.map(com.personal.jobagent.profile.ProfileRecord::professionalSummary).orElse(null)),
+                        new com.personal.jobagent.documents.DocumentFactValidator.JobContext(job.companyNameRaw(), job.skillsExtracted()));
+        factReport.findings().stream()
+                .filter(f -> f.severity() == com.personal.jobagent.documents.DocumentFactValidator.Severity.BLOCKER)
+                .filter(f -> !"UNSUPPORTED_DATE".equals(f.code()))
+                .map(com.personal.jobagent.documents.DocumentFactValidator.Finding::message)
+                .forEach(issues::add);
+
         String status = "ANSWERED";
         BigDecimal confidence = BigDecimal.valueOf(0.95);
 
@@ -129,6 +147,7 @@ public class ApplicationAnswerService {
         Map<String, Object> validationNotes = new HashMap<>();
         validationNotes.put("question_type", questionType);
         validationNotes.put("issues", issues);
+        validationNotes.put("fact_validation", factReport.toMap());
         validationNotes.put("verified_experiences_count", experiences.size());
         validationNotes.put("verified_skills_count", skills.size());
 

@@ -71,7 +71,9 @@ class InspectionPlanBridgeTest {
                 pipelineService, inspectionPlanService, greenhousePlanService,
                 resumeService, coverLetterService, answerService,
                 jobRepository, notifications, db, new ObjectMapper(),
-                new com.personal.jobagent.common.AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
+                new com.personal.jobagent.common.AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()),
+                mock(com.personal.jobagent.application.ApplicationDecisionService.class),
+                mock(com.personal.jobagent.audit.AuditLogWriter.class));
 
         // Application exists
         when(db.queryForObject(contains("count(*) from applications"), eq(Integer.class), eq(APP_ID)))

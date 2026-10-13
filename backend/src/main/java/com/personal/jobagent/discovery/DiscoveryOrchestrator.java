@@ -28,6 +28,8 @@ public class DiscoveryOrchestrator {
     private final List<String> secondaryPriority;
     private final GreenhouseProvider greenhouseProvider;
     private final AshbyProvider ashbyProvider;
+    private final int maxSecondaryParallel;
+    private final long secondaryTimeoutMs;
 
     @Autowired
     public DiscoveryOrchestrator(List<ScraperProvider> providers, JobDiscoveryService ingestion,
@@ -35,16 +37,38 @@ public class DiscoveryOrchestrator {
                                  DiscoveryTelemetry telemetry,
                                  @Value("${app.discovery.comparison-conflict-threshold:0.20}") double conflictThreshold,
                                  @Value("${app.discovery.primary-confidence-threshold:0.60}") double primaryConfidenceThreshold,
-                                 @Value("${app.discovery.secondary-priority:firecrawl,apify,browserless,scraperapi,scrapingbee}") String secondaryPriority) {
+                                 @Value("${app.discovery.secondary-priority:firecrawl,apify,browserless,scraperapi,scrapingbee}") String secondaryPriority,
+                                 @Value("${app.discovery.max-secondary-parallel:3}") int maxSecondaryParallel,
+                                 @Value("${app.discovery.secondary-timeout-ms:30000}") long secondaryTimeoutMs) {
         this(providers, ingestion, dedup, comparison, telemetry, conflictThreshold, primaryConfidenceThreshold,
-                secondaryPriority, new GreenhouseProvider(), new AshbyProvider());
+                secondaryPriority, new GreenhouseProvider(), new AshbyProvider(), maxSecondaryParallel, secondaryTimeoutMs);
+    }
+
+    /** Backward-compatible package-private constructor for tests that don't need parallel config. */
+    DiscoveryOrchestrator(List<ScraperProvider> providers, JobDiscoveryService ingestion,
+                          JobDeduplicationService dedup, ExtractionComparisonService comparison,
+                          DiscoveryTelemetry telemetry, double conflictThreshold,
+                          double primaryConfidenceThreshold, String secondaryPriority,
+                          GreenhouseProvider greenhouseProvider, AshbyProvider ashbyProvider) {
+        this(providers, ingestion, dedup, comparison, telemetry, conflictThreshold,
+                primaryConfidenceThreshold, secondaryPriority, greenhouseProvider, ashbyProvider, 3, 30_000L);
+    }
+
+    /** Minimal package-private constructor for tests that don't use ATS board connectors. */
+    DiscoveryOrchestrator(List<ScraperProvider> providers, JobDiscoveryService ingestion,
+                          JobDeduplicationService dedup, ExtractionComparisonService comparison,
+                          DiscoveryTelemetry telemetry, double conflictThreshold,
+                          double primaryConfidenceThreshold, String secondaryPriority) {
+        this(providers, ingestion, dedup, comparison, telemetry, conflictThreshold,
+                primaryConfidenceThreshold, secondaryPriority, new GreenhouseProvider(), new AshbyProvider(), 3, 30_000L);
     }
 
     DiscoveryOrchestrator(List<ScraperProvider> providers, JobDiscoveryService ingestion,
                           JobDeduplicationService dedup, ExtractionComparisonService comparison,
                           DiscoveryTelemetry telemetry, double conflictThreshold,
                           double primaryConfidenceThreshold, String secondaryPriority,
-                          GreenhouseProvider greenhouseProvider, AshbyProvider ashbyProvider) {
+                          GreenhouseProvider greenhouseProvider, AshbyProvider ashbyProvider,
+                          int maxSecondaryParallel, long secondaryTimeoutMs) {
         this.providers = providers;
         this.ingestion = ingestion;
         this.dedup = dedup;
@@ -56,6 +80,8 @@ public class DiscoveryOrchestrator {
                 .map(String::trim).filter(value -> !value.isBlank()).toList();
         this.greenhouseProvider = greenhouseProvider;
         this.ashbyProvider = ashbyProvider;
+        this.maxSecondaryParallel = maxSecondaryParallel > 0 ? maxSecondaryParallel : 3;
+        this.secondaryTimeoutMs = secondaryTimeoutMs > 0 ? secondaryTimeoutMs : 30_000L;
     }
 
     /** Generic URL discovery path; structured ATS connectors are intentionally not mixed into it. */
@@ -151,6 +177,15 @@ public class DiscoveryOrchestrator {
         }
     }
 
+    /**
+     * Fan out secondary providers in parallel, respecting the configured
+     * concurrency limit and per-provider timeout.  Results are collected
+     * from every provider that responds within the deadline — we no longer
+     * stop at the first success, because multiple secondary confirmations
+     * improve extraction confidence.  Providers are still sorted by
+     * priority so that, if the concurrency limit is smaller than the
+     * available set, the highest-priority ones run first.
+     */
     private List<ScraperProvider.ExtractionResult> runSecondaryByPriority(List<ScraperProvider> selected,
                                                                            String type, String url,
                                                                            String correlationId) {
@@ -158,14 +193,41 @@ public class DiscoveryOrchestrator {
             int index = secondaryPriority.indexOf(provider.providerId());
             return index < 0 ? Integer.MAX_VALUE : index;
         })).toList();
-        List<ScraperProvider.ExtractionResult> results = new ArrayList<>();
-        for (ScraperProvider provider : ordered) {
-            ScraperProvider.ExtractionResult result = provider.extract(
-                    new ScraperProvider.DiscoveryRequest(url, type, correlationId, Map.of()));
-            results.add(result);
-            if (result.successful()) break;
+
+        // Apply concurrency cap — only the top-N providers by priority run
+        List<ScraperProvider> capped = maxSecondaryParallel > 0 && ordered.size() > maxSecondaryParallel
+                ? ordered.subList(0, maxSecondaryParallel) : ordered;
+
+        if (capped.isEmpty()) return List.of();
+
+        ExecutorService executor = Executors.newFixedThreadPool(capped.size());
+        try {
+            List<CompletableFuture<ScraperProvider.ExtractionResult>> futures = capped.stream()
+                    .map(provider -> CompletableFuture.supplyAsync(() -> {
+                        try {
+                            return provider.extract(
+                                    new ScraperProvider.DiscoveryRequest(url, type, correlationId, Map.of()));
+                        } catch (Exception e) {
+                            // Defensive: provider.extract() should never throw, but guard anyway
+                            return new ScraperProvider.ExtractionResult(
+                                    provider.providerId(), correlationId,
+                                    java.time.Instant.now(), java.time.Instant.now(),
+                                    List.of(), 0.0, e.getClass().getSimpleName(), 0);
+                        }
+                    }, executor)
+                    .orTimeout(secondaryTimeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    .exceptionally(ex -> new ScraperProvider.ExtractionResult(
+                            provider.providerId(), correlationId,
+                            java.time.Instant.now(), java.time.Instant.now(),
+                            List.of(), 0.0, "TIMEOUT", 0)))
+                    .toList();
+
+            return futures.stream()
+                    .map(CompletableFuture::join)
+                    .toList();
+        } finally {
+            executor.shutdown();
         }
-        return results;
     }
 
     private static List<ScraperProvider.ExtractedJob> successfulJobs(List<ScraperProvider.ExtractionResult> results) {

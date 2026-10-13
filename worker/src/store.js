@@ -74,6 +74,13 @@ export class StateStore {
     this.#save();
   }
 
+  /** Phase 8.5: the employer account identity (address and mailbox kind) for this plan. */
+  identity(planId, value) {
+    const plan = this.state.plans[planId];
+    plan.identity = value;
+    this.#save();
+  }
+
   greenhouseExpected(planId, entries) {
     const plan = this.state.plans[planId];
     plan.greenhouseExpected = entries;

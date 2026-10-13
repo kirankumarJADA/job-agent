@@ -1,0 +1,142 @@
+{
+ "code": "success",
+ "data": [
+  {
+   "Remote_Job": "Yes",
+   "Posting_Title": "Intern – Multi-Department (EdTech | Technology, Sales, Marketing & Operations)",
+   "Is_Locked": false,
+   "City": "",
+   "Industry": "Education",
+   "Job_Description": "The intern will provide cross-functional support across multiple departments, including Technology (App/Web Development, AI Tools, Data science, Data Analytics), Sales, Operations, Digital Marketing, and Quality Assurance. Responsibilities include assisting with application and website development and testing, supporting sales activities such as lead management and follow-ups, contributing to digital marketing initiatives, managing day-to-day operational tasks, maintaining accurate records, monitoring quality standards, ensuring adherence to standard operating procedures (SOPs), and preparing regular reports. Requirements Strong verbal and written communication skills Basic knowledge of App and Web Development concepts Familiarity with software testing and Quality Assurance processes Basic technical troubleshooting skills Proficiency in MS Excel / Google Sheets (data entry, basic formulas, reporting) Understanding of Digital Marketing fundamentals (social media, email, content basics) Ability to support Sales activities (lead management, follow-ups, CRM basics) Attention to detail and accuracy in record-keeping Ability to follow Standard Operating Procedures (SOPs) and quality standards Basic reporting and documentation skills Time management and ability to handle multiple tasks across departments Proactive learning mindset and willingness to adapt in a fast-paced EdTech environment Team collaboration and cross-functional coordination skills Benefits Hands-on experience acros",
+   "Work_Experience": "0",
+   "Job_Type": "Full time",
+   "Job_Opening_Name": "Intern – Multi-Department (EdTech | Technology, Sales, Marketing & Operations)",
+   "State": "",
+   "Country": "",
+   "$url": "https://jobs.sehyog.co.uk/jobs/Careers/167689000000579270/Intern-Multi-Department-EdTech-Technology-Sales-Marketing-Operations?source=CareerSite",
+   "Zip_Code": "",
+   "id": "167689000000579270",
+   "Publish": true,
+   "Date_Opened": "02/06/2026",
+   "Keep_on_Career_Site": false
+  },
+  {
+   "Remote_Job": "Yes",
+   "Posting_Title": "Spanish, German, French Tutor (UK Curriculum)",
+   "Is_Locked": false,
+   "City": "",
+   "Industry": "Education",
+   "Job_Description": "SEHYOG Academy is seeking a qualified and passionate Spanish Language Teacher to deliver high-quality instruction aligned with the UK Curriculum (GCSE and AS/A-Level standards). The candidate will be responsible for planning, delivering, and assessing engaging Spanish lessons that develop students’ proficiency in listening, speaking, reading, and writing. The role requires strong subject expertise, familiarity with examination board (AQA, OCR, Edexcel, Cambridge) requirements, and the ability to prepare students for academic success in external examinations. Requirements Educational Qualifications Bachelor’s or Master’s degree in: Spanish Language Modern Foreign Languages Linguistics Or related field Teaching qualification (PGCE, B.Ed., or equivalent) preferred. Certification in UK Curriculum teaching (desirable).",
+   "Work_Experience": "4-5 years",
+   "Job_Type": "Full time",
+   "Job_Opening_Name": "Spanish, German, French Tutor (UK Curriculum)",
+   "State": "",
+   "Country": "",
+   "$url": "https://jobs.sehyog.co.uk/jobs/Careers/167689000000776490/Spanish-German-French-Tutor-UK-Curriculum?source=CareerSite",
+   "Zip_Code": "",
+   "id": "167689000000776490",
+   "Publish": true,
+   "Date_Opened": "02/21/2026",
+   "Keep_on_Career_Site": false
+  },
+  {
+   "Remote_Job": "Yes",
+   "Posting_Title": "UK - Online English Tutor (KS3, 11+ & GCSE) – Remote",
+   "Is_Locked": false,
+   "City": "",
+   "Industry": "Education",
+   "Job_Description": "We are expanding and looking for passionate, experienced English Tutors to support students across the UK. Subjects include: • KS3 English • 11+ 12+ 13+ English Preparation • GCSE English Language & Literature • Creative Writing • Verbal Reasoning Key Areas for 11+, KS3 & GCSE: • Reading comprehension, creative writing & analytical skills • Essay and extended writing techniques • Grammar, punctuation & vocabulary development • Shakespeare, poetry & modern texts • Creative and transactional writing • Exam techniques, revision strategies & coursework support Entrance Exam Board Experience: CSSE , FSCE , GL Assessment Independent school entrance exams AQA, OCR, Edexcel Requirements Key Requirements: ✔ Strong knowledge of the UK curriculum for 11+, KS3 & GCSE English ✔ Previous tutoring or teaching experience ✔ Excellent communication skills ✔ Ability to deliver engaging, student-focused online lessons ✔ Professional online teaching setup with reliable internet ✔ Commitment to safeguarding and child protection Successful applicants will be required to complete safer recruitment checks, including an Enhanced DBS check and references. Desirable: • Experience preparing students for grammar and independent school entrance exams • UK school or tutoring background • Safeguarding training • Strong creative writing teaching skills Benefits What we offer: • Consistent student allocation • Flexible remote working • Supportive team environment • Long-term growth opportunities We are committ",
+   "Work_Experience": "5+ years",
+   "Job_Type": "Contract",
+   "Job_Opening_Name": "UK - Online English Tutor (KS3, 11+ & GCSE) – Remote",
+   "State": "",
+   "Country": "",
+   "$url": "https://jobs.sehyog.co.uk/jobs/Careers/167689000001363025/UK-Online-English-Tutor-KS3-11-GCSE-Remote?source=CareerSite",
+   "Zip_Code": "",
+   "id": "167689000001363025",
+   "Publish": true,
+   "Date_Opened": "05/23/2026",
+   "Keep_on_Career_Site": false
+  }
+ ],
+ "info": {
+  "layout": 3,
+  "keys": {
+   "_job": "{0} Job",
+   "_no_result": "There are no results that match your search.",
+   "_closed_jobs": "Position filled",
+   "_jobs": "{0} Jobs",
+   "_search2": "City, state/province or country",
+   "_search1": "Job title or skill",
+   "_search3": "Search",
+   "_all": "All",
+   "_remote_job_title": "Remote Job"
+  },
+  "page_name": "Careers",
+  "brand_color": "#6875E2",
+  "fields": [
+   {
+    "api_name": "Job_Opening_Name",
+    "field_label": "Posting Title"
+   },
+   {
+    "api_name": "City",
+    "field_label": "City"
+   },
+   {
+    "api_name": "State",
+    "field_label": "State/Province"
+   },
+   {
+    "api_name": "Country",
+    "field_label": "Country"
+   },
+   {
+    "api_name": "Industry",
+    "field_label": "Industry"
+   },
+   {
+    "api_name": "Job_Type",
+    "field_label": "Job Type"
+   },
+   {
+    "api_name": "Work_Experience",
+    "field_label": "Work Experience"
+   },
+   {
+    "api_name": "Date_Opened",
+    "field_label": "Date Opened"
+   },
+   {
+    "api_name": "Job_Description",
+    "field_label": "Job Description"
+   },
+   {
+    "api_name": "Remote_Job",
+    "field_label": "Remote Job"
+   }
+  ],
+  "facets": [
+   {
+    "api_name": "Remote_Job",
+    "field_label": "Remote Job"
+   },
+   {
+    "api_name": "Job_Type",
+    "field_label": "Job Type"
+   },
+   {
+    "api_name": "Industry",
+    "field_label": "Industry"
+   },
+   {
+    "api_name": "City",
+    "field_label": "City"
+   },
+   {
+    "api_name": "Country",
+    "field_label": "Country"
+   }
+  ]
+ }
+}

@@ -1,6 +1,7 @@
 package com.personal.jobagent.identity;
 
 import com.personal.jobagent.common.ApiError;
+import com.personal.jobagent.mailbox.managed.ManagedMailboxService;
 import com.personal.jobagent.profile.ProfileRecord;
 import com.personal.jobagent.profile.ProfileRepository;
 import com.personal.jobagent.security.AppUserDetails;
@@ -37,11 +38,14 @@ public class IdentityController {
     private final IdentityService service;
     private final CredentialVault vault;
     private final ProfileRepository profileRepository;
+    private final ManagedMailboxService managedMail;
 
-    public IdentityController(IdentityService service, CredentialVault vault, ProfileRepository profileRepository) {
+    public IdentityController(IdentityService service, CredentialVault vault, ProfileRepository profileRepository,
+                              ManagedMailboxService managedMail) {
         this.service = service;
         this.vault = vault;
         this.profileRepository = profileRepository;
+        this.managedMail = managedMail;
     }
 
     public record IdentityRequest(UUID profileId, String email, String domain, String credential) {
@@ -56,15 +60,29 @@ public class IdentityController {
         if (profileId == null) {
             return notFound(httpRequest, "No profile exists for this account.");
         }
-        if (request.email() == null || request.domain() == null) {
+        if (request.domain() == null || request.domain().isBlank()) {
             return ResponseEntity.badRequest().body(ApiError.of(400, "Bad Request",
-                    "email and domain are required", httpRequest.getRequestURI(), correlationId()));
+                    "domain is required", httpRequest.getRequestURI(), correlationId()));
+        }
+        // Phase 8.5: Robin-managed email is the default registration address. An
+        // explicit email is still honoured; without one, the managed address is
+        // used only when it is proven to receive mail.
+        String email = request.email();
+        if (email == null || email.isBlank()) {
+            var managed = managedMail.usableAddress(profileId);
+            if (managed.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.CONFLICT).body(ApiError.of(409, "Conflict",
+                        "Robin-managed email is not ready yet; provide an email or finish managed-mail setup",
+                        httpRequest.getRequestURI(), correlationId()));
+            }
+            email = managed.get().address();
         }
 
         String credentialRef = request.credential() == null
                 ? null
                 : vault.store(request.credential(), Duration.ofHours(1));
-        return ResponseEntity.ok(Map.of("identityId", service.create(profileId, request.email(), request.domain(), credentialRef)));
+        return ResponseEntity.ok(Map.of("identityId", service.create(profileId, email, request.domain(), credentialRef),
+                "email", email));
     }
 
     @PostMapping("/sessions")

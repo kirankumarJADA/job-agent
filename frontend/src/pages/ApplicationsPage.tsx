@@ -1,6 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../api/client';
 import { ApplicationSummary, ApplicationTimelineEvent, AutomationPackageView } from '../types';
+import { ApplicationPrepStatus } from '../components/ApplicationPrepStatus';
+import { ApplyWorkspace } from '../components/ApplyWorkspace';
+import { ApplicationTrackPanel } from '../components/ApplicationTrackPanel';
+import { GmailMailboxCard } from '../components/GmailMailboxCard';
+import { RobinMailboxCard } from '../components/RobinMailboxCard';
+import { TrackReviewQueue } from '../components/TrackReviewQueue';
+import { stageTone } from '../components/trackShared';
 import {
   EmptyState,
   Loading,
@@ -18,6 +25,11 @@ import {
  * them from APPLY match decisions and preparation attaches the tailored CV,
  * cover letter and draft answers). Phase 2 adds automation plan status:
  * inspection plans are created after preparation and executed by the worker.
+ *
+ * Phase 8.3 (TRACK): the status pill shows the status Robin derives from
+ * evidence (`track.label`), never a guessed one; the recorded workflow status
+ * is still shown as such. Each card has a timeline/evidence panel, and
+ * employer messages awaiting the candidate are listed above the queue.
  */
 export const ApplicationsPage: React.FC = () => {
   const [applications, setApplications] = useState<ApplicationSummary[]>([]);
@@ -26,6 +38,10 @@ export const ApplicationsPage: React.FC = () => {
   const [reviewingPlan, setReviewingPlan] = useState<string | null>(null);
   const [approvingPlan, setApprovingPlan] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  // TRACK refresh keys: a change made in one place reloads the other views of
+  // the same evidence without collapsing them.
+  const [queueKey, setQueueKey] = useState(0);
+  const [panelsKey, setPanelsKey] = useState(0);
 
   const fetchApplications = useCallback(async () => {
     setLoading(true);
@@ -40,6 +56,33 @@ export const ApplicationsPage: React.FC = () => {
       setLoading(false);
     }
   }, []);
+
+  /** Re-reads the list (and its TRACK summaries) without unmounting open panels. */
+  const refreshQuietly = useCallback(async () => {
+    try {
+      const res = await apiFetch<{ items: ApplicationSummary[] }>('/applications');
+      setApplications(res.items || []);
+    } catch {
+      // Keep the rows already shown; each panel reports its own state.
+    }
+  }, []);
+
+  const onPanelChanged = useCallback(() => {
+    setQueueKey((k) => k + 1);
+    void refreshQuietly();
+  }, [refreshQuietly]);
+
+  const onQueueChanged = useCallback(() => {
+    setPanelsKey((k) => k + 1);
+    void refreshQuietly();
+  }, [refreshQuietly]);
+
+  /** A mailbox sync can add employer messages to any application and to the queue. */
+  const onMailboxChanged = useCallback(() => {
+    setQueueKey((k) => k + 1);
+    setPanelsKey((k) => k + 1);
+    void refreshQuietly();
+  }, [refreshQuietly]);
 
   useEffect(() => {
     fetchApplications();
@@ -110,6 +153,30 @@ export const ApplicationsPage: React.FC = () => {
 
       {reviewError && <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300" role="alert">{reviewError}</div>}
 
+      {/* One of each mailbox per account, shown once (not per application):
+          the Robin-managed address that employer accounts are registered with
+          (Phase 8.5), and the read-only Gmail connection used for tracking (Phase 8.4). */}
+      {!loading && (
+        <div className="mb-4 space-y-4">
+          <RobinMailboxCard />
+          <GmailMailboxCard onChanged={onMailboxChanged} />
+        </div>
+      )}
+
+      {!loading && !error && applications.length > 0 && (
+        <TrackReviewQueue
+          applications={applications.map((application) => ({
+            applicationId: application.id,
+            jobTitle: application.jobTitle,
+            company: application.company,
+            location: application.jobLocation ?? null,
+            createdAt: application.createdAt,
+          }))}
+          refreshKey={queueKey}
+          onChanged={onQueueChanged}
+        />
+      )}
+
       {!loading && applications.length > 0 && (
         <div className="space-y-3">
           {applications.map((application) => (
@@ -117,9 +184,9 @@ export const ApplicationsPage: React.FC = () => {
               key={application.id}
               title={application.jobTitle}
               hint={<span className="text-sm text-ink-muted">{application.company}</span>}
-              actions={<StatusPill>{application.status}</StatusPill>}
+              actions={<TrackStatusPill application={application} />}
             >
-              <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-4">
+              <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-5">
                 <div>
                   <dt className="text-ink-muted">Location</dt>
                   <dd className="text-ink-body">{application.jobLocation || '—'}</dd>
@@ -137,6 +204,10 @@ export const ApplicationsPage: React.FC = () => {
                   <dd className="text-ink-body">{application.mode}</dd>
                 </div>
                 <div>
+                  <dt className="text-ink-muted">Recorded workflow status</dt>
+                  <dd className="text-ink-body">{application.status}</dd>
+                </div>
+                <div>
                   <dt className="text-ink-muted">Created</dt>
                   <dd className="text-ink-body">
                     {new Date(application.createdAt).toLocaleDateString(undefined, {
@@ -147,6 +218,19 @@ export const ApplicationsPage: React.FC = () => {
                   </dd>
                 </div>
               </dl>
+              <ApplicationPrepStatus jobId={application.jobId} applicationId={application.id} />
+              <ApplicationTrackPanel
+                applicationId={application.id}
+                summary={application.track}
+                refreshKey={panelsKey}
+                onChanged={onPanelChanged}
+              />
+              <ApplyWorkspace
+                applicationId={application.id}
+                planId={application.planId}
+                planStatus={application.planStatus}
+                onChanged={fetchApplications}
+              />
 
               {application.planId && (
                 <div className="mt-3 rounded-lg border border-line bg-surface-sunken px-3 py-2">
@@ -342,6 +426,23 @@ const RobinDecisionPanel: React.FC<{ planId: string; applicationId: string }> = 
     </div>
   );
 };
+
+/**
+ * The candidate-facing status: the one Robin derives from evidence. When the
+ * derivation is unavailable it says so instead of falling back to a guess; a
+ * response without TRACK data (an older server) shows the recorded status,
+ * labelled as such.
+ */
+function TrackStatusPill({ application }: { application: ApplicationSummary }) {
+  const track = application.track;
+  if (track === undefined || track === null) {
+    return <StatusPill>{`Recorded: ${application.status}`}</StatusPill>;
+  }
+  if (track.availability !== 'AVAILABLE') {
+    return <StatusPill tone="slate">Status unavailable</StatusPill>;
+  }
+  return <StatusPill tone={stageTone(track.status, track.basis)}>{track.label ?? 'Status unknown'}</StatusPill>;
+}
 
 function PlanStatusBadge({ status }: { status?: string | null }) {  if (!status) return null;
   const colors: Record<string, string> = {

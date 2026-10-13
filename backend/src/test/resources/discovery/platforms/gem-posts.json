@@ -1,0 +1,78 @@
+[
+ {
+  "absolute_url": "https://jobs.gem.com/gem/4965519002",
+  "content": "<h2>Role Details</h2><ul><li class=\"\"><strong>Location:</strong> This role is based 3 days per week out of our San Francisco, HQ and is not eligible for full-time remote work.&nbsp;</li><li class=\"\"><strong>Compensation:&nbsp;</strong>The annual cash compensation range for this position is $190,000–$260,000<strong> </strong>based on level<strong> </strong>in addition to equity &amp; benefits.</li></ul><div><br></div><div><em>The range displayed on this job posting reflects the minimum and maximum compensation. Factors including location, level, job-related knowledge, skills, and experience will determine compensation.</em></div><div><br></div><h2>About Gem</h2><div>Gem is the only AI-first all-in-one recruiting platform. It brings together your ATS, CRM, sourcing, scheduling, and analytics — plus 800+ million profiles to source from — with AI built into every workflow. By eliminating the headaches of juggling multiple tools, Gem helps customers boost recruiter productivity by up to 5x while saving 30-50% on technology costs. Over 1,000 organizations — from startups to industry leaders like Zillow, DoorDash, and Asana — trust Gem to fuel their growth. With an industry-leading 4.8/5 rating on G2, Gem is the platform recruiters actually love to use. Gem has raised $148M from renown investors including Accel, Greylock, ICONIQ, Sapphire, and Meritech.</div><div><br></div><div>With Gem, you can experience the power of a truly connected recruiting platform — one consistent interface",
+  "content_plain": "Role Details\nLocation:\n This role is based 3 days per week out of our San Francisco, HQ and is not eligible for full-time remote work. \nCompensation: \nThe annual cash compensation range for this position is $190,000–$260,000\n \nbased on level\n \nin addition to equity & benefits.\nThe range displayed on this job posting reflects the minimum and maximum compensation. Factors including location, level, job-related knowledge, skills, and experience will determine compensation.\nAbout Gem\nGem is the only AI-first all-in-one recruiting platform. It brings together your ATS, CRM, sourcing, scheduling, and analytics — plus 800+ million profiles to source from — with AI built into every workflow. By eliminating the headaches of juggling multiple tools, Gem helps customers boost recruiter productivity by up to 5x while saving 30-50% on technology costs. Over 1,000 organizations — from startups to industry leaders like Zillow, DoorDash, and Asana — trust Gem to fuel their growth. With an industry-leading 4.8/5 rating on G2, Gem is the platform recruiters actually love to use. Gem has raised $148M from renown investors including Accel, Greylock, ICONIQ, Sapphire, and Meritech.\nWith Gem, you can experience the power of a truly connected recruiting platform — one consistent interface, unified data, smarter AI recommendations, and simplified permissions. Our customers achieve remarkable results.\nJust as we strive to help our customers find great talent, we also invest in our own people and cult",
+  "created_at": "2020-11-17T15:37:20.000Z",
+  "departments": [
+   {
+    "child_ids": [],
+    "id": "4022145002",
+    "name": "Engineering",
+    "parent_id": null
+   }
+  ],
+  "employment_type": "full_time",
+  "first_published_at": "2020-11-17T15:37:23.000Z",
+  "id": "4965519002",
+  "internal_job_id": "4117748002",
+  "location": {
+   "name": "San Francisco, United States"
+  },
+  "location_type": "hybrid",
+  "offices": [
+   {
+    "child_ids": [],
+    "child_office_external_ids": [],
+    "id": "4010840002",
+    "location": {
+     "name": "San Francisco, United States"
+    },
+    "name": "San Francisco",
+    "parent_id": null,
+    "parent_office_external_id": null
+   }
+  ],
+  "requisition_id": "95",
+  "title": "Software Engineer",
+  "updated_at": "2026-03-10T21:20:54.077Z"
+ },
+ {
+  "absolute_url": "https://jobs.gem.com/gem/am9icG9zdDqTzmNGwXTdU65YRLOAU6ZL",
+  "content": "<h2><strong>About Gem </strong></h2><div>Gem is the only AI-first all-in-one recruiting platform. It brings together your ATS, CRM, sourcing, scheduling, and analytics — plus 800+ million profiles to source from — with AI built into every workflow. By eliminating the headaches of juggling multiple tools, Gem helps customers boost recruiter productivity by up to 5x while saving 30-50% on technology costs. Over 1,000 organizations — from startups to industry leaders like Zillow, DoorDash, and Asana — trust Gem to fuel their growth. With an industry-leading 4.8/5 rating on G2, Gem is the platform recruiters actually love to use. Gem has raised $148M from renown investors including Accel, Greylock, ICONIQ, Sapphire, and Meritech.</div><div><br></div><div>With Gem, you can experience the power of a truly connected recruiting platform — one consistent interface, unified data, smarter AI recommendations, and simplified permissions. Our customers achieve remarkable results.</div><div><br></div><div>Just as we strive to help our customers find great talent, we also invest in our own people and culture. We are proud of the culture we’ve built and have recently been recognized as:&nbsp;</div><ul><li class=\"\"><a href=\"https://www.forbes.com/lists/americas-best-startup-employers/\" rel=\"noopener noreferrer\" target=\"_blank\" style=\"color: rgb(13, 98, 255);\">Forbes America's Best Startup Employers 202</a><a href=\"https://www.forbes.com/lists/americas-best-startup-employers/\" rel=\"noopener nor",
+  "content_plain": "About Gem \nGem is the only AI-first all-in-one recruiting platform. It brings together your ATS, CRM, sourcing, scheduling, and analytics — plus 800+ million profiles to source from — with AI built into every workflow. By eliminating the headaches of juggling multiple tools, Gem helps customers boost recruiter productivity by up to 5x while saving 30-50% on technology costs. Over 1,000 organizations — from startups to industry leaders like Zillow, DoorDash, and Asana — trust Gem to fuel their growth. With an industry-leading 4.8/5 rating on G2, Gem is the platform recruiters actually love to use. Gem has raised $148M from renown investors including Accel, Greylock, ICONIQ, Sapphire, and Meritech.\nWith Gem, you can experience the power of a truly connected recruiting platform — one consistent interface, unified data, smarter AI recommendations, and simplified permissions. Our customers achieve remarkable results.\nJust as we strive to help our customers find great talent, we also invest in our own people and culture. We are proud of the culture we’ve built and have recently been recognized as: \nForbes America's Best Startup Employers 202\n6\nGreat Place to Work Certified, 2024\nFortune Best Workplaces for Millennials, 2023\nThe Team and Role\nWe’re looking for a Senior Software Engineer to join our ATS team, one of the most strategically important areas of Gem’s product suite.\nFor two years, we’ve been building our ATS architecture from the ground up, working closely with top compan",
+  "created_at": "2025-12-04T17:50:36.133Z",
+  "departments": [
+   {
+    "child_ids": [],
+    "id": "4022145002",
+    "name": "Engineering",
+    "parent_id": null
+   }
+  ],
+  "employment_type": "full_time",
+  "first_published_at": "2025-12-04T18:31:33.628Z",
+  "id": "am9icG9zdDqTzmNGwXTdU65YRLOAU6ZL",
+  "internal_job_id": "am9iOtWWIryHC4MCePdOyVZu2qU",
+  "location": {
+   "name": "San Francisco, United States"
+  },
+  "location_type": "hybrid",
+  "offices": [
+   {
+    "child_ids": [],
+    "child_office_external_ids": [],
+    "id": "4010840002",
+    "location": {
+     "name": "San Francisco, United States"
+    },
+    "name": "San Francisco",
+    "parent_id": null,
+    "parent_office_external_id": null
+   }
+  ],
+  "requisition_id": "R20220335",
+  "title": "Senior Software Engineer - Core ATS",
+  "updated_at": "2026-03-10T21:11:50.768Z"
+ }
+]

@@ -31,5 +31,13 @@ export default defineConfig(({ command, mode }) => {
       host: true,
       port: 5173,
     },
+    // No global `test.environment` here on purpose.  The default (node) is what
+    // most suites need — including devCredentialsBundle.test.ts, whose esbuild
+    // run asserts `new TextEncoder().encode("") instanceof Uint8Array` and
+    // breaks under jsdom's TextEncoder.  The DOM-dependent suites opt in with a
+    // `// @vitest-environment jsdom` pragma instead, so no test needs a global
+    // override.  NODE_ENV=test is supplied by the `test` script via cross-env,
+    // which is enough for Vite's dep optimizer to pick React's development
+    // build without mutating the environment when `npm run dev` starts.
   };
 });

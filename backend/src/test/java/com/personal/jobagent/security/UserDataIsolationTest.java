@@ -233,7 +233,8 @@ class UserDataIsolationTest {
     void identityCreationUsesTheAuthenticatedProfileAndIgnoresTheRequestBody() {
         IdentityService service = mock(IdentityService.class);
         when(service.create(any(), anyString(), anyString(), any())).thenReturn(UUID.randomUUID());
-        IdentityController controller = new IdentityController(service, new CredentialVault(), profileRepository());
+        IdentityController controller = new IdentityController(service, new CredentialVault(), profileRepository(),
+                mock(com.personal.jobagent.mailbox.managed.ManagedMailboxService.class));
         authenticate();
         UUID attackerSuppliedProfile = UUID.randomUUID();
 
@@ -247,10 +248,42 @@ class UserDataIsolationTest {
     }
 
     @Test
+    void identityCreationDefaultsToTheOwnersRobinManagedAddressWhenItReceivesMail() {
+        IdentityService service = mock(IdentityService.class);
+        when(service.create(any(), anyString(), anyString(), any())).thenReturn(UUID.randomUUID());
+        var managed = mock(com.personal.jobagent.mailbox.managed.ManagedMailboxService.class);
+        when(managed.usableAddress(profileId)).thenReturn(Optional.of(
+                new com.personal.jobagent.mailbox.managed.ManagedMailboxService.ManagedAddress(UUID.randomUUID(),
+                        profileId, "u7kq2m9x4vb3tn5p", "mail.robin.example", "ACTIVE")));
+        IdentityController controller = new IdentityController(service, new CredentialVault(), profileRepository(), managed);
+        authenticate();
+
+        var response = controller.create(new IdentityController.IdentityRequest(null, null, "acme.example", null), request());
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        verify(service).create(eq(profileId), eq("u7kq2m9x4vb3tn5p@mail.robin.example"), eq("acme.example"), any());
+    }
+
+    @Test
+    void identityCreationWithoutAWorkingManagedAddressRegistersNothing() {
+        IdentityService service = mock(IdentityService.class);
+        var managed = mock(com.personal.jobagent.mailbox.managed.ManagedMailboxService.class);
+        when(managed.usableAddress(profileId)).thenReturn(Optional.empty());
+        IdentityController controller = new IdentityController(service, new CredentialVault(), profileRepository(), managed);
+        authenticate();
+
+        var response = controller.create(new IdentityController.IdentityRequest(null, " ", "acme.example", null), request());
+
+        assertThat(response.getStatusCode().value()).isEqualTo(409);
+        verify(service, never()).create(any(), any(), any(), any());
+    }
+
+    @Test
     void readingAnotherAccountsAutomationSessionReturns404() throws Exception {
         IdentityService service = mock(IdentityService.class);
         when(service.session(any(), eq(profileId))).thenReturn(Optional.empty());
-        IdentityController controller = new IdentityController(service, new CredentialVault(), profileRepository());
+        IdentityController controller = new IdentityController(service, new CredentialVault(), profileRepository(),
+                mock(com.personal.jobagent.mailbox.managed.ManagedMailboxService.class));
         authenticate();
 
         var response = controller.get(UUID.randomUUID(), request());
@@ -262,7 +295,8 @@ class UserDataIsolationTest {
     void hardStoppingAnotherAccountsSessionIsNotReportedAsChanged() throws Exception {
         IdentityService service = mock(IdentityService.class);
         when(service.hardStop(any(), anyString(), eq(profileId))).thenReturn(false);
-        IdentityController controller = new IdentityController(service, new CredentialVault(), profileRepository());
+        IdentityController controller = new IdentityController(service, new CredentialVault(), profileRepository(),
+                mock(com.personal.jobagent.mailbox.managed.ManagedMailboxService.class));
         authenticate();
 
         var response = controller.stop(UUID.randomUUID(), Map.of("reason", "stop"), request());
@@ -277,7 +311,8 @@ class UserDataIsolationTest {
         UUID applicationId = UUID.randomUUID();
         when(service.startSession(any(), anyString(), eq(profileId))).thenReturn(Optional.of(UUID.randomUUID()));
 
-        IdentityController controller = new IdentityController(service, new CredentialVault(), profileRepository());
+        IdentityController controller = new IdentityController(service, new CredentialVault(), profileRepository(),
+                mock(com.personal.jobagent.mailbox.managed.ManagedMailboxService.class));
         authenticate();
 
         controller.session(new IdentityController.SessionRequest(applicationId, "acme.example"), request());
@@ -292,7 +327,8 @@ class UserDataIsolationTest {
         // the endpoint reports that as an ordinary 404.
         IdentityService service = mock(IdentityService.class);
         when(service.startSession(any(), anyString(), eq(profileId))).thenReturn(Optional.empty());
-        IdentityController controller = new IdentityController(service, new CredentialVault(), profileRepository());
+        IdentityController controller = new IdentityController(service, new CredentialVault(), profileRepository(),
+                mock(com.personal.jobagent.mailbox.managed.ManagedMailboxService.class));
         authenticate();
 
         var response = controller.session(
@@ -305,12 +341,14 @@ class UserDataIsolationTest {
 
     private CoverLetterController coverLetterController(CoverLetterRepository repository) {
         return new CoverLetterController(mock(CoverLetterService.class), repository,
-                profileRepository(), mock(AuditLogWriter.class));
+                profileRepository(), mock(AuditLogWriter.class),
+                mock(com.personal.jobagent.apply.ApplyPackageGuard.class));
     }
 
     private ApplicationAnswerController answerController(ApplicationAnswerRepository repository) {
         return new ApplicationAnswerController(mock(ApplicationAnswerService.class), repository,
-                profileRepository(), mock(AuditLogWriter.class));
+                profileRepository(), mock(AuditLogWriter.class),
+                mock(com.personal.jobagent.apply.ApplyPackageGuard.class));
     }
 
     private ProfileRepository profileRepository() {
