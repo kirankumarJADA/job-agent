@@ -11,6 +11,9 @@
     { "source": "/preferences", "destination": "/index.html" },
     { "source": "/models", "destination": "/index.html" },
     { "source": "/sources", "destination": "/index.html" },
-    { "source": "/logs", "destination": "/index.html" }
+    { "source": "/logs", "destination": "/index.html" },
+    { "source": "/applications", "destination": "/index.html" },
+    { "source": "/review-queue", "destination": "/index.html" },
+    { "source": "/approval-rules", "destination": "/index.html" }
   ]
 }

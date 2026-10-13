@@ -12,6 +12,8 @@ export const StepType = Object.freeze({
   WAIT_FOR: 'WAIT_FOR',
   SCREENSHOT: 'SCREENSHOT',
   MAILBOX_VERIFY: 'MAILBOX_VERIFY',
+  ACCOUNT_RESOLVE_IDENTITY: 'ACCOUNT_RESOLVE_IDENTITY',
+  ACCOUNT_VERIFY_OTP: 'ACCOUNT_VERIFY_OTP',
   POLICY_CHECK: 'POLICY_CHECK',
   MOCK_SUBMIT: 'MOCK_SUBMIT',
   VALIDATE: 'VALIDATE',
@@ -140,4 +142,55 @@ export function buildApplicationPlan({ baseUrl, mailboxUrl, package: pkg }) {
 
 export function planFingerprint(plan) {
   return crypto.createHash('sha256').update(JSON.stringify(plan)).digest('hex');
+}
+
+/**
+ * Phase 8.5: employer account lifecycle plan (sign-up, e-mail verification,
+ * login). No application is submitted (`safetyContract: 'NO_SUBMIT'`).
+ *
+ * The account e-mail defaults to the candidate's Robin-managed address: unless
+ * the plan names an `accountEmail` explicitly, its first step asks the backend
+ * which address to register with (ACCOUNT_RESOLVE_IDENTITY), so no address is
+ * baked into the plan and the employer's verification mail reaches Robin
+ * without the candidate's personal mailbox. The verification step then reads
+ * the code from that same mailbox; anything missing or ambiguous pauses for the
+ * human.
+ */
+export function buildAccountLifecyclePlan({ baseUrl, employerDomain, applicationId, sessionId = null,
+                                            accountEmail = null, accountPassword, verifyOtp = true }) {
+  const step = (id, type, policy, params = {}) => ({ id, type, policy, params });
+  const managedIdentity = !accountEmail;
+  const emailField = (id) => step(id, StepType.FILL_FIELD, Policy.AUTO, managedIdentity
+    ? { selector: 'input[name="email"]', valueFrom: 'identity.email' }
+    : { selector: 'input[name="email"]', value: accountEmail });
+  const steps = [];
+  if (managedIdentity) {
+    steps.push(step('account-resolve-identity', StepType.ACCOUNT_RESOLVE_IDENTITY, Policy.AUTO, { employerDomain, applicationId }));
+  }
+  steps.push(
+    step('signup-navigate', StepType.NAVIGATE, Policy.AUTO, { url: `${baseUrl}/signup` }),
+    emailField('signup-email'),
+    step('signup-password', StepType.FILL_FIELD, Policy.AUTO, { selector: 'input[name="password"]', value: accountPassword }),
+    step('signup-submit', StepType.CLICK, Policy.AUTO, { selector: 'button[type="submit"]' }),
+  );
+  if (verifyOtp) {
+    steps.push(
+      step('account-verify-otp', StepType.ACCOUNT_VERIFY_OTP, Policy.AUTO, { employerDomain, applicationId }),
+      step('account-verify-otp-fill', StepType.FILL_FIELD, Policy.AUTO, {
+        selector: 'input[name="otp"]', valueFrom: 'verification.otp', skipWhenMissing: true,
+      }),
+      step('account-verify-otp-submit', StepType.CLICK, Policy.AUTO, {
+        selector: 'button[type="submit"]', onlyWhenVerificationOtp: true,
+      }),
+    );
+  }
+  steps.push(step('login-navigate', StepType.NAVIGATE, Policy.AUTO, { url: `${baseUrl}/login` }),
+    emailField('login-email'),
+    step('login-password', StepType.FILL_FIELD, Policy.AUTO, { selector: 'input[name="password"]', value: accountPassword }),
+    step('login-submit', StepType.CLICK, Policy.AUTO, { selector: 'button[type="submit"]' }));
+  const correlation = { applicationId, employerDomain };
+  if (sessionId) correlation.sessionId = sessionId;
+  if (!managedIdentity) correlation.mailboxAddress = accountEmail;
+  return { planId: `plan-lifecycle-${applicationId}`, version: 1, correlation, steps,
+    safetyContract: 'NO_SUBMIT' };
 }

@@ -15,9 +15,30 @@ const eventToken = process.env.WORKER_EVENT_TOKEN;
 const pollUrl = process.env.WORKER_POLL_URL;
 const pollIntervalMs = parseInt(process.env.WORKER_POLL_INTERVAL_MS || '10000', 10);
 const heartbeatUrl = process.env.WORKER_HEARTBEAT_URL;
+const verificationResolveUrl = process.env.WORKER_VERIFICATION_URL;
+const registrationIdentityUrl = process.env.WORKER_REGISTRATION_IDENTITY_URL;
 const completeUrl = process.env.WORKER_COMPLETE_URL;
 
 const authHeaders = () => eventToken ? { authorization: `Bearer ${eventToken}` } : {};
+const verificationResolver = verificationResolveUrl
+  ? async (body) => {
+      const response = await fetch(verificationResolveUrl, { method: 'POST',
+        headers: { ...authHeaders(), 'content-type': 'application/json' },
+        body: JSON.stringify(body) });
+      if (!response.ok) throw new Error(`VERIFICATION_RESOLVE_FAILED:${response.status}`);
+      return response.json();
+    }
+  : null;
+// Phase 8.5: which address an employer account is registered with (Robin-managed by default).
+const identityResolver = registrationIdentityUrl
+  ? async (body) => {
+      const response = await fetch(registrationIdentityUrl, { method: 'POST',
+        headers: { ...authHeaders(), 'content-type': 'application/json' },
+        body: JSON.stringify(body) });
+      if (!response.ok) throw new Error(`REGISTRATION_IDENTITY_FAILED:${response.status}`);
+      return response.json();
+    }
+  : null;
 
 // ── graceful shutdown ─────────────────────────────────────────────
 // SIGTERM/SIGINT (docker stop, Render restart, OCI kill) must never leave a
@@ -155,7 +176,7 @@ function planFromClaim(planId, claimed) {
 
 if (planFile) {
   const plan = JSON.parse(fs.readFileSync(path.resolve(planFile), 'utf8'));
-  const worker = new BrowserWorker({ statePath, artifactDir, eventSink });
+  const worker = new BrowserWorker({ statePath, artifactDir, eventSink, verificationResolver, identityResolver });
   runtime.runner = worker;
   worker.execute(plan, { approve, headless: true })
     .then((result) => process.stdout.write(`${JSON.stringify({ type: 'WORKER_RESULT', status: result.status })}\n`))
@@ -198,7 +219,7 @@ if (planFile) {
       // for re-execution, and continuing to drive a real employer form with
       // no live lease risks two workers operating the same application at
       // once. Stopping is always the safe direction.
-      const runner = new BrowserWorker({ statePath, artifactDir, eventSink });
+      const runner = new BrowserWorker({ statePath, artifactDir, eventSink, verificationResolver, identityResolver });
       runtime.runner = runner;
       let missedHeartbeats = 0;
       heartbeat = setInterval(() => {

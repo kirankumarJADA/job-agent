@@ -47,4 +47,16 @@ class ApiExceptionAdviceTest {
         assertThat(response.getStatusCode().value()).isEqualTo(409);
         assertThat(response.getBody().detail()).contains("No profile exists");
     }
+
+    @Test
+    void anUnreadableMailgunDeliveryIsRefusedWithoutRetryAndOtherUploadsKeep413() {
+        var tooLarge = new org.springframework.web.multipart.MaxUploadSizeExceededException(1_048_576L);
+        var inbound = org.mockito.Mockito.mock(jakarta.servlet.http.HttpServletRequest.class);
+        org.mockito.Mockito.when(inbound.getRequestURI()).thenReturn("/api/v1/managed-mail/inbound/mailgun");
+        // 406 is the one status Mailgun treats as "do not retry".
+        assertThat(advice.unreadableMultipart(tooLarge, inbound).getStatusCode().value()).isEqualTo(406);
+        assertThat(advice.unreadableMultipart(tooLarge, request).getStatusCode().value()).isEqualTo(413);
+        assertThat(advice.unreadableMultipart(new org.springframework.web.multipart.MultipartException("bad"), request)
+                .getStatusCode().value()).isEqualTo(400);
+    }
 }
