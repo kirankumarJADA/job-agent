@@ -14,6 +14,7 @@
     { "source": "/logs", "destination": "/index.html" },
     { "source": "/applications", "destination": "/index.html" },
     { "source": "/review-queue", "destination": "/index.html" },
-    { "source": "/approval-rules", "destination": "/index.html" }
+    { "source": "/approval-rules", "destination": "/index.html" },
+    { "source": "/auto-apply-activity", "destination": "/index.html" }
   ]
 }

@@ -17,6 +17,7 @@ import { LogsPage } from './pages/LogsPage';
 import { ApplicationsPage } from './pages/ApplicationsPage';
 import { ReviewQueuePage } from './pages/ReviewQueuePage';
 import { ApprovalRulesPage } from './pages/ApprovalRulesPage';
+import { AutoApplyActivityPage } from './pages/AutoApplyActivityPage';
 
 import { LoginPage } from './pages/LoginPage';
 import { SignUpPage } from './pages/SignUpPage';
@@ -111,6 +112,7 @@ export default function App() {
             <Route path="/applications" element={<ApplicationsPage />} />
             <Route path="/review-queue" element={<ReviewQueuePage />} />
             <Route path="/approval-rules" element={<ApprovalRulesPage />} />
+            <Route path="/auto-apply-activity" element={<AutoApplyActivityPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>
