@@ -195,6 +195,87 @@ class ScraplingProviderTest {
     }
 
     @Test
+    void autoModeIsAnAllowedFetchModeConfiguration() throws Exception {
+        AtomicReference<String> capturedBody = new AtomicReference<>();
+        server = HttpServer.create(new InetSocketAddress(0), 0);
+        server.createContext("/fetch", exchange -> {
+            capturedBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, "{\"ok\":false,\"error\":\"no fetch attempted\",\"status\":null}");
+        });
+        server.start();
+        var provider = new ScraplingProvider(new ObjectMapper(),
+                new MockEnvironment().withProperty("SCRAPLING_BASE_URL", "http://localhost:" + server.getAddress().getPort())
+                        .withProperty("SCRAPLING_FETCH_MODE", "auto"));
+        provider.extract(new ScraperProvider.DiscoveryRequest("https://example.test/x", "CAREERS", "c", null));
+        assertThat(capturedBody.get()).contains("\"mode\":\"auto\"");
+    }
+
+    /**
+     * Robin x Tsenta hardening: the sidecar's adaptive {@code fields} fill a
+     * BLANK field the regex/JSON-LD parser missed (here: location, which
+     * this fixture's plain HTML has no JSON-LD or meta tag for at all) —
+     * never claimed by the base parse, so any confidence is enough to add it.
+     */
+    @Test
+    void adaptiveFieldsFillInABlankFieldTheRegexParserMissed() throws Exception {
+        server = HttpServer.create(new InetSocketAddress(0), 0);
+        server.createContext("/fetch", exchange -> respond(exchange, 200,
+                "{\"ok\":true,\"status\":200,\"url\":\"https://boards.example.org/acme/jobs/42\",\"content\":"
+                        + new ObjectMapper().writeValueAsString(JOB_HTML)
+                        + ",\"fields\":{\"location\":{\"value\":\"Remote (UK)\",\"source\":\"css_selector\",\"confidence\":0.55}}}"));
+        server.start();
+        var result = providerOn(server).extract(new ScraperProvider.DiscoveryRequest(
+                "https://boards.example.org/acme/jobs/42", "CAREERS", "c", null));
+        assertThat(result.jobs()).singleElement().satisfies(job -> {
+            // The base parse already found "London" from JSON-LD — a low-confidence
+            // sidecar field must never overwrite an already-present value.
+            assertThat(job.location()).isEqualTo("London");
+        });
+    }
+
+    @Test
+    void aLowConfidenceAdaptiveFieldNeverOverwritesAnAlreadyPresentHighConfidenceValue() throws Exception {
+        server = HttpServer.create(new InetSocketAddress(0), 0);
+        server.createContext("/fetch", exchange -> respond(exchange, 200,
+                "{\"ok\":true,\"status\":200,\"url\":\"https://boards.example.org/acme/jobs/42\",\"content\":"
+                        + new ObjectMapper().writeValueAsString(JOB_HTML)
+                        + ",\"fields\":{\"title\":{\"value\":\"Totally Different Title\",\"source\":\"css_selector\",\"confidence\":0.55}}}"));
+        server.start();
+        var result = providerOn(server).extract(new ScraperProvider.DiscoveryRequest(
+                "https://boards.example.org/acme/jobs/42", "CAREERS", "c", null));
+        assertThat(result.jobs()).singleElement().satisfies(job -> assertThat(job.title()).isEqualTo("Backend Engineer"));
+    }
+
+    @Test
+    void aJsonLdTierAdaptiveFieldMayReplaceAnAlreadyPresentValue() throws Exception {
+        server = HttpServer.create(new InetSocketAddress(0), 0);
+        server.createContext("/fetch", exchange -> respond(exchange, 200,
+                "{\"ok\":true,\"status\":200,\"url\":\"https://boards.example.org/acme/jobs/42\",\"content\":"
+                        + new ObjectMapper().writeValueAsString(JOB_HTML)
+                        + ",\"fields\":{\"company\":{\"value\":\"Acme Corp\",\"source\":\"json_ld\",\"confidence\":0.95}}}"));
+        server.start();
+        var result = providerOn(server).extract(new ScraperProvider.DiscoveryRequest(
+                "https://boards.example.org/acme/jobs/42", "CAREERS", "c", null));
+        assertThat(result.jobs()).singleElement().satisfies(job -> assertThat(job.company()).isEqualTo("Acme Corp"));
+    }
+
+    @Test
+    void anOlderSidecarResponseWithNoFieldsKeyAtAllBehavesExactlyAsBeforeThisChange() throws Exception {
+        server = HttpServer.create(new InetSocketAddress(0), 0);
+        server.createContext("/fetch", exchange -> respond(exchange, 200,
+                "{\"ok\":true,\"status\":200,\"url\":\"https://boards.example.org/acme/jobs/42\",\"content\":"
+                        + new ObjectMapper().writeValueAsString(JOB_HTML) + "}"));
+        server.start();
+        var result = providerOn(server).extract(new ScraperProvider.DiscoveryRequest(
+                "https://boards.example.org/acme/jobs/42", "CAREERS", "c", null));
+        assertThat(result.successful()).isTrue();
+        assertThat(result.jobs()).singleElement().satisfies(job -> {
+            assertThat(job.title()).isEqualTo("Backend Engineer");
+            assertThat(job.company()).isEqualTo("Acme");
+        });
+    }
+
+    @Test
     void unconfiguredScraplingIsSkippedByTheOrchestrator() {
         var provider = new ScraplingProvider(new ObjectMapper(), new MockEnvironment());
         var ingestion = mock(JobDiscoveryService.class);
