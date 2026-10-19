@@ -3,6 +3,7 @@ package com.personal.jobagent.discovery.platform;
 import com.personal.jobagent.discovery.AshbyProvider;
 import com.personal.jobagent.discovery.GreenhouseProvider;
 import com.personal.jobagent.discovery.platform.adapters.DetailFetchAdapters;
+import com.personal.jobagent.discovery.platform.adapters.FreeHireAdapter;
 import com.personal.jobagent.discovery.platform.adapters.LeverAdapter;
 import com.personal.jobagent.discovery.platform.adapters.MarkupAdapters;
 import com.personal.jobagent.discovery.platform.adapters.ProviderBackedAdapter;
@@ -65,6 +66,7 @@ public class PlatformRegistry {
         register(new SinglePayloadAdapters.Recruitee());
         register(new MarkupAdapters.Teamtailor());
         register(new TsentaJobSource(tsentaMaxDetails));
+        register(new FreeHireAdapter());
     }
 
     private void register(BoardAdapter adapter) {

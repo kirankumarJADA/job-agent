@@ -599,9 +599,12 @@ discovered from a platform until a board is configured.
 | 29 | SAP SuccessFactors | UNVERIFIED | Classic career sites render jobs client-side; no stable public listing endpoint validated | — | — | — |
 | 30 | Teamtailor | LIVE_VALIDATED | `{host}/jobs.rss` (full descriptions) | `*.teamtailor.com` host | career.teamtailor.com | **never** (feed not documented as exhaustive) |
 | 31 | Tsenta (aggregator) | LIVE_VALIDATED | Public SSR pages (see 12.4) | scope `jobs`, `jobs/remote`, `jobs/internships`, `jobs/entry-level` | tsenta.com/jobs | **never** |
+| 32 | FreeHire (aggregator) | LIVE_VALIDATED | Keyless public REST API, `GET /api/v1/agent/jobs/search` (see 12.6) | `category` facet value, e.g. `software_engineering`, `backend`, `frontend`, `fullstack`, `devops` | freehire.me/api/v1 | **never** |
 
 Totals: 21 of 30 ATS platforms LIVE_VALIDATED (adapter + real fixtures + live fetch), 8
-UNVERIFIED, 1 BLOCKED; Tsenta LIVE_VALIDATED. Unverified/blocked platforms have **no adapter** —
+UNVERIFIED, 1 BLOCKED; Tsenta and FreeHire both LIVE_VALIDATED (added later, Robin x Tsenta
+continuation — see 12.6; the 21/8/1 ATS-platform split above is unaffected since both
+aggregators are excluded from that count, same as Tsenta always was). Unverified/blocked platforms have **no adapter** —
 no placeholder that returns nothing or fake data — but their URLs are still recognised, so an
 import explains exactly which platform it is and why it cannot be followed yet.
 
@@ -772,6 +775,61 @@ and APPLY readiness lose the provenance fields listed in 12.8.
 - Zoho Recruit pagination beyond the first public response has not been observed (the validated
   tenant has 8 openings), so its listings are reported partial and never remove anything.
 - Workday hosts on `*.myworkdaysite.com` are not recognised (only `*.myworkdayjobs.com`).
+
+## 12.11 FreeHire
+
+Robin x Tsenta continuation (2026-10-19): FreeHire (https://freehire.me, MIT-licensed,
+https://github.com/strelov1/freehire) is a second aggregator source, added as
+`FreeHireAdapter` (`PlatformKind.FREEHIRE`). Unlike Tsenta, FreeHire is used through its own
+documented, keyless public REST API (https://freehire.me/docs/api,
+https://freehire.me/openapi.yaml v1.1.0, verified live 2026-10-19) rather than scraping
+HTML — FreeHire's own Go crawler already does the ATS-level crawling (92 platforms, confirmed
+from its README) and deduplication; re-crawling the same source a second time would duplicate
+that work, so this adapter reads FreeHire's finished catalogue instead.
+
+Endpoint: `GET /api/v1/agent/jobs/search?category={category}&limit={<=100}&offset={n}&sort=posted_at&order=desc&description_format=text`
+— the `/agent/...` variant specifically, because the sibling `/jobs/search` only returns a
+truncated description preview; `/agent/jobs/search` returns the full text in the same one call,
+so no separate per-job detail fetch is needed (every `ListingEntry` this adapter produces is
+already `complete()`). Pagination: FreeHire enforces `offset + limit <= 10000` server-side
+(confirmed live: exceeding it returns `400 {"error":"pagination too deep"}`); the adapter checks
+that ceiling itself before ever sending a request that would cross it.
+
+Search partitions: FreeHire has no per-employer board to import — it is one global catalogue —
+so `org_identifier` names a `category` facet value instead (validated against the full
+documented vocabulary). Five categories are seeded as separate `job_sources` rows (V044):
+`software_engineering`, `backend`, `frontend`, `fullstack`, `devops` — chosen for direct overlap
+with Robin's own existing skills/scoring vocabulary; confirmed live via `/jobs/facets` that these
+are five distinct, non-overlapping category values, not a parent/child hierarchy, so each
+genuinely widens coverage. Any other documented category can be added as a sixth row with no code
+change.
+
+Application URL: FreeHire's own `url` field is used directly as both the application and source
+URL — FreeHire's docs state every listing "links straight to the company's own careers page," and
+this is confirmed for the large majority of records (e.g. `source: workday/zohorecruit/...`, just
+carrying a `utm_source=freehire.me` tracking parameter FreeHire itself appends). FreeHire's own
+`source` vocabulary is confirmed live as 225 values wide and includes, alongside direct ATS
+platforms, secondary job-board aggregators (e.g. `whatjobs-ca`, `adzuna`) whose `url` is one hop
+short of the employer's own page; classifying which of those 225 values are "direct" with
+confidence was judged out of scope — this adapter passes FreeHire's own stated URL through
+unchanged, the same restraint every other adapter already applies to its own source's stated URL.
+
+Never exhaustive, by the same reasoning as Tsenta (12.4): even one category can hold well over
+10,000 postings, so every FreeHire listing is reported PARTIAL regardless of how clean the run
+was; absence from one run's bounded slice never removes anything. Defaults: page size 100, the
+shared discovery `max-pages` setting (no FreeHire-specific override needed — its clean JSON API
+needs none of Tsenta's slow-HTML-scraping accommodations), one HTTP call per page, no detail
+budget consumed at all (nothing ever needs a detail fetch).
+
+Live-verified (2026-10-19, read-only, a handful of small GET requests): `GET /api/v1/jobs`
+(unfiltered catalogue, `meta.total` 5,367,516 at request time — FreeHire's own advertised
+catalogue is "3.3M+" per its README; the live total is larger and growing, both numbers kept
+distinct from anything Robin actually imports), `GET /api/v1/jobs/search` with
+`category=software_engineering&work_mode=remote` (12,439 matches), `GET /api/v1/jobs/facets`
+(confirmed the full category vocabulary and per-category totals), the exact 10,000-offset
+rejection, and `GET /api/v1/agent/jobs/search` (confirmed full-text descriptions and the real
+record shape used to build this adapter's fixtures). See
+`ROBIN_TSENTA_FEATURE_IMPLEMENTATION_REPORT.md`'s FreeHire section for the complete live-check log.
 
 ---
 

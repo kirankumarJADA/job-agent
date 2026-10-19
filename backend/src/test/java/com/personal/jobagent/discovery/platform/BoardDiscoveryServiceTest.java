@@ -201,6 +201,38 @@ class BoardDiscoveryServiceTest {
         verify(db, never()).update(contains("source_status = 'MISSING'"), any(Object[].class));
     }
 
+    /**
+     * Robin x Tsenta continuation: proves FreeHire is genuinely wired into the
+     * real discovery pipeline — not a disconnected adapter nothing ever calls.
+     * Uses the REAL {@link com.personal.jobagent.discovery.platform.adapters.FreeHireAdapter}
+     * (resolved from the real {@link PlatformRegistry}, exactly as
+     * {@code BoardDiscoveryService.run(sourceId, Mode)} would) against a REAL
+     * captured FreeHire response, through this exact {@code run()} overload,
+     * all the way to a captured {@link JobDiscoveryService.IngestJobCommand}.
+     */
+    @Test
+    void freeHireResultsReachRealIngestionWithTheEmployersOwnApplicationUrlPreserved() {
+        BoardAdapter freeHire = registry.adapter(PlatformKind.FREEHIRE).orElseThrow();
+        http.sequence("GET", "api/v1/agent/jobs/search",
+                json(fixture("freehire-search-page1.json")),
+                json(fixture("freehire-search-empty.json")));
+
+        var report = service.run(SOURCE, freeHire, "software_engineering", null, BoardDiscoveryService.Mode.MANUAL);
+
+        assertThat(report.counts().get("listed")).isEqualTo(2);
+        assertThat(report.complete()).isFalse(); // an aggregator listing is never exhaustive
+        ArgumentCaptor<JobDiscoveryService.IngestJobCommand> captor =
+                ArgumentCaptor.forClass(JobDiscoveryService.IngestJobCommand.class);
+        verify(ingestion, times(2)).ingestJob(captor.capture());
+        JobDiscoveryService.IngestJobCommand first = captor.getAllValues().get(0);
+        assertThat(first.title()).isEqualTo("System Engineer");
+        assertThat(first.companyNameRaw()).isEqualTo("Sana Soft");
+        // The employer's OWN ATS posting URL — never a freehire.me redirect.
+        assertThat(first.applicationUrl())
+                .isEqualTo("https://sanasofteg.zohorecruit.com/jobs/Careers/681293000002210024?utm_source=freehire.me");
+        assertThat(first.canonicalUrl()).isEqualTo(first.applicationUrl());
+    }
+
     @Test
     void aClosedPostingClosesItsObservationInsteadOfBeingIngested() {
         Scripted a = new Scripted();

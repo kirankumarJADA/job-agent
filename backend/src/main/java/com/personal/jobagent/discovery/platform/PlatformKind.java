@@ -12,7 +12,10 @@ import java.util.Optional;
  * Workable JazzHR Jobvite BreezyHR Oracle Cloud SmartRecruiters Paylocity
  * UltiPro ADP Dover Gem Zoho Recruit BrassRing CareerPlug Dayforce Hireology
  * Join Phenom Pinpoint Polymer Recruitee SAP SuccessFactors Teamtailor"), plus
- * Tsenta itself as a separate aggregator source.
+ * two separate aggregator sources that are not themselves on that list:
+ * Tsenta, and FreeHire (https://freehire.me, its own independent catalogue
+ * pulled from 92 ATS platforms through FreeHire's own public API — see
+ * {@code FreeHireAdapter}'s javadoc).
  *
  * <p>The {@link #name()} of each constant is the persisted
  * {@code job_sources.kind} value (V037 widens the check constraint to exactly
@@ -106,7 +109,10 @@ public enum PlatformKind {
             "career-site host, e.g. career.teamtailor.com", List.of("team tailor")),
     // ---- Aggregator ------------------------------------------------------------------------
     TSENTA("Tsenta", Group.AGGREGATOR, Readiness.LIVE_VALIDATED,
-            "listing scope: jobs, jobs/remote, jobs/internships or jobs/entry-level", List.of("tsenta.com"));
+            "listing scope: jobs, jobs/remote, jobs/internships or jobs/entry-level", List.of("tsenta.com")),
+    FREEHIRE("FreeHire", Group.AGGREGATOR, Readiness.LIVE_VALIDATED,
+            "category facet value, e.g. software_engineering, backend, frontend, fullstack or devops",
+            List.of("freehire.me"));
 
     public enum Group { A, B, C, AGGREGATOR }
 
