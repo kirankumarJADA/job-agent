@@ -317,7 +317,14 @@ class ApplicationPipelineIT {
                 .andExpect(jsonPath("$.items[0].jobTitle").value("Java Platform Engineer"))
                 .andExpect(jsonPath("$.items[0].company").value("Pipeline Corp"))
                 .andExpect(jsonPath("$.items[0].status").value("READY_TO_APPLY"))
-                .andExpect(jsonPath("$.items[0].matchScore").value(80))
+                // Robin x Tsenta continuation: the scorer now honours the full
+                // seven-category scoringWeights contract instead of a fixed
+                // 60/20/20 formula (see JobMatchService#evaluateMatch) — 97
+                // is this fixture's real, deterministic output under that
+                // formula (skill+salary dominate; this profile has no
+                // experience/visa/location preference set, so those
+                // categories are excluded rather than neutrally scored).
+                .andExpect(jsonPath("$.items[0].matchScore").value(97))
                 .andExpect(jsonPath("$.items[0].matchRecommendation").value("APPLY"))
                 .andExpect(jsonPath("$.items[0].mode").value("CONTROLLED_AUTO"));
 

@@ -260,14 +260,37 @@ export const JobDetailPage: React.FC = () => {
                   </div>
                   <ScoreBar value={match.score} />
                   <div className="space-y-1.5 text-xs">
-                    {(['skill_overlap', 'remote_fit', 'salary_fit'] as const).map((factor) => (
-                      <div key={factor} className="flex items-center justify-between text-ink-soft">
-                        <span className="capitalize">{factor.replace(/_/g, ' ')}</span>
-                        <span className="font-mono font-semibold text-ink">
-                          {match.breakdown?.[factor] != null ? `${match.breakdown[factor]}%` : '—'}
-                        </span>
-                      </div>
-                    ))}
+                    {(
+                      [
+                        ['skill_overlap', 'skill'],
+                        ['experience_fit', 'experience'],
+                        ['visa_fit', 'visa'],
+                        ['location_fit', 'location'],
+                        ['salary_fit', 'salary'],
+                        // Workplace-type fit is shown for context but is never
+                        // one of the weighted scoringWeights categories — see
+                        // JobMatchService#evaluateMatch — so it has no
+                        // `applicable` entry at all.
+                        ['remote_fit', null],
+                      ] as const
+                    ).map(([factor, applicableKey]) => {
+                      const weighed = applicableKey == null ? null : match.breakdown?.applicable?.[applicableKey];
+                      return (
+                        <div key={factor} className="flex items-center justify-between text-ink-soft">
+                          <span className="capitalize">
+                            {factor.replace(/_/g, ' ')}
+                            {weighed === false && (
+                              <span className="ml-1.5 text-[10px] font-semibold uppercase tracking-wide text-ink-faint">
+                                not weighted
+                              </span>
+                            )}
+                          </span>
+                          <span className="font-mono font-semibold text-ink">
+                            {match.breakdown?.[factor] != null ? `${match.breakdown[factor]}%` : '—'}
+                          </span>
+                        </div>
+                      );
+                    })}
                   </div>
                   {match.breakdown?.why && (
                     <p className="border-t border-line pt-3 text-xs leading-relaxed text-ink-muted">

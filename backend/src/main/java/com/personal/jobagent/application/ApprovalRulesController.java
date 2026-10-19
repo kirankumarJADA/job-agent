@@ -2,6 +2,7 @@ package com.personal.jobagent.application;
 
 import com.personal.jobagent.audit.AuditEntry;
 import com.personal.jobagent.audit.AuditLogWriter;
+import com.personal.jobagent.common.QuotaService;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.security.OwnerContext;
 import jakarta.servlet.http.HttpServletRequest;
@@ -55,13 +56,16 @@ public class ApprovalRulesController {
     private final ApplicationDecisionService decisions;
     private final AuditLogWriter audit;
     private final OwnerContext ownerContext;
+    private final QuotaService quotas;
 
     public ApprovalRulesController(ApplicationDecisionService decisions,
                                    AuditLogWriter audit,
-                                   OwnerContext ownerContext) {
+                                   OwnerContext ownerContext,
+                                   QuotaService quotas) {
         this.decisions = decisions;
         this.audit = audit;
         this.ownerContext = ownerContext;
+        this.quotas = quotas;
     }
 
     public record RuleRequest(Boolean autoApproveEnabled, Integer minScore) {}
@@ -142,5 +146,39 @@ public class ApprovalRulesController {
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
+    }
+
+    /**
+     * Run-history summary: how many matches the decision engine has
+     * considered today and over the last 7 days, broken down by how each one
+     * resolved, plus today's daily-application-quota usage. A read of the
+     * engine's own persisted decisions and quota counters — never a separate
+     * tracking mechanism, so it can never disagree with what actually happened.
+     */
+    @GetMapping("/activity")
+    public ResponseEntity<?> activity() {
+        UUID profileId = ownerContext.profileIdOrNull();
+        if (profileId == null) {
+            return ResponseEntity.badRequest().body(Map.of("error", "a profile is required"));
+        }
+        ApplicationDecisionService.ActivitySummary summary = decisions.activitySummary(profileId);
+        QuotaService.QuotaCheckResult quota = quotas.check(profileId, "application_daily");
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("today", windowBody(summary.today()));
+        body.put("last7Days", windowBody(summary.last7Days()));
+        Map<String, Object> quotaBody = new LinkedHashMap<>();
+        quotaBody.put("used", quota.used());
+        quotaBody.put("limit", quota.limit());
+        quotaBody.put("remaining", quota.remaining());
+        body.put("dailyApplicationQuota", quotaBody);
+        return ResponseEntity.ok(body);
+    }
+
+    private static Map<String, Object> windowBody(ApplicationDecisionService.ActivityWindow window) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("considered", window.considered());
+        body.put("byDecision", window.byDecision());
+        return body;
     }
 }

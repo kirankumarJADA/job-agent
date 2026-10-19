@@ -48,15 +48,15 @@ import java.util.UUID;
  * event. Crash-safety comes from the outbox (at-least-once delivery) plus
  * idempotent creation — the combination is exactly-once effect.
  *
- * <p><b>Matching policy.</b> The scorer, thresholds (APPLY ≥ 70, REVIEW ≥ 50)
- * and profile-ownership semantics are the existing ones, untouched. Candidate
- * salary expectations come from the profile's active preference set;
- * the remote constraint is passed as unconstrained (null) because the
- * existing scorer signature takes a single remote type while preferences
- * carry a list, and jobs discovered from structured boards often have no
- * workplace type at all — passing a constraint would zero the remote fit for
- * unknown-workplace jobs. Extending the scorer for list-valued remote
- * preferences is a separate, explicit change.
+ * <p><b>Matching policy.</b> The thresholds (APPLY ≥ 70, REVIEW ≥ 50) and
+ * profile-ownership semantics are the existing ones, untouched. The scorer
+ * itself (Robin x Tsenta continuation) now takes the candidate's full active
+ * preference set directly — salary floor, allowed experience levels,
+ * locations and remote types (list-valued, no longer the single-value
+ * constraint this comment used to describe as a known gap), sponsorship
+ * policy, and the configured {@code scoringWeights} — so every category the
+ * candidate has actually set a preference for weighs into the score, per
+ * {@link com.personal.jobagent.jobs.JobMatchService#evaluateMatch}.
  */
 @Service
 public class ApplicationPipelineService {
@@ -131,9 +131,11 @@ public class ApplicationPipelineService {
                     continue; // skip scoring entirely
                 }
 
-                // Scoring only runs for jobs that pass all hard filters
-                Number desiredSalaryMin = preferences == null ? null : preferences.salaryMinGbp();
-                var match = jobMatchService.evaluateMatch(jobId, profileId, desiredSalaryMin, null);
+                // Scoring only runs for jobs that pass all hard filters. The
+                // full preference record (not just salary) is passed through
+                // so the scorer can honour every configured scoringWeights
+                // category — see JobMatchService#evaluateMatch.
+                var match = jobMatchService.evaluateMatch(jobId, profileId, preferences);
                 log.debug("Pipeline match job={} profile={} score={} recommendation={}",
                         jobId, profileId, match.overall(), match.recommendation());
             } catch (Exception e) {

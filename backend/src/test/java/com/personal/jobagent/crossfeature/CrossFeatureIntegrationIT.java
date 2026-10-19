@@ -199,7 +199,7 @@ class CrossFeatureIntegrationIT {
     private JobPackage runPipeline(UUID profileId, JobFixture job) {
         // 1. MATCH (deterministic scoring + transactional outbox emission)
         JobMatchService.MatchResult match = jobMatchService.evaluateMatch(
-                job.jobId(), profileId, null, null);
+                job.jobId(), profileId, null);
         assertThat(match.recommendation()).isEqualTo("APPLY");
         assertThat(match.notified()).isTrue();
 
@@ -224,7 +224,7 @@ class CrossFeatureIntegrationIT {
         JobFixture job = seedJob("Snyk", "Security Engineer HS", List.of("Java"));
         seedCandidateSkills(profileId, List.of("Java"));
 
-        jobMatchService.evaluateMatch(job.jobId(), profileId, null, null);
+        jobMatchService.evaluateMatch(job.jobId(), profileId, null);
 
         ApplicationAnswerService.AnswerResult result = answerService.draftAnswer(
                 profileId, job.jobId(), null, "Describe your experience with top secret clearance programmes");

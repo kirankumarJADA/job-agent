@@ -27,14 +27,23 @@ import java.util.UUID;
  *       raise or lower. {@code CONTROLLED_AUTO} auto-applies only an
  *       APPLY-level match that an explicitly enabled, successfully loaded
  *       rule authorises.</li>
- *   <li><b>Quota</b> — if the profile's daily application quota is exhausted,
- *       the decision falls to NEEDS_REVIEW regardless of mode, so usage
- *       cannot runaway overnight. The quota is checked before any rule can
- *       authorise automatic approval.</li>
  *   <li><b>Per-user auto-approval rule</b> (Phase 7) — a rule can switch
  *       automatic approval off and raise or lower the score threshold. It can
  *       never bypass a hard stop, a required-field failure or an
  *       artifact-integrity failure.</li>
+ *   <li><b>Quota</b> — the profile's daily application quota is reserved
+ *       atomically ({@link QuotaService#tryReserve}), at the one point this
+ *       method is actually about to return AUTO_APPLY — never earlier, so a
+ *       match that was going to be NEEDS_REVIEW anyway (wrong mode, score
+ *       below threshold, rule disabled) never consumes a reservation for
+ *       nothing. Exhausted quota falls to NEEDS_REVIEW regardless of mode, so
+ *       usage cannot run away overnight. Reserving here rather than checking
+ *       read-only and recording later (the original Phase 5 design) is what
+ *       closes a check-then-act race: two concurrent decisions for the same
+ *       profile could previously both pass a read-only check before either
+ *       recorded its usage, overspending the limit. See
+ *       {@link #tryAutoApply} for the reserve/release contract this implies
+ *       for {@link ApplicationPipelineEventHandler}.</li>
  * </ol>
  *
  * <p><b>Fail-closed rule handling (Phase 7.2):</b> resolving the owner's rule
@@ -99,8 +108,25 @@ public class ApplicationDecisionService {
         this.health = health;
     }
 
-    /** The outcome of the decision engine for one (profile, job) pair. */
-    public record DecisionResult(String decision, String reason, int matchScore) {}
+    /**
+     * The outcome of the decision engine for one (profile, job) pair.
+     *
+     * <p>{@code quotaPeriodStart} is non-null only when this call reserved a
+     * unit of the daily application quota (i.e. {@code decision ==
+     * "AUTO_APPLY"}, via {@link #tryAutoApply}) — the exact day
+     * {@link QuotaService#tryReserve} reserved it against, which {@link
+     * ApplicationPipelineEventHandler} must pass back unchanged to {@link
+     * QuotaService#release} if this AUTO_APPLY does not end up creating a
+     * genuinely new application. Every other decision path never reserves
+     * anything, so this is simply {@code null} there — there is nothing to
+     * release.
+     */
+    public record DecisionResult(String decision, String reason, int matchScore, java.time.LocalDate quotaPeriodStart) {
+        /** Every non-quota-reserving decision path uses this — see the class javadoc. */
+        public DecisionResult(String decision, String reason, int matchScore) {
+            this(decision, reason, matchScore, null);
+        }
+    }
 
     /**
      * Evaluates whether a match that scored APPLY should proceed to
@@ -135,15 +161,12 @@ public class ApplicationDecisionService {
                     "NEEDS_REVIEW", "Manual mode requires human review");
         }
 
-        // ── 3. Quota gate: prevent runaway auto-applications ──
-        var quotaCheck = quotaService.check(profileId, "application_daily");
-        if (!quotaCheck.allowed()) {
-            return record(profileId, jobId, matchScore, recommendation, mode,
-                    "NEEDS_REVIEW", "Daily application quota exceeded (" +
-                            (int) quotaCheck.used() + "/" + (int) quotaCheck.limit() + ")");
-        }
-
-        // ── 4. Per-user auto-approval rule (Phase 7) ──
+        // ── 3. Per-user auto-approval rule (Phase 7) ──
+        // (The daily-quota gate used to live here as an upfront check-only
+        // peek — see §5/§6 below for where it moved and why: a peek this
+        // early, before the mode/rule/threshold checks that follow can still
+        // route to NEEDS_REVIEW for other reasons, would reserve quota for a
+        // match that was never actually going to auto-apply.)
         // The rule can only TOGGLE automatic application creation and RAISE or
         // LOWER the score threshold; it can never bypass a hard stop, a
         // required-field failure or an artifact-integrity failure — those are
@@ -172,7 +195,7 @@ public class ApplicationDecisionService {
                     "NEEDS_REVIEW", "Automatic approval disabled by user rule");
         }
 
-        // ── 5. ASSISTED mode: a conservative floor applies ──
+        // ── 4. ASSISTED mode: a conservative floor applies ──
         // With no rule the mode's own high-confidence floor (85) is the bar,
         // which is stricter than the APPLY threshold and is the documented
         // Phase 5 default. A configured, enabled rule may move it.
@@ -180,8 +203,8 @@ public class ApplicationDecisionService {
             int assistedThreshold = rule.availability() == RuleAvailability.CONFIGURED
                     ? rule.rule().minScore() : HIGH_CONFIDENCE_THRESHOLD;
             if (matchScore >= assistedThreshold) {
-                return record(profileId, jobId, matchScore, recommendation, mode,
-                        "AUTO_APPLY", "High-confidence match in assisted mode (score " + matchScore
+                return tryAutoApply(profileId, jobId, matchScore, recommendation, mode,
+                        "High-confidence match in assisted mode (score " + matchScore
                                 + " >= " + assistedThreshold + ")");
             }
             return record(profileId, jobId, matchScore, recommendation, mode,
@@ -189,7 +212,7 @@ public class ApplicationDecisionService {
                             + assistedThreshold + ") for assisted mode");
         }
 
-        // ── 6. CONTROLLED_AUTO requires an explicitly enabled, loaded rule ──
+        // ── 5. CONTROLLED_AUTO requires an explicitly enabled, loaded rule ──
         // No rule means no authorisation: "auto-apply everything" must be an
         // explicit opt-in, never the silent default.
         if (rule.availability() == RuleAvailability.ABSENT) {
@@ -203,9 +226,59 @@ public class ApplicationDecisionService {
                     "NEEDS_REVIEW", "Score " + matchScore + " below user threshold ("
                             + rule.rule().minScore() + ")");
         }
-        return record(profileId, jobId, matchScore, recommendation, mode,
-                "AUTO_APPLY", "Controlled-auto mode with an enabled user rule (score "
+        return tryAutoApply(profileId, jobId, matchScore, recommendation, mode,
+                "Controlled-auto mode with an enabled user rule (score "
                         + matchScore + " >= " + rule.rule().minScore() + ")");
+    }
+
+    /**
+     * ── 6. The daily-quota gate, moved here from its old upfront position ──
+     *
+     * <p>This is the ONE place {@code decide()} ever returns AUTO_APPLY, and
+     * the quota is reserved atomically ({@link QuotaService#tryReserve}) at
+     * exactly this point — not earlier, where a match that turns out to be
+     * NEEDS_REVIEW for an unrelated reason (mode, rule, threshold) would
+     * otherwise have consumed a reservation for nothing; not later (e.g.
+     * only after {@code createApplicationFromMatch} actually runs), which is
+     * exactly the check-then-act race the old {@code check()}-then-
+     * {@code recordAndCheck()} split had: two concurrent decisions for the
+     * same profile could both pass a read-only check before either recorded
+     * its usage.
+     *
+     * <p>If {@link ApplicationPipelineEventHandler} discovers this
+     * "AUTO_APPLY" never actually results in a newly-created application
+     * (idempotent replay, cross-source duplicate, or the creation itself
+     * failing), it is responsible for releasing this reservation via
+     * {@link QuotaService#release} — the explicit other half of this
+     * reserve/release contract; see that class's own handling for why.
+     * {@code record}'s own replay guard is handled here too: if a terminal
+     * decision (APPROVED/REJECTED/PAUSED/EXPIRED) already exists for this
+     * (profile, job) pair, the upsert is refused and the reservation this
+     * call just made was never actually spent on a real auto-apply — released
+     * immediately, in the same place, rather than leaking into the caller.
+     */
+    private DecisionResult tryAutoApply(UUID profileId, UUID jobId, int matchScore, String recommendation,
+                                        String mode, String reason) {
+        QuotaService.ReservationResult reservation = quotaService.tryReserve(profileId, "application_daily", 1);
+        if (!reservation.reserved()) {
+            return record(profileId, jobId, matchScore, recommendation, mode,
+                    "NEEDS_REVIEW", "Daily application quota exceeded (" +
+                            (int) reservation.used() + "/" + (int) reservation.limit() + ")");
+        }
+        DecisionResult result = record(profileId, jobId, matchScore, recommendation, mode, "AUTO_APPLY", reason);
+        if (!"AUTO_APPLY".equals(result.decision())) {
+            // record()'s own terminal-decision replay guard refused the
+            // write — release against the EXACT day reserved, never "today"
+            // (see QuotaService#release's javadoc for why that distinction
+            // is load-bearing, not cosmetic).
+            quotaService.release(profileId, "application_daily", 1, reservation.periodStart());
+            return result;
+        }
+        // Carry the exact reservation day forward: if ApplicationPipelineEventHandler
+        // later discovers this AUTO_APPLY never resulted in a genuinely new
+        // application, it must release against this same day, however much
+        // real time (and possibly a midnight rollover) has passed by then.
+        return new DecisionResult(result.decision(), result.reason(), result.matchScore(), reservation.periodStart());
     }
 
     /**
@@ -401,6 +474,49 @@ public class ApplicationDecisionService {
                 where profile_id = ? and decision = 'NEEDS_REVIEW'
                   and created_at < now() - make_interval(days => ?)
                 """, profileId, expireDays);
+    }
+
+    // ── Robin x Tsenta continuation: Auto Apply run-history summary ──
+
+    /** One time window's decision counts, by Robin's own decision vocabulary. */
+    public record ActivityWindow(int considered, Map<String, Integer> byDecision) {}
+
+    public record ActivitySummary(ActivityWindow today, ActivityWindow last7Days) {}
+
+    /**
+     * Aggregates {@code application_decisions} into the counts the Approval
+     * Rules page shows as "today" and "last 7 days" activity — how many
+     * matches were considered by the decision engine and how each one
+     * resolved (AUTO_APPLY, NEEDS_REVIEW, SKIP, APPROVED, REJECTED, PAUSED,
+     * EXPIRED). This is a read of the engine's own persisted decisions, not a
+     * separate tracking mechanism, so it can never disagree with {@link #decide}.
+     *
+     * <p>Windows are measured on {@code updated_at} rather than
+     * {@code created_at}: the table is upserted on (profile_id, job_id), so a
+     * re-evaluated match's {@code created_at} can be far older than today
+     * while {@code updated_at} reflects what actually happened today.
+     */
+    public ActivitySummary activitySummary(UUID profileId) {
+        java.time.Instant todayStart = java.time.LocalDate.now()
+                .atStartOfDay(java.time.ZoneId.systemDefault()).toInstant();
+        java.time.Instant sevenDaysAgo = java.time.Instant.now().minus(java.time.Duration.ofDays(7));
+        return new ActivitySummary(windowSince(profileId, todayStart), windowSince(profileId, sevenDaysAgo));
+    }
+
+    private ActivityWindow windowSince(UUID profileId, java.time.Instant since) {
+        List<Map<String, Object>> rows = db.queryForList("""
+                select decision, count(*) as n from application_decisions
+                where profile_id = ? and updated_at >= ?
+                group by decision
+                """, profileId, java.sql.Timestamp.from(since));
+        Map<String, Integer> byDecision = new java.util.LinkedHashMap<>();
+        int considered = 0;
+        for (Map<String, Object> row : rows) {
+            int n = ((Number) row.get("n")).intValue();
+            byDecision.put(String.valueOf(row.get("decision")), n);
+            considered += n;
+        }
+        return new ActivityWindow(considered, byDecision);
     }
 
     /** Null means missing, soft-deleted, or not owned by the current profile. */
