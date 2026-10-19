@@ -65,6 +65,22 @@ public class EmployerCredentialService {
                 (UUID) row.get("id"), employerDomain.toLowerCase(), username, password));
     }
 
+    public record CredentialSummary(UUID id, String employerDomain, String username, String status,
+                                     java.sql.Timestamp updatedAt) {}
+
+    /** Lists the candidate's own saved credentials. Never decrypts or returns the password. */
+    public List<CredentialSummary> list(UUID profileId) {
+        return db.query("""
+                select id, employer_domain, username_encrypted, status, updated_at
+                from employer_credentials where profile_id = ? order by employer_domain
+                """,
+                (rs, rowNum) -> new CredentialSummary(
+                        (UUID) rs.getObject("id"), rs.getString("employer_domain"),
+                        cipher.decrypt(rs.getString("username_encrypted")),
+                        rs.getString("status"), rs.getTimestamp("updated_at")),
+                profileId);
+    }
+
     public boolean exists(UUID profileId, String employerDomain) {
         Integer count = db.queryForObject("""
                 select count(*) from employer_credentials

@@ -11,11 +11,13 @@ let server;
 let mockUrl;
 let submittedOtp;
 // What the mock employer received: the sign-up and login addresses, and every page requested.
-const employerSaw = { signupEmail: null, loginEmail: null, paths: [] };
+const employerSaw = { signupEmail: null, loginEmail: null, signupPassword: null, loginPassword: null, paths: [] };
 function resetEmployer() {
   submittedOtp = null;
   employerSaw.signupEmail = null;
   employerSaw.loginEmail = null;
+  employerSaw.signupPassword = null;
+  employerSaw.loginPassword = null;
   employerSaw.paths = [];
 }
 after(async () => { if (server?.listening) await new Promise((resolve) => server.close(resolve)); });
@@ -26,10 +28,10 @@ async function startMock() {
     employerSaw.paths.push(url.pathname);
     res.writeHead(200, { 'Content-Type': 'text/html' });
     if (url.pathname === '/signup') res.end('<form action="/verify" method="get"><input name="email"><input name="password"><button type="submit">Sign up</button></form>');
-    else if (url.pathname === '/verify') { employerSaw.signupEmail = url.searchParams.get('email'); res.end('<form action="/verified" method="get"><input name="otp"><button type="submit">Verify</button></form>'); }
+    else if (url.pathname === '/verify') { employerSaw.signupEmail = url.searchParams.get('email'); employerSaw.signupPassword = url.searchParams.get('password'); res.end('<form action="/verified" method="get"><input name="otp"><button type="submit">Verify</button></form>'); }
     else if (url.pathname === '/verified') { submittedOtp = url.searchParams.get('otp'); res.end('<main>Verification successful</main>'); }
     else if (url.pathname === '/login') res.end('<form action="/dashboard" method="get"><input name="email"><input name="password"><button type="submit">Log in</button></form>');
-    else if (url.pathname === '/dashboard') { employerSaw.loginEmail = url.searchParams.get('email'); res.end('<main>Dashboard</main>'); }
+    else if (url.pathname === '/dashboard') { employerSaw.loginEmail = url.searchParams.get('email'); employerSaw.loginPassword = url.searchParams.get('password'); res.end('<main>Dashboard</main>'); }
     else { res.writeHead(404); res.end('Not found'); }
   });
   await new Promise((resolve, reject) => {
@@ -206,5 +208,98 @@ describe('account lifecycle with the Robin-managed address (Phase 8.5)', () => {
     assert.equal(employerSaw.loginEmail, MANAGED);
     assert.equal(submittedOtp, '482913');
     fs.rmSync(root, { recursive: true, force: true });
+  });
+});
+
+// ── Phase 8.5 continuation: EmployerCredentialService wired as the password source ──
+describe('account lifecycle with a backend-resolved portal password (Phase 8.5 continuation)', () => {
+  it('asks the backend for the password instead of baking one into the plan', () => {
+    const p = buildAccountLifecyclePlan({ baseUrl: 'https://mockemployer.test', employerDomain: 'mockemployer.test',
+      applicationId: 'app-cred', accountEmail: 'candidate@example.com' });
+    assert.ok(p.steps.some((s) => s.id === 'account-resolve-credential' && s.type === 'ACCOUNT_RESOLVE_CREDENTIAL'));
+    for (const id of ['signup-password', 'login-password']) {
+      const field = p.steps.find((s) => s.id === id);
+      assert.equal(field.params.valueFrom, 'credential.password');
+      assert.ok(!('value' in field.params), 'no literal password value is written into the plan');
+    }
+  });
+
+  it('still bakes in a literal password when one is explicitly given (backward compatible)', () => {
+    const p = buildAccountLifecyclePlan({ baseUrl: 'https://mockemployer.test', employerDomain: 'mockemployer.test',
+      applicationId: 'app-cred-literal', accountEmail: 'candidate@example.com', accountPassword: 'literal-pw' });
+    assert.ok(!p.steps.some((s) => s.type === 'ACCOUNT_RESOLVE_CREDENTIAL'));
+    assert.equal(p.steps.find((s) => s.id === 'signup-password').params.value, 'literal-pw');
+  });
+
+  it('signs up and logs in using the resolved credential, and never records it via a dedicated store field or an event', async () => {
+    const url = await startMock(); resetEmployer();
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lifecycle-credential-'));
+    const credentialCalls = []; const events = [];
+    const worker = new BrowserWorker({ statePath: path.join(root, 'state.json'), artifactDir: root, eventSink: (e) => events.push(e),
+      credentialResolver: async (b) => { credentialCalls.push(b); return { username: 'candidate@example.com', password: 'resolved-secret-pw' }; } });
+    const p = buildAccountLifecyclePlan({ baseUrl: url, employerDomain: new URL(url).hostname, applicationId: 'app-cred-run',
+      accountEmail: 'candidate@example.com', verifyOtp: false });
+    assert.equal((await worker.execute(p)).status, 'COMPLETED');
+    assert.equal(employerSaw.signupPassword, 'resolved-secret-pw');
+    assert.equal(employerSaw.loginPassword, 'resolved-secret-pw');
+    assert.deepEqual(credentialCalls, [{ applicationId: 'app-cred-run', employerDomain: new URL(url).hostname }]);
+    assert.ok(events.some((e) => e.type === 'EMPLOYER_CREDENTIAL_RESOLVED'));
+    assert.ok(!JSON.stringify(events).includes('resolved-secret-pw'), 'the password never appears in an event');
+    // Unlike identity/verification, there is no dedicated this.store.credential()
+    // persistence method at all — the resolved value lives only in this run's
+    // in-memory `values`. The mock employer's forms submit over GET for test
+    // simplicity, so page.url() immediately after the signup/login submit
+    // would otherwise carry the password in its query string — this is the
+    // exact GET-form leak the state-persistence layer (store.js's markStep,
+    // via secret_redaction.js's sanitizeUrl) now closes at the source, so the
+    // raw password must not appear ANYWHERE in the on-disk state file, not
+    // merely absent from a dedicated field.
+    const stateRaw = fs.readFileSync(path.join(root, 'state.json'), 'utf8');
+    assert.ok(!stateRaw.includes('resolved-secret-pw'),
+      'the password must never appear anywhere in the on-disk state file, including inside a recorded page URL');
+    const state = JSON.parse(stateRaw).plans[p.planId];
+    assert.equal(state.credential, undefined, 'no dedicated credential field is ever written to the state file');
+    // Prove the redaction actually fired (rather than the password simply
+    // never having been in a URL to begin with): the GET-submitted signup
+    // click navigates to /verify?email=...&password=..., and that is the
+    // step whose recorded URL must carry [REDACTED] in place of the password.
+    const signupSubmitStep = state.steps['signup-submit'];
+    assert.ok(signupSubmitStep?.currentUrl, 'the signup-submit step should have recorded a current URL');
+    assert.match(signupSubmitStep.currentUrl, /password=.*REDACTED/i);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('pauses when no credential resolver is configured, without touching the employer', async () => {
+    const url = await startMock(); resetEmployer();
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lifecycle-cred-none-'));
+    const worker = new BrowserWorker({ statePath: path.join(root, 'state.json'), artifactDir: root });
+    const p = buildAccountLifecyclePlan({ baseUrl: url, employerDomain: new URL(url).hostname, applicationId: 'app-cred-none',
+      accountEmail: 'c@x.test', verifyOtp: false });
+    await assert.rejects(() => worker.execute(p), (e) => e.name === 'ApprovalRequiredError');
+    const state = JSON.parse(fs.readFileSync(path.join(root, 'state.json'), 'utf8')).plans[p.planId];
+    assert.equal(state.status, 'PAUSED');
+    assert.equal(state.pauseReason, 'EMPLOYER_CREDENTIAL_UNAVAILABLE');
+    assert.deepEqual(employerSaw.paths, [], 'no employer page was opened');
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('pauses with the specific reason for a missing credential, a provider failure, or an empty password', async () => {
+    const url = await startMock();
+    for (const [credentialResolver, reason] of [
+      [async () => { throw new Error('EMPLOYER_CREDENTIAL_FAILED:404'); }, 'EMPLOYER_CREDENTIAL_NOT_FOUND'],
+      [async () => { throw new Error('EMPLOYER_CREDENTIAL_FAILED:503'); }, 'EMPLOYER_CREDENTIAL_UNAVAILABLE'],
+      [async () => ({ username: 'c@x.test', password: '' }), 'EMPLOYER_CREDENTIAL_INVALID'],
+    ]) {
+      resetEmployer();
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lifecycle-cred-fail-'));
+      const worker = new BrowserWorker({ statePath: path.join(root, 'state.json'), artifactDir: root, credentialResolver });
+      const p = buildAccountLifecyclePlan({ baseUrl: url, employerDomain: new URL(url).hostname, applicationId: 'app-cred-fail',
+        accountEmail: 'c@x.test', verifyOtp: false });
+      await assert.rejects(() => worker.execute(p), (e) => e.name === 'ApprovalRequiredError');
+      const state = JSON.parse(fs.readFileSync(path.join(root, 'state.json'), 'utf8')).plans[p.planId];
+      assert.equal(state.pauseReason, reason);
+      assert.deepEqual(employerSaw.paths, []);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

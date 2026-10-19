@@ -254,6 +254,11 @@ mailbox unless a plan is explicitly supplied. Environment:
   (employer account lifecycle: which address to register with — Robin-managed
   by default — and the verification code for it; both bearer-authenticated
   with `WORKER_EVENT_TOKEN`). Without them the lifecycle pauses for the human.
+- `WORKER_EMPLOYER_CREDENTIAL_URL=https://<render-backend>/api/v1/employer-credentials/resolve`
+  (this candidate's saved portal password for the employer domain,
+  `EmployerCredentialService`; bearer-authenticated with `WORKER_EVENT_TOKEN`).
+  Without it, or with no credential saved for that domain, the lifecycle
+  pauses for the human rather than guessing or generating one.
 - `WORKER_STATE_PATH=/data/worker-state.json`, `WORKER_ARTIFACT_DIR=/data/artifacts`
   (Render disk or ephemeral — state is a crash-recovery cache, not the
   source of truth; the backend DB owns durable state).
