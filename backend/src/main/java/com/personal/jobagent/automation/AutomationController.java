@@ -55,6 +55,7 @@ public class AutomationController {
     private final AutomationMetrics metrics;
     private final com.personal.jobagent.apply.ApplyReadinessService applyReadiness;
     private final ApplyDocumentSelector documentSelector;
+    private final com.personal.jobagent.application.ApplicationStatusService applicationStatus;
 
     public AutomationController(AutomationPlanRepository plans,
                                 AuditLogWriter audit,
@@ -64,7 +65,8 @@ public class AutomationController {
                                 NotificationService notifications,
                                 AutomationMetrics metrics,
                                 com.personal.jobagent.apply.ApplyReadinessService applyReadiness,
-                                ApplyDocumentSelector documentSelector) {
+                                ApplyDocumentSelector documentSelector,
+                                com.personal.jobagent.application.ApplicationStatusService applicationStatus) {
         this.plans = plans;
         this.audit = audit;
         this.ownerContext = ownerContext;
@@ -74,11 +76,14 @@ public class AutomationController {
         this.metrics = metrics;
         this.applyReadiness = applyReadiness;
         this.documentSelector = documentSelector;
+        this.applicationStatus = applicationStatus;
     }
 
     public record CreateRequest(UUID applicationId, UUID jobId, String targetUrl, String idempotencyKey, List<AutomationPlan.Step> steps) {}
     public record StepRequest(int index, String stepId, String status, Map<String, Object> result, String screenshotRef) {}
-    public record OutcomeRequest(String outcome, String detail) {}
+    public record OutcomeRequest(String outcome, String detail, List<Map<String, Object>> result) {
+        public OutcomeRequest(String outcome, String detail) { this(outcome, detail, null); }
+    }
     public record WorkerEvent(String eventId, UUID planId, UUID applicationId, UUID jobId, String type, Map<String, Object> payload) {}
 
     @PostMapping("/plans")
@@ -199,16 +204,67 @@ public class AutomationController {
         return ResponseEntity.ok(Map.of("status", "READY_TO_SUBMIT", "submissionEnabled", false));
     }
 
+    /**
+     * Phase 4: the one, deliberately separate human action that queues the
+     * real submission click for an already-approved plan. Distinct from
+     * {@link #approve}: approval alone never did and still does not enable
+     * submission (READY_TO_SUBMIT only records intent) — this endpoint is
+     * the second, explicit confirmation that actually appends the
+     * REAL_SUBMIT_CLICK step, and it independently re-verifies readiness and
+     * document drift again, exactly as approval did, since time may have
+     * passed since the plan was approved.
+     */
+    @PostMapping("/plans/{id}/prepare-submit")
+    public ResponseEntity<?> prepareSubmit(@PathVariable UUID id) {
+        if (ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(403).body(Map.of("error", "queuing a real submission requires a human action"));
+        }
+        if (!mayActOnPlan(id)) {
+            return notFound();
+        }
+        UUID profileId = ownerContext.profileIdOrNull();
+        var plan = plans.find(profileId, id).orElse(null);
+        if (plan == null || !"READY_TO_SUBMIT".equals(plan.status()) || !plan.submitApproved()) {
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "a plan can only be queued for real submission once it is approved and READY_TO_SUBMIT"));
+        }
+        String drift = packageDrift(plan, profileId);
+        if (drift != null) {
+            audit.write(new AuditEntry(ownerContext.actorOr("user"), "GREENHOUSE_SUBMIT_QUEUE_REFUSED",
+                    "AUTOMATION_PLAN", id, null, Map.of("reason", drift), null, UuidV7.generate()));
+            return ResponseEntity.status(409).body(Map.of("error", drift, "code", "PACKAGE_DRIFT"));
+        }
+        if (!plans.prepareRealSubmission(id)) {
+            return ResponseEntity.status(409).body(Map.of("error", "plan state changed"));
+        }
+        audit.write(new AuditEntry(ownerContext.actorOr("user"), "GREENHOUSE_SUBMIT_QUEUED", "AUTOMATION_PLAN", id,
+                null, Map.of("submissionQueued", true), null, UuidV7.generate()));
+        return ResponseEntity.ok(Map.of("status", "PREPARED", "submissionQueued", true));
+    }
+
     @PostMapping("/plans/{id}/complete")
     public ResponseEntity<?> complete(@PathVariable UUID id, @RequestBody OutcomeRequest r) {
         if (!mayActOnPlan(id)) {
             return notFound();
         }
         String outcome = r.outcome();
+        // A real submission outcome may only be reported by the worker
+        // identity, and only with the confirmation evidence #runRealSubmitClick
+        // actually observed — never fabricated, and never silently absent.
+        if ("SUBMITTED".equals(outcome) && !ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(403).body(Map.of("error", "only the worker may report a real submission"));
+        }
+        if ("SUBMITTED".equals(outcome) && (r.detail() == null || r.detail().isBlank())) {
+            return ResponseEntity.status(400).body(Map.of("error", "a real submission outcome requires confirmation evidence"));
+        }
         boolean ok = switch (outcome == null ? "" : outcome) {
-            case "HUMAN_REQUIRED", "COMPLETED", "FAILED", "BLOCKED_ANTI_BOT" ->
-                    plans.transition(id, "RUNNING", outcome.equals("HUMAN_REQUIRED") ? "AWAITING_APPROVAL" : outcome);
-            case "SUBMITTED" -> false;
+            case "HUMAN_REQUIRED", "COMPLETED", "FAILED", "BLOCKED_ANTI_BOT" -> {
+                String to = outcome.equals("HUMAN_REQUIRED") ? "AWAITING_APPROVAL" : outcome;
+                yield r.result() != null && !r.result().isEmpty()
+                        ? plans.transitionWithResult(id, "RUNNING", to, new java.util.ArrayList<>(r.result()))
+                        : plans.transition(id, "RUNNING", to);
+            }
+            case "SUBMITTED" -> plans.completeRealSubmission(id);
             default -> false;
         };
         if (!ok) {
@@ -217,8 +273,35 @@ public class AutomationController {
         audit.write(new AuditEntry(ownerContext.actorOr("worker"), "AUTOMATION_PLAN_" + outcome, "AUTOMATION_PLAN", id,
                 null, Map.of("detail", r.detail() == null ? "" : r.detail()), null, UuidV7.generate()));
         metrics.planOutcome(outcome);
+        if ("SUBMITTED".equals(outcome)) {
+            markApplicationSubmitted(id, r.detail());
+        }
         notifyPlanOutcome(id, outcome, r.detail());
         return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * Mirrors a confirmed real submission onto the application's own status,
+     * so the applications list/timeline (the surface the rest of the product
+     * reads) reflects it, not just the automation plan row. Deliberately
+     * tolerant of an unexpected current application status: the
+     * automation_plans row reaching SUBMITTED is the authoritative,
+     * database-guarded fact (completeRealSubmission's own atomic guard); a
+     * mismatch here is logged, not allowed to undo or mask that fact.
+     */
+    private void markApplicationSubmitted(UUID planId, String detail) {
+        var plan = plans.findById(planId).orElse(null);
+        UUID profileId = plans.ownerOfPlan(planId).orElse(null);
+        if (plan == null || plan.applicationId() == null || profileId == null) {
+            return;
+        }
+        try {
+            applicationStatus.apply(profileId, plan.applicationId(), "APPLICATION_SUBMITTED",
+                    "automation.real_submit:" + planId, "worker",
+                    Map.of("planId", planId.toString(), "detail", detail == null ? "" : detail));
+        } catch (IllegalStateException | java.util.NoSuchElementException e) {
+            log.warn("Could not mirror real submission onto application status for plan {}: {}", planId, e.getMessage());
+        }
     }
 
     /**
