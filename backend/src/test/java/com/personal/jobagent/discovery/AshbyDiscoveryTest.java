@@ -57,7 +57,10 @@ class AshbyDiscoveryTest {
                 new GreenhouseProvider(), new AshbyProvider("http://127.0.0.1:" + server.getAddress().getPort()));
         when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of(Map.of(
                 "kind", "ASHBY", "org_identifier", "fixture", "enabled", true)));
-        var controller = new DiscoveryController(ingestion, orchestrator, mock(LinkedInDiscoveryService.class), jdbc);
+        // Phase 8.2.5: kind-aware runs go through the single BoardDiscoveryService
+        // path; the Ashby adapter wraps the same (stub-pointed) AshbyProvider.
+        var boards = boardRunner(jdbc, ingestion, new AshbyProvider("http://127.0.0.1:" + server.getAddress().getPort()));
+        var controller = new DiscoveryController(ingestion, orchestrator, mock(LinkedInDiscoveryService.class), jdbc, boards);
         MockMvc mvc = MockMvcBuilders.standaloneSetup(controller).build();
         UUID sourceId = UUID.randomUUID();
 
@@ -80,7 +83,19 @@ class AshbyDiscoveryTest {
         assertThat(command.applicationUrl()).isEqualTo("https://jobs.ashbyhq.com/fixture/ashby-101/application");
         assertThat(command.canonicalUrl()).isEqualTo("https://jobs.ashbyhq.com/fixture/ashby-101");
         assertThat(command.postedAt()).isEqualTo(java.time.Instant.parse("2025-03-04T05:06:07Z"));
-        verify(dedup).recordObservation(eq(ingestResult.jobId()), any(AshbyProvider.class), any(), eq(1.0));
+        // Provenance is recorded by ingestion itself (job_source_observations with
+        // the source id); the run's counters and health are recorded on the source.
+        assertThat(response.getContentAsString()).contains("\"created\":1", "\"listed\":1");
+        verify(jdbc).update(org.mockito.ArgumentMatchers.contains("last_success_at = now()"), any(), any(), eq(sourceId));
+    }
+
+    static com.personal.jobagent.discovery.platform.BoardDiscoveryService boardRunner(
+            JdbcTemplate jdbc, JobDiscoveryService ingestion, AshbyProvider ashby) {
+        var registry = new com.personal.jobagent.discovery.platform.PlatformRegistry(new GreenhouseProvider(), ashby, 40);
+        return new com.personal.jobagent.discovery.platform.BoardDiscoveryService(jdbc, ingestion, registry,
+                kind -> com.personal.jobagent.discovery.platform.SafeHttpClient.live(
+                        com.personal.jobagent.discovery.platform.SafeHttpClient.Settings.defaults()),
+                50, 150, 3, 10);
     }
 
     @Test
@@ -94,7 +109,8 @@ class AshbyDiscoveryTest {
                 new GreenhouseProvider(), provider);
         when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of(Map.of(
                 "kind", "ASHBY", "org_identifier", "fixture", "enabled", true)));
-        var controller = new DiscoveryController(ingestion, orchestrator, mock(LinkedInDiscoveryService.class), jdbc);
+        var controller = new DiscoveryController(ingestion, orchestrator, mock(LinkedInDiscoveryService.class), jdbc,
+                boardRunner(jdbc, ingestion, provider));
         MockMvc mvc = MockMvcBuilders.standaloneSetup(controller).build();
 
         int mismatch = mvc.perform(post("/api/v1/discovery/run")

@@ -1,6 +1,7 @@
 package com.personal.jobagent.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.personal.jobagent.application.ApplicationDecisionService;
 import com.personal.jobagent.common.AutomationMetrics;
 import com.personal.jobagent.automation.GreenhouseExecutionPlanService;
 import com.personal.jobagent.automation.InspectionPlanService;
@@ -23,6 +24,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -50,30 +52,41 @@ class ApplicationPipelineEventHandlerTest {
     private static final UUID APPLICATION = UUID.randomUUID();
     private static final UUID PROFILE = UUID.randomUUID();
     private static final UUID JOB = UUID.randomUUID();
+    private static final LocalDate RESERVATION_PERIOD_START = LocalDate.of(2026, 1, 15);
 
     private final ApplicationPipelineService pipeline = mock(ApplicationPipelineService.class);
     private final InspectionPlanService inspectionPlanService = mock(InspectionPlanService.class);
     private final GreenhouseExecutionPlanService greenhousePlanService = mock(GreenhouseExecutionPlanService.class);
+    private final com.personal.jobagent.automation.ZohoRecruitExecutionPlanService zohoRecruitPlanService =
+            mock(com.personal.jobagent.automation.ZohoRecruitExecutionPlanService.class);
     private final ResumeAtsIntelligenceService resumeService = mock(ResumeAtsIntelligenceService.class);
     private final CoverLetterService coverLetterService = mock(CoverLetterService.class);
     private final ApplicationAnswerService answerService = mock(ApplicationAnswerService.class);
     private final JobRepository jobRepository = mock(JobRepository.class);
     private final NotificationService notifications = mock(NotificationService.class);
     private final JdbcTemplate db = mock(JdbcTemplate.class);
+    private final ApplicationDecisionService decisionService = mock(ApplicationDecisionService.class);
+    private final com.personal.jobagent.common.QuotaService quotaService = mock(com.personal.jobagent.common.QuotaService.class);
     private ApplicationPipelineEventHandler handler;
 
     @BeforeEach
     void setUp() {
-        reset(pipeline, inspectionPlanService, greenhousePlanService, resumeService, coverLetterService,
+        reset(pipeline, inspectionPlanService, greenhousePlanService, zohoRecruitPlanService, resumeService, coverLetterService,
                 answerService, jobRepository, notifications, db);
         handler = new ApplicationPipelineEventHandler(pipeline, inspectionPlanService, greenhousePlanService,
+                zohoRecruitPlanService,
                 resumeService, coverLetterService, answerService, jobRepository, notifications, db, new ObjectMapper(),
-                new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
+                new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()), decisionService,
+                mock(com.personal.jobagent.audit.AuditLogWriter.class), quotaService);
         when(db.queryForObject(contains("count(*) from applications"), eq(Integer.class), eq(APPLICATION)))
                 .thenReturn(1);
         when(db.update(contains("application_events"), any(UUID.class), eq(APPLICATION), any(String.class)))
                 .thenReturn(1);
         when(db.queryForList(anyString(), any(Object.class))).thenReturn(List.of());
+        // Default: APPLY matches auto-apply (the decision-engine tests cover
+        // the mode/quota branches themselves).
+        when(decisionService.decide(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any()))
+                .thenReturn(new ApplicationDecisionService.DecisionResult("AUTO_APPLY", "test", 90, RESERVATION_PERIOD_START));
         when(jobRepository.findById(JOB)).thenReturn(java.util.Optional.of(job()));
     }
 
@@ -103,6 +116,67 @@ class ApplicationPipelineEventHandlerTest {
                 "job_id", JOB.toString(), "profile_id", PROFILE.toString(), "recommendation", "APPLY")));
 
         verify(pipeline).createApplicationFromMatch(PROFILE, JOB);
+    }
+
+    @Test
+    void aGenuinelyNewAutoCreatedApplicationKeepsTheReservationDecideAlreadyMade() {
+        // Robin x Tsenta continuation: ApplicationDecisionService#decide
+        // already reserved one unit of the quota ATOMICALLY, at the moment
+        // it decided AUTO_APPLY (QuotaService#tryReserve) — this handler's
+        // job is only to RELEASE that reservation when creation does NOT
+        // actually result in a new application. A genuine new creation must
+        // never call release — the reservation decide() made is exactly the
+        // unit this application should cost, nothing more to do here.
+        when(pipeline.createApplicationFromMatch(PROFILE, JOB))
+                .thenReturn(new ApplicationPipelineService.CreatedApplication(APPLICATION, true, "READY_TO_APPLY"));
+
+        handler.handle(envelope(NotificationEvents.JOB_MATCHED, Map.of(
+                "job_id", JOB.toString(), "profile_id", PROFILE.toString(), "recommendation", "APPLY")));
+
+        verify(quotaService, never()).release(any(), any(), org.mockito.ArgumentMatchers.anyDouble(), any());
+    }
+
+    @Test
+    void aReplayThatResolvesToAnExistingApplicationReleasesTheReservation() {
+        // created=false means this call is an idempotent replay resolving to
+        // an application that already existed — the reservation decide()
+        // made for this call must be given back, not kept as if a second
+        // real auto-apply had happened.
+        when(pipeline.createApplicationFromMatch(PROFILE, JOB))
+                .thenReturn(new ApplicationPipelineService.CreatedApplication(APPLICATION, false, "READY_TO_APPLY"));
+
+        handler.handle(envelope(NotificationEvents.JOB_MATCHED, Map.of(
+                "job_id", JOB.toString(), "profile_id", PROFILE.toString(), "recommendation", "APPLY")));
+
+        verify(quotaService).release(PROFILE, "application_daily", 1, RESERVATION_PERIOD_START);
+    }
+
+    @Test
+    void aCrossSourceDuplicateReleasesTheReservation() {
+        var duplicate = new com.personal.jobagent.apply.DuplicateApplicationException(
+                UUID.randomUUID(), UUID.randomUUID(), "identity-key", "same role, another source");
+        when(pipeline.createApplicationFromMatch(PROFILE, JOB)).thenThrow(duplicate);
+
+        handler.handle(envelope(NotificationEvents.JOB_MATCHED, Map.of(
+                "job_id", JOB.toString(), "profile_id", PROFILE.toString(), "recommendation", "APPLY")));
+
+        verify(quotaService).release(PROFILE, "application_daily", 1, RESERVATION_PERIOD_START);
+    }
+
+    @Test
+    void aCreationThatThrowsAnUnexpectedExceptionStillReleasesTheReservationBeforePropagating() {
+        // "A failed creation does not consume quota permanently": the
+        // release must happen in a finally, so it still runs even when the
+        // exception is neither caught here nor expected — and the exception
+        // must still propagate afterward for the outbox's own retry policy.
+        when(pipeline.createApplicationFromMatch(PROFILE, JOB))
+                .thenThrow(new IllegalStateException("db down"));
+
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, () ->
+                handler.handle(envelope(NotificationEvents.JOB_MATCHED, Map.of(
+                        "job_id", JOB.toString(), "profile_id", PROFILE.toString(), "recommendation", "APPLY"))));
+
+        verify(quotaService).release(PROFILE, "application_daily", 1, RESERVATION_PERIOD_START);
     }
 
     @Test
@@ -205,6 +279,26 @@ class ApplicationPipelineEventHandlerTest {
 
         verify(resumeService, never()).tailor(any(), any(), any());
         verify(db, never()).update(contains("application_events"), any(), any(), any());
+    }
+
+    @Test
+    void needsReviewDecisionQueuesWithoutCreatingAnApplication() {
+        when(decisionService.decide(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any()))
+                .thenReturn(new ApplicationDecisionService.DecisionResult("NEEDS_REVIEW",
+                        "below auto-apply threshold", 75));
+
+        handler.handle(envelope(NotificationEvents.JOB_MATCHED, Map.of(
+                "job_id", JOB.toString(), "profile_id", PROFILE.toString(),
+                "recommendation", "APPLY", "score", 75)));
+
+        // No application, but the candidate IS notified that review is pending:
+        verify(pipeline, never()).createApplicationFromMatch(any(), any());
+        ArgumentCaptor<NotificationService.NotificationCommand> event =
+                ArgumentCaptor.forClass(NotificationService.NotificationCommand.class);
+        verify(notifications).emit(event.capture());
+        assertThat(event.getValue().eventType()).isEqualTo(NotificationEvents.APPROVAL_REQUIRED);
+        assertThat(String.valueOf(((Map<?, ?>) event.getValue().payload()).get("decision")))
+                .isEqualTo("NEEDS_REVIEW");
     }
 
     @Test

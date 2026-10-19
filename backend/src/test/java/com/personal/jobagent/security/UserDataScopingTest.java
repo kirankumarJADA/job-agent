@@ -321,9 +321,17 @@ class UserDataScopingTest {
         return readOnlyJdbc();
     }
 
+    /**
+     * Phase 8.3: the service no longer takes ApplicationStatusService (ingestion
+     * never changes an application's status any more). The TRACK repository it now
+     * uses is built on the SAME mocked template, so every statement it issues is
+     * still inspected by these assertions.
+     */
     private EmailIntelligenceService emailService(JdbcTemplate jdbc) {
-        return new EmailIntelligenceService(jdbc, new CredentialVault(),
-                mock(NotificationService.class), mock(ApplicationStatusService.class), ownerContextWithProfile(jdbc));
+        com.personal.jobagent.track.TrackRepository track = new com.personal.jobagent.track.TrackRepository(jdbc, new ObjectMapper());
+        return new EmailIntelligenceService(jdbc, new CredentialVault(), mock(NotificationService.class),
+                ownerContextWithProfile(jdbc), track,
+                new com.personal.jobagent.track.TrackEvidenceRecorder(track, mock(AuditLogWriter.class)), new ObjectMapper());
     }
 
     private OwnerContext ownerContextWithProfile(JdbcTemplate jdbc) {

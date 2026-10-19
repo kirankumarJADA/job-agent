@@ -59,6 +59,7 @@ class NotificationEventHandlerTest {
         assertThat(handler.supports(NotificationEvents.AUTOMATION_FAILURE)).isTrue();
         assertThat(handler.supports(NotificationEvents.HARD_STOP)).isTrue();
         assertThat(handler.supports(NotificationEvents.APPROVAL_REQUIRED)).isTrue();
+        assertThat(handler.supports(NotificationEvents.APPROVAL_RULE_UNAVAILABLE)).isTrue();
         // unrelated events are not ours
         assertThat(handler.supports("test.synthetic_event")).isFalse();
         assertThat(handler.supports("cv.generated_v2")).isFalse();
@@ -148,6 +149,39 @@ class NotificationEventHandlerTest {
                 .isEqualTo("recruiter-reply:" + jobId + ":msg-1");
         assertThat(captor.getAllValues().get(1).dedupKey())
                 .isEqualTo("recruiter-reply:" + jobId + ":msg-2");
+    }
+
+    /**
+     * Phase 7.3: the approval-rule health monitor's payload must arrive as a WARN
+     * notification owned by the affected candidate. The explicit profile_id and
+     * dedup_key in the payload are what keep the alert out of a stranger's bell
+     * and collapse a burst to one row per day.
+     */
+    @Test
+    void approvalRuleUnavailableAlertIsOwnerScopedWarnAndProducerDeduped() {
+        UUID profileId = UuidV7.generate();
+        Envelope envelope = envelope(NotificationEvents.APPROVAL_RULE_UNAVAILABLE, "PROFILE", profileId, Map.of(
+                "profile_id", profileId.toString(),
+                "dedup_key", "approval-rule-unavailable:2026-10-10",
+                "severity", "WARN",
+                "message", "Auto-approval paused: your approval rule could not be read",
+                "detail", "Robin could not read your approval rule, so automatic approval is paused for safety.",
+                "link", "/approval-rules",
+                "reason", "QUERY_FAILED"));
+
+        handler.handle(envelope);
+
+        ArgumentCaptor<NotificationService.Delivery> captor =
+                ArgumentCaptor.forClass(NotificationService.Delivery.class);
+        verify(notificationService).deliver(captor.capture());
+        NotificationService.Delivery delivery = captor.getValue();
+
+        assertThat(delivery.category()).isEqualTo("APPROVAL_RULE_UNAVAILABLE");
+        assertThat(delivery.severity()).isEqualTo("WARN");
+        assertThat(delivery.profileId()).isEqualTo(profileId);
+        assertThat(delivery.title()).isEqualTo("Auto-approval paused: your approval rule could not be read");
+        assertThat(delivery.link()).isEqualTo("/approval-rules");
+        assertThat(delivery.dedupKey()).isEqualTo("approval-rule-unavailable:2026-10-10");
     }
 
     @Test

@@ -26,15 +26,18 @@ public class CoverLetterController {
     private final CoverLetterRepository coverLetterRepository;
     private final ProfileRepository profileRepository;
     private final AuditLogWriter auditLogWriter;
+    private final com.personal.jobagent.apply.ApplyPackageGuard packageGuard;
 
     public CoverLetterController(CoverLetterService coverLetterService,
                                  CoverLetterRepository coverLetterRepository,
                                  ProfileRepository profileRepository,
-                                 AuditLogWriter auditLogWriter) {
+                                 AuditLogWriter auditLogWriter,
+                                 com.personal.jobagent.apply.ApplyPackageGuard packageGuard) {
         this.coverLetterService = coverLetterService;
         this.coverLetterRepository = coverLetterRepository;
         this.profileRepository = profileRepository;
         this.auditLogWriter = auditLogWriter;
+        this.packageGuard = packageGuard;
     }
 
     public record GenerateRequest(UUID jobId, UUID applicationId) {}
@@ -81,7 +84,12 @@ public class CoverLetterController {
         }
 
         UUID profileId = currentProfileId();
-        CoverLetterService.GenerationResult result = coverLetterService.generateCoverLetter(profileId, body.jobId(), body.applicationId());
+        CoverLetterService.GenerationResult result;
+        try {
+            result = coverLetterService.generateCoverLetter(profileId, body.jobId(), body.applicationId());
+        } catch (IllegalArgumentException e) {
+            return notFound(request, e.getMessage());
+        }
 
         auditLogWriter.write(new AuditEntry(
                 actorEmail(),
@@ -114,7 +122,29 @@ public class CoverLetterController {
             return notFound(request, "Cover letter not found");
         }
 
+        if (body.approved()) {
+            // Approval is refused for content that is not provably the
+            // generated/corrected text, or that fails the CURRENT checks
+            // (re-run now, so letters validated by older, weaker checks are
+            // not approved on that basis). Withdrawing approval is always allowed.
+            if (!CoverLetterService.bodyIntact(existing.get())) {
+                return conflict(request, "COVER_LETTER_CHECKSUM_MISMATCH: the stored letter no longer matches its recorded digest.");
+            }
+            var report = coverLetterService.revalidate(profileId, existing.get());
+            if (!report.passed()) {
+                auditLogWriter.write(new AuditEntry(actorEmail(), "COVER_LETTER_APPROVAL_REFUSED", "COVER_LETTER", id,
+                        Map.of("approved", existing.get().isApproved()),
+                        Map.of("blockers", report.blockers()), request.getRemoteAddr(), UuidV7.generate()));
+                return conflict(request, "This letter has " + report.blockers()
+                        + " blocking validation finding(s). Submit a correction (a new version) before approving.");
+            }
+        }
+
         coverLetterRepository.setApprovedForProfile(id, body.approved(), profileId);
+        // Phase 8.2: approval state decides which exact letter version an
+        // execution package may carry, so a change re-evaluates any approved
+        // package instead of leaving a stale approval behind.
+        packageGuard.letterChanged(profileId, id);
 
         auditLogWriter.write(new AuditEntry(
                 actorEmail(),
@@ -128,6 +158,73 @@ public class CoverLetterController {
         ));
 
         return ResponseEntity.ok(coverLetterRepository.findByIdForProfile(id, profileId).orElseThrow());
+    }
+
+    public record CorrectionRequest(String bodyMarkdown) {}
+
+    /**
+     * Owner correction of a letter. Creates a NEW version (origin
+     * USER_CORRECTED, parent = the corrected version), revalidated and
+     * unapproved. The original version is left exactly as it was.
+     */
+    @PostMapping("/{id}/corrections")
+    public ResponseEntity<?> correct(@PathVariable UUID id, @RequestBody CorrectionRequest body, HttpServletRequest request) {
+        UUID profileId = currentProfileIdOrNull();
+        if (profileId == null) return notFound(request, "Cover letter not found");
+        CoverLetterService.GenerationResult result;
+        try {
+            result = coverLetterService.correct(profileId, id, body == null ? null : body.bodyMarkdown());
+        } catch (java.util.NoSuchElementException e) {
+            return notFound(request, "Cover letter not found");
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest()
+                    .body(ApiError.of(400, "Bad Request", e.getMessage(), request.getRequestURI(), correlationId()));
+        }
+        // A correction is a NEW letter version: the previously approved
+        // version is no longer the newest approved state of the user's letter,
+        // so any approved package is re-evaluated (Phase 8.2).
+        packageGuard.letterChanged(profileId, id);
+        auditLogWriter.write(new AuditEntry(actorEmail(), "COVER_LETTER_CORRECTED", "COVER_LETTER",
+                result.coverLetter().id(), Map.of("corrects", id.toString()),
+                Map.of("version", result.coverLetter().version(), "passed_validation", result.passedValidation()),
+                request.getRemoteAddr(), UuidV7.generate()));
+        return ResponseEntity.status(HttpStatus.CREATED).body(result);
+    }
+
+    /**
+     * Authenticated, owner-scoped PDF of one letter version. The bytes are
+     * served only when they still match their stored digest; the digest is
+     * returned in X-Content-SHA256 so the client can verify what it received.
+     */
+    @GetMapping("/{id}/pdf")
+    public ResponseEntity<?> pdf(@PathVariable UUID id, HttpServletRequest request) {
+        UUID profileId = currentProfileIdOrNull();
+        if (profileId == null) return notFound(request, "Cover letter not found");
+        var pdf = coverLetterService.pdf(profileId, id);
+        if (pdf.isEmpty() || pdf.get().bytes() == null) return notFound(request, "Cover letter not found");
+        if (!pdf.get().intact()) {
+            auditLogWriter.write(new AuditEntry(actorEmail(), "COVER_LETTER_PDF_INTEGRITY_FAILED", "COVER_LETTER", id,
+                    Map.of(), Map.of("recorded_sha256", String.valueOf(pdf.get().recordedSha256())),
+                    request.getRemoteAddr(), UuidV7.generate()));
+            return conflict(request, "The stored PDF does not match its recorded checksum and was not served.");
+        }
+        byte[] bytes = pdf.get().bytes();
+        auditLogWriter.write(new AuditEntry(actorEmail(), "COVER_LETTER_PDF_DOWNLOADED", "COVER_LETTER", id,
+                Map.of(), Map.of("byte_size", bytes.length, "content_sha256", pdf.get().actualSha256()),
+                request.getRemoteAddr(), UuidV7.generate()));
+        org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
+        headers.setContentType(org.springframework.http.MediaType.APPLICATION_PDF);
+        headers.setContentDisposition(org.springframework.http.ContentDisposition.attachment()
+                .filename("cover-letter-" + id + ".pdf").build());
+        headers.setContentLength(bytes.length);
+        headers.set("X-Content-SHA256", pdf.get().actualSha256());
+        headers.setCacheControl("no-store");
+        return ResponseEntity.ok().headers(headers).body(bytes);
+    }
+
+    private ResponseEntity<?> conflict(HttpServletRequest request, String detail) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(ApiError.of(409, "Conflict", detail, request.getRequestURI(), correlationId()));
     }
 
     private ResponseEntity<?> notFound(HttpServletRequest request, String detail) {

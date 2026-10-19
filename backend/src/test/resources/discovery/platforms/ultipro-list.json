@@ -1,0 +1,208 @@
+{
+ "opportunities": [
+  {
+   "Id": "b78cfb5f-4c2a-4e97-b737-eacb266bf560",
+   "Featured": false,
+   "Title": "Traveling Project Engineer",
+   "RequisitionNumber": "TRAVE008142",
+   "FullTime": true,
+   "JobCategoryName": "Operations",
+   "Locations": [
+    {
+     "Id": "9d2fd685-5b70-4ec6-ab86-cb9b8279da4c",
+     "LocalizedName": "Lithia Springs",
+     "LocalizedLocationId": null,
+     "LocalizedDescription": null,
+     "Address": {
+      "Line1": null,
+      "Line2": null,
+      "City": "Lithia Springs",
+      "PostalCode": null,
+      "State": {
+       "Code": "GA",
+       "Name": "Georgia"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": true,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 0,
+     "Coordinates": {
+      "Latitude": 33.7940298,
+      "Longitude": -84.6608286
+     }
+    },
+    {
+     "Id": "365a5a57-2a9a-488d-b0bf-a6c5d1184ab7",
+     "LocalizedName": "Iowa",
+     "LocalizedLocationId": null,
+     "LocalizedDescription": null,
+     "Address": {
+      "Line1": "Iowa Ave SE",
+      "Line2": null,
+      "City": "Cedar Rapids",
+      "PostalCode": "52403",
+      "State": {
+       "Code": "IA",
+       "Name": "Iowa"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": true,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 0,
+     "Coordinates": {
+      "Latitude": 41.983153997913,
+      "Longitude": -91.62611050607
+     }
+    }
+   ],
+   "PostedDate": "2026-10-09T21:42:56.009Z",
+   "BriefDescription": "Our Traveling Project Engineer assists their Project Manager on projects and is the liaison between the field and the office. In this role, the PE is responsible for defining the project’s objectives by planning, executing and finalizing projects according to the schedule while keeping within the budget.",
+   "MatchScore": 1.0,
+   "MatchedLocations": [],
+   "Distance": null,
+   "JobLocationType": 1,
+   "OpportunityType": 0
+  },
+  {
+   "Id": "e935485e-59ee-4003-97d9-a67ee720fafe",
+   "Featured": false,
+   "Title": "Traveling Project Manager",
+   "RequisitionNumber": "TRAVE008141",
+   "FullTime": true,
+   "JobCategoryName": "Operations",
+   "Locations": [
+    {
+     "Id": "9d2fd685-5b70-4ec6-ab86-cb9b8279da4c",
+     "LocalizedName": "Lithia Springs",
+     "LocalizedLocationId": null,
+     "LocalizedDescription": null,
+     "Address": {
+      "Line1": null,
+      "Line2": null,
+      "City": "Lithia Springs",
+      "PostalCode": null,
+      "State": {
+       "Code": "GA",
+       "Name": "Georgia"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": true,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 0,
+     "Coordinates": {
+      "Latitude": 33.7940298,
+      "Longitude": -84.6608286
+     }
+    },
+    {
+     "Id": "365a5a57-2a9a-488d-b0bf-a6c5d1184ab7",
+     "LocalizedName": "Iowa",
+     "LocalizedLocationId": null,
+     "LocalizedDescription": null,
+     "Address": {
+      "Line1": "Iowa Ave SE",
+      "Line2": null,
+      "City": "Cedar Rapids",
+      "PostalCode": "52403",
+      "State": {
+       "Code": "IA",
+       "Name": "Iowa"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": true,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 0,
+     "Coordinates": {
+      "Latitude": 41.983153997913,
+      "Longitude": -91.62611050607
+     }
+    }
+   ],
+   "PostedDate": "2026-10-09T21:39:45.596Z",
+   "BriefDescription": "Our Traveling Project Manager is responsible for planning, managing, overseeing, and direction of all assigned projects.",
+   "MatchScore": 1.0,
+   "MatchedLocations": [],
+   "Distance": null,
+   "JobLocationType": 1,
+   "OpportunityType": 0
+  },
+  {
+   "Id": "1e82d9d9-d909-437f-95eb-476439b46eb1",
+   "Featured": false,
+   "Title": "Project Administrator",
+   "RequisitionNumber": "PROJE008137",
+   "FullTime": true,
+   "JobCategoryName": "Administration",
+   "Locations": [
+    {
+     "Id": "ae33b8fa-c1ad-566f-9e1a-c1459f6db95e",
+     "LocalizedName": null,
+     "LocalizedLocationId": null,
+     "LocalizedDescription": "Salt Lake County",
+     "Address": {
+      "Line1": "9130 S Sandy Pkwy",
+      "Line2": "Suite A",
+      "City": "Sandy",
+      "PostalCode": "84070",
+      "State": {
+       "Code": "UT",
+       "Name": "Utah"
+      },
+      "Country": {
+       "Code": "USA",
+       "Name": "United States"
+      }
+     },
+     "DisplayName": false,
+     "DisplayLocationId": false,
+     "DisplayAddress": true,
+     "DisplayStreetAddress": false,
+     "DisplayDescription": false,
+     "SourceOfTruth": 1,
+     "Coordinates": {
+      "Latitude": 40.57517859718395,
+      "Longitude": -111.90586073625943
+     }
+    }
+   ],
+   "PostedDate": "2026-10-09T18:06:48.386Z",
+   "BriefDescription": "The Project Administrator will be responsible for the day-to-day administrative support functions for multiple million-dollar projects, simultaneously.",
+   "MatchScore": 1.0,
+   "MatchedLocations": [],
+   "Distance": null,
+   "JobLocationType": null,
+   "OpportunityType": 0
+  }
+ ],
+ "totalCount": 124,
+ "initialTotalOpportunitiesCount": 124,
+ "locations": []
+}

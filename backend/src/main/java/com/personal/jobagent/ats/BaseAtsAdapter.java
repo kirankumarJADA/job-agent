@@ -61,14 +61,31 @@ public abstract class BaseAtsAdapter implements AtsAdapter {
             return new SubmissionResult(false, "MISSING_ATTACHMENT", null, "Resume PDF file is mandatory", Map.of());
         }
 
-        // Deterministic simulation & dry-run validation
+        if (!dryRun) {
+            // No adapter in this generic family ever performs a real submission:
+            // this class has no browser, no session, and no way to know whether
+            // a real submission would even succeed. Real execution exists only
+            // for Greenhouse, through the separate, reviewed AutomationPlan /
+            // worker pipeline (automation.GreenhouseExecutionPlanService), and
+            // only after explicit human approval. This branch must never report
+            // success for a non-dry-run call, in any environment, so a caller
+            // can never mistake this adapter path for a genuine submission.
+            return new SubmissionResult(false, "REAL_SUBMIT_NOT_IMPLEMENTED", null,
+                    "No real submission path exists for " + kind.name() + " through this adapter; "
+                            + "real execution is implemented only for Greenhouse, via the reviewed "
+                            + "automation pipeline, and only after human approval.",
+                    Map.of("kind", kind.name(), "simulated", false));
+        }
+
+        // Deterministic simulation & dry-run validation only — this branch
+        // never performs or claims a real submission.
         String confirmationId = "MOCK-" + kind.name() + "-" + UuidV7.generate().toString().substring(0, 8).toUpperCase();
         return new SubmissionResult(
                 true,
-                dryRun ? "DRY_RUN_PASSED" : "SUBMITTED",
+                "DRY_RUN_PASSED",
                 confirmationId,
-                "Successfully processed by " + kind.name() + " adapter",
-                Map.of("adapter", kind.name(), "dryRun", dryRun, "url", url)
+                "Successfully processed by " + kind.name() + " adapter (dry run — no real submission occurred)",
+                Map.of("adapter", kind.name(), "dryRun", dryRun, "url", url, "simulated", true)
         );
     }
 }

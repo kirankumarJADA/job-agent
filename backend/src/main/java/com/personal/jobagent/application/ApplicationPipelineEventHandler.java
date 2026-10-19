@@ -3,6 +3,7 @@ package com.personal.jobagent.application;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.common.AutomationMetrics;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.application.ApplicationDecisionService;
 import com.personal.jobagent.coverletter.CoverLetterService;
 import com.personal.jobagent.events.Envelope;
 import com.personal.jobagent.events.EventHandler;
@@ -62,6 +63,7 @@ public class ApplicationPipelineEventHandler implements EventHandler {
     private final ApplicationPipelineService pipeline;
     private final InspectionPlanService inspectionPlanService;
     private final GreenhouseExecutionPlanService greenhousePlanService;
+    private final com.personal.jobagent.automation.ZohoRecruitExecutionPlanService zohoRecruitPlanService;
     private final ResumeAtsIntelligenceService resumeService;
     private final CoverLetterService coverLetterService;
     private final ApplicationAnswerService answerService;
@@ -70,10 +72,14 @@ public class ApplicationPipelineEventHandler implements EventHandler {
     private final JdbcTemplate db;
     private final ObjectMapper json;
     private final AutomationMetrics metrics;
+    private final ApplicationDecisionService decisionService;
+    private final com.personal.jobagent.audit.AuditLogWriter audit;
+    private final com.personal.jobagent.common.QuotaService quotaService;
 
     public ApplicationPipelineEventHandler(ApplicationPipelineService pipeline,
                                            InspectionPlanService inspectionPlanService,
                                            GreenhouseExecutionPlanService greenhousePlanService,
+                                           com.personal.jobagent.automation.ZohoRecruitExecutionPlanService zohoRecruitPlanService,
                                            ResumeAtsIntelligenceService resumeService,
                                            CoverLetterService coverLetterService,
                                            ApplicationAnswerService answerService,
@@ -81,10 +87,14 @@ public class ApplicationPipelineEventHandler implements EventHandler {
                                            NotificationService notifications,
                                            JdbcTemplate db,
                                            ObjectMapper json,
-                                           AutomationMetrics metrics) {
+                                           AutomationMetrics metrics,
+                                           ApplicationDecisionService decisionService,
+                                           com.personal.jobagent.audit.AuditLogWriter audit,
+                                           com.personal.jobagent.common.QuotaService quotaService) {
         this.pipeline = pipeline;
         this.inspectionPlanService = inspectionPlanService;
         this.greenhousePlanService = greenhousePlanService;
+        this.zohoRecruitPlanService = zohoRecruitPlanService;
         this.resumeService = resumeService;
         this.coverLetterService = coverLetterService;
         this.answerService = answerService;
@@ -93,6 +103,9 @@ public class ApplicationPipelineEventHandler implements EventHandler {
         this.db = db;
         this.json = json;
         this.metrics = metrics;
+        this.decisionService = decisionService;
+        this.audit = audit;
+        this.quotaService = quotaService;
     }
 
     @Override public String consumerName() { return CONSUMER_NAME; }
@@ -135,12 +148,92 @@ public class ApplicationPipelineEventHandler implements EventHandler {
             log.warn("job.matched event without usable ids (profile_id/job_id) — skipping creation");
             return;
         }
-        var created = pipeline.createApplicationFromMatch(profileId, jobId);
-        if (created == null || created.applicationId() == null) {
-            log.warn("Pipeline returned no application for profile={} job={} — skipping", profileId, jobId);
+        // Phase 5: the decision engine sits between the scorer and the
+        // creator. Mode (MANUAL/ASSISTED/CONTROLLED_AUTO) and the per-profile
+        // quota decide whether an APPLY match auto-applies or queues for
+        // human review; every outcome is persisted in application_decisions.
+        int score = payload.get("score") instanceof Number n ? n.intValue() : 0;
+        var decision = decisionService.decide(profileId, jobId, score, "APPLY");
+
+        if (java.util.Set.of("APPROVED", "REJECTED", "EXPIRED", "PAUSED", "SKIP").contains(decision.decision())) {
+            log.debug("Match replay for profile={} job={} ignored because decision is terminal ({})",
+                    profileId, jobId, decision.decision());
             return;
         }
-        log.info("APPLY match processed: application={} created={}", created.applicationId(), created.created());
+
+        if (!"AUTO_APPLY".equals(decision.decision())) {
+            log.info("Match profile={} job={} queued for review ({}): {}",
+                    profileId, jobId, decision.decision(), decision.reason());
+            try {
+                notifications.emit(new NotificationService.NotificationCommand(
+                        NotificationEvents.APPROVAL_REQUIRED,
+                        "APPLICATION_DECISION",
+                        jobId,
+                        Map.of("profile_id", profileId.toString(),
+                                "job_id", jobId.toString(),
+                                "score", score,
+                                "decision", decision.decision(),
+                                "reason", decision.reason()),
+                        UuidV7.generate(),
+                        null));
+            } catch (Exception e) {
+                log.warn("Failed to emit {} notification: {}", NotificationEvents.APPROVAL_REQUIRED, e.getMessage());
+            }
+            return;
+        }
+
+        // Robin x Tsenta continuation: decisionService.decide() already
+        // RESERVED one unit of the daily application quota atomically, at
+        // the moment it decided AUTO_APPLY (ApplicationDecisionService#tryAutoApply)
+        // — this is the other, explicit half of that reserve/release
+        // contract. Every path below that does NOT end in a genuinely new
+        // application (a cross-source duplicate, an idempotent replay
+        // resolving to an application that already existed, a null/missing
+        // result, or any exception propagating out of creation entirely)
+        // releases the reservation in the `finally`, so quota is spent only
+        // on real auto-apply activity and a failed or duplicate attempt
+        // never costs the account anything.
+        boolean quotaConsumed = false;
+        try {
+            ApplicationPipelineService.CreatedApplication created;
+            try {
+                created = pipeline.createApplicationFromMatch(profileId, jobId);
+            } catch (com.personal.jobagent.apply.DuplicateApplicationException duplicate) {
+                // Cross-source duplicate protection: the candidate already has an
+                // application for this role. Refused, audited, and never reported
+                // as a fresh application.
+                log.info("Duplicate application refused for profile={} job={} ({}; existing application {})",
+                        profileId, jobId, duplicate.matchReason(), duplicate.existingApplicationId());
+                audit.write(new com.personal.jobagent.audit.AuditEntry("SYSTEM", "DUPLICATE_APPLICATION_DETECTED",
+                        "APPLICATION", duplicate.existingApplicationId(),
+                        Map.of("jobId", jobId.toString()),
+                        Map.of("existingJobId", String.valueOf(duplicate.existingJobId()),
+                                "identityKey", String.valueOf(duplicate.identityKey()),
+                                "matchReason", duplicate.matchReason()),
+                        null, UuidV7.generate()));
+                return;
+            }
+            if (created == null || created.applicationId() == null) {
+                log.warn("Pipeline returned no application for profile={} job={} — skipping", profileId, jobId);
+                return;
+            }
+            // created.created()==false means createApplicationFromMatch
+            // resolved to a LIVE application that already existed (an
+            // idempotent replay) — not a new auto-apply, so the reservation
+            // is released, not kept.
+            quotaConsumed = created.created();
+            log.info("APPLY match processed: application={} created={}", created.applicationId(), created.created());
+        } finally {
+            if (!quotaConsumed) {
+                // Release against the EXACT day decide() reserved it on
+                // (decision.quotaPeriodStart()), never "today" — creation can
+                // take real time (document generation, a slow database, an
+                // outbox redelivery), and a reservation made just before
+                // midnight must not be released against the next day's row,
+                // which would silently leak the original reservation forever.
+                quotaService.release(profileId, "application_daily", 1, decision.quotaPeriodStart());
+            }
+        }
     }
 
     private void handleCreated(Map<String, Object> payload) {
@@ -207,6 +300,13 @@ public class ApplicationPipelineEventHandler implements EventHandler {
                                         Map.of("plan_id", planId.toString()));
                                 log.info("Greenhouse plan {} queued for application {}", planId, applicationId);
                             });
+                } else if (zohoRecruitPlanService.handles(applicationUrl)) {
+                    zohoRecruitPlanService.createExecutionPlan(profileId, applicationId, jobId)
+                            .ifPresent(planId -> {
+                                record(applicationId, "ZOHO_RECRUIT_PLAN_CREATED",
+                                        Map.of("plan_id", planId.toString()));
+                                log.info("Zoho Recruit plan {} queued for application {}", planId, applicationId);
+                            });
                 } else {
                     inspectionPlanService.createInspectionPlan(profileId, applicationId, jobId)
                             .ifPresent(planId -> {
@@ -215,6 +315,16 @@ public class ApplicationPipelineEventHandler implements EventHandler {
                                 log.info("Inspection plan {} queued for application {}", planId, applicationId);
                             });
                 }
+            } catch (com.personal.jobagent.automation.ExecutionPackageBlockedException blocked) {
+                // Fail-closed document selection: the exact reviewed/validated
+                // document versions do not exist yet, so NO plan is built. The
+                // application stays prepared; the candidate's APPLY workspace
+                // shows these blockers and rebuilds the package once the
+                // documents have been reviewed.
+                record(applicationId, "EXECUTION_PACKAGE_DEFERRED",
+                        Map.of("blockers", blocked.blockers().stream()
+                                .map(b -> String.valueOf(b.get("code"))).toList()));
+                log.warn("Execution package deferred for application {}: {}", applicationId, blocked.getMessage());
             } catch (Exception e) {
                 record(applicationId, "AUTOMATION_PLAN_FAILED",
                         Map.of("error", e.getClass().getSimpleName()));

@@ -1,13 +1,22 @@
 package com.personal.jobagent.application;
 
+import com.personal.jobagent.apply.ApplicationIdentityService;
+import com.personal.jobagent.apply.DuplicateApplicationException;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.jobs.HardFilterResult;
+import com.personal.jobagent.jobs.HardFilterService;
 import com.personal.jobagent.jobs.JobMatchService;
+import com.personal.jobagent.jobs.JobRecord;
+import com.personal.jobagent.jobs.JobRepository;
 import com.personal.jobagent.notifications.NotificationEvents;
 import com.personal.jobagent.notifications.NotificationService;
 import com.personal.jobagent.preferences.PreferenceSetRepository;
 import com.personal.jobagent.profile.ProfileRepository;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -39,40 +48,57 @@ import java.util.UUID;
  * event. Crash-safety comes from the outbox (at-least-once delivery) plus
  * idempotent creation — the combination is exactly-once effect.
  *
- * <p><b>Matching policy.</b> The scorer, thresholds (APPLY ≥ 70, REVIEW ≥ 50)
- * and profile-ownership semantics are the existing ones, untouched. Candidate
- * salary expectations come from the profile's active preference set;
- * the remote constraint is passed as unconstrained (null) because the
- * existing scorer signature takes a single remote type while preferences
- * carry a list, and jobs discovered from structured boards often have no
- * workplace type at all — passing a constraint would zero the remote fit for
- * unknown-workplace jobs. Extending the scorer for list-valued remote
- * preferences is a separate, explicit change.
+ * <p><b>Matching policy.</b> The thresholds (APPLY ≥ 70, REVIEW ≥ 50) and
+ * profile-ownership semantics are the existing ones, untouched. The scorer
+ * itself (Robin x Tsenta continuation) now takes the candidate's full active
+ * preference set directly — salary floor, allowed experience levels,
+ * locations and remote types (list-valued, no longer the single-value
+ * constraint this comment used to describe as a known gap), sponsorship
+ * policy, and the configured {@code scoringWeights} — so every category the
+ * candidate has actually set a preference for weighs into the score, per
+ * {@link com.personal.jobagent.jobs.JobMatchService#evaluateMatch}.
  */
 @Service
 public class ApplicationPipelineService {
 
     private static final Logger log = LoggerFactory.getLogger(ApplicationPipelineService.class);
 
+    private final HardFilterService hardFilterService;
     private final JobMatchService jobMatchService;
+    private final JobRepository jobRepository;
     private final PreferenceSetRepository preferenceSets;
     private final ProfileRepository profileRepository;
     private final JdbcTemplate db;
     private final NotificationService notifications;
+    private final ObjectMapper objectMapper;
+    private final ApplicationIdentityService identityService;
     private final TransactionTemplate transactionTemplate;
 
-    public ApplicationPipelineService(JobMatchService jobMatchService,
+    public ApplicationPipelineService(HardFilterService hardFilterService,
+                                      JobMatchService jobMatchService,
+                                      JobRepository jobRepository,
                                       PreferenceSetRepository preferenceSets,
                                       ProfileRepository profileRepository,
                                       JdbcTemplate db,
                                       NotificationService notifications,
+                                      ObjectMapper objectMapper,
+                                      ApplicationIdentityService identityService,
                                       PlatformTransactionManager transactionManager) {
+        this.hardFilterService = hardFilterService;
         this.jobMatchService = jobMatchService;
+        this.jobRepository = jobRepository;
         this.preferenceSets = preferenceSets;
         this.profileRepository = profileRepository;
         this.db = db;
         this.notifications = notifications;
+        this.objectMapper = objectMapper;
+        this.identityService = identityService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
+        // Creation runs in its OWN transaction so a duplicate-key race rolls
+        // back only the insert (and its timeline/notification writes), leaving
+        // the caller's transaction usable for the duplicate resolution below.
+        this.transactionTemplate.setPropagationBehavior(
+                org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     public record CreatedApplication(UUID applicationId, boolean created, String status) {}
@@ -85,17 +111,58 @@ public class ApplicationPipelineService {
      * ingestion re-triggers matching, and matching is idempotent).
      */
     public void onJobIngested(UUID jobId, String action) {
+        JobRecord job = jobRepository.findById(jobId).orElse(null);
+        if (job == null) {
+            log.warn("Pipeline skip: job {} not found", jobId);
+            return;
+        }
+
         List<UUID> profiles = profileRepository.findAllIds();
         for (UUID profileId : profiles) {
             try {
                 var preferences = preferenceSets.findActiveByProfileId(profileId).orElse(null);
-                Number desiredSalaryMin = preferences == null ? null : preferences.salaryMinGbp();
-                var match = jobMatchService.evaluateMatch(jobId, profileId, desiredSalaryMin, null);
+
+                // Hard filters run FIRST, before expensive scoring
+                HardFilterResult filterResult = hardFilterService.evaluate(job, preferences);
+                if (!filterResult.passed()) {
+                    persistFilterRejection(jobId, filterResult);
+                    log.debug("Pipeline hard-filter REJECT job={} profile={} reasons={}",
+                            jobId, profileId, filterResult.reasons().size());
+                    continue; // skip scoring entirely
+                }
+
+                // Scoring only runs for jobs that pass all hard filters. The
+                // full preference record (not just salary) is passed through
+                // so the scorer can honour every configured scoringWeights
+                // category — see JobMatchService#evaluateMatch.
+                var match = jobMatchService.evaluateMatch(jobId, profileId, preferences);
                 log.debug("Pipeline match job={} profile={} score={} recommendation={}",
                         jobId, profileId, match.overall(), match.recommendation());
             } catch (Exception e) {
                 log.error("Automatic matching failed for job={} profile={}", jobId, profileId, e);
             }
+        }
+    }
+
+    /**
+     * Persists the hard-filter rejection: writes structured filter_reasons
+     * to the jobs table and sets status to FILTERED_OUT.
+     */
+    private void persistFilterRejection(UUID jobId, HardFilterResult result) {
+        try {
+            String reasonsJson = objectMapper.writeValueAsString(
+                    result.reasons().stream().map(r -> java.util.Map.of(
+                            "criterion", r.criterion(),
+                            "expected", r.expected(),
+                            "actual", r.actual(),
+                            "message", r.message()
+                    )).toList());
+
+            db.update(
+                    "update jobs set filter_reasons = ?::jsonb, status = 'FILTERED_OUT' where id = ? and status = 'DISCOVERED'",
+                    reasonsJson, jobId);
+        } catch (JsonProcessingException e) {
+            log.error("Failed to serialize filter reasons for job={}", jobId, e);
         }
     }
 
@@ -118,38 +185,52 @@ public class ApplicationPipelineService {
             return new CreatedApplication(existing.get(), false, statusOf(existing.get()));
         }
 
+        // Cross-source duplicate protection (Phase 8.2): the same role seen
+        // through another board already has one of this owner's applications.
+        // Owner-scoped by construction — never another candidate's record.
+        String identityKey = identityService.identityKeyForJob(jobId);
+        for (var duplicate : identityService.findDuplicates(profileId, jobId)) {
+            throw new DuplicateApplicationException(duplicate.applicationId(), duplicate.jobId(),
+                    duplicate.identityKey(), duplicate.matchReason());
+        }
+
         String mode = preferenceSets.findActiveByProfileId(profileId)
                 .map(p -> p.applicationMode() == null || p.applicationMode().isBlank()
                         ? "ASSISTED" : p.applicationMode())
                 .orElse("ASSISTED");
         UUID applicationId = UuidV7.generate();
 
-        return transactionTemplate.execute(tx -> {
-            // The pre-check ran outside the transaction, so the insert is the
-            // arbiter: the partial unique index (V022) rejects a second live
-            // application for the same (profile, job) under concurrency.
-            int inserted = db.update("""
-                    insert into applications (id, job_id, profile_id, mode)
-                    values (?, ?, ?, ?)
-                    on conflict do nothing
-                    """, applicationId, jobId, profileId, mode);
+        CreatedApplication created;
+        try {
+            created = transactionTemplate.execute(tx -> {
+                // The pre-check ran outside the transaction, so the insert is
+                // the arbiter: the partial unique index (V022) rejects a second
+                // live application for the same (profile, job), and V036's
+                // identity index rejects a second live application for the
+                // same role across sources. The conflict target names the
+                // one-per-job index only, so an identity violation surfaces as
+                // a constraint error instead of being silently swallowed.
+                int inserted = db.update("""
+                        insert into applications (id, job_id, profile_id, mode, identity_key)
+                        values (?, ?, ?, ?, ?)
+                        on conflict (profile_id, job_id) where status not in ('FAILED','WITHDRAWN') do nothing
+                        """, applicationId, jobId, profileId, mode, identityKey);
 
-            if (inserted == 0) {
-                UUID winner = findLiveApplication(profileId, jobId)
-                        .orElseThrow(() -> new IllegalStateException(
-                                "application insert conflicted but no live row exists for " + profileId + "/" + jobId));
-                return new CreatedApplication(winner, false, statusOf(winner));
-            }
-
-            db.update("""
+                if (inserted == 0) {
+                    UUID winner = findLiveApplication(profileId, jobId)
+                            .orElseThrow(() -> new IllegalStateException(
+                                    "application insert conflicted but no live row exists for " + profileId + "/" + jobId));
+                    return new CreatedApplication(winner, false, statusOf(winner));
+                }
+                db.update("""
                     insert into application_events (id, application_id, type, payload, actor)
                     values (?, ?, 'APPLICATION_CREATED', ?::jsonb, 'SYSTEM')
                     """, UuidV7.generate(), applicationId,
                     "{\"event_key\":\"application-created:" + applicationId
                             + "\",\"source\":\"auto-match\",\"job_id\":\"" + jobId + "\"}");
 
-            var job = jobTitle(profileId, jobId);
-            notifications.emit(new NotificationService.NotificationCommand(
+                var job = jobTitle(profileId, jobId);
+                notifications.emit(new NotificationService.NotificationCommand(
                     NotificationEvents.APPLICATION_CREATED,
                     "APPLICATION",
                     applicationId,
@@ -166,10 +247,32 @@ public class ApplicationPipelineService {
                     UuidV7.generate(),
                     null));
 
-            log.info("Pipeline created application {} for profile={} job={} (mode={})",
-                    applicationId, profileId, jobId, mode);
-            return new CreatedApplication(applicationId, true, "READY_TO_APPLY");
-        });
+                log.info("Pipeline created application {} for profile={} job={} (mode={})",
+                        applicationId, profileId, jobId, mode);
+                return new CreatedApplication(applicationId, true, "READY_TO_APPLY");
+            });
+        } catch (DuplicateKeyException e) {
+            // Lost a race with a concurrent create. The failed transaction
+            // rolled back entirely, so the winner is resolved fresh: the same
+            // (profile, job) row makes this an idempotent replay; a live row
+            // with the same identity key is a cross-source duplicate.
+            Optional<UUID> sameJob = findLiveApplication(profileId, jobId);
+            if (sameJob.isPresent()) {
+                return new CreatedApplication(sameJob.get(), false, statusOf(sameJob.get()));
+            }
+            for (var duplicate : identityService.findDuplicates(profileId, jobId)) {
+                throw new DuplicateApplicationException(duplicate.applicationId(), duplicate.jobId(),
+                        duplicate.identityKey(), duplicate.matchReason());
+            }
+            if (identityKey != null) {
+                for (var duplicate : identityService.findByIdentity(profileId, identityKey)) {
+                    throw new DuplicateApplicationException(duplicate.applicationId(), duplicate.jobId(),
+                            duplicate.identityKey(), duplicate.matchReason());
+                }
+            }
+            throw e;
+        }
+        return created;
     }
 
     private record JobSummary(String jobTitle, String company) {}

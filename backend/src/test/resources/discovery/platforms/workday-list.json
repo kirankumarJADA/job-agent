@@ -1,0 +1,34 @@
+{
+ "total": 2000,
+ "jobPostings": [
+  {
+   "title": "Senior HPC Storage Engineer",
+   "externalPath": "/job/US-CA-Santa-Clara/Senior-HPC-Storage-Engineer_JR2014997",
+   "locationsText": "2 Locations",
+   "postedOn": "Posted Today",
+   "bulletFields": [
+    "JR2014997"
+   ]
+  },
+  {
+   "title": "Senior Systems Software Engineer - GPU Performance at Scale",
+   "externalPath": "/job/US-CA-Santa-Clara/Senior-Performance-Engineer_JR1996987",
+   "locationsText": "5 Locations",
+   "postedOn": "Posted Yesterday",
+   "bulletFields": [
+    "JR1996987"
+   ]
+  },
+  {
+   "title": "Manager, Software Engineering - Cumulus Linux",
+   "externalPath": "/job/US-CA-Santa-Clara/Manager--Software-Engineering---Cumulus-Linux_JR2018585",
+   "locationsText": "US, CA, Santa Clara",
+   "postedOn": "Posted Yesterday",
+   "bulletFields": [
+    "JR2018585"
+   ]
+  }
+ ],
+ "facets": [],
+ "userAuthenticated": false
+}

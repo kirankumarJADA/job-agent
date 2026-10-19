@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 ARG INSTALL_BROWSERS=false
 RUN if [ "$INSTALL_BROWSERS" = "true" ]; then python -m scrapling install; fi
 
-COPY app.py .
+COPY app.py extraction.py ./
 
 ENV SCRAPLING_SERVICE_HOST=0.0.0.0 \
     SCRAPLING_SERVICE_PORT=8199

@@ -1,0 +1,881 @@
+package com.personal.jobagent.application;
+
+import com.personal.jobagent.common.AutomationMetrics;
+import com.personal.jobagent.common.QuotaService;
+import com.personal.jobagent.preferences.PreferenceSetRecord;
+import com.personal.jobagent.preferences.PreferenceSetRepository;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+import java.time.LocalDate;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+/**
+ * Phase 5–7 decision engine tests.
+ *
+ * <p>Phase 5: mode + quota decide whether an APPLY-level match auto-applies
+ * or queues for human review.
+ *
+ * <p>Phase 7: per-user auto-approval rules sit between the quota gate and
+ * the mode thresholds. They can toggle automatic application creation and
+ * raise or lower the score threshold — but they can never bypass quotas,
+ * hard stops, or any safety gate.
+ *
+ * <p>Phase 7.2: rule resolution is tri-state (configured / absent /
+ * unreadable) and fails closed. {@code CONTROLLED_AUTO} no longer auto-applies
+ * without an explicitly enabled rule, and a rule that cannot be read queues
+ * for human review in every automatic mode instead of reverting to defaults.
+ */
+class ApplicationDecisionServiceTest {
+
+    private static final UUID PROFILE = UUID.randomUUID();
+    private static final UUID JOB = UUID.randomUUID();
+
+    private final PreferenceSetRepository preferenceSets = mock(PreferenceSetRepository.class);
+    private final QuotaService quotaService = mock(QuotaService.class);
+    private final JdbcTemplate db = mock(JdbcTemplate.class);
+    private final AutomationMetrics metrics = mock(AutomationMetrics.class);
+    private final ApprovalRuleHealthMonitor health = mock(ApprovalRuleHealthMonitor.class);
+    private ApplicationDecisionService service;
+
+    @BeforeEach
+    void setUp() {
+        Mockito.reset(preferenceSets, quotaService, db, metrics, health);
+        when(db.update(anyString(), any(Object[].class))).thenReturn(1);
+        // Default: no per-user rule configured (Phase 5 defaults)
+        when(db.queryForList(contains("user_approval_rules"), eq(PROFILE)))
+                .thenReturn(Collections.emptyList());
+        service = new ApplicationDecisionService(preferenceSets, quotaService, db, metrics, health);
+    }
+
+    private void mode(String applicationMode) {
+        PreferenceSetRecord record = mock(PreferenceSetRecord.class);
+        when(record.applicationMode()).thenReturn(applicationMode);
+        when(preferenceSets.findActiveByProfileId(PROFILE)).thenReturn(Optional.of(record));
+    }
+
+    /**
+     * Stubs the atomic reservation {@code decide()} now makes at the one
+     * point it is actually about to return AUTO_APPLY
+     * (ApplicationDecisionService#tryAutoApply), replacing the old
+     * read-only {@code check()} peek this helper used to stub — kept under
+     * the same name/call sites throughout this file since every existing
+     * test's intent ("the quota allows/blocks this") is unchanged, only the
+     * underlying QuotaService method is.
+     */
+    private static final LocalDate RESERVATION_PERIOD_START = LocalDate.of(2026, 1, 15);
+
+    private void quotaAllowed(boolean allowed) {
+        when(quotaService.tryReserve(eq(PROFILE), eq("application_daily"), eq(1.0)))
+                .thenReturn(new QuotaService.ReservationResult(allowed, allowed ? 1 : 50, 50, RESERVATION_PERIOD_START));
+    }
+
+    /** Simulates a persisted user_approval_rules row for PROFILE only. */
+    private void ruleExists(boolean autoApproveEnabled, int minScore) {
+        when(db.queryForList(contains("user_approval_rules"), eq(PROFILE)))
+                .thenReturn(List.of(Map.of(
+                        "auto_approve_enabled", autoApproveEnabled,
+                        "min_score", minScore)));
+    }
+
+    // ── Phase 5 baseline tests (unchanged from original) ──────────────
+
+    @Nested
+    class Phase5Baseline {
+
+        @Test
+        void assistedModeHighConfidenceMatchAutoApplies() {
+            mode("ASSISTED");
+            quotaAllowed(true);
+
+            var decision = service.decide(PROFILE, JOB, 90, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("AUTO_APPLY");
+            verify(db).update(contains("application_decisions"), any(Object[].class));
+            verify(metrics).decisionRecorded("AUTO_APPLY");
+        }
+
+        @Test
+        void assistedModeBelowTheAutoApplyThresholdQueuesForReview() {
+            mode("ASSISTED");
+            quotaAllowed(true);
+
+            var decision = service.decide(PROFILE, JOB, 75, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(decision.reason()).contains("below auto-apply threshold");
+            verify(metrics).decisionRecorded("NEEDS_REVIEW");
+        }
+
+        /**
+         * Phase 7.2 changed this: CONTROLLED_AUTO used to auto-apply every
+         * APPLY match with no rule at all. It now requires an explicitly
+         * enabled rule, so an absent rule queues for human review.
+         */
+        @Test
+        void controlledAutoModeWithoutARuleQueuesForReview() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+
+            var decision = service.decide(PROFILE, JOB, 72, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(decision.reason()).contains("requires an enabled approval rule");
+        }
+
+        @Test
+        void manualModeNeverAutoApplies() {
+            mode("MANUAL");
+            quotaAllowed(true);
+
+            var decision = service.decide(PROFILE, JOB, 95, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(decision.reason()).contains("Manual mode");
+        }
+
+        @Test
+        void anExhaustedDailyQuotaFallsToReviewRegardlessOfMode() {
+            // Quota is now reserved only at the point a mode/rule/threshold
+            // combination would otherwise actually return AUTO_APPLY (see
+            // ApplicationDecisionService#tryAutoApply) — so this needs a
+            // rule that WOULD authorise CONTROLLED_AUTO, to prove the quota
+            // gate, not the rule, is what ultimately refuses it.
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(false);
+            ruleExists(true, 50);
+
+            var decision = service.decide(PROFILE, JOB, 95, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(decision.reason()).contains("quota exceeded");
+            verify(metrics).decisionRecorded("NEEDS_REVIEW");
+        }
+
+        @Test
+        void skipAndReviewRecommendationsNeverAutoApply() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+
+            assertThat(service.decide(PROFILE, JOB, 30, "SKIP").decision())
+                    .isEqualTo("SKIP");
+            assertThat(service.decide(PROFILE, JOB, 60, "REVIEW").decision())
+                    .isEqualTo("NEEDS_REVIEW");
+        }
+
+        @Test
+        void aProfileWithoutPreferencesDefaultsToAssisted() {
+            when(preferenceSets.findActiveByProfileId(PROFILE))
+                    .thenReturn(Optional.empty());
+            quotaAllowed(true);
+
+            assertThat(service.decide(PROFILE, JOB, 90, "APPLY").decision())
+                    .isEqualTo("AUTO_APPLY");
+            assertThat(service.decide(PROFILE, JOB, 75, "APPLY").decision())
+                    .isEqualTo("NEEDS_REVIEW");
+        }
+
+        @Test
+        void decisionPersistenceIsBestEffortAndNeverBlocksThePipeline() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+            ruleExists(true, 70);
+            when(db.update(contains("application_decisions"), any(Object[].class)))
+                    .thenThrow(new RuntimeException("db down"));
+
+            var decision = service.decide(PROFILE, JOB, 90, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("AUTO_APPLY");
+        }
+    }
+
+    // ── Phase 7: per-user auto-approval rules ─────────────────────────
+
+    @Nested
+    class Phase7RuleEngine {
+
+        // ── Rule opt-out: autoApproveEnabled=false ──
+
+        @Test
+        void disabledRuleForcesReviewInAssistedMode() {
+            mode("ASSISTED");
+            quotaAllowed(true);
+            ruleExists(false, 85);
+
+            var decision = service.decide(PROFILE, JOB, 95, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(decision.reason()).contains("disabled by user rule");
+        }
+
+        @Test
+        void disabledRuleForcesReviewInControlledAutoMode() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+            ruleExists(false, 70);
+
+            var decision = service.decide(PROFILE, JOB, 99, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(decision.reason()).contains("disabled by user rule");
+        }
+
+        @Test
+        void disabledRuleDoesNotAffectManualMode() {
+            mode("MANUAL");
+            quotaAllowed(true);
+            ruleExists(false, 85);
+
+            var decision = service.decide(PROFILE, JOB, 95, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(decision.reason()).contains("Manual mode");
+        }
+
+        // ── Rule threshold in ASSISTED mode ──
+
+        @Test
+        void enabledRuleLowersAssistedThreshold() {
+            mode("ASSISTED");
+            quotaAllowed(true);
+            ruleExists(true, 70);
+
+            var decision = service.decide(PROFILE, JOB, 75, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("AUTO_APPLY");
+            assertThat(decision.reason()).contains("score 75 >= 70");
+        }
+
+        @Test
+        void enabledRuleRaisesAssistedThreshold() {
+            mode("ASSISTED");
+            quotaAllowed(true);
+            ruleExists(true, 95);
+
+            var decision = service.decide(PROFILE, JOB, 90, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(decision.reason()).contains("below auto-apply threshold (95)");
+        }
+
+        // ── Rule threshold in CONTROLLED_AUTO mode ──
+
+        @Test
+        void enabledRuleEnforcesMinScoreInControlledAutoMode() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+            ruleExists(true, 80);
+
+            var decision = service.decide(PROFILE, JOB, 75, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(decision.reason()).contains("below user threshold (80)");
+        }
+
+        @Test
+        void controlledAutoScoreAboveRuleThresholdAutoApplies() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+            ruleExists(true, 80);
+
+            var decision = service.decide(PROFILE, JOB, 85, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("AUTO_APPLY");
+        }
+
+        // ── Boundary values ──
+
+        @Test
+        void scoreExactlyAtAssistedThresholdAutoApplies() {
+            mode("ASSISTED");
+            quotaAllowed(true);
+            ruleExists(true, 80);
+
+            var decision = service.decide(PROFILE, JOB, 80, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("AUTO_APPLY");
+        }
+
+        @Test
+        void scoreOnePointBelowAssistedThresholdQueuesForReview() {
+            mode("ASSISTED");
+            quotaAllowed(true);
+            ruleExists(true, 80);
+
+            var decision = service.decide(PROFILE, JOB, 79, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+        }
+
+        @Test
+        void scoreExactlyAtControlledAutoRuleThresholdAutoApplies() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+            ruleExists(true, 75);
+
+            var decision = service.decide(PROFILE, JOB, 75, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("AUTO_APPLY");
+        }
+
+        // ── Quotas cannot be bypassed ──
+
+        @Test
+        void quotaExhaustedOverridesEnabledRuleInAssistedMode() {
+            mode("ASSISTED");
+            quotaAllowed(false);
+            ruleExists(true, 50);
+
+            var decision = service.decide(PROFILE, JOB, 99, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(decision.reason()).contains("quota exceeded");
+        }
+
+        @Test
+        void quotaExhaustedOverridesEnabledRuleInControlledAutoMode() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(false);
+            ruleExists(true, 50);
+
+            var decision = service.decide(PROFILE, JOB, 99, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(decision.reason()).contains("quota exceeded");
+        }
+
+        // ── Missing or failed rule loading fails safe ──
+
+        @Test
+        void missingRuleFallsBackToPhase5DefaultsInAssistedMode() {
+            mode("ASSISTED");
+            quotaAllowed(true);
+            // No ruleExists() — returns empty list (setUp default)
+
+            // Phase 5 default assisted threshold = 85
+            assertThat(service.decide(PROFILE, JOB, 90, "APPLY").decision())
+                    .isEqualTo("AUTO_APPLY");
+            assertThat(service.decide(PROFILE, JOB, 80, "APPLY").decision())
+                    .isEqualTo("NEEDS_REVIEW");
+        }
+
+        @Test
+        void missingRuleInControlledAutoQueuesForReview() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+
+            var decision = service.decide(PROFILE, JOB, 72, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(decision.reason()).contains("requires an enabled approval rule");
+        }
+
+        /**
+         * Phase 7.2: an unreadable rule is never treated as an absent one.
+         * Both automatic modes fail closed to human review rather than
+         * reverting to a default that could auto-approve a disabled match.
+         */
+        @Test
+        void ruleLoadExceptionFailsClosedInBothAutomaticModes() {
+            quotaAllowed(true);
+            when(db.queryForList(contains("user_approval_rules"), eq(PROFILE)))
+                    .thenThrow(new RuntimeException("connection lost"));
+
+            mode("ASSISTED");
+            var assisted = service.decide(PROFILE, JOB, 100, "APPLY");
+            assertThat(assisted.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(assisted.reason()).contains("could not be loaded");
+
+            mode("CONTROLLED_AUTO");
+            var controlled = service.decide(PROFILE, JOB, 100, "APPLY");
+            assertThat(controlled.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(controlled.reason()).contains("could not be loaded");
+        }
+
+        @Test
+        void ruleLoadExceptionInControlledAutoNeverAutoApproves() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+            when(db.queryForList(contains("user_approval_rules"), eq(PROFILE)))
+                    .thenThrow(new RuntimeException("connection lost"));
+
+            var decision = service.decide(PROFILE, JOB, 99, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            verify(metrics).decisionRecorded("NEEDS_REVIEW");
+        }
+
+        /** A stored threshold outside 1–100 is untrustworthy: fail closed. */
+        @Test
+        void outOfRangeStoredThresholdFailsClosed() {
+            for (int invalid : new int[] {0, 101, -5}) {
+                mode("CONTROLLED_AUTO");
+                quotaAllowed(true);
+                ruleExists(true, invalid);
+
+                var decision = service.decide(PROFILE, JOB, 100, "APPLY");
+
+                assertThat(decision.decision())
+                        .as("stored threshold %d must fail closed", invalid)
+                        .isEqualTo("NEEDS_REVIEW");
+                assertThat(decision.reason()).contains("could not be loaded");
+            }
+        }
+
+        @Test
+        void nonNumericStoredThresholdFailsClosed() {
+            mode("ASSISTED");
+            quotaAllowed(true);
+            when(db.queryForList(contains("user_approval_rules"), eq(PROFILE)))
+                    .thenReturn(List.of(Map.of(
+                            "auto_approve_enabled", true,
+                            "min_score", "not-a-number")));
+
+            var decision = service.decide(PROFILE, JOB, 100, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+        }
+
+        // ── Owner isolation ──
+
+        @Test
+        void differentProfilesCannotAccessEachOthersRules() {
+            UUID otherProfile = UUID.randomUUID();
+            ruleExists(true, 50);  // Only matches PROFILE's UUID
+
+            assertThat(service.ruleFor(otherProfile)).isNull();
+        }
+
+        @Test
+        void anotherProfilesDisabledRuleCannotForceReviewOnThisProfile() {
+            // PROFILE has no rule at all; another profile's disabled rule must
+            // not leak across the owner boundary.
+            mode("ASSISTED");
+            quotaAllowed(true);
+
+            var decision = service.decide(PROFILE, JOB, 95, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("AUTO_APPLY");
+            verify(db).queryForList(contains("user_approval_rules"), eq(PROFILE));
+        }
+
+        // ── Quota is reserved atomically at the point a rule would otherwise approve ──
+
+        @Test
+        void exhaustedQuotaRefusesAutoApplyEvenWhenAnEnabledRuleWouldOtherwiseApprove() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(false);
+            ruleExists(true, 1);
+
+            var decision = service.decide(PROFILE, JOB, 100, "APPLY");
+
+            // Score 100 with an enabled rule at threshold 1 would auto-apply,
+            // so the quota reason proves the reservation attempt is what
+            // ultimately blocked it, not the rule.
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(decision.reason()).contains("quota exceeded");
+            verify(quotaService).tryReserve(eq(PROFILE), eq("application_daily"), eq(1.0));
+        }
+
+        // ── Manual mode is always immune to rules ──
+
+        @Test
+        void manualModeNeverAutoAppliesRegardlessOfEnabledRule() {
+            mode("MANUAL");
+            quotaAllowed(true);
+            ruleExists(true, 1);  // Most permissive possible rule
+
+            var decision = service.decide(PROFILE, JOB, 100, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            assertThat(decision.reason()).contains("Manual mode");
+        }
+
+        // ── Skip/Review recommendations are still immune ──
+
+        @Test
+        void skipRecommendationUnaffectedByRule() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+            ruleExists(true, 1);
+
+            assertThat(service.decide(PROFILE, JOB, 30, "SKIP").decision())
+                    .isEqualTo("SKIP");
+        }
+
+        @Test
+        void reviewRecommendationUnaffectedByRule() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+            ruleExists(true, 1);
+
+            assertThat(service.decide(PROFILE, JOB, 60, "REVIEW").decision())
+                    .isEqualTo("NEEDS_REVIEW");
+        }
+
+        // ── Metrics recorded correctly with rules ──
+
+        @Test
+        void metricsRecordedForRuleBasedDecision() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+            ruleExists(true, 90);
+
+            service.decide(PROFILE, JOB, 80, "APPLY");
+
+            verify(metrics).decisionRecorded("NEEDS_REVIEW");
+        }
+
+        // ── Phase 7.3: observability does not change any decision ──
+
+        @Test
+        void everyDecisionTimeLookupIsReportedWithItsResolvedState() {
+            mode("ASSISTED");
+            quotaAllowed(true);
+            ruleExists(true, 80);
+
+            service.decide(PROFILE, JOB, 90, "APPLY");
+
+            verify(health).ruleResolvedAtDecisionTime(
+                    eq(PROFILE),
+                    argThat(state -> state.availability()
+                            == ApplicationDecisionService.RuleAvailability.CONFIGURED));
+        }
+
+        @Test
+        void unreadableRuleIsReportedAsUnreadableAndStillWithheld() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+            when(db.queryForList(contains("user_approval_rules"), eq(PROFILE)))
+                    .thenThrow(new RuntimeException("connection lost"));
+
+            var decision = service.decide(PROFILE, JOB, 100, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
+            verify(health).ruleResolvedAtDecisionTime(
+                    eq(PROFILE),
+                    argThat(state -> state.availability()
+                                    == ApplicationDecisionService.RuleAvailability.UNREADABLE
+                            && state.unreadableCause()
+                                    == ApplicationDecisionService.RuleUnavailableCause.QUERY_FAILED));
+            verify(health).approvalWithheld(ApprovalRuleHealthMonitor.WithheldReason.RULE_UNREADABLE);
+        }
+
+        @Test
+        void disabledRuleIsReportedAsAWithholding() {
+            mode("ASSISTED");
+            quotaAllowed(true);
+            ruleExists(false, 85);
+
+            service.decide(PROFILE, JOB, 99, "APPLY");
+
+            verify(health).approvalWithheld(ApprovalRuleHealthMonitor.WithheldReason.RULE_DISABLED);
+        }
+
+        @Test
+        void absentRuleInControlledAutoIsReportedAsAWithholding() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+
+            service.decide(PROFILE, JOB, 99, "APPLY");
+
+            verify(health).approvalWithheld(
+                    ApprovalRuleHealthMonitor.WithheldReason.NO_RULE_IN_CONTROLLED_AUTO);
+        }
+
+        @Test
+        void assistedAutoApplyIsReportedAsConfiguredAndNotWithheld() {
+            mode("ASSISTED");
+            quotaAllowed(true);
+            ruleExists(true, 80);
+
+            var decision = service.decide(PROFILE, JOB, 95, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("AUTO_APPLY");
+            verify(health, org.mockito.Mockito.never())
+                    .approvalWithheld(any(ApprovalRuleHealthMonitor.WithheldReason.class));
+        }
+
+        @Test
+        void manualModeReportsTheLookupButNeverAWithholding() {
+            mode("MANUAL");
+            quotaAllowed(true);
+            ruleExists(true, 1);
+
+            service.decide(PROFILE, JOB, 100, "APPLY");
+
+            // MANUAL returns before the rule step, so no lookup is even made.
+            verify(health, org.mockito.Mockito.never())
+                    .ruleResolvedAtDecisionTime(any(UUID.class), any());
+            verify(health, org.mockito.Mockito.never())
+                    .approvalWithheld(any(ApprovalRuleHealthMonitor.WithheldReason.class));
+        }
+
+        @Test
+        void quotaWithholdingIsNotAttributedToTheRule() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(false);
+            ruleExists(true, 1);
+
+            service.decide(PROFILE, JOB, 100, "APPLY");
+
+            verify(health, org.mockito.Mockito.never())
+                    .approvalWithheld(any(ApprovalRuleHealthMonitor.WithheldReason.class));
+        }
+    }
+
+    // ── Phase 7: saveRule validation ───────────────────────────────────
+
+    @Nested
+    class Phase7SaveRule {
+
+        @Test
+        void saveRuleRejectsScoreBelowOne() {
+            assertThatThrownBy(() -> service.saveRule(PROFILE, true, 0))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("between 1 and 100");
+        }
+
+        @Test
+        void saveRuleRejectsScoreAboveHundred() {
+            assertThatThrownBy(() -> service.saveRule(PROFILE, true, 101))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("between 1 and 100");
+        }
+
+        @Test
+        void saveRuleAcceptsBoundaryValueOne() {
+            var rule = service.saveRule(PROFILE, true, 1);
+            assertThat(rule.minScore()).isEqualTo(1);
+            assertThat(rule.autoApproveEnabled()).isTrue();
+        }
+
+        @Test
+        void saveRuleAcceptsBoundaryValueHundred() {
+            var rule = service.saveRule(PROFILE, false, 100);
+            assertThat(rule.minScore()).isEqualTo(100);
+            assertThat(rule.autoApproveEnabled()).isFalse();
+        }
+
+        @Test
+        void saveRuleDefaultsToExistingValuesWhenFieldsAreNull() {
+            ruleExists(true, 90);
+
+            var rule = service.saveRule(PROFILE, null, null);
+
+            assertThat(rule.autoApproveEnabled()).isTrue();
+            assertThat(rule.minScore()).isEqualTo(90);
+        }
+
+        @Test
+        void saveRuleDefaultsToPhase5WhenNoExistingRule() {
+            var rule = service.saveRule(PROFILE, null, null);
+
+            assertThat(rule.autoApproveEnabled()).isFalse();
+            assertThat(rule.minScore())
+                    .isEqualTo(ApplicationDecisionService.HIGH_CONFIDENCE_THRESHOLD);
+        }
+
+        @Test
+        void saveRuleUpsertsViaJdbc() {
+            service.saveRule(PROFILE, true, 75);
+
+            verify(db).update(contains("user_approval_rules"), any(Object[].class));
+        }
+    }
+
+    // ── Phase 7: ruleFor (read path) ──────────────────────────────────
+
+    @Nested
+    class Phase7RuleFor {
+
+        @Test
+        void ruleForReturnsNullWhenNoRowExists() {
+            assertThat(service.ruleFor(PROFILE)).isNull();
+        }
+
+        @Test
+        void ruleForReturnsSavedRule() {
+            ruleExists(true, 72);
+
+            var rule = service.ruleFor(PROFILE);
+
+            assertThat(rule).isNotNull();
+            assertThat(rule.autoApproveEnabled()).isTrue();
+            assertThat(rule.minScore()).isEqualTo(72);
+        }
+
+        // ── Phase 7.3: ruleState exposes the tri-state the API needs ──
+
+        @Test
+        void ruleStateReportsConfigured() {
+            ruleExists(false, 60);
+
+            var state = service.ruleState(PROFILE);
+
+            assertThat(state.availability())
+                    .isEqualTo(ApplicationDecisionService.RuleAvailability.CONFIGURED);
+            assertThat(state.rule().minScore()).isEqualTo(60);
+            assertThat(state.unreadableCause()).isNull();
+        }
+
+        @Test
+        void ruleStateReportsAbsent() {
+            var state = service.ruleState(PROFILE);
+
+            assertThat(state.availability())
+                    .isEqualTo(ApplicationDecisionService.RuleAvailability.ABSENT);
+            assertThat(state.rule()).isNull();
+            assertThat(state.unreadableCause()).isNull();
+        }
+
+        @Test
+        void ruleStateReportsUnreadableWithBoundedCause() {
+            when(db.queryForList(contains("user_approval_rules"), eq(PROFILE)))
+                    .thenThrow(new RuntimeException("connection to db-host:5432 refused"));
+
+            var state = service.ruleState(PROFILE);
+
+            assertThat(state.availability())
+                    .isEqualTo(ApplicationDecisionService.RuleAvailability.UNREADABLE);
+            assertThat(state.unreadableCause())
+                    .isEqualTo(ApplicationDecisionService.RuleUnavailableCause.QUERY_FAILED);
+        }
+
+        @Test
+        void ruleStateReportsInvalidThresholdAsUnreadable() {
+            ruleExists(true, 500);
+
+            var state = service.ruleState(PROFILE);
+
+            assertThat(state.availability())
+                    .isEqualTo(ApplicationDecisionService.RuleAvailability.UNREADABLE);
+            assertThat(state.unreadableCause())
+                    .isEqualTo(ApplicationDecisionService.RuleUnavailableCause.INVALID_THRESHOLD);
+        }
+
+        @Test
+        void effectiveApplicationModeMirrorsTheDecisionEngineDefault() {
+            when(preferenceSets.findActiveByProfileId(PROFILE)).thenReturn(Optional.empty());
+            assertThat(service.effectiveApplicationMode(PROFILE)).isEqualTo("ASSISTED");
+
+            mode("CONTROLLED_AUTO");
+            assertThat(service.effectiveApplicationMode(PROFILE)).isEqualTo("CONTROLLED_AUTO");
+
+            PreferenceSetRecord blank = mock(PreferenceSetRecord.class);
+            when(blank.applicationMode()).thenReturn("  ");
+            when(preferenceSets.findActiveByProfileId(PROFILE)).thenReturn(Optional.of(blank));
+            assertThat(service.effectiveApplicationMode(PROFILE)).isEqualTo("ASSISTED");
+        }
+    }
+
+    // ── Idempotency ───────────────────────────────────────────────────
+
+    @Nested
+    class Idempotency {
+
+        @Test
+        void repeatedDecideCallsReturnConsistentResult() {
+            mode("ASSISTED");
+            quotaAllowed(true);
+            ruleExists(true, 80);
+
+            var first = service.decide(PROFILE, JOB, 85, "APPLY");
+            var second = service.decide(PROFILE, JOB, 85, "APPLY");
+
+            assertThat(first.decision()).isEqualTo(second.decision());
+            assertThat(first.matchScore()).isEqualTo(second.matchScore());
+        }
+
+        @Test
+        void upsertGuardPreservesTerminalDecision() {
+            mode("CONTROLLED_AUTO");
+            quotaAllowed(true);
+            when(db.update(contains("application_decisions"), any(Object[].class)))
+                    .thenReturn(0);
+            when(db.queryForList(
+                    contains("select decision, reason"),
+                    any(UUID.class), any(UUID.class)))
+                    .thenReturn(List.of(Map.of(
+                            "decision", "APPROVED",
+                            "reason", "Manually approved")));
+
+            var decision = service.decide(PROFILE, JOB, 90, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("APPROVED");
+        }
+
+        @Test
+        void aReplayThatHitsTheTerminalDecisionGuardReleasesItsReservationRatherThanLeakingIt() {
+            // A match that would authorise AUTO_APPLY this time around, but a
+            // terminal decision (e.g. a human already APPROVED or REJECTED
+            // this exact match) already exists for this (profile, job) pair
+            // — record()'s own upsert guard refuses the overwrite. The
+            // reservation tryAutoApply made just before calling record() was
+            // never actually spent on a real auto-apply, so it must be
+            // released here rather than silently shrinking today's quota.
+            mode("ASSISTED");
+            quotaAllowed(true);
+            when(db.update(contains("application_decisions"), any(Object[].class)))
+                    .thenReturn(0);
+            when(db.queryForList(contains("select decision, reason"), any(UUID.class), any(UUID.class)))
+                    .thenReturn(List.of(Map.of("decision", "REJECTED", "reason", "Not interested")));
+
+            var decision = service.decide(PROFILE, JOB, 95, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("REJECTED");
+            verify(quotaService).tryReserve(eq(PROFILE), eq("application_daily"), eq(1.0));
+            verify(quotaService).release(eq(PROFILE), eq("application_daily"), eq(1.0), eq(RESERVATION_PERIOD_START));
+        }
+    }
+
+    // ── Robin x Tsenta continuation: Auto Apply run-history summary ──
+    @Nested
+    class ActivitySummaryTest {
+
+        @Test
+        void aggregatesTodayAndLast7DaysSeparatelyByDecision() {
+            when(db.queryForList(contains("application_decisions"), eq(PROFILE), any(java.sql.Timestamp.class)))
+                    .thenReturn(
+                            List.of(Map.of("decision", "AUTO_APPLY", "n", 2L), Map.of("decision", "NEEDS_REVIEW", "n", 1L)),
+                            List.of(Map.of("decision", "AUTO_APPLY", "n", 6L), Map.of("decision", "SKIP", "n", 1L)));
+
+            var summary = service.activitySummary(PROFILE);
+
+            assertThat(summary.today().considered()).isEqualTo(3);
+            assertThat(summary.today().byDecision()).containsEntry("AUTO_APPLY", 2).containsEntry("NEEDS_REVIEW", 1);
+            assertThat(summary.last7Days().considered()).isEqualTo(7);
+            assertThat(summary.last7Days().byDecision()).containsEntry("AUTO_APPLY", 6).containsEntry("SKIP", 1);
+        }
+
+        @Test
+        void emptyActivityReportsZeroRatherThanThrowing() {
+            when(db.queryForList(contains("application_decisions"), eq(PROFILE), any(java.sql.Timestamp.class)))
+                    .thenReturn(List.of());
+
+            var summary = service.activitySummary(PROFILE);
+
+            assertThat(summary.today().considered()).isZero();
+            assertThat(summary.today().byDecision()).isEmpty();
+            assertThat(summary.last7Days().considered()).isZero();
+        }
+    }
+}

@@ -142,6 +142,12 @@ services:
       # Set SCRAPLING_API_TOKEN in the environment to require Bearer auth
       # from the backend (the backend then sends the same value).
       SCRAPLING_API_TOKEN: ${SCRAPLING_API_TOKEN:-}
+      # Bounded-safety knobs (sidecar/scrapling/README.md) — all optional,
+      # defaults match the sidecar's own built-in defaults when unset.
+      SCRAPLING_MAX_CONTENT_BYTES: ${SCRAPLING_MAX_CONTENT_BYTES:-}
+      SCRAPLING_MIN_DELAY_MS: ${SCRAPLING_MIN_DELAY_MS:-}
+      SCRAPLING_ADAPTIVE_EXTRACTION: ${SCRAPLING_ADAPTIVE_EXTRACTION:-}
+      SCRAPLING_ADAPTIVE_STORAGE: ${SCRAPLING_ADAPTIVE_STORAGE:-}
     ports:
       - "127.0.0.1:8199:8199"
     healthcheck:

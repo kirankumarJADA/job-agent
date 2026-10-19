@@ -62,6 +62,7 @@ server:
         http-only: true
 
 app:
+  frontend-url: ${APP_FRONTEND_URL:}
   redis:
     # Separate cold TLS connection initialization from command execution.
     connection-initialization-timeout: ${APP_REDIS_CONNECTION_INITIALIZATION_TIMEOUT:10s}

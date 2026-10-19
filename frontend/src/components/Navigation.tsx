@@ -58,6 +58,17 @@ const MAIN_NAV: NavItem[] = [
     ),
   },
   {
+    name: 'Review Queue',
+    path: '/review-queue',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" className={iconClass} aria-hidden="true">
+        <rect x="4.5" y="4.5" width="15" height="15" rx="2" stroke="currentColor" strokeWidth="1.6" />
+        <path d="M8.5 9h7M8.5 12h7M8.5 15h4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+        <path d="M15.5 16.5l2 2 3.5-3.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+  {
     name: 'Profile',
     path: '/profile',
     icon: (
@@ -80,6 +91,25 @@ const MAIN_NAV: NavItem[] = [
         />
         <circle cx="16" cy="8" r="2" stroke="currentColor" strokeWidth="1.6" />
         <circle cx="9.5" cy="16" r="2" stroke="currentColor" strokeWidth="1.6" />
+      </svg>
+    ),
+  },
+  {
+    name: 'Approval Rules',
+    path: '/approval-rules',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" className={iconClass} aria-hidden="true">
+        <path d="M12 3.5L4 7.5v5c0 4.7 3.4 9 8 10 4.6-1 8-5.3 8-10v-5l-8-4Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+        <path d="M9 12l2 2 4-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    ),
+  },
+  {
+    name: 'Auto Apply Activity',
+    path: '/auto-apply-activity',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" className={iconClass} aria-hidden="true">
+        <path d="M4 19V5m0 14h16M8 15v-4m4 4V9m4 10V7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
     ),
   },

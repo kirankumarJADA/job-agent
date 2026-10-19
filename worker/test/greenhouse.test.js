@@ -83,6 +83,196 @@ test('Greenhouse human review never transitions to submission and no submit step
     && error.reason === 'FORBIDDEN_GREENHOUSE_STEP');
 });
 
+// Phase 4: the real-submission step. These first few tests exercise
+// #validateGreenhousePlan's static rejection of a malformed shape only — the
+// same boundary every other Greenhouse-specific test in this file checks,
+// no browser needed. A well-formed plan's full execution — the real click,
+// DOM-text confirmation, and the pre-click re-inspection that makes a
+// crash-then-resume safe — previously had no browser-level test at all
+// (VALIDATE and REAL_SUBMIT_CLICK both require an already-navigated live
+// page, and greenhousePageIdentityMatches requires a real
+// boards.greenhouse.io/job-boards.greenhouse.io hostname a local mock HTTP
+// server cannot satisfy). That gap is closed further below (search for
+// `onPageCreated`): a real Chromium page is driven through
+// page.route()-intercepted, zero-real-network fixtures instead.
+
+test('REAL_SUBMIT_CLICK is rejected unless it is the plan\'s last step', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'greenhouse-submit-position-'));
+  const submit = { id: 'real-submit-click', type: StepType.REAL_SUBMIT_CLICK, policy: 'AUTO',
+    params: { selector: 'button[type="submit"]' } };
+  // Appended BEFORE validate-form (via extraSteps), so validate-form ends up
+  // last instead — exactly the misplacement a real attacker-controlled or
+  // buggy caller might produce.
+  const plan = greenhousePlan(root, { extraSteps: [submit] });
+  return assert.rejects(() => worker(root).execute(plan), (error) => error instanceof HardStopError
+    && error.reason === 'GREENHOUSE_SUBMIT_STEP_MISPLACED');
+});
+
+test('REAL_SUBMIT_CLICK is rejected when it does not immediately follow validate-form', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'greenhouse-submit-gap-'));
+  const screenshot = { id: 'screenshot-extra', type: StepType.SCREENSHOT, policy: 'AUTO', params: {} };
+  const submit = { id: 'real-submit-click', type: StepType.REAL_SUBMIT_CLICK, policy: 'AUTO',
+    params: { selector: 'button[type="submit"]' } };
+  const plan = greenhousePlan(root, {});
+  plan.steps.push(screenshot, submit); // validate-form, screenshot, real-submit-click — a gap
+  return assert.rejects(() => worker(root).execute(plan), (error) => error instanceof HardStopError
+    && error.reason === 'GREENHOUSE_SUBMIT_STEP_MISPLACED');
+});
+
+test('REAL_SUBMIT_CLICK with any selector other than the allow-listed submit button is rejected', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'greenhouse-submit-selector-'));
+  const submit = { id: 'real-submit-click', type: StepType.REAL_SUBMIT_CLICK, policy: 'AUTO',
+    params: { selector: '#some-other-button' } };
+  const plan = greenhousePlan(root, {});
+  plan.steps.push(submit);
+  return assert.rejects(() => worker(root).execute(plan), (error) => error instanceof HardStopError
+    && error.reason === 'GREENHOUSE_SUBMIT_SELECTOR_NOT_ALLOWED');
+});
+
+test('A REAL_SUBMIT_CLICK step is still forbidden everywhere a plain CLICK already was', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'greenhouse-submit-wrong-id-'));
+  // Right type and position, wrong id — the id check is independent of position.
+  const submit = { id: 'click-the-thing', type: StepType.REAL_SUBMIT_CLICK, policy: 'AUTO',
+    params: { selector: 'button[type="submit"]' } };
+  const plan = greenhousePlan(root, {});
+  plan.steps.push(submit);
+  return assert.rejects(() => worker(root).execute(plan), (error) => error instanceof HardStopError
+    && error.reason === 'GREENHOUSE_SUBMIT_STEP_MISPLACED');
+});
+
+// Phase 8.5 continuation (confirmation hardening): the same static-shape
+// boundary above is unchanged, but these tests close the previously
+// acknowledged "no test here drives a real browser" gap for exactly the
+// REAL_SUBMIT_CLICK/confirmation path, using `onPageCreated` (a test-only
+// seam, see browser_worker.js) to register `page.route()` interception
+// BEFORE the plan's own NAVIGATE step runs — a real Chromium page genuinely
+// navigates, clicks and inspects DOM state, but zero real network requests
+// ever leave the machine and no real employer site is ever touched.
+function greenhouseSubmitPlan(root, { expectedConfirmationText } = {}) {
+  const submit = { id: 'real-submit-click', type: StepType.REAL_SUBMIT_CLICK, policy: 'AUTO',
+    params: { selector: 'button[type="submit"]', expectedConfirmationText } };
+  // greenhousePlan() appends its own 'validate-form' VALIDATE step last, so
+  // passing `submit` as the (only) extra step yields [navigate, screenshot,
+  // real-submit-click, validate-form] — wrong order. Build the steps
+  // directly instead, placing real-submit-click immediately after (and
+  // only after) validate-form, which is the one shape #validateGreenhousePlan
+  // accepts.
+  const plan = greenhousePlan(root, {});
+  plan.steps.push(submit);
+  return plan;
+}
+
+function routedWorker(root, routeHandler) {
+  return new BrowserWorker({
+    statePath: path.join(root, 'state.json'), artifactDir: root,
+    onPageCreated: async (page) => { await page.route(`${URL}**`, routeHandler); },
+  });
+}
+
+test('a real click that mutates the DOM to the configured confirmation text reports SUBMITTED, never a fabricated fallback', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'greenhouse-real-click-confirm-'));
+  const html = `<!doctype html><html><body>
+    <main>Review your application</main>
+    <button type="submit" onclick="document.body.innerHTML='<main>Thanks for applying! Application submitted — ref GH-1.</main>'">Submit</button>
+  </body></html>`;
+  const plan = greenhouseSubmitPlan(root, { expectedConfirmationText: 'Thanks for applying' });
+  const instance = routedWorker(root, (route) => route.fulfill({ contentType: 'text/html', body: html }));
+  const result = await instance.execute(plan, { approve: true });
+  assert.equal(result.status, 'COMPLETED');
+  assert.equal(result.submitResult.confirmed, true);
+  assert.equal(result.submitResult.category, 'CONFIRMED');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('a page already showing the configured confirmation before the step runs is never re-clicked (crash-resume safety)', async () => {
+  // Simulates a worker that crashed after a real click actually reached the
+  // employer but before that result was persisted: the page genuinely is
+  // the confirmation page already when this step's pre-click inspection
+  // runs. If the implementation ever regressed to clicking again instead of
+  // trusting the pre-click inspection, the onclick below would navigate to
+  // a DIFFERENT job id, which greenhousePageIdentityMatches rejects — so a
+  // regression here fails LOUD (the whole run rejects) rather than silently.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'greenhouse-no-reclick-'));
+  const html = `<!doctype html><html><body>
+    <main>Thanks for applying! Application submitted — ref GH-2.</main>
+    <button type="submit" onclick="location.href='${URL.replace('/42', '/99-wrong-job')}'">Submit</button>
+  </body></html>`;
+  const plan = greenhouseSubmitPlan(root, { expectedConfirmationText: 'Thanks for applying' });
+  const instance = routedWorker(root, (route) => route.fulfill({ contentType: 'text/html', body: html }));
+  const result = await instance.execute(plan, { approve: true });
+  assert.equal(result.status, 'COMPLETED');
+  assert.equal(result.submitResult.confirmed, true);
+});
+
+test('a click that leaves the application form still present is reported unconfirmed, never fabricated as SUBMITTED', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'greenhouse-still-present-'));
+  // The required contact fields carry values (so VALIDATE's :invalid check
+  // passes before the click) and the click handler intentionally does
+  // nothing — simulating a submission that silently failed to go through
+  // and left the candidate back on the same, still-filled-in form.
+  const html = `<!doctype html><html><body>
+    <input id="first_name" value="Ada">
+    <input id="email" value="ada@example.test">
+    <button type="submit" onclick="void 0">Submit</button>
+  </body></html>`;
+  const plan = greenhouseSubmitPlan(root, { expectedConfirmationText: 'Thanks for applying' });
+  const instance = routedWorker(root, (route) => route.fulfill({ contentType: 'text/html', body: html }));
+  const result = await instance.execute(plan, { approve: true });
+  assert.equal(result.status, 'COMPLETED');
+  assert.equal(result.submitResult.confirmed, false);
+  assert.equal(result.submitResult.category, 'FORM_STILL_PRESENT');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('a login wall appearing only after the click is a hard stop, not a retryable uncertain result', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'greenhouse-login-after-click-'));
+  const html = `<!doctype html><html><body>
+    <main>Review your application</main>
+    <button type="submit" onclick="document.body.innerHTML='<main>Please sign in to continue</main>'">Submit</button>
+  </body></html>`;
+  const plan = greenhouseSubmitPlan(root, { expectedConfirmationText: 'Thanks for applying' });
+  const instance = routedWorker(root, (route) => route.fulfill({ contentType: 'text/html', body: html }));
+  await assert.rejects(() => instance.execute(plan, { approve: true }), (error) => error instanceof HardStopError
+    && error.reason === 'GREENHOUSE_LOGIN_REQUIRED_AFTER_SUBMIT');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('a click whose resulting navigation never completes times out as a genuine failure, never a fabricated success', async () => {
+  // Playwright's locator.click() auto-waits for a navigation the click
+  // itself triggers, so a route that never responds makes the click call
+  // time out and throw — proven here with page.setDefault(Navigation)Timeout
+  // turned down so the test stays fast rather than waiting on the real 30s
+  // default. That exception propagates exactly like any other step failure
+  // (through #retry, then #runStep's caller) straight to a REJECTED run
+  // (store.fail + WORKER_FAILED), never silently through to a confirmed or
+  // completed result — there is no code path between a timed-out click and
+  // `lastSubmitResult` being set at all.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'greenhouse-nav-timeout-'));
+  const landingHtml = `<!doctype html><html><body>
+    <main>Review your application</main>
+    <button type="submit" onclick="location.href='${URL}?next=hang'">Submit</button>
+  </body></html>`;
+  const plan = greenhouseSubmitPlan(root, { expectedConfirmationText: 'Thanks for applying' });
+  const instance = new BrowserWorker({
+    statePath: path.join(root, 'state.json'), artifactDir: root,
+    onPageCreated: async (page) => {
+      page.setDefaultTimeout(300);
+      page.setDefaultNavigationTimeout(300);
+      await page.route(`${URL}**`, (route) => {
+        if (route.request().url().includes('next=hang')) return; // never resolves — simulates a hang
+        return route.fulfill({ contentType: 'text/html', body: landingHtml });
+      });
+    },
+  });
+  await assert.rejects(() => instance.execute(plan, { approve: true }), (error) => /Timeout.*exceeded/i.test(error.message));
+  assert.equal(instance.lastSubmitResult, null, 'a timed-out click must never set a submit result at all');
+  const state = JSON.parse(fs.readFileSync(path.join(root, 'state.json'), 'utf8')).plans[plan.planId];
+  assert.equal(state.status, 'FAILED');
+  assert.ok(!state.steps['real-submit-click'] || state.steps['real-submit-click'].status !== 'COMPLETED',
+    'the timed-out step must never be recorded as completed');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
 test('A lease-loss abort stops the run at the next step boundary with a hard stop', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'greenhouse-lease-'));
   const fill = { id: 'fill-email', type: StepType.FILL_FIELD, policy: 'AUTO',

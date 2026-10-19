@@ -1,0 +1,209 @@
+{
+ "refineSearch": {
+  "status": 200,
+  "hits": 2,
+  "totalHits": 38,
+  "data": {
+   "jobs": [
+    {
+     "type": "Full-Time",
+     "descriptionTeaser": "Seeking a PDE II - Fullstack to define long-term technical architecture and lead product development for our AI-driven talent experience platform. Responsible for system design and architecture, and collaborating with teams. Ideal for experienced software developers with strong technical and analytical skills.",
+     "state": "Telangana",
+     "siteType": "external",
+     "reqId": "P-104654",
+     "city": "Hyderabad",
+     "latitude": "17.38405",
+     "multi_location": [
+      "Hyderabad, Telangana, India"
+     ],
+     "externalApply": false,
+     "country": "India",
+     "experience": "<p><strong>What you've done</strong></p><ul><li><span style=\"background-color: transparent;\">4 - 7 years of Software Development experience in Core Java, MongoDB, Algorithm, Data Structures, Design Patterns.,</span></li><li><span style=\"background-color: transparent;\">Strong experience with React JS/ Angular JS, HTML, CSS.</span></li><li><span style=\"background-color: transparent;\">Experience in defining architecture and leading teams in design &amp; development</span></li><li><span style=\"background-color: transparent;\">Experience with Cloud (AWS and Azure) deployments</span></li><li><span style=\"background-color: transparent;\">Solid written and verbal communication skills</span></li><li>Eye for&nbsp;design aesthetics&nbsp;and&nbsp;attention to detail&nbsp;with a good understanding of&nbsp;UI/UX&nbsp;principles</li><li><span style=\"background-color: transparent;\">Able to thrive in a fast-paced environment</span></li><li><span style=\"background-color: transparent;\">Engineering Graduates / Post-Graduates from premier institutions are preferred. Graduates from&nbsp;IIT,&nbsp;BITS,&nbsp;&amp;&nbsp;NIT are preferred.</span></li></ul>",
+     "longitude": "78.45636",
+     "jobId": "P-104654",
+     "locale": "en_US",
+     "title": "PDE II - Fullstack",
+     "jobSeqNo": "PHENA0059P104654EXTERNALENUS",
+     "postedDate": "2026-08-05T09:34:56.310+0000",
+     "dateCreated": "2026-08-05T09:34:56.310+0000",
+     "department": "Engineering",
+     "isCritical": true,
+     "location": "Hyderabad, Telangana, India",
+     "category": "Engineering",
+     "ml_skills": [
+      "css",
+      "react.js",
+      "mongodb",
+      "html",
+      "angular",
+      "core java",
+      "algorithms",
+      "data structures",
+      "design patterns",
+      "react js",
+      "angular js",
+      "aws",
+      "azure",
+      "system design",
+      "ui/ux principles",
+      "technical solutions",
+      "team leadership",
+      "communication skills",
+      "analytical solutions"
+     ],
+     "ml_job_parser": {
+      "descriptionTeaser": "Seeking a PDE II - Fullstack to define long-term technical architecture and lead product development for our AI-driven talent experience platform. Responsible for system design and architecture, and collaborating with teams. Ideal for experienced software developers with strong technical and analytical skills.",
+      "descriptionTeaser_keyword": "Phenom Intro. Our purpose is to help a billion people find the right job! Phenom is an AI-Powered talent experience platform that is redefining the HR tech space. We have grown into a global organizat...",
+      "descriptionTeaser_ats": "Job Requirements Phenom IntroOur purpose is to help a billion people find the right job! Phenom is an AI-Powered talent experience platform that is redefining the HR tech space. We",
+      "descriptionTeaser_first200": "Phenom Intro. Our purpose is to help a billion people find the right job! Phenom is an AI-Powered talent experience platform that is redefining the HR tech space. We have grown into a global organi..."
+     },
+     "visibilityType": "External",
+     "jobVisibility": [
+      "external",
+      "internal"
+     ],
+     "isMultiLocation": true,
+     "multi_location_array": [
+      {
+       "latlong": {
+        "lon": 78.45636,
+        "lat": 17.38405
+       },
+       "location": "Hyderabad, Telangana, India"
+      }
+     ],
+     "isMultiCategory": false,
+     "badge": ""
+    },
+    {
+     "type": "Full-Time",
+     "descriptionTeaser": "Take on the role of Director Agentic Talent Programs, driving strategic account engagements for Fortune 1000 clients in the retail, hospitality, and logistics sectors. Lead research, analysis, and solution design to address talent constraints, working directly with senior leadership. Ideal for experienced professionals in HR consulting or talent technology.",
+     "state": "Pennsylvania",
+     "siteType": "external",
+     "reqId": "P-104708",
+     "city": "Horsham",
+     "latitude": "40.17844",
+     "multi_location": [
+      "Horsham, PA, USA"
+     ],
+     "externalApply": false,
+     "country": "United States",
+     "experience": "",
+     "longitude": "-75.12851",
+     "jobId": "P-104708",
+     "locale": "en_US",
+     "title": "Director Agentic Talent Programs, Finserv",
+     "jobSeqNo": "PHENA0059P104708EXTERNALENUS",
+     "postedDate": "2026-09-03T00:00:00.000+0000",
+     "dateCreated": "2026-08-28T18:14:06.800+0000",
+     "department": "Sales",
+     "jobVisibility": [
+      "external",
+      "internal"
+     ],
+     "isCritical": true,
+     "location": "Horsham, Pennsylvania, United States",
+     "category": "Sales",
+     "ml_skills": [
+      "talent management",
+      "financial modeling",
+      "executive communication",
+      "process mapping",
+      "stakeholder alignment",
+      "business intelligence",
+      "hypothesis testing",
+      "ai tools",
+      "llm tools",
+      "data literacy",
+      "competitive intelligence",
+      "consulting",
+      "sales pipeline management",
+      "account research",
+      "customer acquisition",
+      "retail hiring",
+      "hospitality hiring",
+      "logistics hiring",
+      "franchise operations",
+      "hr technology",
+      "talent technology outsourcing"
+     ],
+     "ml_job_parser": {
+      "descriptionTeaser": "Take on the role of Director Agentic Talent Programs, driving strategic account engagements for Fortune 1000 clients in the retail, hospitality, and logistics sectors. Lead research, analysis, and solution design to address talent constraints, working directly with senior leadership. Ideal for experienced professionals in HR consulting or talent technology.",
+      "descriptionTeaser_keyword": "Job Description. Phenom is an applied AI company with a bold mission: help a billion people find the right work. Our platform delivers an AI orchestration layer that sits across the entire talent life...",
+      "descriptionTeaser_ats": "Job Requirements Job DescriptionPhenom is an applied AI company with a bold mission: help a billion people find the right work.Our platform delivers an AI orchestration layer that sits across the enti",
+      "descriptionTeaser_first200": "Job Description. Phenom is an applied AI company with a bold mission: help a billion people find the right work. Our platform delivers an AI orchestration layer that sits across the entire talent l..."
+     },
+     "visibilityType": "External",
+     "isMultiLocation": true,
+     "multi_location_array": [
+      {
+       "latlong": {
+        "lon": -75.12851,
+        "lat": 40.17844
+       },
+       "location": "Horsham, PA, USA"
+      }
+     ],
+     "isMultiCategory": false,
+     "badge": ""
+    }
+   ],
+   "aggregations": [
+    {
+     "field": "country",
+     "value": {
+      "India": 18,
+      "United States": 20
+     }
+    },
+    {
+     "field": "city",
+     "value": {
+      "Horsham": 20,
+      "Hyderabad": 18,
+      "Visakhapatnam": 1
+     }
+    },
+    {
+     "field": "state",
+     "value": {
+      "Andhra Pradesh": 1,
+      "Pennsylvania": 20,
+      "Telangana": 18
+     }
+    },
+    {
+     "field": "category",
+     "value": {
+      "Customer Success": 1,
+      "Customer Support": 2,
+      "Engineering": 14,
+      "Implementation": 3,
+      "Marketing": 3,
+      "Other": 3,
+      "Platform Integration Engineering": 1,
+      "Product": 6,
+      "Sales": 5
+     }
+    }
+   ],
+   "SEARCH_CONFIG": {
+    "contextualSearch": true,
+    "isSuggestionsEnabled": true
+   },
+   "suggestions": {},
+   "ui_skills_selection": null,
+   "locationData": {}
+  },
+  "eid": {
+   "trialIndex": -1,
+   "eid": "6aca489f01db66460c561150",
+   "searchType": "allJobs",
+   "isMultiLingualVectorApplied": false,
+   "query": "",
+   "variant": 0,
+   "banditId": "",
+   "keywordLanguage": "en"
+  }
+ }
+}

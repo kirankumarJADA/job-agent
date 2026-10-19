@@ -53,6 +53,9 @@ public class AutomationController {
     private final String workerToken;
     private final NotificationService notifications;
     private final AutomationMetrics metrics;
+    private final com.personal.jobagent.apply.ApplyReadinessService applyReadiness;
+    private final ApplyDocumentSelector documentSelector;
+    private final com.personal.jobagent.application.ApplicationStatusService applicationStatus;
 
     public AutomationController(AutomationPlanRepository plans,
                                 AuditLogWriter audit,
@@ -60,7 +63,10 @@ public class AutomationController {
                                 @Value("${app.worker-event-token:}") String workerToken,
                                 ExecutionPackageService executionPackages,
                                 NotificationService notifications,
-                                AutomationMetrics metrics) {
+                                AutomationMetrics metrics,
+                                com.personal.jobagent.apply.ApplyReadinessService applyReadiness,
+                                ApplyDocumentSelector documentSelector,
+                                com.personal.jobagent.application.ApplicationStatusService applicationStatus) {
         this.plans = plans;
         this.audit = audit;
         this.ownerContext = ownerContext;
@@ -68,11 +74,16 @@ public class AutomationController {
         this.executionPackages = executionPackages;
         this.notifications = notifications;
         this.metrics = metrics;
+        this.applyReadiness = applyReadiness;
+        this.documentSelector = documentSelector;
+        this.applicationStatus = applicationStatus;
     }
 
     public record CreateRequest(UUID applicationId, UUID jobId, String targetUrl, String idempotencyKey, List<AutomationPlan.Step> steps) {}
     public record StepRequest(int index, String stepId, String status, Map<String, Object> result, String screenshotRef) {}
-    public record OutcomeRequest(String outcome, String detail) {}
+    public record OutcomeRequest(String outcome, String detail, List<Map<String, Object>> result) {
+        public OutcomeRequest(String outcome, String detail) { this(outcome, detail, null); }
+    }
     public record WorkerEvent(String eventId, UUID planId, UUID applicationId, UUID jobId, String type, Map<String, Object> payload) {}
 
     @PostMapping("/plans")
@@ -148,6 +159,36 @@ public class AutomationController {
             return ResponseEntity.status(409).body(Map.of(
                     "error", "approval requires a validated plan awaiting human review"));
         }
+        // Phase 8.2: approval re-runs the server-side readiness gate over the
+        // CURRENT records. A stale frontend state cannot bypass a blocker, and
+        // a refusal names the blockers instead of a generic error.
+        UUID profileId = ownerContext.profileIdOrNull();
+        Map<String, Object> state;
+        try {
+            state = applyReadiness.evaluate(profileId, plan.applicationId());
+        } catch (java.util.NoSuchElementException e) {
+            return notFound();
+        } catch (com.personal.jobagent.apply.ApplyReadinessService.ReadinessUnavailableException e) {
+            return ResponseEntity.status(503).body(Map.of(
+                    "availability", "UNAVAILABLE", "reason", e.getMessage(),
+                    "message", "Preparation state could not be verified, so nothing was approved."));
+        }
+        if (!Boolean.TRUE.equals(state.get("packageReady"))) {
+            audit.write(new AuditEntry(ownerContext.actorOr("user"), "GREENHOUSE_SUBMIT_APPROVAL_REFUSED",
+                    "AUTOMATION_PLAN", id, null,
+                    Map.of("blockers", state.get("blockers")), null, UuidV7.generate()));
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "the application is not ready for approval",
+                    "code", "APPLY_NOT_READY",
+                    "blockers", state.get("blockers")));
+        }
+        String drift = packageDrift(plan, profileId);
+        if (drift != null) {
+            audit.write(new AuditEntry(ownerContext.actorOr("user"), "GREENHOUSE_SUBMIT_APPROVAL_REFUSED",
+                    "AUTOMATION_PLAN", id, null,
+                    Map.of("reason", drift), null, UuidV7.generate()));
+            return ResponseEntity.status(409).body(Map.of("error", drift, "code", "PACKAGE_DRIFT"));
+        }
         String rejection = approvalPrecondition(plan);
         if (rejection != null) {
             return ResponseEntity.status(409).body(Map.of("error", rejection));
@@ -163,16 +204,67 @@ public class AutomationController {
         return ResponseEntity.ok(Map.of("status", "READY_TO_SUBMIT", "submissionEnabled", false));
     }
 
+    /**
+     * Phase 4: the one, deliberately separate human action that queues the
+     * real submission click for an already-approved plan. Distinct from
+     * {@link #approve}: approval alone never did and still does not enable
+     * submission (READY_TO_SUBMIT only records intent) — this endpoint is
+     * the second, explicit confirmation that actually appends the
+     * REAL_SUBMIT_CLICK step, and it independently re-verifies readiness and
+     * document drift again, exactly as approval did, since time may have
+     * passed since the plan was approved.
+     */
+    @PostMapping("/plans/{id}/prepare-submit")
+    public ResponseEntity<?> prepareSubmit(@PathVariable UUID id) {
+        if (ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(403).body(Map.of("error", "queuing a real submission requires a human action"));
+        }
+        if (!mayActOnPlan(id)) {
+            return notFound();
+        }
+        UUID profileId = ownerContext.profileIdOrNull();
+        var plan = plans.find(profileId, id).orElse(null);
+        if (plan == null || !"READY_TO_SUBMIT".equals(plan.status()) || !plan.submitApproved()) {
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "a plan can only be queued for real submission once it is approved and READY_TO_SUBMIT"));
+        }
+        String drift = packageDrift(plan, profileId);
+        if (drift != null) {
+            audit.write(new AuditEntry(ownerContext.actorOr("user"), "GREENHOUSE_SUBMIT_QUEUE_REFUSED",
+                    "AUTOMATION_PLAN", id, null, Map.of("reason", drift), null, UuidV7.generate()));
+            return ResponseEntity.status(409).body(Map.of("error", drift, "code", "PACKAGE_DRIFT"));
+        }
+        if (!plans.prepareRealSubmission(id)) {
+            return ResponseEntity.status(409).body(Map.of("error", "plan state changed"));
+        }
+        audit.write(new AuditEntry(ownerContext.actorOr("user"), "GREENHOUSE_SUBMIT_QUEUED", "AUTOMATION_PLAN", id,
+                null, Map.of("submissionQueued", true), null, UuidV7.generate()));
+        return ResponseEntity.ok(Map.of("status", "PREPARED", "submissionQueued", true));
+    }
+
     @PostMapping("/plans/{id}/complete")
     public ResponseEntity<?> complete(@PathVariable UUID id, @RequestBody OutcomeRequest r) {
         if (!mayActOnPlan(id)) {
             return notFound();
         }
         String outcome = r.outcome();
+        // A real submission outcome may only be reported by the worker
+        // identity, and only with the confirmation evidence #runRealSubmitClick
+        // actually observed — never fabricated, and never silently absent.
+        if ("SUBMITTED".equals(outcome) && !ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(403).body(Map.of("error", "only the worker may report a real submission"));
+        }
+        if ("SUBMITTED".equals(outcome) && (r.detail() == null || r.detail().isBlank())) {
+            return ResponseEntity.status(400).body(Map.of("error", "a real submission outcome requires confirmation evidence"));
+        }
         boolean ok = switch (outcome == null ? "" : outcome) {
-            case "HUMAN_REQUIRED", "COMPLETED", "FAILED", "BLOCKED_ANTI_BOT" ->
-                    plans.transition(id, "RUNNING", outcome.equals("HUMAN_REQUIRED") ? "AWAITING_APPROVAL" : outcome);
-            case "SUBMITTED" -> false;
+            case "HUMAN_REQUIRED", "COMPLETED", "FAILED", "BLOCKED_ANTI_BOT" -> {
+                String to = outcome.equals("HUMAN_REQUIRED") ? "AWAITING_APPROVAL" : outcome;
+                yield r.result() != null && !r.result().isEmpty()
+                        ? plans.transitionWithResult(id, "RUNNING", to, new java.util.ArrayList<>(r.result()))
+                        : plans.transition(id, "RUNNING", to);
+            }
+            case "SUBMITTED" -> plans.completeRealSubmission(id);
             default -> false;
         };
         if (!ok) {
@@ -181,8 +273,35 @@ public class AutomationController {
         audit.write(new AuditEntry(ownerContext.actorOr("worker"), "AUTOMATION_PLAN_" + outcome, "AUTOMATION_PLAN", id,
                 null, Map.of("detail", r.detail() == null ? "" : r.detail()), null, UuidV7.generate()));
         metrics.planOutcome(outcome);
+        if ("SUBMITTED".equals(outcome)) {
+            markApplicationSubmitted(id, r.detail());
+        }
         notifyPlanOutcome(id, outcome, r.detail());
         return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * Mirrors a confirmed real submission onto the application's own status,
+     * so the applications list/timeline (the surface the rest of the product
+     * reads) reflects it, not just the automation plan row. Deliberately
+     * tolerant of an unexpected current application status: the
+     * automation_plans row reaching SUBMITTED is the authoritative,
+     * database-guarded fact (completeRealSubmission's own atomic guard); a
+     * mismatch here is logged, not allowed to undo or mask that fact.
+     */
+    private void markApplicationSubmitted(UUID planId, String detail) {
+        var plan = plans.findById(planId).orElse(null);
+        UUID profileId = plans.ownerOfPlan(planId).orElse(null);
+        if (plan == null || plan.applicationId() == null || profileId == null) {
+            return;
+        }
+        try {
+            applicationStatus.apply(profileId, plan.applicationId(), "APPLICATION_SUBMITTED",
+                    "automation.real_submit:" + planId, "worker",
+                    Map.of("planId", planId.toString(), "detail", detail == null ? "" : detail));
+        } catch (IllegalStateException | java.util.NoSuchElementException e) {
+            log.warn("Could not mirror real submission onto application status for plan {}: {}", planId, e.getMessage());
+        }
     }
 
     /**
@@ -355,6 +474,52 @@ public class AutomationController {
         }
         if (bytes == null || !s.equals(bytes.sha256())) {
             return "the " + kind + " artifact checksum does not match the stored version";
+        }
+        return null;
+    }
+
+    /**
+     * Phase 8.2: the package is a snapshot of exact document versions and
+     * confirmed answers. If anything it carries moved underneath it — document
+     * replacement, approval withdrawal, an edited or unconfirmed answer — the
+     * approval statement is no longer true and the plan must be rebuilt and
+     * re-reviewed. Returns null while the package still matches its records.
+     */
+    private String packageDrift(AutomationPlanRepository.PlanRow plan, UUID profileId) {
+        Map<String, Object> stored = plan.plan() == null ? Map.of() : plan.plan();
+        Map<String, Object> pkg = asObjectMap(stored.get("package"));
+        Map<String, Object> correlation = asObjectMap(stored.get("correlation"));
+        UUID applicationId = uuid(correlation.get("applicationId"));
+        UUID jobId = uuid(correlation.get("jobId"));
+        if (applicationId == null || jobId == null) return "plan correlation is incomplete";
+        ApplyDocumentSelector.DocumentSelection selection = documentSelector.select(profileId, jobId, applicationId);
+        if (selection.blocked()) {
+            Object first = selection.blockers().isEmpty() ? null : selection.blockers().get(0).get("message");
+            return "the package's documents are no longer usable: " + first;
+        }
+        Map<String, Object> cv = asObjectMap(pkg.get("cv"));
+        if (!cv.isEmpty()) {
+            if (selection.cv() == null) {
+                return "the CV in this package is no longer selected for this application; rebuild the package";
+            }
+            if (!String.valueOf(selection.cv().versionId()).equals(cv.get("versionId"))) {
+                return "the CV attached to this package is no longer the reviewed version; rebuild the package";
+            }
+        }
+        Map<String, Object> cover = asObjectMap(pkg.get("coverLetter"));
+        if (!cover.isEmpty()) {
+            if (selection.coverLetter() == null) {
+                return "the cover letter in this package is no longer approved for this application; rebuild the package";
+            }
+            if (!String.valueOf(selection.coverLetter().versionId()).equals(cover.get("versionId"))) {
+                return "the cover letter in this package is no longer the approved version; rebuild the package";
+            }
+        }
+        List<Map<String, Object>> packagedAnswers = pkg.get("answers") instanceof List<?> list
+                ? list.stream().filter(o -> o instanceof Map).map(this::asObjectMap).toList()
+                : List.of();
+        if (!executionPackages.answersStillCurrent(profileId, applicationId, jobId, packagedAnswers)) {
+            return "an answer in this package has changed since it was built; rebuild the package";
         }
         return null;
     }

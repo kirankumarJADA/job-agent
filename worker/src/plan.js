@@ -12,9 +12,34 @@ export const StepType = Object.freeze({
   WAIT_FOR: 'WAIT_FOR',
   SCREENSHOT: 'SCREENSHOT',
   MAILBOX_VERIFY: 'MAILBOX_VERIFY',
+  ACCOUNT_RESOLVE_IDENTITY: 'ACCOUNT_RESOLVE_IDENTITY',
+  // Phase 8.5 continuation: asks the backend (EmployerCredentialService, via
+  // the worker-authenticated resolve endpoint) for this candidate's saved
+  // portal password for this employer domain, instead of a plaintext
+  // password being baked into the plan at build time.
+  ACCOUNT_RESOLVE_CREDENTIAL: 'ACCOUNT_RESOLVE_CREDENTIAL',
+  ACCOUNT_VERIFY_OTP: 'ACCOUNT_VERIFY_OTP',
   POLICY_CHECK: 'POLICY_CHECK',
   MOCK_SUBMIT: 'MOCK_SUBMIT',
   VALIDATE: 'VALIDATE',
+  // Phase 4: the one real, external form-submission action. Distinct from
+  // MOCK_SUBMIT (mock-environment only) and from the POLICY_CHECK{action:
+  // REAL_SUBMIT} marker (an unconditional hard-stop, unchanged, still fires
+  // for anything still using that old marker). This step type is only ever
+  // appended to an already-approved plan by the backend
+  // (AutomationPlanRepository#prepareRealSubmission) and only ever accepted
+  // into a GREENHOUSE plan as the last step, immediately after validate-form
+  // — enforced in #validateGreenhousePlan below, not merely by convention.
+  REAL_SUBMIT_CLICK: 'REAL_SUBMIT_CLICK',
+  // Robin x Tsenta continuation: the one step a ZOHO_RECRUIT plan ever runs
+  // beyond NAVIGATE/SCREENSHOT. Zoho Recruit's apply form is rendered
+  // entirely client-side (verified against two live tenants — see
+  // zoho_recruit.js's module comment), so unlike Greenhouse there are no
+  // pre-known field selectors to drive with FILL_FIELD/UPLOAD_FILE: this one
+  // step finds the live form, classifies every field by its rendered label,
+  // fills only the identity fields it is confident about, and never submits
+  // — see browser_worker.js#runZohoRecruitApply.
+  ZOHO_RECRUIT_APPLY: 'ZOHO_RECRUIT_APPLY',
 });
 
 export const Policy = Object.freeze({ AUTO: 'AUTO', REQUIRES_APPROVAL: 'REQUIRES_APPROVAL', FORBIDDEN: 'FORBIDDEN' });
@@ -53,6 +78,36 @@ export function greenhousePageIdentityMatches(expectedUrl, actualUrl) {
       && allowedHosts.has(expected.hostname.toLowerCase())
       && allowedHosts.has(actual.hostname.toLowerCase())
       && expected.pathname.replace(/\/$/, '') === actual.pathname.replace(/\/$/, '');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Same shape and purpose as {@link greenhousePageIdentityMatches}: re-verify,
+ * after a navigation, that the browser is actually still on the expected
+ * Zoho Recruit host (defence against a redirect to an attacker-controlled
+ * page). Zoho Recruit tenants each get their own subdomain
+ * (`{tenant}.zohorecruit.com` / `.zohorecruit.in`), so — unlike Greenhouse's
+ * two fixed hostnames — this checks a host suffix instead, mirroring the
+ * same suffix rule `AtsAdapters.ZohoAdapter#matchesUrl` already enforces
+ * server-side.
+ */
+export function zohoRecruitPageIdentityMatches(expectedUrl, actualUrl) {
+  try {
+    const expected = new URL(expectedUrl);
+    const actual = new URL(actualUrl);
+    const defaultPort = (url) => !url.port || url.port === '443';
+    const allowedHost = (host) => {
+      const h = host.toLowerCase();
+      return h === 'zohorecruit.com' || h.endsWith('.zohorecruit.com')
+        || h === 'zohorecruit.in' || h.endsWith('.zohorecruit.in');
+    };
+    return expected.protocol === 'https:' && actual.protocol === 'https:'
+      && !expected.username && !expected.password && !actual.username && !actual.password
+      && defaultPort(expected) && defaultPort(actual)
+      && allowedHost(expected.hostname) && allowedHost(actual.hostname)
+      && expected.hostname.toLowerCase() === actual.hostname.toLowerCase();
   } catch {
     return false;
   }
@@ -140,4 +195,71 @@ export function buildApplicationPlan({ baseUrl, mailboxUrl, package: pkg }) {
 
 export function planFingerprint(plan) {
   return crypto.createHash('sha256').update(JSON.stringify(plan)).digest('hex');
+}
+
+/**
+ * Phase 8.5: employer account lifecycle plan (sign-up, e-mail verification,
+ * login). No application is submitted (`safetyContract: 'NO_SUBMIT'`).
+ *
+ * The account e-mail defaults to the candidate's Robin-managed address: unless
+ * the plan names an `accountEmail` explicitly, its first step asks the backend
+ * which address to register with (ACCOUNT_RESOLVE_IDENTITY), so no address is
+ * baked into the plan and the employer's verification mail reaches Robin
+ * without the candidate's personal mailbox. The verification step then reads
+ * the code from that same mailbox; anything missing or ambiguous pauses for the
+ * human.
+ *
+ * <p>The account password works the same way: unless the plan names an
+ * `accountPassword` explicitly, it is never baked into the plan at build
+ * time. Instead an ACCOUNT_RESOLVE_CREDENTIAL step asks the backend
+ * (EmployerCredentialService, via its worker-authenticated resolve endpoint)
+ * for this candidate's saved portal password for this employer domain, and
+ * the password-fill steps read it from that in-memory result
+ * (`valueFrom: 'credential.password'`) rather than ever appearing in the
+ * plan's own JSON.
+ */
+export function buildAccountLifecyclePlan({ baseUrl, employerDomain, applicationId, sessionId = null,
+                                            accountEmail = null, accountPassword = null, verifyOtp = true }) {
+  const step = (id, type, policy, params = {}) => ({ id, type, policy, params });
+  const managedIdentity = !accountEmail;
+  const resolveCredential = !accountPassword;
+  const emailField = (id) => step(id, StepType.FILL_FIELD, Policy.AUTO, managedIdentity
+    ? { selector: 'input[name="email"]', valueFrom: 'identity.email' }
+    : { selector: 'input[name="email"]', value: accountEmail });
+  const passwordField = (id) => step(id, StepType.FILL_FIELD, Policy.AUTO, resolveCredential
+    ? { selector: 'input[name="password"]', valueFrom: 'credential.password' }
+    : { selector: 'input[name="password"]', value: accountPassword });
+  const steps = [];
+  if (managedIdentity) {
+    steps.push(step('account-resolve-identity', StepType.ACCOUNT_RESOLVE_IDENTITY, Policy.AUTO, { employerDomain, applicationId }));
+  }
+  if (resolveCredential) {
+    steps.push(step('account-resolve-credential', StepType.ACCOUNT_RESOLVE_CREDENTIAL, Policy.AUTO, { employerDomain, applicationId }));
+  }
+  steps.push(
+    step('signup-navigate', StepType.NAVIGATE, Policy.AUTO, { url: `${baseUrl}/signup` }),
+    emailField('signup-email'),
+    passwordField('signup-password'),
+    step('signup-submit', StepType.CLICK, Policy.AUTO, { selector: 'button[type="submit"]' }),
+  );
+  if (verifyOtp) {
+    steps.push(
+      step('account-verify-otp', StepType.ACCOUNT_VERIFY_OTP, Policy.AUTO, { employerDomain, applicationId }),
+      step('account-verify-otp-fill', StepType.FILL_FIELD, Policy.AUTO, {
+        selector: 'input[name="otp"]', valueFrom: 'verification.otp', skipWhenMissing: true,
+      }),
+      step('account-verify-otp-submit', StepType.CLICK, Policy.AUTO, {
+        selector: 'button[type="submit"]', onlyWhenVerificationOtp: true,
+      }),
+    );
+  }
+  steps.push(step('login-navigate', StepType.NAVIGATE, Policy.AUTO, { url: `${baseUrl}/login` }),
+    emailField('login-email'),
+    passwordField('login-password'),
+    step('login-submit', StepType.CLICK, Policy.AUTO, { selector: 'button[type="submit"]' }));
+  const correlation = { applicationId, employerDomain };
+  if (sessionId) correlation.sessionId = sessionId;
+  if (!managedIdentity) correlation.mailboxAddress = accountEmail;
+  return { planId: `plan-lifecycle-${applicationId}`, version: 1, correlation, steps,
+    safetyContract: 'NO_SUBMIT' };
 }

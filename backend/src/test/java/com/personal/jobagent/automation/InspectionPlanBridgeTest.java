@@ -43,6 +43,7 @@ class InspectionPlanBridgeTest {
     private ApplicationPipelineService pipelineService;
     private InspectionPlanService inspectionPlanService;
     private GreenhouseExecutionPlanService greenhousePlanService;
+    private ZohoRecruitExecutionPlanService zohoRecruitPlanService;
     private ResumeAtsIntelligenceService resumeService;
     private CoverLetterService coverLetterService;
     private ApplicationAnswerService answerService;
@@ -66,12 +67,16 @@ class InspectionPlanBridgeTest {
 
         inspectionPlanService = new InspectionPlanService(planRepo, db);
         greenhousePlanService = mock(GreenhouseExecutionPlanService.class);
+        zohoRecruitPlanService = mock(ZohoRecruitExecutionPlanService.class);
 
         handler = new ApplicationPipelineEventHandler(
-                pipelineService, inspectionPlanService, greenhousePlanService,
+                pipelineService, inspectionPlanService, greenhousePlanService, zohoRecruitPlanService,
                 resumeService, coverLetterService, answerService,
                 jobRepository, notifications, db, new ObjectMapper(),
-                new com.personal.jobagent.common.AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
+                new com.personal.jobagent.common.AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()),
+                mock(com.personal.jobagent.application.ApplicationDecisionService.class),
+                mock(com.personal.jobagent.audit.AuditLogWriter.class),
+                mock(com.personal.jobagent.common.QuotaService.class));
 
         // Application exists
         when(db.queryForObject(contains("count(*) from applications"), eq(Integer.class), eq(APP_ID)))

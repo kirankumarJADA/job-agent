@@ -8,6 +8,12 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Read-only ATS adapter listing and detection — safe in every environment.
+ * The adapter payload-validation smoke test ({@code POST /test-submit})
+ * lives separately in {@link AtsTestSubmitController}, which is registered
+ * only under the {@code local} profile.
+ */
 @RestController
 @RequestMapping("/api/v1/ats")
 public class AtsController {
@@ -19,7 +25,6 @@ public class AtsController {
     }
 
     public record DetectRequest(String url) {}
-    public record TestSubmitRequest(String url, AtsAdapter.SubmissionPayload payload, boolean dryRun) {}
 
     @GetMapping("/adapters")
     public List<Map<String, Object>> listAdapters() {
@@ -54,21 +59,6 @@ public class AtsController {
                     }
                 })
                 .orElseGet(() -> ResponseEntity.status(404).body(ApiError.of(404, "Not Found", "No adapter matched URL: " + body.url(), request.getRequestURI(), correlationId())));
-    }
-
-    @PostMapping("/test-submit")
-    public ResponseEntity<?> testSubmit(@RequestBody TestSubmitRequest body, HttpServletRequest request) {
-        if (body.url() == null || body.payload() == null) {
-            return ResponseEntity.badRequest().body(ApiError.of(400, "Bad Request", "url and payload are required", request.getRequestURI(), correlationId()));
-        }
-
-        var adapterOpt = adapterRegistry.findAdapterForUrl(body.url());
-        if (adapterOpt.isEmpty()) {
-            return ResponseEntity.status(404).body(ApiError.of(404, "Not Found", "No adapter matches URL", request.getRequestURI(), correlationId()));
-        }
-
-        AtsAdapter.SubmissionResult result = adapterOpt.get().submitApplication(body.url(), body.payload(), body.dryRun());
-        return ResponseEntity.ok(result);
     }
 
     private String correlationId() {

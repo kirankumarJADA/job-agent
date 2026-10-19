@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { BrowserWorker } from './browser_worker.js';
+import { computePlanOutcome } from './outcome.js';
 
 const args = new Map();
 for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i], process.argv[i + 1] ?? true);
@@ -15,9 +17,44 @@ const eventToken = process.env.WORKER_EVENT_TOKEN;
 const pollUrl = process.env.WORKER_POLL_URL;
 const pollIntervalMs = parseInt(process.env.WORKER_POLL_INTERVAL_MS || '10000', 10);
 const heartbeatUrl = process.env.WORKER_HEARTBEAT_URL;
+const verificationResolveUrl = process.env.WORKER_VERIFICATION_URL;
+const registrationIdentityUrl = process.env.WORKER_REGISTRATION_IDENTITY_URL;
+const employerCredentialUrl = process.env.WORKER_EMPLOYER_CREDENTIAL_URL;
 const completeUrl = process.env.WORKER_COMPLETE_URL;
 
 const authHeaders = () => eventToken ? { authorization: `Bearer ${eventToken}` } : {};
+const verificationResolver = verificationResolveUrl
+  ? async (body) => {
+      const response = await fetch(verificationResolveUrl, { method: 'POST',
+        headers: { ...authHeaders(), 'content-type': 'application/json' },
+        body: JSON.stringify(body) });
+      if (!response.ok) throw new Error(`VERIFICATION_RESOLVE_FAILED:${response.status}`);
+      return response.json();
+    }
+  : null;
+// Phase 8.5: which address an employer account is registered with (Robin-managed by default).
+const identityResolver = registrationIdentityUrl
+  ? async (body) => {
+      const response = await fetch(registrationIdentityUrl, { method: 'POST',
+        headers: { ...authHeaders(), 'content-type': 'application/json' },
+        body: JSON.stringify(body) });
+      if (!response.ok) throw new Error(`REGISTRATION_IDENTITY_FAILED:${response.status}`);
+      return response.json();
+    }
+  : null;
+// Phase 8.5 continuation: this candidate's saved portal password for one
+// employer domain (EmployerCredentialService), decrypted only here, at the
+// worker's own execution boundary — never logged, never written to the
+// worker's on-disk state (see browser_worker.js's ACCOUNT_RESOLVE_CREDENTIAL).
+const credentialResolver = employerCredentialUrl
+  ? async (body) => {
+      const response = await fetch(employerCredentialUrl, { method: 'POST',
+        headers: { ...authHeaders(), 'content-type': 'application/json' },
+        body: JSON.stringify(body) });
+      if (!response.ok) throw new Error(`EMPLOYER_CREDENTIAL_FAILED:${response.status}`);
+      return response.json();
+    }
+  : null;
 
 // ── graceful shutdown ─────────────────────────────────────────────
 // SIGTERM/SIGINT (docker stop, Render restart, OCI kill) must never leave a
@@ -72,7 +109,7 @@ async function apiCall(url, body = null) {
   return response.json();
 }
 
-async function reportOutcome(planId, outcome, detail) {
+async function reportOutcome(planId, outcome, detail, result = null) {
   if (!completeUrl) return;
   // The completion report is the single most important call the worker makes:
   // a transient backend blip must not end with the plan stranded in RUNNING
@@ -81,7 +118,7 @@ async function reportOutcome(planId, outcome, detail) {
   let lastError = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      await apiCall(completeUrl.replace('{id}', encodeURIComponent(planId)), { outcome, detail });
+      await apiCall(completeUrl.replace('{id}', encodeURIComponent(planId)), { outcome, detail, result });
       return;
     } catch (error) {
       lastError = error;
@@ -115,15 +152,37 @@ async function downloadArtifact(baseUrl, artifact, destination) {
   return destination;
 }
 
-async function materializeArtifacts(plan, backendBase) {
+/**
+ * Robin x Tsenta hardening: whether a ZOHO_RECRUIT plan's package needs
+ * artifact materialization at all — keyed on the PACKAGE's mere presence,
+ * never on any one specific document. The previous condition
+ * (`plan.package?.cv`) silently skipped materialization whenever a plan had
+ * ONLY an approved cover letter and no CV: a real, correctly-embedded
+ * `plan.package.coverLetter`/`plan.package.artifacts` entry would simply
+ * never be downloaded, so `.path` stayed unset and the worker reported
+ * `NO_ARTIFACT` for a document that genuinely existed. `materializeArtifacts`
+ * itself already safely no-ops when `plan.package.artifacts` is empty, so
+ * gating on the package's presence — rather than re-deriving which specific
+ * documents it holds — is both correct and simpler; exported for its own
+ * direct unit test.
+ */
+export function zohoRecruitPackageNeedsMaterialization(plan) {
+  return plan.planType === 'ZOHO_RECRUIT' && Boolean(plan.package);
+}
+
+export async function materializeArtifacts(plan, backendBase) {
+  // Shared by GREENHOUSE and ZOHO_RECRUIT (any plan type whose package
+  // carries cv/coverLetter + a matching artifacts list) — error identifiers
+  // are deliberately ATS-agnostic, not "GREENHOUSE_...", since a ZOHO_RECRUIT
+  // cover-letter-only package hits this same code path.
   const artifacts = plan.package?.artifacts ?? [];
-  if (!Array.isArray(artifacts)) throw new Error('INVALID_GREENHOUSE_ARTIFACT_LIST');
+  if (!Array.isArray(artifacts)) throw new Error('INVALID_ARTIFACT_LIST');
   const seenKinds = new Set();
   for (const artifact of artifacts) {
     if (!['cv', 'coverLetter'].includes(artifact.kind) || seenKinds.has(artifact.kind)
         || artifact.versionId !== plan.package[artifact.kind === 'cv' ? 'cv' : 'coverLetter']?.versionId
         || artifact.url !== plan.package[artifact.kind === 'cv' ? 'cv' : 'coverLetter']?.url) {
-      throw new Error('GREENHOUSE_ARTIFACT_METADATA_MISMATCH');
+      throw new Error('ARTIFACT_METADATA_MISMATCH');
     }
     seenKinds.add(artifact.kind);
     const safeName = path.basename(artifact.fileName ?? '');
@@ -153,9 +212,17 @@ function planFromClaim(planId, claimed) {
   };
 }
 
+// Robin x Tsenta hardening: guards the entire dispatch below so this module
+// can be safely `import`ed (e.g. by worker.test.js, to unit-test
+// `materializeArtifacts`/`zohoRecruitPackageNeedsMaterialization` directly)
+// without starting a real poll loop or idle keepalive interval — those only
+// run when this file is actually executed as the process entrypoint, the
+// same distinction CommonJS's `require.main === module` draws.
+const isMainModule = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
+if (isMainModule) {
 if (planFile) {
   const plan = JSON.parse(fs.readFileSync(path.resolve(planFile), 'utf8'));
-  const worker = new BrowserWorker({ statePath, artifactDir, eventSink });
+  const worker = new BrowserWorker({ statePath, artifactDir, eventSink, verificationResolver, identityResolver, credentialResolver });
   runtime.runner = worker;
   worker.execute(plan, { approve, headless: true })
     .then((result) => process.stdout.write(`${JSON.stringify({ type: 'WORKER_RESULT', status: result.status })}\n`))
@@ -190,6 +257,19 @@ if (planFile) {
         }
         plan.requiredGaps = plan.package.requiredGaps ?? [];
         await materializeArtifacts(plan, baseUrl);
+      } else if (zohoRecruitPackageNeedsMaterialization(plan)) {
+        // Robin x Tsenta continuation: unlike GREENHOUSE, the package is
+        // already embedded in the claimed plan JSON (ZohoRecruitExecutionPlanService
+        // builds it directly, with no live-DOM-dependent fields to fetch
+        // separately) — only the document bytes themselves need downloading,
+        // reusing the exact same correlation/checksum-verified download path.
+        // Triggers whenever a package exists at all (cv-only, cover-letter-
+        // only, or both) — see zohoRecruitPackageNeedsMaterialization's own
+        // comment for the bug this replaced (gating on `.cv` alone silently
+        // skipped a cover-letter-only package).
+        const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
+        if (apiRoot === pollUrl) throw new Error('INVALID_WORKER_POLL_URL');
+        await materializeArtifacts(plan, new URL(apiRoot).origin);
       }
 
       // Heartbeat on an interval while executing. A single missed beat is
@@ -198,7 +278,7 @@ if (planFile) {
       // for re-execution, and continuing to drive a real employer form with
       // no live lease risks two workers operating the same application at
       // once. Stopping is always the safe direction.
-      const runner = new BrowserWorker({ statePath, artifactDir, eventSink });
+      const runner = new BrowserWorker({ statePath, artifactDir, eventSink, verificationResolver, identityResolver, credentialResolver });
       runtime.runner = runner;
       let missedHeartbeats = 0;
       heartbeat = setInterval(() => {
@@ -212,16 +292,31 @@ if (planFile) {
             }
           });
       }, 30_000);
-      await runner.execute(plan, { approve: false, headless: true });
-      const outcome = plan.planType === 'GREENHOUSE' ? 'HUMAN_REQUIRED' : 'COMPLETED';
-      if (plan.planType === 'GREENHOUSE') await Promise.allSettled([
-        eventSink({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
-          applicationId: plan.correlation.applicationId, requiredGaps: plan.requiredGaps }),
-      ]);
-      const detail = plan.planType === 'GREENHOUSE'
-        ? `Form preparation finished; human review required (${plan.requiredGaps.length} outstanding field(s))`
-        : 'Inspection completed';
-      await reportOutcome(planId, outcome, detail);
+      const runResult = await runner.execute(plan, { approve: false, headless: true });
+      // Phase 4: a GREENHOUSE plan whose last step is REAL_SUBMIT_CLICK has
+      // just attempted (or confirmed an already-completed) real submission —
+      // its outcome depends on what the worker actually observed, never a
+      // hardcoded assumption. Every other GREENHOUSE plan still ends at
+      // validate-form exactly as before, always awaiting human review.
+      const isSubmitAttempt = plan.planType === 'GREENHOUSE'
+        && plan.steps.at(-1)?.type === 'REAL_SUBMIT_CLICK';
+      const { outcome, detail, result } = computePlanOutcome(plan, runResult);
+      if (plan.planType === 'GREENHOUSE' && !isSubmitAttempt) {
+        await Promise.allSettled([
+          eventSink({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
+            applicationId: plan.correlation.applicationId, requiredGaps: plan.requiredGaps }),
+        ]);
+      } else if (plan.planType === 'ZOHO_RECRUIT') {
+        const zoho = runResult.zohoRecruitResult ?? {};
+        await Promise.allSettled([
+          eventSink({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
+            applicationId: plan.correlation.applicationId, requiredGaps: zoho.requiredGaps ?? [],
+            filled: zoho.filled ?? [], fields: zoho.fields ?? [],
+            resumeUploadState: zoho.resumeUploadState ?? 'NO_FIELD',
+            coverLetterUploadState: zoho.coverLetterUploadState ?? 'NO_FIELD' }),
+        ]);
+      }
+      await reportOutcome(planId, outcome, detail, result);
       console.log(JSON.stringify({ type: 'PLAN_ENDED', planId, outcome }));
     } catch (error) {
       if (runtime.shuttingDown) {
@@ -234,7 +329,18 @@ if (planFile) {
           ? (/CAPTCHA|ANTI_BOT|ACCESS_DENIED/i.test(String(error.reason)) ? 'BLOCKED_ANTI_BOT' : 'FAILED')
           : 'FAILED';
         console.error(JSON.stringify({ type: 'POLL_ERROR', planId, outcome, error: error.message }));
-        if (planId) await reportOutcome(planId, outcome, String(error.message)).catch(() => {});
+        // Persist WHY this plan stopped so the review panel can show the candidate
+        // a real reason (missing info, CAPTCHA, a lost lease, …) instead of a bare
+        // "failed" with no explanation — reuses the existing generic `result`
+        // column and `transitionWithResult` path, the same one ZOHO_RECRUIT_OUTCOME
+        // already relies on; no backend change was needed for this.
+        const errorResult = [{
+          type: 'PLAN_ERROR',
+          outcome,
+          reason: error.name === 'HardStopError' ? error.reason : null,
+          message: String(error.message),
+        }];
+        if (planId) await reportOutcome(planId, outcome, String(error.message), errorResult).catch(() => {});
       }
     } finally {
       if (heartbeat) clearInterval(heartbeat);
@@ -248,4 +354,5 @@ if (planFile) {
 } else {
   console.log(JSON.stringify({ type: 'WORKER_READY', mode: 'IDLE', statePath, artifactDir }));
   setInterval(() => {}, 60_000);
+}
 }

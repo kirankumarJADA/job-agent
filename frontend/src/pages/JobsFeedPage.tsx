@@ -9,100 +9,110 @@ import {
   Loading,
   PageHeader,
   PageShell,
-  PrimaryButton,
+  SecondaryButton,
   Select,
   TextInput,
 } from '../components/ui';
 
+const PAGE_SIZE = 50;
+
 /**
- * Jobs Feed — browse and search every discovered UK posting.
+ * Describes exactly what is loaded. Counts refer to the loaded pages only —
+ * the catalogue is cursor-paginated, so no total is claimed.
+ */
+export function feedSummary(jobs: Job[], hasMore: boolean): string {
+  const scored = jobs.filter((job) => job.match_score != null).length;
+  const recommended = jobs.filter(
+    (job) => job.match_recommendation === 'APPLY' || job.match_recommendation === 'REVIEW',
+  ).length;
+  const stale = jobs.filter((job) => job.stale).length;
+  const parts = [
+    `${jobs.length} ${jobs.length === 1 ? 'job' : 'jobs'} loaded`,
+    `${scored} scored for you`,
+    `${recommended} recommended (APPLY or REVIEW)`,
+  ];
+  if (stale > 0) parts.push(`${stale} not seen for 30+ days`);
+  return parts.join(' · ') + (hasMore ? ' · more available' : '');
+}
+
+/**
+ * FIND workspace — the candidate's job catalogue/search view.
  *
- * Presentation-only redesign: the same fetch pipeline (full-text search + status
- * filter + limit), the same URL-import handler, the same job data. The list is
- * now a responsive card grid (1 col mobile / 2 col tablet / 3 col desktop)
- * built on the shared JobCard primitive.
+ * Source hiding (Phase 8.2.5): this page never shows which website, ATS
+ * platform or aggregator a posting came from. Running discovery, importing a
+ * board URL and source health live on the operational Job Sources page.
  */
 export const JobsFeedPage: React.FC = () => {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [loading, setLoading] = useState(false);
-  const [importUrl, setImportUrl] = useState('');
-  const [importMsg, setImportMsg] = useState<string | null>(null);
+  const [jobsLoaded, setJobsLoaded] = useState(false);
+  const [jobsError, setJobsError] = useState<string | null>(null);
+  const [nextCursor, setNextCursor] = useState<string>('');
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+
+  const buildQuery = useCallback((cursor?: string) => {
+    const params = new URLSearchParams();
+    if (search.trim()) params.set('q', search.trim());
+    if (statusFilter) params.set('status', statusFilter);
+    params.set('limit', String(PAGE_SIZE));
+    if (cursor) params.set('cursor', cursor);
+    return '/jobs?' + params.toString();
+  }, [search, statusFilter]);
 
   const fetchJobs = useCallback(async () => {
     setLoading(true);
+    setJobsError(null);
+    setLoadMoreError(null);
     try {
-      const params = new URLSearchParams();
-      if (search.trim()) params.set('q', search.trim());
-      if (statusFilter) params.set('status', statusFilter);
-      params.set('limit', '50');
-
-      const res = await apiFetch<{ items: Job[]; next_cursor?: string }>(`/jobs?${params.toString()}`);
-      setJobs(res.items || []);
-    } catch {
+      const response = await apiFetch<{ items: Job[]; next_cursor?: string }>(buildQuery());
+      setJobs(response.items || []);
+      setNextCursor(response.next_cursor || '');
+    } catch (error: unknown) {
       setJobs([]);
+      setNextCursor('');
+      setJobsError(error instanceof Error ? error.message : 'Could not load the job catalogue.');
     } finally {
+      setJobsLoaded(true);
       setLoading(false);
     }
-  }, [search, statusFilter]);
+  }, [buildQuery]);
 
-  useEffect(() => {
-    fetchJobs();
-  }, [fetchJobs]);
-
-  const handleImport = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!importUrl) return;
-    setImportMsg(null);
+  // Keyset pagination: the API returns next_cursor only when more rows exist.
+  const loadMore = async () => {
+    if (!nextCursor) return;
+    setLoadingMore(true);
+    setLoadMoreError(null);
     try {
-      const res = await apiFetch<{ status: string }>('/jobs/import-url', {
-        method: 'POST',
-        body: JSON.stringify({ url: importUrl }),
+      const response = await apiFetch<{ items: Job[]; next_cursor?: string }>(buildQuery(nextCursor));
+      setJobs((current) => {
+        const seen = new Set(current.map((job) => job.id));
+        return [...current, ...(response.items || []).filter((job) => !seen.has(job.id))];
       });
-      setImportMsg(`Job URL queued for resolution (Status: ${res.status})`);
-      setImportUrl('');
-    } catch (err: unknown) {
-      setImportMsg(err instanceof Error ? err.message : 'Import failed');
+      setNextCursor(response.next_cursor || '');
+    } catch (error: unknown) {
+      setLoadMoreError(error instanceof Error ? error.message : 'Could not load more jobs.');
+    } finally {
+      setLoadingMore(false);
     }
   };
+
+  useEffect(() => {
+    void fetchJobs();
+  }, [fetchJobs]);
 
   return (
     <PageShell>
       <div className="space-y-6">
         <PageHeader
-          eyebrow="Opportunities"
-          title="Jobs Feed"
-          subtitle="Every posting Robin has discovered, with full-text search across titles, companies and descriptions."
+          eyebrow="Stage 1 · FIND"
+          title="Find jobs"
+          subtitle="Search the indexed job catalogue and inspect each posting's match details."
+          actions={<SecondaryButton href="/sources">Manage discovery</SecondaryButton>}
         />
 
-        {/* Add a job by URL — same /jobs/import-url handler as before */}
-        <section className="rounded-xl border border-line bg-surface p-4 shadow-card sm:p-5">
-          <form onSubmit={handleImport} className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            <div className="flex-1">
-              <label htmlFor="import-url" className="mb-1 block text-xs font-semibold text-ink-soft">
-                Add a posting by link
-              </label>
-              <TextInput
-                id="import-url"
-                type="url"
-                value={importUrl}
-                onChange={(e) => setImportUrl(e.target.value)}
-                placeholder="Paste a LinkedIn or ATS job URL (e.g. boards.greenhouse.io/...)"
-              />
-            </div>
-            <PrimaryButton type="submit" className="sm:mb-0 sm:self-end">
-              Quick add
-            </PrimaryButton>
-          </form>
-          {importMsg && (
-            <div className="mt-3">
-              <Alert tone="info">{importMsg}</Alert>
-            </div>
-          )}
-        </section>
-
-        {/* Search + status filter — same query params as before */}
         <div className="flex flex-col gap-3 rounded-xl border border-line bg-surface p-4 shadow-card sm:flex-row sm:items-center">
           <div className="relative flex-1">
             <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-ink-faint">
@@ -114,8 +124,8 @@ export const JobsFeedPage: React.FC = () => {
             <TextInput
               type="text"
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search keywords (e.g. Kotlin, Kubernetes, Senior)…"
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search indexed job text (e.g. Java, Kubernetes, Senior)…"
               className="pl-9"
               aria-label="Search jobs"
             />
@@ -123,7 +133,7 @@ export const JobsFeedPage: React.FC = () => {
           <div className="sm:w-52">
             <Select
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
+              onChange={(event) => setStatusFilter(event.target.value)}
               aria-label="Filter by pipeline status"
             >
               <option value="">All statuses</option>
@@ -133,56 +143,58 @@ export const JobsFeedPage: React.FC = () => {
               <option value="SCORED">SCORED</option>
               <option value="DECIDED">DECIDED</option>
               <option value="ARCHIVED">ARCHIVED</option>
+              <option value="PIPELINE_ERROR">PIPELINE_ERROR</option>
             </Select>
           </div>
+          <SecondaryButton onClick={() => void fetchJobs()} disabled={loading}>
+            {loading ? 'Refreshing…' : 'Refresh'}
+          </SecondaryButton>
         </div>
 
-        {/* Results */}
-        {loading ? (
-          <Loading>Searching the job database…</Loading>
+        {jobsError && <Alert tone="error">Job catalogue could not be loaded: {jobsError}</Alert>}
+
+        {loading && !jobsLoaded ? (
+          <Loading>Loading the indexed job catalogue…</Loading>
+        ) : loading ? (
+          <Loading>Refreshing job results…</Loading>
+        ) : jobsError ? (
+          <EmptyState title="Job listings are unavailable" body="Robin couldn't retrieve the job catalogue. This is an API/load failure, not an empty feed." actions={<SecondaryButton onClick={() => void fetchJobs()}>Retry</SecondaryButton>} />
         ) : jobs.length === 0 ? (
           <EmptyState
-            title="No matching jobs yet"
-            body="Try different keywords or clear the status filter — or add a posting directly with Quick add above."
+            title="No matching jobs"
+            body="No indexed jobs match this search and status filter. Broaden your search, or run discovery from Job Sources."
           />
         ) : (
           <>
             <p className="text-xs font-medium text-ink-muted" role="status">
-              {jobs.length} {jobs.length === 1 ? 'job' : 'jobs'} found
+              {feedSummary(jobs, Boolean(nextCursor))}
             </p>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
               {jobs.map((job) => (
                 <JobCard
                   key={job.id}
                   job={job}
-                  actions={
-                    <span className="inline-flex items-center gap-1 text-xs font-semibold text-forest-700">
-                      View details
-                      <svg viewBox="0 0 16 16" fill="none" className="h-3.5 w-3.5" aria-hidden="true">
-                        <path
-                          d="m6 3.5 4.5 4.5L6 12.5"
-                          stroke="currentColor"
-                          strokeWidth="1.6"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      </svg>
-                    </span>
-                  }
+                  actions={<span className="inline-flex items-center gap-1 text-xs font-semibold text-forest-700">View match details →</span>}
                   footer={
                     job.skills_extracted && job.skills_extracted.length > 6 ? (
-                      <span className="text-[11px] text-ink-faint">
-                        +{job.skills_extracted.length - 6} more skills listed
-                      </span>
-                    ) : (
+                      <span className="text-[11px] text-ink-faint">+{job.skills_extracted.length - 6} more skills listed</span>
+                    ) : job.employment_type ? (
                       <span className="inline-flex items-center gap-1.5 text-[11px] text-ink-faint">
-                        <Chip>{job.employment_type || 'FULL_TIME'}</Chip>
+                        <Chip>{job.employment_type}</Chip>
                       </span>
-                    )
+                    ) : null
                   }
                 />
               ))}
             </div>
+            {loadMoreError && <Alert tone="error">More jobs could not be loaded: {loadMoreError}</Alert>}
+            {nextCursor && (
+              <div className="flex justify-center">
+                <SecondaryButton onClick={() => void loadMore()} disabled={loadingMore}>
+                  {loadingMore ? 'Loading more…' : 'Load more jobs'}
+                </SecondaryButton>
+              </div>
+            )}
           </>
         )}
       </div>

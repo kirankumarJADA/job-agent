@@ -104,7 +104,35 @@ public final class AtsAdapters {
     @Component
     public static class ZohoAdapter extends BaseAtsAdapter {
         public ZohoAdapter() {
-            super(AtsKind.ZOHO, Pattern.compile("zohorecruit\\.com|zoho\\.com"), false, false);
+            // The base-class pattern is retained for inspectForm()'s generic
+            // field list and as the fallback this constructor still wires up;
+            // matchesUrl below is overridden because the plain substring
+            // pattern alone would miss zohorecruit.in (used by the majority
+            // of sampled Indian Zoho tenants — discovery's own JobIdentity
+            // already recognises these postings by URL path shape,
+            // independent of host, so APPLY and discovery previously
+            // disagreed on the exact same URL) and, separately, because a
+            // bare substring match is weaker than this host-anchored check.
+            super(AtsKind.ZOHO, Pattern.compile("zohorecruit\\.com|zohorecruit\\.in|zoho\\.com"), false, false);
+        }
+
+        @Override
+        public boolean matchesUrl(String url) {
+            if (url == null || url.isBlank()) return false;
+            try {
+                java.net.URI uri = java.net.URI.create(url);
+                String host = uri.getHost();
+                if (host == null || !"https".equalsIgnoreCase(uri.getScheme())
+                        || (uri.getPort() != -1 && uri.getPort() != 443) || uri.getUserInfo() != null) {
+                    return false;
+                }
+                String h = host.toLowerCase(java.util.Locale.ROOT);
+                return h.equals("zohorecruit.com") || h.endsWith(".zohorecruit.com")
+                        || h.equals("zohorecruit.in") || h.endsWith(".zohorecruit.in")
+                        || h.equals("zoho.com") || h.endsWith(".zoho.com");
+            } catch (IllegalArgumentException e) {
+                return false;
+            }
         }
     }
 

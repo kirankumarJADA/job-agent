@@ -69,6 +69,16 @@ public class ProfileRepository {
                 .stream().findFirst();
     }
 
+    /** Name and email of the account that owns this profile (used for CV / letter headers). */
+    public Optional<ContactRecord> findContact(UUID profileId) {
+        return jdbcTemplate.query("""
+                        select u.display_name, u.email::text as email
+                        from profiles p join users u on u.id = p.user_id where p.id = ?
+                        """,
+                (rs, n) -> new ContactRecord(rs.getString("display_name"), rs.getString("email")), profileId)
+                .stream().findFirst();
+    }
+
     public List<Map<String, Object>> findEvidence(UUID profileId) {
         return jdbcTemplate.queryForList("""
                 select id, source_type, source_id, claim, evidence_status, claim_hash, created_at, updated_at

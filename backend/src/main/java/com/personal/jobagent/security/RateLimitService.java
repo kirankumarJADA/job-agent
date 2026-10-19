@@ -38,7 +38,11 @@ public class RateLimitService {
         this.rules = Map.of(
                 "auth", new Rule(20, 60_000L),      // login / firebase session per IP
                 "llm", new Rule(30, 60_000L),       // generation + re-prepare per account
-                "discovery", new Rule(10, 60_000L)  // run / ingest / seed per account
+                "discovery", new Rule(10, 60_000L), // run / ingest / seed per account
+                "track", new Rule(30, 60_000L),     // TRACK evidence writes and message ingestion per account
+                "gmail-sync", new Rule(6, 3_600_000L), // manual Gmail mailbox sync per account (hourly window)
+                "gmail-authorize", new Rule(10, 3_600_000L), // OAuth initiation per account (hourly window)
+                "mail-inbound", new Rule(120, 60_000L) // Mailgun inbound webhook per client address
         );
     }
 
@@ -85,7 +89,28 @@ public class RateLimitService {
                 || path.equals("/api/v1/discovery/ingest")
                 || path.equals("/api/v1/discovery/linkedin/search")
                 || path.equals("/api/v1/discovery/maintenance")
-                || path.equals("/api/v1/jobs/seed-uk")) return "discovery";
+                || path.equals("/api/v1/jobs/seed-uk")
+                // URL import may resolve a page and run a board fetch (Phase 8.2.5).
+                || path.equals("/api/v1/jobs/import-url")) return "discovery";
+        // A source health check performs a live board fetch and ingestion for
+        // Greenhouse/Ashby sources (SourcesController), and the FIND page uses
+        // it as its Discover action, so it shares the discovery quota rather
+        // than being an unthrottled way to hit external boards.
+        if (path.matches("/api/v1/sources/[^/]+/health-check")) return "discovery";
+        // Phase 8.3: employer-message ingestion and TRACK writes (reports, evidence
+        // and message reviews) are cheap but write durable, audited history, so a
+        // single account cannot flood them.
+        if (path.equals("/api/v1/emails/ingest")
+                || path.matches("/api/v1/applications/[^/]+/track/reports")
+                || path.matches("/api/v1/applications/[^/]+/track/receipts/[^/]+/review")
+                || path.matches("/api/v1/track/emails/[^/]+/review")) return "track";
+        // Phase 8.4: manual Gmail mailbox sync performs provider API calls with
+        // the stored grant, so a single account cannot hammer Google or Robin.
+        if (path.equals("/api/v1/integrations/gmail/sync")) return "gmail-sync";
+        // Phase 8.5: the managed-mail webhook is public (signature-authenticated),
+        // so unauthenticated floods are bounded per client address. A 429 is
+        // retried by Mailgun, so a burst of genuine mail is delayed, not lost.
+        if (path.equals("/api/v1/managed-mail/inbound/mailgun")) return "mail-inbound";
         return null;
     }
 

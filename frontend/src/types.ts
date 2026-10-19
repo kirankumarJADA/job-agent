@@ -4,11 +4,16 @@ export interface User {
   displayName: string;
 }
 
+/**
+ * A posting as the CANDIDATE sees it (GET /jobs, GET /jobs/{id}).
+ *
+ * Source hiding (Phase 8.2.5): the API deliberately omits which website, ATS
+ * platform or aggregator surfaced the posting — no source id/name/kind, no
+ * source external id, no discovery (canonical) URL. Do not add those fields
+ * back here; provenance belongs to the operational Sources view only.
+ */
 export interface Job {
   id: string;
-  source_id: string;
-  external_id: string;
-  dedup_key: string;
   company_id?: string;
   company_name_raw?: string;
   title: string;
@@ -24,13 +29,20 @@ export interface Job {
   salary_period?: string;
   description_text: string;
   skills_extracted: string[];
+  /** The employer's own application page (never an aggregator URL). */
   application_url?: string;
-  canonical_url?: string;
   posted_at?: string;
   posted_date_source?: 'EXPLICIT' | 'INFERRED' | 'UNKNOWN';
   status: 'DISCOVERED' | 'FILTERED_OUT' | 'ANALYSED' | 'SCORED' | 'DECIDED' | 'ARCHIVED' | 'PIPELINE_ERROR';
   first_seen_at: string;
   last_seen_at: string;
+  /** Not seen by discovery for 30+ days (same rule the review queue uses to block approval). */
+  stale?: boolean;
+  /** Soft-deleted from the catalogue; only ever true on the detail endpoint. */
+  removed?: boolean;
+  /** The signed-in candidate's own match; null when this candidate has not scored the posting. */
+  match_score?: number | null;
+  match_recommendation?: 'APPLY' | 'REVIEW' | 'SKIP' | null;
 }
 
 export interface JobDetailResponse {
@@ -55,7 +67,17 @@ export interface JobDetailResponse {
       skill_overlap?: number;
       remote_fit?: number;
       salary_fit?: number;
+      // Robin x Tsenta continuation: the three categories the seven-category
+      // scoringWeights contract added beyond the original three factors.
+      // Each is 0-100 whenever reported, but only actually weighed into
+      // `score` when `applicable[<category>]` is true — see
+      // JobMatchService#evaluateMatch: an unset candidate preference
+      // excludes a category entirely rather than scoring it neutral.
+      experience_fit?: number;
+      visa_fit?: number;
+      location_fit?: number;
       weights?: Record<string, number>;
+      applicable?: Record<string, boolean>;
       thresholds?: { apply: number; review: number };
       matched_skills?: string[];
       why?: string;
@@ -96,6 +118,77 @@ export interface AutomationPackageView {
   unsupported: Array<{ key: string; label: string; classification: string; reason: string }>;
   requiredGaps: Array<{ key: string; label: string; classification: string; reason: string }>;
   safetyContract: string;
+}
+
+/**
+ * Robin x Tsenta continuation: one field Robin either filled or still needs
+ * from the candidate on a Zoho Recruit application form, as reported by
+ * `worker/src/zoho_recruit.js`'s classification — `category` is one of
+ * `ZohoFieldCategory` (IDENTITY_FIRST_NAME, RESUME_UPLOAD, REQUIRES_HUMAN, …).
+ */
+export interface ZohoRecruitField {
+  label: string | null;
+  category: string;
+  required?: boolean;
+}
+
+/**
+ * Honest document-upload state (Robin x Tsenta hardening) — mirrors
+ * `worker/src/zoho_recruit.js`'s `ZohoDocumentUploadState`. A successful
+ * `setInputFiles` call only proves the file was selected into the browser's
+ * own form; it is never proof the employer's server received or stored it,
+ * and this adapter never submits, so `ATTACHED` — not `CONFIRMED` — is the
+ * actual terminal state every successful attempt reaches today. `CONFIRMED`
+ * is reserved for a future, separately verified employer-side signal; no
+ * code in this adapter produces it yet.
+ */
+export type ZohoDocumentUploadState = 'NO_FIELD' | 'NO_ARTIFACT' | 'REJECTED' | 'ATTACHED' | 'CONFIRMED';
+
+/**
+ * The structured outcome a ZOHO_RECRUIT plan's one real worker step reports
+ * back, persisted verbatim in the automation plan's `result` column (see
+ * `AutomationController#complete`). This plan type never reaches SUBMITTED —
+ * every successful run ends AWAITING_APPROVAL, with this payload explaining
+ * exactly what Robin filled, what still needs the candidate, and why.
+ */
+export interface ZohoRecruitOutcome {
+  type: 'ZOHO_RECRUIT_OUTCOME';
+  planType: 'ZOHO_RECRUIT';
+  filled: ZohoRecruitField[];
+  requiredGaps: ZohoRecruitField[];
+  fields?: ZohoRecruitField[];
+  resumeUploadState: ZohoDocumentUploadState;
+  resumeUploadReason?: string | null;
+  coverLetterUploadState?: ZohoDocumentUploadState;
+  coverLetterUploadReason?: string | null;
+  formFound?: boolean;
+  applicationUrl?: string | null;
+}
+
+/**
+ * Persisted alongside a FAILED/BLOCKED_ANTI_BOT outcome (see `worker.js`'s
+ * poll-loop catch block) so the review panel can show the candidate the real
+ * reason preparation stopped — a lost lease, a CAPTCHA, a thrown error —
+ * instead of a bare "failed" with nothing to act on.
+ */
+export interface PlanErrorResult {
+  type: 'PLAN_ERROR';
+  outcome: 'FAILED' | 'BLOCKED_ANTI_BOT';
+  reason?: string | null;
+  message: string;
+}
+
+/** GET /automation/plans/{id} — the fields the Zoho Recruit review panel reads. */
+export interface AutomationPlanView {
+  id: string;
+  applicationId: string;
+  targetUrl: string;
+  status: string;
+  plan?: { planType?: string | null } | null;
+  result?: (ZohoRecruitOutcome | PlanErrorResult)[] | null;
+  submitApproved: boolean;
+  heartbeatAt?: string | null;
+  updatedAt: string;
 }
 
 export interface ApplicationTimelineEvent {
@@ -196,9 +289,52 @@ export interface PreferenceSet {
   experienceLevels?: string[];
   salaryMinGbp?: number;
   sponsorshipPolicy: 'SPONSORSHIP_REQUIRED' | 'SPONSORSHIP_PREFERRED' | 'SPONSORSHIP_NOT_REQUIRED' | 'SHOW_ALL';
-  applicationMode: 'MANUAL' | 'ASSISTED' | 'CONTROLLED_AUTO';
+  applicationMode: ApplicationMode;
   scoringWeights: ScoringWeights;
   isActive: boolean;
+}
+
+// The decision engine's application modes (mirrors ApplicationDecisionService).
+export type ApplicationMode = 'MANUAL' | 'ASSISTED' | 'CONTROLLED_AUTO';
+
+/**
+ * How well the backend could resolve the owner's auto-approval rule (Phase 7.3).
+ *
+ *  - CONFIGURED: a valid saved rule was loaded.
+ *  - ABSENT: no custom rule exists, so the decision mode's defaults apply.
+ *  - UNREADABLE: the rule could not be retrieved or validated. The backend
+ *    fails closed: automatic approval is paused and matches wait for review.
+ *    This is returned as HTTP 503, never as a successful response, so a
+ *    database or validation error can never be mistaken for "no rule".
+ */
+export type ApprovalRuleAvailability = 'CONFIGURED' | 'ABSENT' | 'UNREADABLE';
+
+// Per-user auto-approval rule from GET/PUT /api/v1/approval-rules (Phase 7).
+// The rule can toggle automatic approval and set a minimum score threshold;
+// it can never bypass hard stops, quotas, or safety gates. Only returned for
+// the CONFIGURED and ABSENT states; an unreadable rule returns 503 instead.
+export interface ApprovalRule {
+  availability: ApprovalRuleAvailability;
+  configured: boolean;
+  autoApproveEnabled: boolean;
+  minScore: number;
+  applicationMode: ApplicationMode;
+  /** ASSISTED-mode score floor the backend applies when no rule is saved. */
+  assistedFloor: number;
+}
+
+// GET /api/v1/approval-rules/activity (Robin x Tsenta continuation): the
+// decision engine's own persisted decisions, aggregated — never a separate
+// tracking mechanism, so it can never disagree with what actually happened.
+export interface ApprovalActivityWindow {
+  considered: number;
+  byDecision: Record<string, number>;
+}
+
+export interface ApprovalActivity {
+  today: ApprovalActivityWindow;
+  last7Days: ApprovalActivityWindow;
+  dailyApplicationQuota: { used: number; limit: number; remaining: number };
 }
 
 // Owner-scoped application row from GET /api/v1/applications (camelCase wire
@@ -217,9 +353,22 @@ export interface ApplicationSummary {
   matchRecommendation?: string | null;
   planId?: string | null;
   planStatus?: string | null;
+  /**
+   * The automation plan's ATS adapter ("GREENHOUSE", "ZOHO_RECRUIT", "INSPECTION",
+   * or null when none exists yet). Determines which review UI applies — a
+   * ZOHO_RECRUIT plan never offers "Approve for submission" (it has no real
+   * submission capability at all), unlike a GREENHOUSE plan in the same
+   * AWAITING_APPROVAL status.
+   */
+  planType?: string | null;
   planSubmitApproved?: boolean | null;
   planHeartbeatAt?: string | null;
   planUpdatedAt?: string | null;
+  /**
+   * TRACK (Phase 8.3): the status Robin derives from evidence. `status` above
+   * stays Robin's internal workflow status; this is what the candidate sees.
+   */
+  track?: TrackSummary | null;
 }
 
 export interface LlmModel {
@@ -275,6 +424,42 @@ export interface JobSource {
   enabled: boolean;
   failure_streak: number;
   last_run_at?: string;
+  last_attempted_at?: string | null;
+  last_success_at?: string | null;
+  /** JSON text of the last run's counters (listed/created/updated/…, duration, failure category). */
+  last_run?: string | Record<string, unknown> | null;
+  /** JSON text of the recorded health ({status, checked_at, detail, error, failure_streak, circuit}). */
+  health?: string | Record<string, unknown> | null;
+}
+
+/** GET /sources/coverage — one row per platform (operations view only). */
+export interface PlatformCoverage {
+  kind: string;
+  name: string;
+  group: 'A' | 'B' | 'C' | 'AGGREGATOR';
+  aliases: string[];
+  readiness: 'LIVE_VALIDATED' | 'UNVERIFIED' | 'BLOCKED';
+  adapter: boolean;
+  status: 'SUPPORTED' | 'NEEDS_BOARD_CONFIGURATION' | 'TEMPORARILY_UNAVAILABLE' | 'BLOCKED' | 'UNVERIFIED';
+  configuration: string;
+  configured_sources: number;
+  enabled_sources: number;
+  failing_sources: number;
+  last_success_at: string | null;
+}
+
+/** POST /jobs/import-url result. */
+export interface BoardImportResult {
+  status: 'RESOLVED' | 'NEEDS_CONFIGURATION' | 'UNSUPPORTED' | 'UNRECOGNIZED' | 'CONFIGURED' | 'SOURCE_DISABLED' | 'RESOLUTION_PENDING';
+  url?: string;
+  message?: string;
+  platform?: { kind: string; name: string; readiness: string; board_format: string };
+  platforms?: Array<{ kind: string; name: string; readiness: string; board_format: string }>;
+  board?: string;
+  existing_source?: { id: string; enabled: boolean; display_name: string };
+  preview?: { listed_on_first_page: number; more_pages_possible: boolean; sample_titles: string[]; employer?: string; problem?: string };
+  source_id?: string;
+  run?: { status: string; complete: boolean; counts: Record<string, number | boolean>; failure?: string };
 }
 
 export interface AuditLog {
@@ -325,10 +510,100 @@ export interface CoverLetter {
   claimsValidation: {
     passed: boolean;
     issues?: string[];
+    findings?: ValidationFinding[];
+    validator_version?: string;
+    blocker_count?: number;
+    warning_count?: number;
+    scope?: string;
   };
   isApproved: boolean;
   createdAt: string;
   updatedAt: string;
+  contentSha256?: string | null;
+  parentVersionId?: string | null;
+  origin?: 'GENERATED' | 'USER_CORRECTED';
+  pdfStored?: boolean;
+}
+
+/** One finding from the backend DocumentFactValidator. */
+export interface ValidationFinding {
+  code: string;
+  severity: 'BLOCKER' | 'WARNING';
+  kind: 'DETERMINISTIC' | 'HEURISTIC';
+  claim: string;
+  message: string;
+}
+
+export interface DocumentValidation {
+  validator_version: string;
+  passed: boolean;
+  blocker_count: number;
+  warning_count: number;
+  findings: ValidationFinding[];
+  scope?: string;
+}
+
+/** GET /resume-intelligence/job/{jobId} */
+export interface LatestCvResponse {
+  cv: null | {
+    analysis: ResumeAtsAnalysis;
+    artifact: { present: boolean; intact: boolean; sha256: string | null; byteSize: number };
+    review: null | { approved: boolean; decidedBy: string; decidedAt: string; contentSha256: string };
+  };
+}
+
+export interface ComparisonItem { id: string; label: string }
+export interface ComparisonEntry extends ComparisonItem {
+  status: 'RETAINED' | 'SHORTENED' | 'OMITTED';
+  sourceBullets: number;
+  renderedBullets: number;
+}
+
+/** GET /resume-intelligence/cv/{id}/comparison */
+export interface CvComparison {
+  cvVersionId: string;
+  generatedFromProfileRevision: number;
+  currentProfileRevision: number;
+  sourceMatchesGeneration: boolean;
+  sourceNote: string;
+  method: string;
+  skills: { emphasisedForJob: ComparisonItem[]; retained: ComparisonItem[]; omitted: ComparisonItem[] };
+  requirements: {
+    evidenced: Array<{ requirement: string; sourceType: string; sourceId: string; sourceLabel: string }>;
+    missingFromProfile: string[];
+    preferred: string[];
+    note: string;
+  };
+  sections: Array<{ section: string; items: ComparisonEntry[] }>;
+  inCvButNotInCurrentProfile: string[];
+  attention: Array<{ severity: string; kind: string; message: string }>;
+  sourceRecords: {
+    summaryPresent: boolean;
+    skills: ComparisonItem[];
+    experiences: ComparisonItem[];
+    projects: ComparisonItem[];
+    education: ComparisonItem[];
+    certifications: ComparisonItem[];
+  };
+}
+
+export interface PrepItem { area: string; code: string; message: string }
+
+/** GET /prep/jobs/{jobId}/readiness */
+export interface PrepReadiness {
+  jobId: string;
+  applicationId: string | null;
+  applicationStatus: string | null;
+  overall: 'NOT_STARTED' | 'BLOCKED' | 'IN_PROGRESS' | 'READY_FOR_REVIEW';
+  overallLabel: string;
+  cv: { state: string; cvVersionId?: string; linkedToApplication?: boolean | null; artifactIntact?: boolean; approved?: boolean };
+  coverLetter: { state: string; requirement: string; versions: number; coverLetterId?: string; version?: number; approved?: boolean };
+  answers: { total: number; confirmed: number; unconfirmed: number; needsInput: number; requiredQuestionsKnown: boolean };
+  blockers: PrepItem[];
+  actions: PrepItem[];
+  notChecked: string[];
+  note: string;
+  computedAt: string;
 }
 export interface ApplicationAnswer {
   id: string;
@@ -349,3 +624,266 @@ export interface ApplicationAnswer {
   updatedAt: string;
 }
 
+/** One actionable blocker/warning from the server-side APPLY readiness gate. */
+export interface ApplyReadinessItem {
+  area: string;
+  code: string;
+  message: string;
+}
+
+/**
+ * One employer form question as captured from the real application form.
+ * requiredState is evidence-backed tri-state: UNKNOWN never means optional.
+ * answerState distinguishes confirmed candidate answers from drafts.
+ */
+export interface ApplyQuestionItem {
+  questionKey: string;
+  questionText: string;
+  requiredState: 'REQUIRED' | 'OPTIONAL' | 'UNKNOWN';
+  answerType: string;
+  options: string[];
+  answerState: 'CONFIRMED' | 'UNCONFIRMED' | 'MISSING' | 'NEEDS_USER_INPUT' | 'HARD_STOP' | string;
+  answerOrigin?: string | null;
+  answerId?: string | null;
+  formUrl: string;
+}
+
+/** GET /apply/applications/{id}/readiness — recomputed from records per request. */
+export interface ApplyReadiness {
+  availability: 'AVAILABLE' | 'UNAVAILABLE';
+  application: {
+    applicationId: string;
+    jobId: string;
+    jobTitle: string;
+    company: string;
+    applicationUrl: string;
+    status: string;
+  };
+  documents: {
+    cv: { versionId: string; pdfSha256: string; byteSize: number; reviewedAt: string } | null;
+    coverLetter: {
+      versionId: string;
+      version: number;
+      origin: string;
+      bodySha256: string;
+      pdfSha256: string;
+    } | null;
+    coverLetterRequirement: 'REQUIRED' | 'OPTIONAL' | 'UNKNOWN';
+    selectionBlocked: boolean;
+  };
+  questions: {
+    formCaptured: boolean;
+    formUrl: string | null;
+    items: ApplyQuestionItem[];
+    storedAnswerCount: number;
+    confirmedCount: number;
+  };
+  duplicates: {
+    checked: boolean;
+    status: 'NONE' | 'DUPLICATE';
+    items: Array<{ applicationId: string; jobId: string; matchReason: string }>;
+  };
+  decision: { applicationMode: string; ruleAvailability: string };
+  blockers: ApplyReadinessItem[];
+  warnings: ApplyReadinessItem[];
+  unknowns: string[];
+  packageReady: boolean;
+  packagePreview: {
+    documents: { cv: string | null; coverLetter: string | null };
+    coverLetterRequirement: string;
+    note: string;
+  };
+  note: string;
+  computedAt: string;
+}
+
+
+/* ------------------------------------------------------------------ */
+/* TRACK (Phase 8.3)                                                   */
+/* ------------------------------------------------------------------ */
+
+/** Reconciled, candidate-facing application stage (derived at read time, never stored). */
+export type TrackStage =
+  | 'PREPARING'
+  | 'READY_TO_APPLY'
+  | 'APPLYING'
+  | 'APPLIED'
+  | 'ACKNOWLEDGED'
+  | 'IN_CONTACT'
+  | 'ASSESSMENT'
+  | 'INTERVIEW'
+  | 'OFFER'
+  | 'REJECTED'
+  | 'WITHDRAWN'
+  | 'STOPPED'
+  | 'NEEDS_REVIEW'
+  | 'UNKNOWN';
+
+/** What the current stage rests on, strongest first. */
+export type TrackBasis = 'VERIFIED' | 'CANDIDATE_CONFIRMED' | 'CANDIDATE_REPORTED' | 'UNVERIFIED' | 'INTERNAL' | 'INFERRED';
+export type TrackSubmissionState = 'CONFIRMED' | 'UNVERIFIED' | 'UNKNOWN' | 'CONFLICTING';
+export type TrackAcknowledgementState = 'VERIFIED' | 'UNVERIFIED' | 'NONE';
+export type TrackEventClassification = 'INTERNAL' | 'EXTERNAL' | 'INFERRED' | 'CANDIDATE_REPORTED';
+export type TrackVerification = 'NOT_APPLICABLE' | 'VERIFIED' | 'UNVERIFIED' | 'REJECTED' | 'UNKNOWN';
+export type TrackTimePrecision = 'EXACT' | 'DATE' | 'UNKNOWN';
+export type TrackReportKind =
+  | 'SUBMITTED'
+  | 'ACKNOWLEDGED'
+  | 'RECRUITER_CONTACT'
+  | 'ASSESSMENT'
+  | 'INTERVIEW'
+  | 'OFFER'
+  | 'REJECTED'
+  | 'WITHDRAWN';
+
+/** Compact TRACK state carried by each row of GET /applications. */
+export interface TrackSummary {
+  availability: 'AVAILABLE' | 'UNAVAILABLE';
+  status?: TrackStage;
+  label?: string;
+  basis?: TrackBasis | null;
+  submission?: TrackSubmissionState;
+  needsReview?: boolean;
+  attentionCount?: number;
+  pending?: string | null;
+}
+
+export interface TrackApplicationRef {
+  applicationId: string;
+  jobTitle: string;
+  company: string;
+  location?: string | null;
+  createdAt?: string | null;
+}
+
+export interface TrackAttention {
+  code: string;
+  message: string;
+  emailId?: string | null;
+  receiptId?: string | null;
+}
+
+export interface TrackConflict {
+  code: string;
+  message: string;
+}
+
+/** One piece of submission evidence and the verification policy's outcome for it. */
+export interface TrackReceipt {
+  id: string;
+  evidenceType: 'EMPLOYER_ACKNOWLEDGEMENT_EMAIL' | 'CANDIDATE_STATEMENT';
+  evidenceLabel: string;
+  channel: 'MAILBOX_CONNECTOR' | 'CANDIDATE_FORWARDED' | 'CANDIDATE_ENTERED';
+  channelLabel: string;
+  verification: TrackVerification;
+  verificationLabel: string;
+  /** Why the verification policy reached its outcome, one entry per rule checked. */
+  reasons: Array<{ code: string; message: string }>;
+  policyVersion: string;
+  summary: string | null;
+  externalReference: string | null;
+  evidenceAt: string | null;
+  evidenceAtPrecision: TrackTimePrecision;
+  capturedAt: string | null;
+  candidateReview: 'CONFIRMED' | 'REJECTED' | null;
+  candidateReviewedAt: string | null;
+  reviewVersion: number;
+  emailId: string | null;
+}
+
+/** An employer message waiting for the candidate's decision. */
+export interface TrackReviewItem {
+  emailId: string;
+  status: string;
+  reviewType: 'CONFLICT' | 'ASSOCIATION' | 'UNMATCHED' | 'MEANING';
+  subject: string | null;
+  from: string | null;
+  receivedAt: string | null;
+  receivedTimeKnown: boolean;
+  category: string;
+  categoryLabel: string;
+  categoryConfirmed: boolean;
+  confidence: number | null;
+  confidenceNote: string;
+  excerpt: string | null;
+  rationale: Array<{ code: string; message: string }> | null;
+  decisionVersion: number;
+  addedBy: 'YOU' | 'MAILBOX_CONNECTOR';
+  currentApplication: TrackApplicationRef | null;
+  candidates: Array<TrackApplicationRef & { signals: string[] }>;
+  allowedCategories: Array<{ value: string; label: string }>;
+}
+
+/** GET /applications/{id}/track */
+export interface ApplicationTrack {
+  applicationId: string;
+  availability: 'AVAILABLE';
+  application: TrackApplicationRef;
+  status: TrackStage;
+  label: string;
+  basis: TrackBasis | null;
+  basisLabel: string | null;
+  reason: string;
+  since: string | null;
+  sincePrecision: TrackTimePrecision | null;
+  evidenceStage: TrackStage;
+  recordedStatus: string;
+  recordedStatusLabel: string;
+  submission: { state: TrackSubmissionState; label: string; reason: string };
+  acknowledgement: { state: TrackAcknowledgementState; label: string };
+  communications: { linkedMessages: number; awaitingReview: number };
+  pending: { stage: TrackStage; label: string; emailId: string | null } | null;
+  attention: TrackAttention[];
+  unknowns: string[];
+  conflicts: TrackConflict[];
+  needsReview: boolean;
+  robinSubmission: { submitted: boolean; note: string };
+  receipts: TrackReceipt[];
+  reviews: TrackReviewItem[];
+  mailbox: { connected: boolean; note: string };
+  versions?: Record<string, string>;
+  computedAt: string;
+  replayed?: boolean;
+}
+
+/** One neutral timeline entry (no discovery-source or platform names by construction). */
+export interface TrackTimelineItem {
+  id: string;
+  type: string;
+  summary: string;
+  classification: TrackEventClassification;
+  verification: TrackVerification;
+  label: string;
+  actor: 'ROBIN' | 'YOU' | 'EMPLOYER';
+  occurredAt: string | null;
+  occurredOn: string | null;
+  occurredAtPrecision: TrackTimePrecision;
+  recordedAt: string | null;
+  supersedes: string | null;
+  receiptId: string | null;
+  emailId: string | null;
+}
+
+/** GET /applications/{id}/track/timeline — `nextCursor` is "" when there is no further page. */
+export interface TrackTimelinePage {
+  items: TrackTimelineItem[];
+  nextCursor: string;
+  limit: number;
+}
+
+/** GET /track/reviews */
+export interface TrackReviewQueueResponse {
+  items: TrackReviewItem[];
+  mailboxConnected: boolean;
+}
+
+/** POST /emails/ingest */
+export interface EmailIngestResult {
+  emailId: string | null;
+  classification: string | null;
+  applicationId: string | null;
+  replayed: boolean;
+  associationStatus: string | null;
+  needsReview: boolean;
+  receiptVerification: string | null;
+}

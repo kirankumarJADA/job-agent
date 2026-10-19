@@ -38,8 +38,19 @@ public class ApplicationAnswerRepository {
                 JdbcConversions.readJsonMap(rs, "validation_notes", objectMapper),
                 rs.getBoolean("human_confirmed"),
                 rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").toInstant() : null,
-                rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toInstant() : null
+                rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toInstant() : null,
+                (UUID) rs.getObject("form_question_id"),
+                rs.getString("answer_origin")
         );
+    }
+
+    /** True when the application is the caller's own application for this job (or none was given). */
+    public boolean applicationBelongs(UUID profileId, UUID jobId, UUID applicationId) {
+        if (applicationId == null) return true;
+        Integer n = jdbcTemplate.queryForObject(
+                "select count(*) from applications where id = ? and profile_id = ? and job_id = ?",
+                Integer.class, applicationId, profileId, jobId);
+        return n != null && n > 0;
     }
 
     public Optional<ApplicationAnswerRecord> findById(UUID id) {
@@ -100,16 +111,21 @@ public class ApplicationAnswerRepository {
      */
     public boolean updateStatusForProfile(UUID id, String status, String updatedAnswer,
                                            boolean humanConfirmed, UUID profileId) {
+        // Provenance (Phase 8.2): an explicit candidate confirmation is never
+        // recorded as a model draft, and a candidate-edited answer says so.
+        String origin = updatedAnswer != null ? "CANDIDATE_EDITED" : "CANDIDATE_CONFIRMED";
         if (updatedAnswer != null) {
             return jdbcTemplate.update(
-                    "update application_answers set status = ?, answer_text = ?, human_confirmed = ?, updated_at = now() "
+                    "update application_answers set status = ?, answer_text = ?, human_confirmed = ?, "
+                            + "answer_origin = case when ? then ? else answer_origin end, updated_at = now() "
                             + "where id = ? and profile_id = ?",
-                    status, updatedAnswer, humanConfirmed, id, profileId) > 0;
+                    status, updatedAnswer, humanConfirmed, humanConfirmed, origin, id, profileId) > 0;
         }
         return jdbcTemplate.update(
-                "update application_answers set status = ?, human_confirmed = ?, updated_at = now() "
+                "update application_answers set status = ?, human_confirmed = ?, "
+                        + "answer_origin = case when ? then ? else answer_origin end, updated_at = now() "
                         + "where id = ? and profile_id = ?",
-                status, humanConfirmed, id, profileId) > 0;
+                status, humanConfirmed, humanConfirmed, origin, id, profileId) > 0;
     }
 
 }
