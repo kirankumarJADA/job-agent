@@ -67,7 +67,17 @@ export interface JobDetailResponse {
       skill_overlap?: number;
       remote_fit?: number;
       salary_fit?: number;
+      // Robin x Tsenta continuation: the three categories the seven-category
+      // scoringWeights contract added beyond the original three factors.
+      // Each is 0-100 whenever reported, but only actually weighed into
+      // `score` when `applicable[<category>]` is true — see
+      // JobMatchService#evaluateMatch: an unset candidate preference
+      // excludes a category entirely rather than scoring it neutral.
+      experience_fit?: number;
+      visa_fit?: number;
+      location_fit?: number;
       weights?: Record<string, number>;
+      applicable?: Record<string, boolean>;
       thresholds?: { apply: number; review: number };
       matched_skills?: string[];
       why?: string;
@@ -108,6 +118,77 @@ export interface AutomationPackageView {
   unsupported: Array<{ key: string; label: string; classification: string; reason: string }>;
   requiredGaps: Array<{ key: string; label: string; classification: string; reason: string }>;
   safetyContract: string;
+}
+
+/**
+ * Robin x Tsenta continuation: one field Robin either filled or still needs
+ * from the candidate on a Zoho Recruit application form, as reported by
+ * `worker/src/zoho_recruit.js`'s classification — `category` is one of
+ * `ZohoFieldCategory` (IDENTITY_FIRST_NAME, RESUME_UPLOAD, REQUIRES_HUMAN, …).
+ */
+export interface ZohoRecruitField {
+  label: string | null;
+  category: string;
+  required?: boolean;
+}
+
+/**
+ * Honest document-upload state (Robin x Tsenta hardening) — mirrors
+ * `worker/src/zoho_recruit.js`'s `ZohoDocumentUploadState`. A successful
+ * `setInputFiles` call only proves the file was selected into the browser's
+ * own form; it is never proof the employer's server received or stored it,
+ * and this adapter never submits, so `ATTACHED` — not `CONFIRMED` — is the
+ * actual terminal state every successful attempt reaches today. `CONFIRMED`
+ * is reserved for a future, separately verified employer-side signal; no
+ * code in this adapter produces it yet.
+ */
+export type ZohoDocumentUploadState = 'NO_FIELD' | 'NO_ARTIFACT' | 'REJECTED' | 'ATTACHED' | 'CONFIRMED';
+
+/**
+ * The structured outcome a ZOHO_RECRUIT plan's one real worker step reports
+ * back, persisted verbatim in the automation plan's `result` column (see
+ * `AutomationController#complete`). This plan type never reaches SUBMITTED —
+ * every successful run ends AWAITING_APPROVAL, with this payload explaining
+ * exactly what Robin filled, what still needs the candidate, and why.
+ */
+export interface ZohoRecruitOutcome {
+  type: 'ZOHO_RECRUIT_OUTCOME';
+  planType: 'ZOHO_RECRUIT';
+  filled: ZohoRecruitField[];
+  requiredGaps: ZohoRecruitField[];
+  fields?: ZohoRecruitField[];
+  resumeUploadState: ZohoDocumentUploadState;
+  resumeUploadReason?: string | null;
+  coverLetterUploadState?: ZohoDocumentUploadState;
+  coverLetterUploadReason?: string | null;
+  formFound?: boolean;
+  applicationUrl?: string | null;
+}
+
+/**
+ * Persisted alongside a FAILED/BLOCKED_ANTI_BOT outcome (see `worker.js`'s
+ * poll-loop catch block) so the review panel can show the candidate the real
+ * reason preparation stopped — a lost lease, a CAPTCHA, a thrown error —
+ * instead of a bare "failed" with nothing to act on.
+ */
+export interface PlanErrorResult {
+  type: 'PLAN_ERROR';
+  outcome: 'FAILED' | 'BLOCKED_ANTI_BOT';
+  reason?: string | null;
+  message: string;
+}
+
+/** GET /automation/plans/{id} — the fields the Zoho Recruit review panel reads. */
+export interface AutomationPlanView {
+  id: string;
+  applicationId: string;
+  targetUrl: string;
+  status: string;
+  plan?: { planType?: string | null } | null;
+  result?: (ZohoRecruitOutcome | PlanErrorResult)[] | null;
+  submitApproved: boolean;
+  heartbeatAt?: string | null;
+  updatedAt: string;
 }
 
 export interface ApplicationTimelineEvent {
@@ -242,6 +323,20 @@ export interface ApprovalRule {
   assistedFloor: number;
 }
 
+// GET /api/v1/approval-rules/activity (Robin x Tsenta continuation): the
+// decision engine's own persisted decisions, aggregated — never a separate
+// tracking mechanism, so it can never disagree with what actually happened.
+export interface ApprovalActivityWindow {
+  considered: number;
+  byDecision: Record<string, number>;
+}
+
+export interface ApprovalActivity {
+  today: ApprovalActivityWindow;
+  last7Days: ApprovalActivityWindow;
+  dailyApplicationQuota: { used: number; limit: number; remaining: number };
+}
+
 // Owner-scoped application row from GET /api/v1/applications (camelCase wire
 // format). Match fields come from the candidate's own job_matches decision.
 export interface ApplicationSummary {
@@ -258,6 +353,14 @@ export interface ApplicationSummary {
   matchRecommendation?: string | null;
   planId?: string | null;
   planStatus?: string | null;
+  /**
+   * The automation plan's ATS adapter ("GREENHOUSE", "ZOHO_RECRUIT", "INSPECTION",
+   * or null when none exists yet). Determines which review UI applies — a
+   * ZOHO_RECRUIT plan never offers "Approve for submission" (it has no real
+   * submission capability at all), unlike a GREENHOUSE plan in the same
+   * AWAITING_APPROVAL status.
+   */
+  planType?: string | null;
   planSubmitApproved?: boolean | null;
   planHeartbeatAt?: string | null;
   planUpdatedAt?: string | null;

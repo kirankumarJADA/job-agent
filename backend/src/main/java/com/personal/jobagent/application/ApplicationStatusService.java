@@ -101,7 +101,8 @@ public class ApplicationStatusService {
                        j.location_raw as job_location,
                        m.score as match_score, m.recommendation as match_recommendation,
                        p.id as plan_id, p.status as plan_status, p.submit_approved as plan_submit_approved,
-                       p.heartbeat_at as plan_heartbeat_at, p.updated_at as plan_updated_at
+                       p.heartbeat_at as plan_heartbeat_at, p.updated_at as plan_updated_at,
+                       p.plan->>'planType' as plan_type
                 from applications a
                 join jobs j on j.id = a.job_id
                 left join job_matches m on m.job_id = a.job_id and m.profile_id = a.profile_id
@@ -123,6 +124,7 @@ public class ApplicationStatusService {
                     row.put("matchRecommendation", rs.getString("match_recommendation"));
                     row.put("planId", rs.getObject("plan_id"));
                     row.put("planStatus", rs.getString("plan_status"));
+                    row.put("planType", rs.getString("plan_type"));
                     row.put("planSubmitApproved", rs.getObject("plan_submit_approved"));
                     var planHb = rs.getTimestamp("plan_heartbeat_at");
                     row.put("planHeartbeatAt", planHb == null ? null : planHb.toInstant());

@@ -3,6 +3,7 @@ import { apiFetch } from '../api/client';
 import { ApplicationSummary, ApplicationTimelineEvent, AutomationPackageView } from '../types';
 import { ApplicationPrepStatus } from '../components/ApplicationPrepStatus';
 import { ApplyWorkspace } from '../components/ApplyWorkspace';
+import { ZohoRecruitReviewPanel } from '../components/ZohoRecruitReviewPanel';
 import { ApplicationTrackPanel } from '../components/ApplicationTrackPanel';
 import { GmailMailboxCard } from '../components/GmailMailboxCard';
 import { RobinMailboxCard } from '../components/RobinMailboxCard';
@@ -225,14 +226,22 @@ export const ApplicationsPage: React.FC = () => {
                 refreshKey={panelsKey}
                 onChanged={onPanelChanged}
               />
-              <ApplyWorkspace
-                applicationId={application.id}
-                planId={application.planId}
-                planStatus={application.planStatus}
-                onChanged={fetchApplications}
-              />
+              {application.planType !== 'ZOHO_RECRUIT' && (
+                <ApplyWorkspace
+                  applicationId={application.id}
+                  planId={application.planId}
+                  planStatus={application.planStatus}
+                  onChanged={fetchApplications}
+                />
+              )}
 
-              {application.planId && (
+              {application.planId && application.planType === 'ZOHO_RECRUIT' && (
+                <div className="mt-3">
+                  <ZohoRecruitReviewPanel planId={application.planId} onChanged={fetchApplications} />
+                </div>
+              )}
+
+              {application.planId && application.planType !== 'ZOHO_RECRUIT' && (
                 <div className="mt-3 rounded-lg border border-line bg-surface-sunken px-3 py-2">
                   <div className="flex items-center gap-3 text-sm">
                     <span className="text-ink-muted">Automation</span>
@@ -445,10 +454,18 @@ function TrackStatusPill({ application }: { application: ApplicationSummary }) {
 }
 
 function PlanStatusBadge({ status }: { status?: string | null }) {  if (!status) return null;
+  // SUBMITTED is the one, narrowly-reachable terminal state a real
+  // submission confirms (AutomationPlanRepository#completeRealSubmission) —
+  // it is the ONLY status styled green. COMPLETED means the worker finished
+  // its steps without error, which for a plain inspection plan is routine
+  // and for every ATS-automated plan (GREENHOUSE, ZOHO_RECRUIT) never even
+  // occurs (both always end AWAITING_APPROVAL or SUBMITTED — see
+  // worker/src/outcome.js) — styled neutral so it is never mistaken for a
+  // successful submission at a glance.
   const colors: Record<string, string> = {
     PREPARED: 'bg-blue-500/20 text-blue-300',
     RUNNING: 'bg-yellow-500/20 text-yellow-300',
-    COMPLETED: 'bg-green-500/20 text-green-300',
+    COMPLETED: 'bg-gray-500/20 text-gray-400',
     SUBMITTED: 'bg-green-500/20 text-green-300',
     FAILED: 'bg-red-500/20 text-red-300',
     BLOCKED_ANTI_BOT: 'bg-red-500/20 text-red-300',

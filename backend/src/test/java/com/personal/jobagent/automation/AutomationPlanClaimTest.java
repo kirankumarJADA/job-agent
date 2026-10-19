@@ -110,4 +110,20 @@ class AutomationPlanClaimTest {
         assertThat(repo.transition(PLAN_A, "RUNNING", "COMPLETED")).isTrue();
         assertThat(repo.transition(PLAN_A, "PREPARED", "COMPLETED")).isFalse();
     }
+
+    /**
+     * Robin x Tsenta hardening: the SQL itself must clear the previous
+     * attempt's stale {@code result} in the same atomic statement, not as a
+     * separate follow-up update — a second statement could race with (or be
+     * skipped after) a concurrent caller, leaving the window this fix exists
+     * to close. {@code AutomationLifecycleIT}'s scenarioJ proves the same
+     * thing against real Postgres data; this proves the exact SQL shape.
+     */
+    @Test
+    void requeueFailedPlanClearsTheStaleResultInTheSameStatement() {
+        when(db.update(contains("result='[]'::jsonb"), eq(PLAN_A))).thenReturn(1);
+
+        assertThat(repo.requeueFailedPlan(PLAN_A)).isTrue();
+        verify(db).update(contains("status in ('FAILED','BLOCKED_ANTI_BOT')"), eq(PLAN_A));
+    }
 }

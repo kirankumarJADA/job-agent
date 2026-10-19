@@ -125,8 +125,80 @@ public class AutomationPlanRepository {
         return db.update("update automation_plans set heartbeat_at=now(),updated_at=now() where id=? and status='RUNNING'", id) == 1;
     }
 
+    /**
+     * Generic outcome transition, always from {@code RUNNING}. Also clears
+     * {@code submit_approved}: for every call site that existed before Phase
+     * 4 that flag was already false at this point (it is only ever set by
+     * {@link #approveForSubmission}, strictly after a RUNNING pass
+     * completes), so clearing it here is a no-op for them. For a real
+     * submission attempt that did not reach {@code SUBMITTED} (uncertain or
+     * failed), it is exactly the behavior required: the plan lands back in
+     * AWAITING_APPROVAL/FAILED/BLOCKED_ANTI_BOT with approval withdrawn, so a
+     * fresh, deliberate human re-approval — not a silent retry — is required
+     * before any further attempt.
+     */
     public boolean transition(UUID id, String from, String to) {
-        return db.update("update automation_plans set status=?,updated_at=now() where id=? and status=?", to, id, from) == 1;
+        return db.update("update automation_plans set status=?,submit_approved=false,updated_at=now() where id=? and status=?", to, id, from) == 1;
+    }
+
+    /**
+     * Robin x Tsenta continuation: the same transition as {@link #transition},
+     * but also persists a structured outcome into {@code automation_plans.result}
+     * — a column that already existed (V009) but nothing previously wrote to.
+     * Built for adapters like Zoho Recruit, where (unlike Greenhouse) the
+     * backend does not know the form's fields ahead of execution: the only way
+     * the review queue can show what was actually filled, what still needs the
+     * candidate, and why is for the worker to report it back here, once, at the
+     * one terminal point every run reaches. {@code result} is stored verbatim
+     * (plan ownership/authorization for who may call this is enforced by the
+     * controller, exactly as for {@link #transition}).
+     */
+    public boolean transitionWithResult(UUID id, String from, String to, List<Object> result) {
+        try {
+            String value = json.writeValueAsString(result == null ? List.of() : result);
+            return db.update("""
+                    update automation_plans set status=?, result=?::jsonb, submit_approved=false, updated_at=now()
+                    where id=? and status=?
+                    """, to, value, id, from) == 1;
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to persist plan outcome result", e);
+        }
+    }
+
+    /**
+     * Robin x Tsenta continuation: the retry half of review-queue recovery.
+     * Without this, a plan that reaches {@code FAILED} or
+     * {@code BLOCKED_ANTI_BOT} is stuck there forever — {@link #create}'s own
+     * idempotency-key lookup always resolves back to the SAME row regardless
+     * of its current status, so a terminal-failed plan's id is simply handed
+     * back unchanged on every later call, and {@link #claimNext} only ever
+     * serves {@code PREPARED} rows. This is the one, deliberate way out:
+     * atomically moves a plan from exactly one of those two terminal
+     * failure states back to {@code PREPARED} — never from any other status
+     * (an {@code AWAITING_APPROVAL}, {@code RUNNING} or already-{@code
+     * SUBMITTED} plan is untouched) — clearing its heartbeat so a stale
+     * lease cannot linger. The candidate's own existing, explicit retry
+     * action ({@code POST /applications/{id}/re-prepare}) is what reaches
+     * this; nothing calls it automatically.
+     *
+     * <p><b>Also clears the stale {@code result}.</b> Robin x Tsenta
+     * hardening: without this, the PREVIOUS attempt's persisted outcome (a
+     * {@code PLAN_ERROR} entry, or in principle any earlier structured
+     * result) would sit in the row — stale, attempt-specific state — from
+     * the moment this requeue runs until the retried worker pass eventually
+     * calls {@code /complete} again. A candidate who refreshes the review
+     * panel in that window must never see a leftover result from the run
+     * that just failed. Cleared to an empty JSON array in the SAME atomic
+     * update, guarded by the identical {@code WHERE} clause — this can never
+     * wipe the result of a plan that is not actually being requeued.
+     *
+     * @return false if the plan was not in one of those two exact states
+     */
+    public boolean requeueFailedPlan(UUID id) {
+        return db.update("""
+                update automation_plans set status='PREPARED', heartbeat_at=null, result='[]'::jsonb, updated_at=now()
+                where id=? and status in ('FAILED','BLOCKED_ANTI_BOT')
+                """, id) == 1;
     }
 
     public boolean approveSubmit(UUID id) {
@@ -137,11 +209,73 @@ public class AutomationPlanRepository {
      * Explicit owner approval of a validated plan: AWAITING_APPROVAL →
      * READY_TO_SUBMIT with {@code submit_approved=true}. Atomic and
      * single-shot — a second approval, or one racing a state change, no-ops.
-     * READY_TO_SUBMIT is a terminal Phase 3 state: no worker sees the plan
-     * again (claim-next only serves PREPARED) and submission stays disabled.
+     * READY_TO_SUBMIT by itself still does not submit anything: no worker
+     * claims a READY_TO_SUBMIT plan (claim-next only serves PREPARED), and no
+     * plan contains a submit-capable step at this point. Phase 4 adds the one
+     * deliberate next action, {@link #prepareRealSubmission}, which is a
+     * separate, explicit call a human must still make.
      */
     public boolean approveForSubmission(UUID id) {
         return db.update("update automation_plans set submit_approved=true,status='READY_TO_SUBMIT',updated_at=now() where id=? and status='AWAITING_APPROVAL' and submit_approved=false", id) == 1;
+    }
+
+    /**
+     * Phase 4: the only method that can introduce a real-submission step into
+     * a plan, and it only ever does so starting from an already-approved
+     * plan. Appends exactly one {@code REAL_SUBMIT_CLICK} step (id
+     * {@code real-submit-click}) to the plan's own stored JSON — the worker's
+     * own {@code #validateGreenhousePlan} independently re-checks this same
+     * shape before ever running it — and returns the plan to {@code PREPARED}
+     * so the existing claim-next/resume path picks it up; every step before
+     * this one is already recorded {@code COMPLETED}, so the worker's
+     * existing per-step skip logic carries straight to the new step without
+     * re-running anything already done. Guarded atomically by {@code where
+     * status='READY_TO_SUBMIT' and submit_approved=true}: a plan that has not
+     * been through explicit human approval can never reach this method
+     * successfully.
+     *
+     * @return false if the plan was not in that exact state (already queued,
+     *         already submitted, approval withdrawn by drift, etc.)
+     */
+    public boolean prepareRealSubmission(UUID id) {
+        PlanRow current = findById(id).orElse(null);
+        if (current == null || !"READY_TO_SUBMIT".equals(current.status()) || !current.submitApproved()) {
+            return false;
+        }
+        Map<String, Object> stored = current.plan() == null ? Map.of() : current.plan();
+        if (!"GREENHOUSE".equals(stored.get("planType")) || !(stored.get("steps") instanceof List<?> existingSteps)) {
+            return false;
+        }
+        List<Object> newSteps = new java.util.ArrayList<>(existingSteps);
+        newSteps.add(Map.of(
+                "id", "real-submit-click",
+                "type", "REAL_SUBMIT_CLICK",
+                "policy", "AUTO",
+                "params", Map.of("selector", "button[type=\"submit\"]")));
+        Map<String, Object> updated = new java.util.LinkedHashMap<>(stored);
+        updated.put("steps", newSteps);
+        try {
+            return db.update("""
+                    update automation_plans set plan=?::jsonb, status='PREPARED', updated_at=now()
+                    where id=? and status='READY_TO_SUBMIT' and submit_approved=true
+                    """, json.writeValueAsString(updated), id) == 1;
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to persist real-submission step", e);
+        }
+    }
+
+    /**
+     * Phase 4: the one, narrowly-scoped transition to {@code SUBMITTED}.
+     * Reachable only from {@code RUNNING} (the second, post-approval worker
+     * pass started by {@link #prepareRealSubmission}'s own {@code PREPARED}
+     * state), and — unlike {@link #transition} — deliberately leaves {@code
+     * submit_approved=true} as a durable record that this terminal state was
+     * reached only after an explicit human approval. {@code SUBMITTED} is a
+     * true dead end: no method in this class ever transitions out of it, and
+     * {@code claimNext}/{@code claim} never select it.
+     */
+    public boolean completeRealSubmission(UUID id) {
+        return db.update("update automation_plans set status='SUBMITTED',updated_at=now() where id=? and status='RUNNING' and submit_approved=true", id) == 1;
     }
 
     public boolean appendStep(UUID id, int index, String stepId, String status, Map<String, Object> result, String screenshot) {

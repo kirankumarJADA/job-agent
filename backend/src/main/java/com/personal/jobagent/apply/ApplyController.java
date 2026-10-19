@@ -6,6 +6,7 @@ import com.personal.jobagent.audit.AuditLogWriter;
 import com.personal.jobagent.automation.ExecutionPackageBlockedException;
 import com.personal.jobagent.automation.GreenhouseExecutionPlanService;
 import com.personal.jobagent.automation.InspectionPlanService;
+import com.personal.jobagent.automation.ZohoRecruitExecutionPlanService;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.jobs.JobRecord;
 import com.personal.jobagent.jobs.JobRepository;
@@ -38,16 +39,18 @@ public class ApplyController {
     private final OwnerContext ownerContext;
     private final ApplyReadinessService readiness;
     private final GreenhouseExecutionPlanService greenhousePlans;
+    private final ZohoRecruitExecutionPlanService zohoRecruitPlans;
     private final InspectionPlanService inspectionPlans;
     private final JobRepository jobs;
     private final AuditLogWriter audit;
 
     public ApplyController(OwnerContext ownerContext, ApplyReadinessService readiness,
-                           GreenhouseExecutionPlanService greenhousePlans, InspectionPlanService inspectionPlans,
-                           JobRepository jobs, AuditLogWriter audit) {
+                           GreenhouseExecutionPlanService greenhousePlans, ZohoRecruitExecutionPlanService zohoRecruitPlans,
+                           InspectionPlanService inspectionPlans, JobRepository jobs, AuditLogWriter audit) {
         this.ownerContext = ownerContext;
         this.readiness = readiness;
         this.greenhousePlans = greenhousePlans;
+        this.zohoRecruitPlans = zohoRecruitPlans;
         this.inspectionPlans = inspectionPlans;
         this.jobs = jobs;
         this.audit = audit;
@@ -106,11 +109,12 @@ public class ApplyController {
         String applicationUrl = String.valueOf(
                 ((Map<?, ?>) state.get("application")).get("applicationUrl"));
         try {
-            var planId = jobs.findById(jobId)
-                    .map(JobRecord::applicationUrl)
-                    .filter(url -> url != null && greenhousePlans.handles(url))
-                    .map(url -> greenhousePlans.createExecutionPlan(profileId, id, jobId))
-                    .orElseGet(() -> inspectionPlans.createInspectionPlan(profileId, id, jobId));
+            String jobApplicationUrl = jobs.findById(jobId).map(JobRecord::applicationUrl).orElse(null);
+            var planId = jobApplicationUrl != null && greenhousePlans.handles(jobApplicationUrl)
+                    ? greenhousePlans.createExecutionPlan(profileId, id, jobId)
+                    : jobApplicationUrl != null && zohoRecruitPlans.handles(jobApplicationUrl)
+                    ? zohoRecruitPlans.createExecutionPlan(profileId, id, jobId)
+                    : inspectionPlans.createInspectionPlan(profileId, id, jobId);
             if (planId.isEmpty()) {
                 return ResponseEntity.status(409).body(Map.of(
                         "error", "no automation plan could be created for this job's application URL",
