@@ -10,6 +10,7 @@ import type {
   TrackTimelinePage,
 } from '../types';
 import { Alert, Label, Loading, SecondaryButton, Select, StatusPill, TextInput, Textarea } from './ui';
+import { SubmissionReceiptModal } from './SubmissionReceiptModal';
 import {
   ACTOR_LABELS,
   type TrackFailure,
@@ -78,6 +79,7 @@ export const ApplicationTrackPanel: React.FC<{
   const [timelineFailure, setTimelineFailure] = useState<TrackFailure | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [receiptModalOpen, setReceiptModalOpen] = useState(false);
   const [version, setVersion] = useState(0);
 
   const reload = useCallback(() => setVersion((v) => v + 1), []);
@@ -174,7 +176,7 @@ export const ApplicationTrackPanel: React.FC<{
 
           {track && (
             <>
-              <StatusSection track={track} />
+              <StatusSection track={track} onOpenReceipt={() => setReceiptModalOpen(true)} />
               <AttentionSection track={track} />
               <EvidenceSection
                 applicationId={applicationId}
@@ -211,19 +213,34 @@ export const ApplicationTrackPanel: React.FC<{
           )}
         </div>
       )}
+      <SubmissionReceiptModal
+        isOpen={receiptModalOpen}
+        onClose={() => setReceiptModalOpen(false)}
+        applicationId={applicationId}
+        companyName={track?.application?.company}
+        jobTitle={track?.application?.jobTitle}
+      />
     </div>
   );
 };
 
-const StatusSection: React.FC<{ track: ApplicationTrack }> = ({ track }) => (
+const StatusSection: React.FC<{ track: ApplicationTrack; onOpenReceipt: () => void }> = ({ track, onOpenReceipt }) => (
   <section aria-label="Current status">
-    <div className="flex flex-wrap items-center gap-2">
-      <StatusPill tone={stageTone(track.status, track.basis)}>{track.label}</StatusPill>
-      {track.since && (
-        <span className="text-xs text-ink-muted">
-          since {describeWhen(track.since, track.since, track.sincePrecision ?? 'EXACT')}
-        </span>
-      )}
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusPill tone={stageTone(track.status, track.basis)}>{track.label}</StatusPill>
+        {track.since && (
+          <span className="text-xs text-ink-muted">
+            since {describeWhen(track.since, track.since, track.sincePrecision ?? 'EXACT')}
+          </span>
+        )}
+      </div>
+      <SecondaryButton onClick={onOpenReceipt} className="text-xs py-1 px-2.5">
+        <svg className="w-3.5 h-3.5 text-forest-700 mr-1 inline-block" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+        </svg>
+        Submission Receipt
+      </SecondaryButton>
     </div>
     <p className="mt-2 text-sm text-ink-body">{track.reason}</p>
     <dl className="mt-3 grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-3">

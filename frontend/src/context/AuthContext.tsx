@@ -28,15 +28,20 @@ interface BackendUser {
   userId: string;
   email: string;
   displayName: string;
+  role?: string;
+  isOperator?: boolean;
 }
 
 /** Normalises the backend payload, tolerating either id field name. */
 function toUser(response: BackendUser & { id?: string }): User {
-  return {
+  const user: User = {
     id: response.userId ?? response.id ?? '',
     email: response.email,
     displayName: response.displayName,
   };
+  if (response.role !== undefined) user.role = response.role;
+  if (response.isOperator) user.isOperator = true;
+  return user;
 }
 
 export interface SignUpInput {

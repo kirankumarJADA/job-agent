@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head><title>Apply</title></head>
+<body>
+<!--
+  Trimmed, representative fixture built from a real, live Lever posting
+  (jobs.lever.co/palantir/{posting}/apply — the exact org the discovery-side
+  LeverAdapter already verifies live against), captured 2026-10-20. Standard
+  field names, the `required` attribute pattern, the resume file input id,
+  and the per-question "card" JSON shape (including real optionIds) are
+  reproduced verbatim from the live DOM; only the surrounding marketing CSS
+  and unrelated cards were trimmed for fixture size.
+-->
+<form id="application-form" enctype="multipart/form-data" method="POST">
+  <div class="application-file-input-wrapper">
+    <input class="application-file-input invisible-resume-upload" data-qa="input-resume" id="resume-upload-input" name="resume" tabindex="-1" type="file">
+  </div>
+  <input type="text" data-qa="name-input" name="name" required>
+  <input name="email" data-qa="email-input" type="email" required>
+  <input type="text" data-qa="phone-input" name="phone">
+  <input class="location-input" data-qa="location-input" id="location-input" type="text" maxlength="100" name="location" required>
+  <input id="selected-location" type="hidden" name="selectedLocation">
+  <input type="text" data-qa="org-input" name="org">
+  <input type="text" name="urls[LinkedIn]">
+  <input type="text" name="urls[GitHub]">
+  <input type="text" name="urls[Portfolio]">
+  <textarea placeholder="Add a cover letter or anything else you want to share." name="comments" id="additional-information"></textarea>
+
+  <input type="hidden" value="{&quot;createdAt&quot;:1476737325762,&quot;text&quot;:&quot;Supplementary Questions&quot;,&quot;instructions&quot;:&quot;&quot;,&quot;type&quot;:&quot;posting&quot;,&quot;fields&quot;:[{&quot;type&quot;:&quot;multiple-select&quot;,&quot;text&quot;:&quot;Language Skill(s) (Check all that apply)&quot;,&quot;description&quot;:&quot;&quot;,&quot;required&quot;:true,&quot;id&quot;:&quot;cac01a60-2c41-4dc6-9053-5d18f60aa6a9&quot;,&quot;options&quot;:[{&quot;text&quot;:&quot;English (ENG)&quot;,&quot;optionId&quot;:&quot;06db8241-8de9-48f2-ae15-b9fa3c4bd2c2&quot;},{&quot;text&quot;:&quot;Spanish (SPA)&quot;,&quot;optionId&quot;:&quot;49715e17-535d-4509-8675-2e8451d94530&quot;},{&quot;text&quot;:&quot;French (FRA)&quot;,&quot;optionId&quot;:&quot;d03f2a7b-c37f-4a3e-a92d-0fbafd60d52c&quot;}]},{&quot;type&quot;:&quot;text&quot;,&quot;text&quot;:&quot;Preferred Name | What would you like us to call you?&quot;,&quot;description&quot;:&quot;&quot;,&quot;required&quot;:false,&quot;id&quot;:&quot;3d86f9c9-4062-40f1-ad12-57a6de3e2baa&quot;}],&quot;accountId&quot;:&quot;b8300af6-ed1c-4d0b-8956-cee7839555b9&quot;,&quot;updatedAt&quot;:1758698228012,&quot;updatedByUserId&quot;:&quot;6fbe260e-3e97-4594-ab57-27e7e90da9c4&quot;,&quot;id&quot;:&quot;a69a985a-eae9-4c14-90fb-b5a4b891523e&quot;}" name="cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][baseTemplate]">
+  <input type="checkbox" name="cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]" value="English (ENG)" required />
+  <input type="checkbox" name="cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]" value="Spanish (SPA)" required />
+  <input type="checkbox" name="cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]" value="French (FRA)" required />
+  <input type="text" name="cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field1]" />
+
+  <!-- A second card, with a single required text question and no choice options. -->
+  <input type="hidden" value="{&quot;createdAt&quot;:1476737325762,&quot;text&quot;:&quot;Work Authorization&quot;,&quot;instructions&quot;:&quot;&quot;,&quot;type&quot;:&quot;posting&quot;,&quot;fields&quot;:[{&quot;type&quot;:&quot;text&quot;,&quot;text&quot;:&quot;Are you legally authorized to work in the country for which you are applying?&quot;,&quot;description&quot;:&quot;&quot;,&quot;required&quot;:true,&quot;id&quot;:&quot;7a8d6a3f-9a3e-4a1d-8c1b-2d4e5f6a7b8c&quot;}],&quot;accountId&quot;:&quot;b8300af6-ed1c-4d0b-8956-cee7839555b9&quot;,&quot;updatedAt&quot;:1758698228012,&quot;updatedByUserId&quot;:&quot;6fbe260e-3e97-4594-ab57-27e7e90da9c4&quot;,&quot;id&quot;:&quot;f1e2d3c4-b5a6-4789-9abc-def012345678&quot;}" name="cards[f1e2d3c4-b5a6-4789-9abc-def012345678][baseTemplate]">
+  <input type="text" name="cards[f1e2d3c4-b5a6-4789-9abc-def012345678][field0]" />
+
+  <button id="hcaptchaSubmitBtn" type="submit" class="hidden">Submit application</button>
+</form>
+</body>
+</html>

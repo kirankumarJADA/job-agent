@@ -1,0 +1,17 @@
+name = "robin-email-router"
+main = "src/index.js"
+compatibility_date = "2024-09-23"
+
+# Cloudflare Email Routing Worker for Robin (Phase 20)
+# Subdomains (e.g. mail.aplivenosi.com) do not support wildcard/catch-all rules.
+# Configure a single literal base rule in Cloudflare Email Routing:
+# Custom address: robin@mail.aplivenosi.com -> Action: Send to Worker "robin-email-router"
+# Cloudflare natively delivers all plus-subaddresses (robin+<token>@mail.aplivenosi.com) to this worker.
+
+[vars]
+ROBIN_BACKEND_URL = "https://api.aplivenosi.com"
+ROBIN_INBOUND_PATH = "/api/v1/managed-mail/inbound/cloudflare"
+MAX_EMAIL_BYTES = 10485760
+
+# Secrets required (configure via `wrangler secret put`):
+# CLOUDFLARE_EMAIL_WORKER_SECRET

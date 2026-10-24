@@ -6,8 +6,11 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.math.BigDecimal;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -24,6 +27,14 @@ public class JobsController {
 
     private static final java.util.Set<String> VALID_STATUSES = java.util.Set.of(
             "DISCOVERED", "FILTERED_OUT", "ANALYSED", "SCORED", "DECIDED", "ARCHIVED", "PIPELINE_ERROR");
+
+    /** The real {@code jobs.remote_type} check-constraint values (V001) — never a guessed vocabulary. */
+    private static final java.util.Set<String> VALID_REMOTE_TYPES = java.util.Set.of(
+            "REMOTE", "HYBRID", "ONSITE", "UNKNOWN");
+
+    /** The real {@code job_analyses.sponsorship_status} check-constraint values (V001). */
+    private static final java.util.Set<String> VALID_SPONSORSHIP_STATUSES = java.util.Set.of(
+            "LIKELY_AVAILABLE", "POSSIBLE", "UNKNOWN", "LIKELY_NOT_AVAILABLE", "NOT_AVAILABLE");
 
     private final JobRepository jobRepository;
     private final JobSeedService jobSeedService;
@@ -84,22 +95,76 @@ public class JobsController {
     @GetMapping
     public ResponseEntity<?> listJobs(@RequestParam(required = false) String status,
                                        @RequestParam(required = false) String q,
+                                       @RequestParam(required = false) String location,
+                                       @RequestParam(required = false) String remote_type,
+                                       @RequestParam(required = false) String employment_type,
+                                       @RequestParam(required = false) String experience_level,
+                                       @RequestParam(required = false) String salary_min,
+                                       @RequestParam(required = false) String sponsorship,
+                                       @RequestParam(required = false) String posted_after,
+                                       @RequestParam(required = false) String sort,
                                        @RequestParam(required = false) String cursor,
                                        @RequestParam(defaultValue = "20") int limit,
                                        HttpServletRequest httpRequest) {
         if (status != null && !VALID_STATUSES.contains(status)) {
-            ApiError error = ApiError.of(400, "Invalid status",
-                    "status must be one of " + VALID_STATUSES, httpRequest.getRequestURI(),
-                    String.valueOf(org.slf4j.MDC.get("correlation_id")));
-            return ResponseEntity.badRequest().body(error);
+            return badRequest(httpRequest, "Invalid status", "status must be one of " + VALID_STATUSES);
+        }
+        String remoteType = blankToNull(remote_type);
+        if (remoteType != null) {
+            remoteType = remoteType.toUpperCase(java.util.Locale.ROOT);
+            if (!VALID_REMOTE_TYPES.contains(remoteType)) {
+                return badRequest(httpRequest, "Invalid remote_type", "remote_type must be one of " + VALID_REMOTE_TYPES);
+            }
+        }
+        String sponsorshipStatus = blankToNull(sponsorship);
+        if (sponsorshipStatus != null) {
+            sponsorshipStatus = sponsorshipStatus.toUpperCase(java.util.Locale.ROOT);
+            if (!VALID_SPONSORSHIP_STATUSES.contains(sponsorshipStatus)) {
+                return badRequest(httpRequest, "Invalid sponsorship", "sponsorship must be one of " + VALID_SPONSORSHIP_STATUSES);
+            }
+        }
+        String sortKey = blankToNull(sort);
+        if (sortKey != null && !JobRepository.VALID_SORTS.contains(sortKey)) {
+            return badRequest(httpRequest, "Invalid sort", "sort must be one of " + JobRepository.VALID_SORTS);
+        }
+        BigDecimal salaryMin = null;
+        if (blankToNull(salary_min) != null) {
+            try {
+                salaryMin = new BigDecimal(salary_min.strip());
+                if (salaryMin.signum() < 0) throw new NumberFormatException("negative");
+            } catch (NumberFormatException e) {
+                return badRequest(httpRequest, "Invalid salary_min", "salary_min must be a non-negative number");
+            }
+        }
+        Instant postedAfter = null;
+        if (blankToNull(posted_after) != null) {
+            try {
+                postedAfter = Instant.parse(posted_after.strip());
+            } catch (DateTimeParseException e) {
+                return badRequest(httpRequest, "Invalid posted_after", "posted_after must be an ISO-8601 instant");
+            }
         }
 
         int boundedLimit = Math.max(1, Math.min(limit, 100));
-        JobRepository.FeedPage page = jobRepository.findFeed(
-                ownerContext.profileIdOrNull(), status, q, boundedLimit, cursor);
-        return ResponseEntity.ok(Map.of(
-                "items", page.items().stream().map(JobsController::toWire).toList(),
-                "next_cursor", page.nextCursor() != null ? page.nextCursor() : ""));
+        JobRepository.FeedFilters filters = new JobRepository.FeedFilters(
+                blankToNull(location), remoteType, blankToNull(employment_type), blankToNull(experience_level),
+                salaryMin, sponsorshipStatus, postedAfter);
+        try {
+            JobRepository.FeedPage page = jobRepository.findFeed(
+                    ownerContext.profileIdOrNull(), status, q, filters, sortKey, boundedLimit, cursor);
+            return ResponseEntity.ok(Map.of(
+                    "items", page.items().stream().map(JobsController::toWire).toList(),
+                    "next_cursor", page.nextCursor() != null ? page.nextCursor() : ""));
+        } catch (JobRepository.CursorMismatchException e) {
+            return badRequest(httpRequest, "Invalid cursor", e.getMessage());
+        } catch (IllegalArgumentException e) {
+            // Base64.getDecoder().decode on a malformed cursor string.
+            return badRequest(httpRequest, "Invalid cursor", "cursor is not well-formed");
+        }
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value.strip();
     }
 
     /**
@@ -149,6 +214,7 @@ public class JobsController {
         wire.put("removed", item.removed());
         wire.put("match_score", item.matchScore());
         wire.put("match_recommendation", item.matchRecommendation());
+        wire.put("match_breakdown", item.matchBreakdown());
         return wire;
     }
 

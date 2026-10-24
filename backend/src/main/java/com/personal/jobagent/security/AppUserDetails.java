@@ -8,18 +8,25 @@ import java.util.Collection;
 import java.util.UUID;
 
 /**
- * Adapts UserRecord to Spring Security's UserDetails contract. Phase 1 is
- * single-user with no RBAC (per the architecture's deliberate
- * simplification, §A4) — everyone gets a single fixed "USER" authority,
- * kept only so RBAC can be retrofitted later without changing this
- * adapter's shape.
+ * Adapts UserRecord to Spring Security's UserDetails contract.
+ * Phase 18 Security Closure: provides role-based authorities (CANDIDATE, OPERATOR, ADMIN).
+ *
+ * <p>Ordinary candidates receive {@code ROLE_USER}, {@code ROLE_CANDIDATE}, and {@code USER}.
+ * Authorized operators/administrators additionally receive {@code ROLE_OPERATOR}, {@code ROLE_ADMIN},
+ * {@code OPERATOR}, and {@code ADMIN}.
  */
 public class AppUserDetails implements UserDetails {
 
     private final UserRecord user;
+    private final boolean operator;
 
     public AppUserDetails(UserRecord user) {
+        this(user, user.isOperator());
+    }
+
+    public AppUserDetails(UserRecord user, boolean operator) {
         this.user = user;
+        this.operator = operator || user.isOperator();
     }
 
     public UUID getUserId() {
@@ -30,9 +37,21 @@ public class AppUserDetails implements UserDetails {
         return user.displayName();
     }
 
+    public boolean isOperator() {
+        return operator;
+    }
+
+    public String getRole() {
+        return operator ? (user.role() != null && "ADMIN".equalsIgnoreCase(user.role()) ? "ADMIN" : "OPERATOR") : "CANDIDATE";
+    }
+
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
-        return AuthorityUtils.createAuthorityList("USER");
+        if (operator) {
+            return AuthorityUtils.createAuthorityList(
+                    "ROLE_USER", "ROLE_CANDIDATE", "USER", "ROLE_OPERATOR", "ROLE_ADMIN", "OPERATOR", "ADMIN");
+        }
+        return AuthorityUtils.createAuthorityList("ROLE_USER", "ROLE_CANDIDATE", "USER");
     }
 
     @Override

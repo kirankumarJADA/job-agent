@@ -139,7 +139,8 @@ public class ApplyReadinessService {
                 + "Nothing here submits an application.");
         out.put("packagePreview", preview);
         out.put("note", "Derived from your stored records at request time. READY_TO_APPLY, an approval or a "
-                + "prepared package is never evidence of a submission. REAL_SUBMIT remains hard-stopped.");
+                + "prepared package is never evidence of a submission — a real submission happens only after "
+                + "a separate, explicit queuing action and is confirmed only on genuine provider evidence.");
         out.put("computedAt", Instant.now().toString());
         return out;
     }

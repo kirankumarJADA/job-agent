@@ -225,6 +225,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   IDENTITY_LAST_NAME: 'Last name',
   IDENTITY_EMAIL: 'Email',
   IDENTITY_PHONE: 'Phone / mobile',
+  IDENTITY_LINKEDIN: 'LinkedIn',
   RESUME_UPLOAD: 'Résumé upload',
   COVER_LETTER_UPLOAD: 'Cover letter upload',
   CAPTCHA: 'CAPTCHA',

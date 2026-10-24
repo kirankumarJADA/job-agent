@@ -59,6 +59,12 @@ class ApplicationPipelineEventHandlerTest {
     private final GreenhouseExecutionPlanService greenhousePlanService = mock(GreenhouseExecutionPlanService.class);
     private final com.personal.jobagent.automation.ZohoRecruitExecutionPlanService zohoRecruitPlanService =
             mock(com.personal.jobagent.automation.ZohoRecruitExecutionPlanService.class);
+    private final com.personal.jobagent.automation.LeverExecutionPlanService leverPlanService =
+            mock(com.personal.jobagent.automation.LeverExecutionPlanService.class);
+    private final com.personal.jobagent.automation.WorkdayExecutionPlanService workdayPlanService =
+            mock(com.personal.jobagent.automation.WorkdayExecutionPlanService.class);
+    private final com.personal.jobagent.automation.AshbyExecutionPlanService ashbyPlanService =
+            mock(com.personal.jobagent.automation.AshbyExecutionPlanService.class);
     private final ResumeAtsIntelligenceService resumeService = mock(ResumeAtsIntelligenceService.class);
     private final CoverLetterService coverLetterService = mock(CoverLetterService.class);
     private final ApplicationAnswerService answerService = mock(ApplicationAnswerService.class);
@@ -71,10 +77,10 @@ class ApplicationPipelineEventHandlerTest {
 
     @BeforeEach
     void setUp() {
-        reset(pipeline, inspectionPlanService, greenhousePlanService, zohoRecruitPlanService, resumeService, coverLetterService,
+        reset(pipeline, inspectionPlanService, greenhousePlanService, zohoRecruitPlanService, leverPlanService, workdayPlanService, ashbyPlanService, resumeService, coverLetterService,
                 answerService, jobRepository, notifications, db);
         handler = new ApplicationPipelineEventHandler(pipeline, inspectionPlanService, greenhousePlanService,
-                zohoRecruitPlanService,
+                zohoRecruitPlanService, leverPlanService, workdayPlanService, ashbyPlanService,
                 resumeService, coverLetterService, answerService, jobRepository, notifications, db, new ObjectMapper(),
                 new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()), decisionService,
                 mock(com.personal.jobagent.audit.AuditLogWriter.class), quotaService);

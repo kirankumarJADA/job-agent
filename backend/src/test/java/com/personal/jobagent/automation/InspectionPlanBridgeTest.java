@@ -44,6 +44,9 @@ class InspectionPlanBridgeTest {
     private InspectionPlanService inspectionPlanService;
     private GreenhouseExecutionPlanService greenhousePlanService;
     private ZohoRecruitExecutionPlanService zohoRecruitPlanService;
+    private LeverExecutionPlanService leverPlanService;
+    private WorkdayExecutionPlanService workdayPlanService;
+    private AshbyExecutionPlanService ashbyPlanService;
     private ResumeAtsIntelligenceService resumeService;
     private CoverLetterService coverLetterService;
     private ApplicationAnswerService answerService;
@@ -68,9 +71,12 @@ class InspectionPlanBridgeTest {
         inspectionPlanService = new InspectionPlanService(planRepo, db);
         greenhousePlanService = mock(GreenhouseExecutionPlanService.class);
         zohoRecruitPlanService = mock(ZohoRecruitExecutionPlanService.class);
+        leverPlanService = mock(LeverExecutionPlanService.class);
+        workdayPlanService = mock(WorkdayExecutionPlanService.class);
+        ashbyPlanService = mock(AshbyExecutionPlanService.class);
 
         handler = new ApplicationPipelineEventHandler(
-                pipelineService, inspectionPlanService, greenhousePlanService, zohoRecruitPlanService,
+                pipelineService, inspectionPlanService, greenhousePlanService, zohoRecruitPlanService, leverPlanService, workdayPlanService, ashbyPlanService,
                 resumeService, coverLetterService, answerService,
                 jobRepository, notifications, db, new ObjectMapper(),
                 new com.personal.jobagent.common.AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()),

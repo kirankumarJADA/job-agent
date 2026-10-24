@@ -1,6 +1,8 @@
 package com.personal.jobagent.jobs;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.common.AutomationMetrics;
+import com.personal.jobagent.common.JdbcConversions;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.notifications.NotificationEvents;
 import com.personal.jobagent.notifications.NotificationService;
@@ -15,6 +17,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -64,6 +67,7 @@ public class JobMatchService {
     private final TransactionTemplate transactionTemplate;
     private final AutomationMetrics metrics;
     private final SemanticSkillMatcher semanticSkillMatcher;
+    private final ObjectMapper objectMapper;
 
     public JobMatchService(JobRepository jobRepository,
                            SemanticSkillMatcher semanticSkillMatcher,
@@ -71,7 +75,8 @@ public class JobMatchService {
                            JdbcTemplate jdbcTemplate,
                            NotificationService notificationService,
                            PlatformTransactionManager transactionManager,
-                           AutomationMetrics metrics) {
+                           AutomationMetrics metrics,
+                           ObjectMapper objectMapper) {
         this.jobRepository = jobRepository;
         this.profileRepository = profileRepository;
         this.jdbcTemplate = jdbcTemplate;
@@ -79,6 +84,7 @@ public class JobMatchService {
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.metrics = metrics;
         this.semanticSkillMatcher = semanticSkillMatcher;
+        this.objectMapper = objectMapper;
     }
 
     public record MatchResult(UUID jobId, int overall, String recommendation,
@@ -275,11 +281,11 @@ public class JobMatchService {
     }
 
     /** Deterministic skill overlap plus the evidence behind it. */
-    private record SkillOverlap(double ratio, List<String> matchedSkills, int listedSkills, boolean candidateHasSkills) {}
+    private record SkillOverlap(double ratio, List<String> matchedSkills, List<String> missingSkills, int listedSkills, boolean candidateHasSkills) {}
 
     private SkillOverlap computeSkillOverlap(JobRecord job, UUID profileId) {
         if (job.skillsExtracted() == null || job.skillsExtracted().isEmpty()) {
-            return new SkillOverlap(0.5, List.of(), 0, true); // unknown requirements — neutral, not zero
+            return new SkillOverlap(0.5, List.of(), List.of(), 0, true); // unknown requirements — neutral, not zero
         }
         // Collect candidate skills as their original names (not lower-cased)
         // so the semantic matcher can report them meaningfully.
@@ -288,7 +294,7 @@ public class JobMatchService {
                 .filter(s -> !s.isEmpty())
                 .collect(java.util.stream.Collectors.toSet());
         if (candidateSkills.isEmpty()) {
-            return new SkillOverlap(0.0, List.of(), job.skillsExtracted().size(), false);
+            return new SkillOverlap(0.0, List.of(), job.skillsExtracted(), job.skillsExtracted().size(), false);
         }
 
         // Delegate to the three-tier semantic matcher (exact → synonym → LLM).
@@ -299,7 +305,15 @@ public class JobMatchService {
                 .map(m -> m.candidateSkill())
                 .toList();
 
-        return new SkillOverlap(overlap.ratio(), matchedSkillNames,
+        Set<String> matchedJobSkills = overlap.matches().stream()
+                .map(m -> m.jobSkill().toLowerCase(Locale.ROOT).trim())
+                .collect(java.util.stream.Collectors.toSet());
+
+        List<String> missingSkills = job.skillsExtracted().stream()
+                .filter(js -> js != null && !matchedJobSkills.contains(js.toLowerCase(Locale.ROOT).trim()))
+                .toList();
+
+        return new SkillOverlap(overlap.ratio(), matchedSkillNames, missingSkills,
                 overlap.jobSkillCount(), overlap.candidateHasSkills());
     }
 
@@ -491,27 +505,85 @@ public class JobMatchService {
                     + " — no application was created.";
         };
 
-        String matchedJson = skillOverlap.matchedSkills().stream()
-                .map(s -> "\"" + s.replace("\"", "'") + "\"")
-                .reduce((a, b) -> a + "," + b).orElse("");
-        String weightsJson = categories.stream()
-                .map(c -> "\"" + c.key() + "\":" + c.weight())
-                .reduce((a, b) -> a + "," + b).orElse("");
-        String applicableJson = categories.stream()
-                .map(c -> "\"" + c.key() + "\":" + (c.score() != null))
-                .reduce((a, b) -> a + "," + b).orElse("");
-        return "{\"skill_overlap\":" + Math.round(skillOverlap.ratio() * 100)
-                + ",\"remote_fit\":" + Math.round(remoteFit * 100)
-                + ",\"salary_fit\":" + Math.round(salaryFit * 100)
-                + ",\"experience_fit\":" + Math.round((experience.score() == null ? 0.5 : experience.score()) * 100)
-                + ",\"visa_fit\":" + Math.round((visa.score() == null ? 0.5 : visa.score()) * 100)
-                + ",\"location_fit\":" + Math.round((location.score() == null ? 0.5 : location.score()) * 100)
-                + ",\"weights\":{" + weightsJson + "}"
-                + ",\"applicable\":{" + applicableJson + "}"
-                + ",\"thresholds\":{\"apply\":" + APPLY_THRESHOLD + ",\"review\":" + REVIEW_THRESHOLD + "}"
-                + ",\"matched_skills\":[" + matchedJson + "]"
-                + ",\"why\":\"" + why.toString().replace("\"", "'") + "\""
-                + ",\"decision\":\"" + decision.replace("\"", "'") + "\""
-                + "}";
+        List<String> highlights = new java.util.ArrayList<>();
+        List<String> concerns = new java.util.ArrayList<>();
+
+        if (!skillOverlap.matchedSkills().isEmpty()) {
+            highlights.add("Matched " + skillOverlap.matchedSkills().size() + " of "
+                    + skillOverlap.listedSkills() + " required skills ("
+                    + String.join(", ", skillOverlap.matchedSkills()) + ")");
+        }
+        if (!skillOverlap.missingSkills().isEmpty()) {
+            concerns.add("Missing or unlisted requirements: "
+                    + String.join(", ", skillOverlap.missingSkills().stream().limit(5).toList())
+                    + (skillOverlap.missingSkills().size() > 5 ? " (+" + (skillOverlap.missingSkills().size() - 5) + " more)" : ""));
+        } else if (skillOverlap.candidateHasSkills() && skillOverlap.listedSkills() > 0) {
+            highlights.add("100% of listed skill requirements matched");
+        }
+
+        if (allowedRemoteTypes != null && !allowedRemoteTypes.isEmpty() && job.remoteType() != null) {
+            if (allowedRemoteTypes.stream().anyMatch(r -> r.equalsIgnoreCase(job.remoteType()))) {
+                highlights.add("Workplace type (" + job.remoteType() + ") aligns with your preference");
+            } else {
+                concerns.add("Workplace type (" + job.remoteType() + ") differs from preferred " + String.join("/", allowedRemoteTypes));
+            }
+        }
+
+        if (desiredSalaryMin != null) {
+            if (job.salaryMax() != null && job.salaryMax().doubleValue() >= desiredSalaryMin.doubleValue()) {
+                highlights.add("Declared salary meets your stated minimum threshold");
+            } else if (job.salaryMax() != null) {
+                concerns.add("Declared salary is below your stated minimum threshold");
+            } else {
+                concerns.add("No salary declared on posting (scored neutral)");
+            }
+        }
+
+        if (experience.score() != null) {
+            if (experience.score() >= 0.8) {
+                highlights.add("Experience level requirement aligns with your profile");
+            } else if (experience.score() < 0.4) {
+                concerns.add("Experience level requirement (" + (job.experienceLevel() != null ? job.experienceLevel() : "unspecified") + ") may not match preference");
+            }
+        }
+
+        if (visa.score() != null) {
+            if (visa.score() >= 0.8) {
+                highlights.add("Visa/sponsorship assessment: likely available");
+            } else if (visa.score() <= 0.3) {
+                concerns.add("Visa/sponsorship assessment: unlikely or not supported");
+            }
+        }
+
+        // Built as a real Map and serialised through Jackson (not hand-rolled
+        // JSON string concatenation) so a candidate-entered skill name or any
+        // free-text field containing a backslash, control character or other
+        // JSON-significant byte can never produce invalid JSON written into
+        // the `job_matches.breakdown` jsonb column — the previous
+        // implementation only ever escaped a literal `"`, which is not
+        // sufficient for arbitrary user-entered text.
+        Map<String, Integer> weights = new LinkedHashMap<>();
+        Map<String, Boolean> applicable = new LinkedHashMap<>();
+        for (CategoryScore category : categories) {
+            weights.put(category.key(), category.weight());
+            applicable.put(category.key(), category.score() != null);
+        }
+        Map<String, Object> breakdown = new LinkedHashMap<>();
+        breakdown.put("skill_overlap", Math.round(skillOverlap.ratio() * 100));
+        breakdown.put("remote_fit", Math.round(remoteFit * 100));
+        breakdown.put("salary_fit", Math.round(salaryFit * 100));
+        breakdown.put("experience_fit", Math.round((experience.score() == null ? 0.5 : experience.score()) * 100));
+        breakdown.put("visa_fit", Math.round((visa.score() == null ? 0.5 : visa.score()) * 100));
+        breakdown.put("location_fit", Math.round((location.score() == null ? 0.5 : location.score()) * 100));
+        breakdown.put("weights", weights);
+        breakdown.put("applicable", applicable);
+        breakdown.put("thresholds", Map.of("apply", APPLY_THRESHOLD, "review", REVIEW_THRESHOLD));
+        breakdown.put("matched_skills", skillOverlap.matchedSkills());
+        breakdown.put("missing_skills", skillOverlap.missingSkills());
+        breakdown.put("highlights", highlights);
+        breakdown.put("concerns", concerns);
+        breakdown.put("why", why.toString());
+        breakdown.put("decision", decision);
+        return JdbcConversions.toJson(breakdown, objectMapper);
     }
 }

@@ -79,9 +79,10 @@ app:
   # has been received for the domain (see docs/ROBIN_BUILD_STATUS.md).
   managed-mail:
     # A (sub)domain the operator owns whose MX records point at the provider,
-    # e.g. mail.robin.example. Dedicated to receiving; never used to send.
+    # e.g. mail.aplivenosi.com. Dedicated to receiving; never used to send.
     domain: ${APP_MANAGED_MAIL_DOMAIN:}
     provider: ${APP_MANAGED_MAIL_PROVIDER:mailgun}
+    address-prefix: ${APP_MANAGED_MAIL_ADDRESS_PREFIX:}
     # Encrypted content is erased after this long (and at first use).
     content-retention-minutes: ${APP_MANAGED_MAIL_CONTENT_RETENTION_MINUTES:120}
     # Message metadata (sender, redacted subject, times) is deleted after this.
@@ -92,6 +93,10 @@ app:
       # Signed requests older than this are refused (406); accepted tokens are
       # remembered for twice this long so a captured request cannot be replayed.
       max-age-seconds: ${MAILGUN_WEBHOOK_MAX_AGE_SECONDS:900}
+    cloudflare:
+      # Cloudflare Email Worker shared webhook secret.
+      webhook-secret: ${CLOUDFLARE_EMAIL_WORKER_SECRET:}
+      max-age-seconds: ${CLOUDFLARE_WEBHOOK_MAX_AGE_SECONDS:900}
   mailbox-verification:
     # How old a verification message may be when the worker asks for it.
     window-minutes: ${APP_MAILBOX_VERIFICATION_WINDOW_MINUTES:30}
@@ -141,6 +146,11 @@ app:
   # a loopback origin is left behind in APP_CORS_ALLOWED_ORIGINS.
   cors:
     allow-localhost: ${APP_CORS_ALLOW_LOCALHOST:true}
+
+  security:
+    # Comma-separated list of operator email addresses authorized to inspect and
+    # manage discovery sources. Production sets ROBIN_OPERATOR_EMAILS.
+    operator-emails: ${ROBIN_OPERATOR_EMAILS:}
 
 management:
   endpoints:

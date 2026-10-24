@@ -41,7 +41,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * disabled source is never fetched live by the health-check Discover action.
  */
 @SpringBootTest(properties = {"spring.flyway.placeholders.remove_seed_dev_account=false",
-        "app.discovery.scheduler-enabled=false"})
+        "app.discovery.scheduler-enabled=false", "app.security.operator-emails=dev@example.local"})
 @AutoConfigureMockMvc
 @Testcontainers
 class JobFeedIT {
@@ -121,6 +121,49 @@ class JobFeedIT {
                 lastSeenDaysAgo, lastSeenDaysAgo, deleted);
         created.add(id);
         return id;
+    }
+
+    /** Fuller seeding for Phase 4 filter/sort tests — every field defaults to "not stated" (null). */
+    private record JobSpec(String title, String city, String country, String locationRaw, String remoteType,
+                           String employmentType, String experienceLevel, java.math.BigDecimal salaryMax,
+                           String salaryCurrency, java.time.Instant postedAt) {
+        static JobSpec titled(String title) {
+            return new JobSpec(title, null, null, null, null, null, null, null, null, null);
+        }
+
+        JobSpec city(String v) { return new JobSpec(title, v, country, locationRaw, remoteType, employmentType, experienceLevel, salaryMax, salaryCurrency, postedAt); }
+        JobSpec country(String v) { return new JobSpec(title, city, v, locationRaw, remoteType, employmentType, experienceLevel, salaryMax, salaryCurrency, postedAt); }
+        JobSpec locationRaw(String v) { return new JobSpec(title, city, country, v, remoteType, employmentType, experienceLevel, salaryMax, salaryCurrency, postedAt); }
+        JobSpec remoteType(String v) { return new JobSpec(title, city, country, locationRaw, v, employmentType, experienceLevel, salaryMax, salaryCurrency, postedAt); }
+        JobSpec employmentType(String v) { return new JobSpec(title, city, country, locationRaw, remoteType, v, experienceLevel, salaryMax, salaryCurrency, postedAt); }
+        JobSpec experienceLevel(String v) { return new JobSpec(title, city, country, locationRaw, remoteType, employmentType, v, salaryMax, salaryCurrency, postedAt); }
+        JobSpec salary(java.math.BigDecimal max, String currency) { return new JobSpec(title, city, country, locationRaw, remoteType, employmentType, experienceLevel, max, currency, postedAt); }
+        JobSpec postedAt(java.time.Instant v) { return new JobSpec(title, city, country, locationRaw, remoteType, employmentType, experienceLevel, salaryMax, salaryCurrency, v); }
+    }
+
+    private UUID seedJobDetailed(JobSpec spec) {
+        UUID id = UuidV7.generate();
+        String external = "feed-" + id;
+        jdbc.update("""
+                insert into jobs (id, source_id, external_id, dedup_key, company_name_raw, title, city, country,
+                                  location_raw, remote_type, employment_type, experience_level, salary_max,
+                                  salary_currency, description_text, skills_extracted, content_hash, status,
+                                  posted_at, first_seen_at, last_seen_at)
+                values (?, ?, ?, ?, 'Feed Ltd', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, 'DISCOVERED', ?, now(), now())
+                """, id, sourceId, external, "dedup-" + external, spec.title(), spec.city(), spec.country(),
+                spec.locationRaw(), spec.remoteType(), spec.employmentType(), spec.experienceLevel(), spec.salaryMax(),
+                spec.salaryCurrency(), "Role description mentioning " + TERM, "hash-" + external,
+                spec.postedAt() == null ? null : java.sql.Timestamp.from(spec.postedAt()));
+        created.add(id);
+        return id;
+    }
+
+    private void seedAnalysis(UUID jobId, String sponsorshipStatus) {
+        jdbc.update("""
+                insert into job_analyses (id, job_id, prompt_version, model_label, sponsorship_status,
+                                          sponsorship_confidence, sponsorship_reason)
+                values (?, ?, 'v1', 'test-model', ?, 0.9, 'test fixture')
+                """, UuidV7.generate(), jobId, sponsorshipStatus);
     }
 
     private void seedMatch(UUID profile, UUID job, int score, String recommendation) {
@@ -267,5 +310,227 @@ class JobFeedIT {
     @Test
     void anUnauthenticatedCallerCannotReadTheFeed() throws Exception {
         mockMvc.perform(get("/api/v1/jobs")).andExpect(status().isUnauthorized());
+    }
+
+    // ── Phase 4: discovery/recommendations filters and sort ──────────────
+
+    @Test
+    void locationFilterMatchesCityCountryOrRawLocationText() throws Exception {
+        UUID london = seedJobDetailed(JobSpec.titled("London Role " + TERM).city("London").country("United Kingdom"));
+        UUID berlin = seedJobDetailed(JobSpec.titled("Berlin Role " + TERM).city("Berlin").country("Germany"));
+        UUID freeText = seedJobDetailed(JobSpec.titled("Hybrid Role " + TERM).locationRaw("Greater London area"));
+
+        JsonNode byCity = getJson("/api/v1/jobs?q=" + TERM + "&location=London&limit=50");
+        assertThat(findItem(byCity, london)).isNotNull();
+        assertThat(findItem(byCity, berlin)).isNull();
+        // The raw-text record has no structured city, but its free text contains "London".
+        assertThat(findItem(byCity, freeText)).isNotNull();
+
+        JsonNode byCountry = getJson("/api/v1/jobs?q=" + TERM + "&location=Germany&limit=50");
+        assertThat(findItem(byCountry, berlin)).isNotNull();
+        assertThat(findItem(byCountry, london)).isNull();
+    }
+
+    @Test
+    void remoteTypeFilterIsExactAndAnInvalidValueIsRejected() throws Exception {
+        UUID remote = seedJobDetailed(JobSpec.titled("Remote Role " + TERM).remoteType("REMOTE"));
+        UUID onsite = seedJobDetailed(JobSpec.titled("Onsite Role " + TERM).remoteType("ONSITE"));
+
+        JsonNode feed = getJson("/api/v1/jobs?q=" + TERM + "&remote_type=remote&limit=50"); // lower-case accepted
+        assertThat(findItem(feed, remote)).isNotNull();
+        assertThat(findItem(feed, onsite)).isNull();
+
+        mockMvc.perform(get("/api/v1/jobs?remote_type=FROM_HOME").session(session))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void employmentTypeAndExperienceLevelFiltersAreCaseInsensitiveSubstringMatchesOnHeterogeneousFreeText() throws Exception {
+        // Mirrors real heterogeneous source data (e.g. ArbeitnowAdapter's own
+        // comma-joined job_types string) — no controlled vocabulary exists for
+        // either field, so an exact-match filter would silently miss records
+        // like this one.
+        UUID job = seedJobDetailed(JobSpec.titled("Mixed Role " + TERM)
+                .employmentType("Mid, fulltime permanent").experienceLevel("Senior executive"));
+        UUID other = seedJobDetailed(JobSpec.titled("Other Role " + TERM)
+                .employmentType("Internship").experienceLevel("Entry"));
+
+        JsonNode byEmployment = getJson("/api/v1/jobs?q=" + TERM + "&employment_type=permanent&limit=50");
+        assertThat(findItem(byEmployment, job)).isNotNull();
+        assertThat(findItem(byEmployment, other)).isNull();
+
+        JsonNode byExperience = getJson("/api/v1/jobs?q=" + TERM + "&experience_level=senior&limit=50");
+        assertThat(findItem(byExperience, job)).isNotNull();
+        assertThat(findItem(byExperience, other)).isNull();
+    }
+
+    @Test
+    void salaryMinFilterNeverSilentlyQualifiesAJobWithAnUnknownSalary() throws Exception {
+        UUID aboveFloor = seedJobDetailed(JobSpec.titled("Paid Role " + TERM)
+                .salary(new java.math.BigDecimal("80000"), "GBP"));
+        UUID belowFloor = seedJobDetailed(JobSpec.titled("Underpaid Role " + TERM)
+                .salary(new java.math.BigDecimal("30000"), "GBP"));
+        UUID unknownSalary = seedJobDetailed(JobSpec.titled("Unstated Salary Role " + TERM));
+
+        JsonNode feed = getJson("/api/v1/jobs?q=" + TERM + "&salary_min=50000&limit=50");
+        assertThat(findItem(feed, aboveFloor)).isNotNull();
+        assertThat(findItem(feed, belowFloor)).isNull();
+        // The whole point of this test: unknown salary must never silently pass a floor check.
+        assertThat(findItem(feed, unknownSalary)).isNull();
+
+        mockMvc.perform(get("/api/v1/jobs?salary_min=-5").session(session))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void sponsorshipFilterOnlyMatchesAnalysedJobsAndNeverTreatsAnUnanalysedJobAsSatisfyingIt() throws Exception {
+        UUID available = seedJobDetailed(JobSpec.titled("Sponsoring Role " + TERM));
+        seedAnalysis(available, "LIKELY_AVAILABLE");
+        UUID notAvailable = seedJobDetailed(JobSpec.titled("Non-Sponsoring Role " + TERM));
+        seedAnalysis(notAvailable, "NOT_AVAILABLE");
+        UUID unanalysed = seedJobDetailed(JobSpec.titled("Unanalysed Role " + TERM));
+
+        JsonNode feed = getJson("/api/v1/jobs?q=" + TERM + "&sponsorship=LIKELY_AVAILABLE&limit=50");
+        assertThat(findItem(feed, available)).isNotNull();
+        assertThat(findItem(feed, notAvailable)).isNull();
+        // Never analysed — this filter must not guess it either way.
+        assertThat(findItem(feed, unanalysed)).isNull();
+
+        mockMvc.perform(get("/api/v1/jobs?sponsorship=MAYBE").session(session))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void postedAfterFilterNeverSilentlyQualifiesAJobWithAnUnknownPostingDate() throws Exception {
+        java.time.Instant now = java.time.Instant.now();
+        UUID recent = seedJobDetailed(JobSpec.titled("Recent Posting " + TERM).postedAt(now));
+        UUID old = seedJobDetailed(JobSpec.titled("Old Posting " + TERM).postedAt(now.minus(java.time.Duration.ofDays(60))));
+        UUID unknownDate = seedJobDetailed(JobSpec.titled("Undated Posting " + TERM));
+
+        JsonNode feed = getJson("/api/v1/jobs?q=" + TERM + "&posted_after="
+                + now.minus(java.time.Duration.ofDays(1)) + "&limit=50");
+        assertThat(findItem(feed, recent)).isNotNull();
+        assertThat(findItem(feed, old)).isNull();
+        assertThat(findItem(feed, unknownDate)).isNull();
+
+        mockMvc.perform(get("/api/v1/jobs?posted_after=not-a-date").session(session))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void combiningMultipleFiltersNarrowsResultsConsistentlyAsAnAndNotAnOr() throws Exception {
+        UUID matches = seedJobDetailed(JobSpec.titled("Perfect Fit " + TERM)
+                .city("London").remoteType("REMOTE").salary(new java.math.BigDecimal("90000"), "GBP"));
+        UUID wrongLocation = seedJobDetailed(JobSpec.titled("Wrong City " + TERM)
+                .city("Berlin").remoteType("REMOTE").salary(new java.math.BigDecimal("90000"), "GBP"));
+        UUID wrongRemote = seedJobDetailed(JobSpec.titled("Onsite Only " + TERM)
+                .city("London").remoteType("ONSITE").salary(new java.math.BigDecimal("90000"), "GBP"));
+
+        JsonNode feed = getJson("/api/v1/jobs?q=" + TERM + "&location=London&remote_type=REMOTE&salary_min=50000&limit=50");
+        assertThat(findItem(feed, matches)).isNotNull();
+        assertThat(findItem(feed, wrongLocation)).isNull();
+        assertThat(findItem(feed, wrongRemote)).isNull();
+    }
+
+    @Test
+    void matchSortUsesTheCallersOwnPersistedScoreAndCannotExposeAnotherCandidatesScore() throws Exception {
+        UUID high = seedJobDetailed(JobSpec.titled("High Match " + TERM));
+        UUID mid = seedJobDetailed(JobSpec.titled("Mid Match " + TERM));
+        UUID low = seedJobDetailed(JobSpec.titled("Low Match " + TERM));
+        seedMatch(devProfile, high, 90, "APPLY");
+        seedMatch(devProfile, mid, 50, "REVIEW");
+        seedMatch(devProfile, low, 10, "SKIP");
+        // The other candidate's scores are deliberately the OPPOSITE ranking —
+        // if this sort ever leaked or mixed in another profile's score, the
+        // caller's own ordering below would come out reversed instead.
+        seedMatch(otherProfile, high, 5, "SKIP");
+        seedMatch(otherProfile, mid, 50, "REVIEW");
+        seedMatch(otherProfile, low, 95, "APPLY");
+
+        JsonNode feed = getJson("/api/v1/jobs?q=" + TERM + "&sort=match&limit=50");
+        List<String> order = new ArrayList<>();
+        for (JsonNode item : feed.get("items")) {
+            UUID id = UUID.fromString(item.get("id").asText());
+            if (id.equals(high) || id.equals(mid) || id.equals(low)) order.add(item.get("title").asText());
+        }
+        assertThat(order).containsExactly("High Match " + TERM, "Mid Match " + TERM, "Low Match " + TERM);
+    }
+
+    @Test
+    void matchSortPlacesUnscoredJobsLastRatherThanGuessingTheirRank() throws Exception {
+        UUID scored = seedJobDetailed(JobSpec.titled("Scored Role " + TERM));
+        seedMatch(devProfile, scored, 40, "REVIEW");
+        UUID unscored = seedJobDetailed(JobSpec.titled("Unscored Role " + TERM));
+
+        JsonNode feed = getJson("/api/v1/jobs?q=" + TERM + "&sort=match&limit=50");
+        List<String> order = new ArrayList<>();
+        for (JsonNode item : feed.get("items")) {
+            UUID id = UUID.fromString(item.get("id").asText());
+            if (id.equals(scored) || id.equals(unscored)) order.add(item.get("title").asText());
+        }
+        assertThat(order).containsExactly("Scored Role " + TERM, "Unscored Role " + TERM);
+    }
+
+    @Test
+    void sortingHappensBeforePaginationAndKeysetPagesThroughAMatchSortedFeedWithoutDuplicatesOrGaps() throws Exception {
+        List<UUID> jobs = new ArrayList<>();
+        // Five jobs, five distinct scores — enough to force two pages at limit=2.
+        int[] scores = {95, 80, 60, 40, 20};
+        for (int i = 0; i < scores.length; i++) {
+            UUID job = seedJobDetailed(JobSpec.titled("Rank " + i + " " + TERM));
+            seedMatch(devProfile, job, scores[i], "REVIEW");
+            jobs.add(job);
+        }
+
+        List<String> collected = new ArrayList<>();
+        String cursor = null;
+        for (int guard = 0; guard < 10; guard++) {
+            String encodedCursor = cursor == null ? null
+                    : java.net.URLEncoder.encode(cursor, StandardCharsets.UTF_8);
+            String url = "/api/v1/jobs?q=" + TERM + "&sort=match&limit=2" + (encodedCursor != null ? "&cursor=" + encodedCursor : "");
+            JsonNode feed = getJson(url);
+            for (JsonNode item : feed.get("items")) {
+                UUID id = UUID.fromString(item.get("id").asText());
+                if (jobs.contains(id)) collected.add(item.get("title").asText());
+            }
+            cursor = feed.get("next_cursor").asText();
+            if (cursor.isBlank()) break;
+        }
+        // Every one of the five jobs appears exactly once, in strict score
+        // order, across however many pages it took — the defining property
+        // of "sort before pagination" with a deterministic tiebreaker.
+        assertThat(collected).containsExactly(
+                "Rank 0 " + TERM, "Rank 1 " + TERM, "Rank 2 " + TERM, "Rank 3 " + TERM, "Rank 4 " + TERM);
+    }
+
+    @Test
+    void postedSortOrdersByTheRealTimestampNotDiscoveryOrder() throws Exception {
+        java.time.Instant now = java.time.Instant.now();
+        UUID newest = seedJobDetailed(JobSpec.titled("Newest Posting " + TERM).postedAt(now));
+        UUID oldest = seedJobDetailed(JobSpec.titled("Oldest Posting " + TERM).postedAt(now.minus(java.time.Duration.ofDays(5))));
+
+        JsonNode feed = getJson("/api/v1/jobs?q=" + TERM + "&sort=posted&limit=50");
+        List<String> order = new ArrayList<>();
+        for (JsonNode item : feed.get("items")) {
+            UUID id = UUID.fromString(item.get("id").asText());
+            if (id.equals(newest) || id.equals(oldest)) order.add(item.get("title").asText());
+        }
+        assertThat(order).containsExactly("Newest Posting " + TERM, "Oldest Posting " + TERM);
+    }
+
+    @Test
+    void anInvalidSortValueIsRejectedAndACursorFromADifferentSortIsRejected() throws Exception {
+        mockMvc.perform(get("/api/v1/jobs?sort=cheapest").session(session))
+                .andExpect(status().isBadRequest());
+
+        UUID job = seedJobDetailed(JobSpec.titled("Cursor Role " + TERM));
+        seedMatch(devProfile, job, 77, "REVIEW");
+        JsonNode recentFeed = getJson("/api/v1/jobs?q=" + TERM + "&sort=recent&limit=1");
+        String recentCursor = recentFeed.get("next_cursor").asText();
+        if (!recentCursor.isBlank()) {
+            String encoded = java.net.URLEncoder.encode(recentCursor, StandardCharsets.UTF_8);
+            mockMvc.perform(get("/api/v1/jobs?sort=match&cursor=" + encoded).session(session))
+                    .andExpect(status().isBadRequest());
+        }
     }
 }

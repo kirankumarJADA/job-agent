@@ -233,6 +233,46 @@ class BoardDiscoveryServiceTest {
         assertThat(first.canonicalUrl()).isEqualTo(first.applicationUrl());
     }
 
+    /**
+     * Proves Arbeitnow is genuinely wired into the real discovery pipeline —
+     * not a disconnected adapter nothing ever calls — using the REAL
+     * {@link com.personal.jobagent.discovery.platform.adapters.ArbeitnowAdapter}
+     * (resolved from the real {@link PlatformRegistry}) against REAL captured
+     * responses, all the way to a captured
+     * {@link JobDiscoveryService.IngestJobCommand}.
+     *
+     * <p>This is also the regression guard for a real bug this integration
+     * surfaced and fixed: {@code ingest()} skips ANY aggregator-kind posting
+     * whose {@code applicationUrl} is null (see the line above checking
+     * {@code kind.isAggregator()}) — Arbeitnow's own hosted page must
+     * therefore actually be set as {@code applicationUrl}, or every single
+     * one of its postings would be silently dropped here, every run,
+     * forever (ArbeitnowAdapter's own javadoc explains why that URL is a
+     * genuine application destination, not a placeholder).
+     */
+    @Test
+    void arbeitnowResultsReachRealIngestionWithItsOwnGenuineApplicationUrlSet() {
+        BoardAdapter arbeitnow = registry.adapter(PlatformKind.ARBEITNOW).orElseThrow();
+        http.sequence("GET", "api/job-board-api",
+                json(fixture("arbeitnow-page1.json")),
+                json(fixture("arbeitnow-empty.json")));
+
+        var report = service.run(SOURCE, arbeitnow, "jobs", null, BoardDiscoveryService.Mode.MANUAL);
+
+        assertThat(report.counts().get("listed")).isEqualTo(3);
+        assertThat(report.complete()).isFalse(); // never exhaustive, by design
+        assertThat(report.counts().getOrDefault("skipped_no_employer_url", 0)).isEqualTo(0); // the bug this guards against
+        ArgumentCaptor<JobDiscoveryService.IngestJobCommand> captor =
+                ArgumentCaptor.forClass(JobDiscoveryService.IngestJobCommand.class);
+        verify(ingestion, times(3)).ingestJob(captor.capture());
+        JobDiscoveryService.IngestJobCommand first = captor.getAllValues().get(0);
+        assertThat(first.title()).isEqualTo("Technical Onboarding Specialist - Praxissoftware (x/f/m)");
+        assertThat(first.companyNameRaw()).isEqualTo("Doctolib");
+        assertThat(first.applicationUrl()).isEqualTo(
+                "https://www.arbeitnow.com/jobs/companies/doctolib/technical-onboarding-specialist-praxissoftware-berlin-berlin-335262");
+        assertThat(first.canonicalUrl()).isEqualTo(first.applicationUrl());
+    }
+
     @Test
     void aClosedPostingClosesItsObservationInsteadOfBeingIngested() {
         Scripted a = new Scripted();

@@ -297,6 +297,36 @@ export const JobDetailPage: React.FC = () => {
                       {match.breakdown.why}
                     </p>
                   )}
+                  {match.breakdown?.highlights && match.breakdown.highlights.length > 0 && (
+                    <div className="border-t border-line pt-3">
+                      <span className="block text-[11px] font-bold uppercase tracking-wider text-forest-800">
+                        Strengths & Alignment
+                      </span>
+                      <ul className="mt-1.5 space-y-1 text-xs text-forest-900">
+                        {match.breakdown.highlights.map((h, i) => (
+                          <li key={i} className="flex items-start gap-1.5">
+                            <span className="font-bold text-emerald-600" aria-hidden="true">✓</span>
+                            <span>{h}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {match.breakdown?.concerns && match.breakdown.concerns.length > 0 && (
+                    <div className="border-t border-line pt-3">
+                      <span className="block text-[11px] font-bold uppercase tracking-wider text-amber-800">
+                        Gaps & Points to Consider
+                      </span>
+                      <ul className="mt-1.5 space-y-1 text-xs text-amber-950">
+                        {match.breakdown.concerns.map((c, i) => (
+                          <li key={i} className="flex items-start gap-1.5">
+                            <span className="font-bold text-amber-600" aria-hidden="true">!</span>
+                            <span>{c}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                   {match.breakdown?.decision && (
                     <p className="text-xs font-medium leading-relaxed text-ink-soft">{match.breakdown.decision}</p>
                   )}

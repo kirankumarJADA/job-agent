@@ -184,6 +184,36 @@ describe('SourcesPage operations view', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Check URL' }));
     expect(await screen.findByText(/internal host names are refused/)).toBeTruthy();
   });
+
+  it('toggles a source enabled state via PATCH /sources/:id', async () => {
+    mockedApiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/sources') return [source];
+      if (path === '/sources/coverage') return coverage;
+      if (path === '/sources/source-1' && init?.method === 'PATCH') {
+        return { ...source, enabled: false };
+      }
+      throw new Error('Unexpected API path: ' + path);
+    });
+    renderPage();
+    await screen.findByText('Acme Careers');
+    const toggleBtn = screen.getByRole('button', { name: 'Toggle Acme Careers' });
+    expect(toggleBtn.textContent).toBe('Disable');
+    await userEvent.click(toggleBtn);
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledWith(
+      '/sources/source-1',
+      expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ enabled: false }) })
+    ));
+    expect(await screen.findByText('Acme Careers is now disabled.')).toBeTruthy();
+  });
+
+  it('displays operator access required message when API responds with 403 Forbidden', async () => {
+    mockedApiFetch.mockImplementation(async () => {
+      throw new Error('403 Forbidden: Operator access required');
+    });
+    renderPage();
+    expect(await screen.findByText('Operator Access Required')).toBeTruthy();
+    expect(screen.getByText(/restricted to authorized platform operators/i)).toBeTruthy();
+  });
 });
 
 describe('healthDisplay', () => {

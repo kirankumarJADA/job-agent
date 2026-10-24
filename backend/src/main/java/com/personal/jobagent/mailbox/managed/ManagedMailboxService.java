@@ -13,7 +13,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Robin-managed receiving addresses (Phase 8.5).
+ * Robin-managed receiving addresses (Phase 8.5, Phase 20).
  *
  * <p><b>Readiness is evidence-based.</b> An address is offered for employer
  * registration only when the deployment is fully configured AND Robin has
@@ -25,9 +25,11 @@ import java.util.UUID;
  *
  * <p><b>Ownership.</b> One alias per profile per domain, unique per domain, both
  * enforced by the database. Aliases are random: 16 characters (about 80 bits)
- * from an alphabet without look-alike characters, starting with a letter. They
- * are never derived from the candidate's name or e-mail, so an alias neither
- * identifies its owner nor can be guessed to inject mail into a mailbox.
+ * from an alphabet without look-alike characters, starting with a letter.
+ *
+ * <p><b>Subaddressing (Cloudflare compatibility).</b> When Cloudflare Email Routing
+ * is used, a single base rule on the subdomain (e.g. {@code robin@mail.aplivenosi.com})
+ * is paired with candidate-specific plus-subaddressing (e.g. {@code robin+<token>@mail.aplivenosi.com}).
  */
 @Service
 public class ManagedMailboxService {
@@ -138,7 +140,7 @@ public class ManagedMailboxService {
                     insert into managed_mail_addresses (id, profile_id, local_part, domain)
                     values (?, ?, ?, ?)
                     on conflict do nothing
-                    """, UuidV7.generate(), profileId, newAlias(), settings.domain());
+                    """, UuidV7.generate(), profileId, newLocalPart(), settings.domain());
             Optional<ManagedAddress> now = findAddress(profileId);
             if (now.isPresent()) return now.get();
         }
@@ -146,21 +148,43 @@ public class ManagedMailboxService {
     }
 
     /**
-     * The active alias an envelope recipient routes to, or empty. Matching is on
-     * the exact local part under the configured domain (no sub-addressing), so a
-     * message reaches exactly one owner or none.
+     * The active alias an envelope recipient routes to, or empty. Matching supports
+     * exact local parts as well as Cloudflare plus-subaddressing (e.g. robin+token),
+     * so a message reaches exactly one owner or none.
      */
     public Optional<ManagedAddress> routeEnvelopeRecipient(String envelopeRecipient) {
         Optional<String> address = MailAddresses.bareAddress(envelopeRecipient);
+        if (address.isEmpty()) {
+            address = MailAddresses.singleMailbox(envelopeRecipient);
+        }
         if (address.isEmpty() || settings.domain().isEmpty()) return Optional.empty();
         String domain = MailAddresses.domainOf(address.get());
         if (!settings.domain().equals(domain)) return Optional.empty();
+        String fullLocalPart = MailAddresses.localPartOf(address.get());
+
+        // 1. Exact match on local_part (handles exact alias or robin+alias)
+        Optional<ManagedAddress> direct = findActiveByLocalPart(fullLocalPart, domain);
+        if (direct.isPresent()) return direct;
+
+        // 2. Subaddress fallback: if recipient has plus-addressing (e.g. robin+token),
+        // check if token matches an alias registered without the prefix
+        int plus = fullLocalPart.indexOf('+');
+        if (plus > 0 && plus < fullLocalPart.length() - 1) {
+            String token = fullLocalPart.substring(plus + 1);
+            Optional<ManagedAddress> byToken = findActiveByLocalPart(token, domain);
+            if (byToken.isPresent()) return byToken;
+        }
+
+        return Optional.empty();
+    }
+
+    private Optional<ManagedAddress> findActiveByLocalPart(String localPart, String domain) {
         return db.query("""
                         select id, profile_id, local_part, domain, status from managed_mail_addresses
                         where local_part = ? and domain = ? and status = 'ACTIVE'
                         """, (rs, n) -> new ManagedAddress((UUID) rs.getObject("id"), (UUID) rs.getObject("profile_id"),
                         rs.getString("local_part"), rs.getString("domain"), rs.getString("status")),
-                MailAddresses.localPartOf(address.get()), domain).stream().findFirst();
+                localPart, domain).stream().findFirst();
     }
 
     /**
@@ -185,6 +209,10 @@ public class ManagedMailboxService {
         Map<String, Object> row = rows.get(0);
         return Optional.of(new DomainEvidence(((Timestamp) row.get("receiving_verified_at")).toInstant(),
                 ((Timestamp) row.get("last_inbound_at")).toInstant()));
+    }
+
+    public String newLocalPart() {
+        return settings.addressPrefix() + newAlias();
     }
 
     String newAlias() {

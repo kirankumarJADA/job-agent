@@ -24,3 +24,6 @@ spring:
 logging:
   level:
     com.personal.jobagent: DEBUG
+app:
+  security:
+    operator-emails: "dev@example.local,operator@example.local"

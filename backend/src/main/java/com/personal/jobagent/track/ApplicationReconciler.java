@@ -266,6 +266,18 @@ public final class ApplicationReconciler {
             status = Stage.STOPPED;
             basis = Basis.INTERNAL;
             reason = "This application was marked as failed in Robin, so Robin stopped working on it.";
+        } else if (s.plan() != null && "SUBMITTED".equals(s.plan().status())) {
+            // Phase 15: Robin's own worker confirmed a real submission
+            // (Greenhouse REAL_SUBMIT_CLICK or Ashby ASHBY_SUBMIT_CLICK) with
+            // platform evidence it actually observed for that exact click —
+            // AutomationPlanRepository#completeRealSubmission's own atomic
+            // guard (RUNNING + submit_approved=true) is what makes this status
+            // itself trustworthy; VERIFIED is the strongest basis this model
+            // has, since it is Robin's own system-verified fact, never a
+            // candidate statement or an unverified employer email.
+            status = Stage.APPLIED;
+            basis = Basis.VERIFIED;
+            reason = "Robin submitted this application and confirmed it with platform evidence observed at the time of submission.";
         } else {
             Stage recordedStage = stageForRecorded(recorded);
             boolean recordedAhead = recordedStage != null
@@ -297,12 +309,21 @@ public final class ApplicationReconciler {
             } else {
                 status = evidenceStage;
                 basis = Basis.INTERNAL;
+                // Phase 15: no longer claims "real submission is disabled" —
+                // that stopped being true for GREENHOUSE/ASHBY plans once
+                // this phase (and Phase 4/14 before it) added a genuine, if
+                // approval-gated, real-submission path; the honest statement
+                // is simply that nothing has happened yet, for whatever
+                // reason the plan's own current status already names below.
                 reason = status == Stage.PREPARING
-                        ? "Robin is still preparing this application's documents. Nothing has been sent to the employer."
-                        : "The application package is prepared. Robin has not submitted it (real submission is disabled), "
+                        ? "Robin is still preparing this application's documents. Nothing has been sent to the employer yet."
+                        : "The application package is prepared, but nothing has been sent to the employer yet, "
                         + "and there is no evidence that it was submitted another way."
                         + (s.plan() != null && "READY_TO_SUBMIT".equals(s.plan().status())
-                        ? " You approved the package; an approval is not a submission." : "");
+                        ? " You approved the package; an approval is not a submission." : "")
+                        + (s.plan() != null && "RECONCILIATION_REQUIRED".equals(s.plan().status())
+                        ? " A real submission was attempted but its outcome could not be confirmed — Robin will never "
+                        + "retry it automatically; see the attention item below for what is needed." : "");
             }
             if (pending != null && status != Stage.NEEDS_REVIEW) {
                 reason = reason + " An employer message suggests a newer stage; confirm it to update the status.";
@@ -311,6 +332,7 @@ public final class ApplicationReconciler {
 
         // 8. Submission and acknowledgement dimensions.
         boolean verifiedReceipt = liveReceipts.stream().anyMatch(r -> r.verification() == Verification.VERIFIED);
+        boolean robinSubmitted = s.plan() != null && "SUBMITTED".equals(s.plan().status());
         Signal submissionSignal = eligible.stream()
                 .filter(x -> x.stage() != Stage.WITHDRAWN && x.stage() != Stage.APPLYING)
                 .max(Comparator.comparingInt((Signal x) -> x.basis().strength).thenComparing(Signal::sortTime))
@@ -322,6 +344,9 @@ public final class ApplicationReconciler {
         } else if (verifiedReceipt) {
             submission = new SubmissionView(SubmissionState.CONFIRMED, "Confirmed by verified employer evidence",
                     "A verified employer acknowledgement identifies this application.");
+        } else if (robinSubmitted) {
+            submission = new SubmissionView(SubmissionState.CONFIRMED, "Confirmed by Robin submission",
+                    "Robin submitted this application and confirmed it with platform evidence observed at the time of submission.");
         } else if (submissionSignal != null) {
             submission = new SubmissionView(SubmissionState.UNVERIFIED, "Not verified", switch (submissionSignal.basis()) {
                 case CANDIDATE_REPORTED -> "You reported this; no employer evidence has verified it.";
@@ -329,6 +354,9 @@ public final class ApplicationReconciler {
                 case UNVERIFIED -> "An employer acknowledgement identifies this application but could not be verified.";
                 default -> "No verified employer evidence.";
             });
+        } else if (s.plan() != null && "RECONCILIATION_REQUIRED".equals(s.plan().status())) {
+            submission = new SubmissionView(SubmissionState.UNVERIFIED, "Submission unconfirmed",
+                    "A real submission was attempted by Robin, but the employer's acceptance could not be confirmed.");
         } else {
             submission = new SubmissionView(SubmissionState.UNKNOWN, "No evidence of submission",
                     "There is no evidence that this application was submitted. " + ROBIN_SUBMISSION_NOTE);
@@ -347,6 +375,13 @@ public final class ApplicationReconciler {
             attention.add(new Attention("PACKAGE_REVIEW",
                     "The filled application form is waiting for your review. Approving it does not submit anything.", null, null));
         }
+        if (s.plan() != null && "RECONCILIATION_REQUIRED".equals(s.plan().status())) {
+            String note = s.plan().reconciliationNote();
+            String detail = (note == null || note.isBlank())
+                    ? "A real submission attempt could not be confirmed. Robin will never retry it automatically; verify with the employer whether your application was received."
+                    : "A real submission attempt could not be confirmed (" + note + "). Robin will never retry it automatically; verify with the employer whether your application was received.";
+            attention.add(new Attention("RECONCILIATION_REQUIRED", detail, null, null));
+        }
         if (s.preparation() != null && s.preparation().failed()) {
             attention.add(new Attention("PREPARATION_FAILED",
                     "A preparation step failed. Re-run preparation to retry it.", null, null));
@@ -362,11 +397,17 @@ public final class ApplicationReconciler {
             unknowns.add("Some events have no known date; Robin orders them by when they were recorded.");
         }
 
+        String robinSubmissionNote = robinSubmitted
+                ? "Robin submitted this application and confirmed it with platform evidence observed at the time of submission."
+                : (s.plan() != null && "RECONCILIATION_REQUIRED".equals(s.plan().status())
+                ? "A real submission was attempted by Robin, but the employer's acceptance could not be confirmed. Robin will never retry it automatically."
+                : ROBIN_SUBMISSION_NOTE);
+
         String label = labelFor(status, basis);
         return new TrackState(status, label, basis, TrackVocabulary.basisLabel(basis), reason, since, sincePrecision,
                 evidenceStage, recorded, TrackVocabulary.recordedStatusLabel(recorded), submission, acknowledgement,
                 new Communications(linkedMessages, awaitingReview), pending, List.copyOf(attention),
-                List.copyOf(unknowns), List.copyOf(conflicts), false, ROBIN_SUBMISSION_NOTE);
+                List.copyOf(unknowns), List.copyOf(conflicts), robinSubmitted, robinSubmissionNote);
     }
 
     // ── rules ────────────────────────────────────────────────────────────

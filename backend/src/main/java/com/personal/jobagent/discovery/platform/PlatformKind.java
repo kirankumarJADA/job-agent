@@ -12,10 +12,16 @@ import java.util.Optional;
  * Workable JazzHR Jobvite BreezyHR Oracle Cloud SmartRecruiters Paylocity
  * UltiPro ADP Dover Gem Zoho Recruit BrassRing CareerPlug Dayforce Hireology
  * Join Phenom Pinpoint Polymer Recruitee SAP SuccessFactors Teamtailor"), plus
- * two separate aggregator sources that are not themselves on that list:
- * Tsenta, and FreeHire (https://freehire.me, its own independent catalogue
+ * four separate aggregator sources that are not themselves on that list:
+ * Tsenta; FreeHire (https://freehire.me, its own independent catalogue
  * pulled from 92 ATS platforms through FreeHire's own public API — see
- * {@code FreeHireAdapter}'s javadoc).
+ * {@code FreeHireAdapter}'s javadoc); Arbeitnow
+ * (https://www.arbeitnow.com, its own independent catalogue with a free,
+ * keyless, documented public API — see {@code ArbeitnowAdapter}'s javadoc);
+ * and Adzuna (https://www.adzuna.com, a keyed, documented public search API
+ * covering many countries through the same endpoint shape — one registered
+ * app_id/app_key pair, a country code in the path — see {@code
+ * AdzunaAdapter}'s javadoc for why this is Robin's region-aware source).
  *
  * <p>The {@link #name()} of each constant is the persisted
  * {@code job_sources.kind} value (V037 widens the check constraint to exactly
@@ -112,7 +118,13 @@ public enum PlatformKind {
             "listing scope: jobs, jobs/remote, jobs/internships or jobs/entry-level", List.of("tsenta.com")),
     FREEHIRE("FreeHire", Group.AGGREGATOR, Readiness.LIVE_VALIDATED,
             "category facet value, e.g. software_engineering, backend, frontend, fullstack or devops",
-            List.of("freehire.me"));
+            List.of("freehire.me")),
+    ARBEITNOW("Arbeitnow", Group.AGGREGATOR, Readiness.LIVE_VALIDATED,
+            "fixed identifier 'jobs' — one global catalogue, no per-category partition",
+            List.of("arbeitnow.com")),
+    ADZUNA("Adzuna", Group.AGGREGATOR, Readiness.LIVE_VALIDATED,
+            "ISO-3166-1 alpha-2 country code Adzuna supports, e.g. gb, us, de — one source row per country",
+            List.of("adzuna.com"));
 
     public enum Group { A, B, C, AGGREGATOR }
 

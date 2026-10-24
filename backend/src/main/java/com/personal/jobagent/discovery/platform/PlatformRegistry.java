@@ -2,6 +2,8 @@ package com.personal.jobagent.discovery.platform;
 
 import com.personal.jobagent.discovery.AshbyProvider;
 import com.personal.jobagent.discovery.GreenhouseProvider;
+import com.personal.jobagent.discovery.platform.adapters.AdzunaAdapter;
+import com.personal.jobagent.discovery.platform.adapters.ArbeitnowAdapter;
 import com.personal.jobagent.discovery.platform.adapters.DetailFetchAdapters;
 import com.personal.jobagent.discovery.platform.adapters.FreeHireAdapter;
 import com.personal.jobagent.discovery.platform.adapters.LeverAdapter;
@@ -39,11 +41,22 @@ public class PlatformRegistry {
     private final Map<PlatformKind, BoardAdapter> adapters = new EnumMap<>(PlatformKind.class);
 
     @org.springframework.beans.factory.annotation.Autowired
-    public PlatformRegistry(@Value("${app.discovery.tsenta.max-details-per-run:40}") int tsentaMaxDetails) {
-        this(new GreenhouseProvider(), new AshbyProvider(), tsentaMaxDetails);
+    public PlatformRegistry(@Value("${app.discovery.tsenta.max-details-per-run:40}") int tsentaMaxDetails,
+                            @Value("${app.discovery.adzuna.app-id:}") String adzunaAppId,
+                            @Value("${app.discovery.adzuna.app-key:}") String adzunaAppKey) {
+        this(new GreenhouseProvider(), new AshbyProvider(), tsentaMaxDetails, adzunaAppId, adzunaAppKey);
     }
 
     public PlatformRegistry(GreenhouseProvider greenhouse, AshbyProvider ashby, int tsentaMaxDetails) {
+        this(greenhouse, ashby, tsentaMaxDetails, "", "");
+    }
+
+    public PlatformRegistry(int tsentaMaxDetails) {
+        this(new GreenhouseProvider(), new AshbyProvider(), tsentaMaxDetails, "", "");
+    }
+
+    public PlatformRegistry(GreenhouseProvider greenhouse, AshbyProvider ashby, int tsentaMaxDetails,
+                            String adzunaAppId, String adzunaAppKey) {
         register(new WorkdayAdapter());
         register(new ProviderBackedAdapter.Greenhouse(greenhouse));
         register(new LeverAdapter());
@@ -67,6 +80,8 @@ public class PlatformRegistry {
         register(new MarkupAdapters.Teamtailor());
         register(new TsentaJobSource(tsentaMaxDetails));
         register(new FreeHireAdapter());
+        register(new ArbeitnowAdapter());
+        register(new AdzunaAdapter(adzunaAppId, adzunaAppKey));
     }
 
     private void register(BoardAdapter adapter) {

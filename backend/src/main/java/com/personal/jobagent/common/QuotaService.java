@@ -154,10 +154,22 @@ public class QuotaService {
      * caller's behalf.
      */
     public ReservationResult tryReserve(UUID profileId, String quotaKey, double amount) {
+        return tryReserve(profileId, quotaKey, amount, limitFor(quotaKey));
+    }
+
+    /**
+     * Same atomic reservation as {@link #tryReserve(UUID, String, double)},
+     * but with a caller-supplied limit instead of this class's own static
+     * {@link #limitFor} table — for quota keys whose ceiling is a per-profile
+     * setting (e.g. the Auto Apply batch's candidate-configured daily cap)
+     * rather than one of the fixed application-wide defaults. The row is
+     * still keyed only by {@code (profileId, quotaKey, periodStart)}: two
+     * callers sharing a key still share one counter, so pick a key that is
+     * actually meant to be shared.
+     */
+    public ReservationResult tryReserve(UUID profileId, String quotaKey, double amount, double limit) {
         LocalDate today = LocalDate.now();
         if (!enabled) return new ReservationResult(true, 0, Double.MAX_VALUE, today);
-
-        double limit = limitFor(quotaKey);
 
         db.update("""
                 INSERT INTO usage_quotas (profile_id, quota_key, period_start, used, quota_limit, unit, updated_at)

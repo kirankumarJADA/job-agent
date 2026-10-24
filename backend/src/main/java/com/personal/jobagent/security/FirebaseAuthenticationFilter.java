@@ -55,13 +55,22 @@ public class FirebaseAuthenticationFilter extends OncePerRequestFilter {
     private final FirebaseTokenVerifier verifier;
     private final UserRepository userRepository;
     private final SecurityContextRepository securityContextRepository;
+    private final OperatorAccessPolicy operatorPolicy;
+
+    public FirebaseAuthenticationFilter(FirebaseTokenVerifier verifier,
+                                        UserRepository userRepository,
+                                        SecurityContextRepository securityContextRepository,
+                                        OperatorAccessPolicy operatorPolicy) {
+        this.verifier = verifier;
+        this.userRepository = userRepository;
+        this.securityContextRepository = securityContextRepository;
+        this.operatorPolicy = operatorPolicy;
+    }
 
     public FirebaseAuthenticationFilter(FirebaseTokenVerifier verifier,
                                         UserRepository userRepository,
                                         SecurityContextRepository securityContextRepository) {
-        this.verifier = verifier;
-        this.userRepository = userRepository;
-        this.securityContextRepository = securityContextRepository;
+        this(verifier, userRepository, securityContextRepository, new OperatorAccessPolicy(""));
     }
 
     @Override
@@ -114,8 +123,8 @@ public class FirebaseAuthenticationFilter extends OncePerRequestFilter {
      * lets Firebase-authenticated requests reuse the entire existing API
      * surface unchanged.
      */
-    private static Authentication authenticationFor(UserRecord user) {
-        AppUserDetails principal = new AppUserDetails(user);
+    private Authentication authenticationFor(UserRecord user) {
+        AppUserDetails principal = new AppUserDetails(user, operatorPolicy.isOperator(user));
         return new UsernamePasswordAuthenticationToken(principal, null, principal.getAuthorities());
     }
 

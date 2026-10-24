@@ -5,10 +5,15 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
+import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -22,10 +27,23 @@ public class JobRepository {
 
     private final JdbcTemplate jdbcTemplate;
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
+    private final RowMapper<FeedItem> feedMapper;
 
     public JobRepository(JdbcTemplate jdbcTemplate, com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
+        this.feedMapper = (rs, rowNum) -> new FeedItem(
+                ROW_MAPPER.mapRow(rs, rowNum),
+                rs.getTimestamp("first_seen_at").toInstant(),
+                rs.getTimestamp("last_seen_at").toInstant(),
+                rs.getBoolean("stale"),
+                rs.getBoolean("removed"),
+                rs.getString("source_name"),
+                rs.getString("source_kind"),
+                (Integer) rs.getObject("match_score"),
+                rs.getString("match_recommendation"),
+                rs.getTimestamp("match_scored_at") == null ? null : rs.getTimestamp("match_scored_at").toInstant(),
+                JdbcConversions.readJsonMap(rs, "match_breakdown", objectMapper));
     }
 
     /**
@@ -135,7 +153,13 @@ public class JobRepository {
      */
     public record FeedItem(JobRecord job, java.time.Instant firstSeenAt, java.time.Instant lastSeenAt,
                            boolean stale, boolean removed, String sourceName, String sourceKind,
-                           Integer matchScore, String matchRecommendation, java.time.Instant matchScoredAt) {
+                           Integer matchScore, String matchRecommendation, java.time.Instant matchScoredAt,
+                           Map<String, Object> matchBreakdown) {
+        public FeedItem(JobRecord job, java.time.Instant firstSeenAt, java.time.Instant lastSeenAt,
+                        boolean stale, boolean removed, String sourceName, String sourceKind,
+                        Integer matchScore, String matchRecommendation, java.time.Instant matchScoredAt) {
+            this(job, firstSeenAt, lastSeenAt, stale, removed, sourceName, sourceKind, matchScore, matchRecommendation, matchScoredAt, null);
+        }
     }
 
     public record FeedPage(List<FeedItem> items, String nextCursor) {
@@ -147,29 +171,119 @@ public class JobRepository {
             + ", (j.last_seen_at < now() - interval '" + STALE_AFTER_DAYS + " days') as stale"
             + ", s.display_name as source_name, s.kind as source_kind"
             + ", m.score as match_score, m.recommendation as match_recommendation, m.scored_at as match_scored_at"
+            + ", m.breakdown as match_breakdown"
             + " from jobs j"
             + " left join job_sources s on s.id = j.source_id"
             + " left join job_matches m on m.job_id = j.id and m.profile_id = ?::uuid";
 
-    private static final RowMapper<FeedItem> FEED_MAPPER = (rs, rowNum) -> new FeedItem(
-            ROW_MAPPER.mapRow(rs, rowNum),
-            rs.getTimestamp("first_seen_at").toInstant(),
-            rs.getTimestamp("last_seen_at").toInstant(),
-            rs.getBoolean("stale"),
-            rs.getBoolean("removed"),
-            rs.getString("source_name"),
-            rs.getString("source_kind"),
-            (Integer) rs.getObject("match_score"),
-            rs.getString("match_recommendation"),
-            rs.getTimestamp("match_scored_at") == null ? null : rs.getTimestamp("match_scored_at").toInstant());
+
 
     /**
-     * The FIND feed. Same filters and keyset pagination as {@link #findJobs}
-     * (status, full-text {@code q}, cursor on first_seen_at/id) but soft-deleted
-     * postings are excluded, because they can no longer be applied to and the
-     * review queue already hides them.
+     * Candidate-facing filters beyond {@code status}/{@code q}. Every field is
+     * optional (null = not applied). Each one is evaluated only against a
+     * genuinely stated job field — a job with no value for that field is
+     * EXCLUDED when the filter is active, never silently treated as a match
+     * (e.g. an unknown salary never satisfies a {@code salaryMin} floor; an
+     * un-analysed job never satisfies a {@code sponsorship} requirement).
+     *
+     * @param location        matched against city, country or the raw
+     *                        location text — the same case-insensitive
+     *                        equality-or-contains shape
+     *                        {@code JobMatchService#computeLocationCategory}
+     *                        already uses, so this filter and the scoring
+     *                        engine's own location fit never disagree about
+     *                        what "matches"
+     * @param remoteType      exact match against the real {@code remote_type}
+     *                        check-constraint values (REMOTE/HYBRID/ONSITE/UNKNOWN)
+     * @param employmentType  case-insensitive substring match — {@code employment_type}
+     *                        is free text populated differently by every
+     *                        source (see ArbeitnowAdapter's own joined
+     *                        job_types string vs. a clean ATS-provided label),
+     *                        so an exact-match dropdown would silently miss
+     *                        most real records
+     * @param experienceLevel case-insensitive substring match, for the same
+     *                        reason — no controlled vocabulary for this field
+     *                        exists anywhere in Robin today (not even in the
+     *                        candidate's own preferences UI)
+     * @param salaryMin       only jobs with a KNOWN {@code salary_max} at or
+     *                        above this floor qualify
+     * @param sponsorship     exact match against the job's most recent
+     *                        {@code job_analyses.sponsorship_status} — only
+     *                        jobs that have actually been analysed qualify
+     * @param postedAfter     only jobs with a KNOWN {@code posted_at} at or
+     *                        after this instant qualify
      */
-    public FeedPage findFeed(UUID profileId, String status, String query, int limit, String cursor) {
+    public record FeedFilters(String location, String remoteType, String employmentType,
+                              String experienceLevel, BigDecimal salaryMin, String sponsorship,
+                              Instant postedAfter) {
+        public static FeedFilters none() {
+            return new FeedFilters(null, null, null, null, null, null, null);
+        }
+
+        boolean needsSponsorshipJoin() {
+            return sponsorship != null;
+        }
+    }
+
+    /** Candidate-facing sort orders the feed actually supports — see {@link #sortSpec}. */
+    public static final Set<String> VALID_SORTS = Set.of("recent", "match", "posted");
+
+    /**
+     * One supported sort's SQL shape. {@code keysetColumns} is the exact pair
+     * the {@code order by} is built from, so the keyset predicate below is
+     * always comparing the same expressions the rows were actually ordered
+     * by — the structural guarantee that pagination can never skip or repeat
+     * a row. Every nullable sort value is {@code coalesce}d to a sentinel
+     * guaranteed outside its real range (-1 for a 0-100 score, the minimum
+     * representable timestamp for a date) specifically so the keyset
+     * predicate is a plain two-column tuple comparison with no NULL operand —
+     * Postgres row-comparison semantics do not resolve a tie through a later
+     * column when an earlier one is NULL, which would silently break the
+     * deterministic tiebreaker.
+     */
+    private record SortSpec(String orderBy, String keysetColumns) {
+    }
+
+    private static SortSpec sortSpec(String sort) {
+        return switch (sort) {
+            case "match" -> new SortSpec(
+                    "coalesce(m.score, -1) desc, j.id desc",
+                    "(coalesce(m.score, -1), j.id)");
+            case "posted" -> new SortSpec(
+                    "coalesce(j.posted_at, '-infinity'::timestamptz) desc, j.id desc",
+                    "(coalesce(j.posted_at, '-infinity'::timestamptz), j.id)");
+            default -> new SortSpec(
+                    "j.first_seen_at desc, j.id desc",
+                    "(j.first_seen_at, j.id)");
+        };
+    }
+
+    /** Thrown when a cursor was issued for a different sort than the one now requested. */
+    public static final class CursorMismatchException extends RuntimeException {
+        public CursorMismatchException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * The FIND feed. Same {@code status}/{@code q} handling as {@link #findJobs},
+     * plus the Phase 4 filter/sort set, but soft-deleted postings are excluded,
+     * because they can no longer be applied to and the review queue already
+     * hides them.
+     *
+     * <p>Sorting happens here, in SQL, before the {@code limit} is applied —
+     * never client-side on an already-paginated page — and the keyset cursor
+     * is built from the exact same sort key the query ordered by, so moving
+     * between pages under a given sort can never duplicate or skip a row.
+     *
+     * @param sort one of {@link #VALID_SORTS}; {@code null} or unrecognised
+     *             falls back to {@code "recent"} (the pre-existing default
+     *             order, preserved unchanged)
+     */
+    public FeedPage findFeed(UUID profileId, String status, String query, FeedFilters filters, String sort,
+                             int limit, String cursor) {
+        String sortKey = sort != null && VALID_SORTS.contains(sort) ? sort : "recent";
+        SortSpec spec = sortSpec(sortKey);
         List<String> conditions = new ArrayList<>();
         List<Object> params = new ArrayList<>();
         params.add(profileId);
@@ -182,26 +296,78 @@ public class JobRepository {
             conditions.add("j.search_vector @@ plainto_tsquery('english', ?)");
             params.add(query);
         }
-        if (cursor != null && !cursor.isBlank()) {
-            String[] decoded = new String(Base64.getDecoder().decode(cursor)).split("\\|", 2);
-            conditions.add("(j.first_seen_at, j.id) < (?::timestamptz, ?::uuid)");
-            params.add(decoded[0]);
-            params.add(decoded[1]);
+        if (filters.location() != null) {
+            conditions.add("(lower(j.city) = lower(?) or lower(j.country) = lower(?) or lower(j.location_raw) like '%'||lower(?)||'%')");
+            params.add(filters.location());
+            params.add(filters.location());
+            params.add(filters.location());
         }
-        String sql = FEED_SELECT + " where " + String.join(" and ", conditions)
-                + " order by j.first_seen_at desc, j.id desc limit ?";
+        if (filters.remoteType() != null) {
+            conditions.add("j.remote_type = ?");
+            params.add(filters.remoteType());
+        }
+        if (filters.employmentType() != null) {
+            conditions.add("lower(j.employment_type) like '%'||lower(?)||'%'");
+            params.add(filters.employmentType());
+        }
+        if (filters.experienceLevel() != null) {
+            conditions.add("lower(j.experience_level) like '%'||lower(?)||'%'");
+            params.add(filters.experienceLevel());
+        }
+        if (filters.salaryMin() != null) {
+            conditions.add("j.salary_max is not null and j.salary_max >= ?");
+            params.add(filters.salaryMin());
+        }
+        if (filters.postedAfter() != null) {
+            conditions.add("j.posted_at is not null and j.posted_at >= ?");
+            params.add(Timestamp.from(filters.postedAfter()));
+        }
+        if (filters.sponsorship() != null) {
+            conditions.add("la.sponsorship_status = ?");
+            params.add(filters.sponsorship());
+        }
+        if (cursor != null && !cursor.isBlank()) {
+            String[] decoded = new String(Base64.getDecoder().decode(cursor)).split("\\|", 3);
+            if (decoded.length != 3 || !decoded[0].equals(sortKey)) {
+                throw new CursorMismatchException("cursor was issued for sort '" + (decoded.length > 0 ? decoded[0] : "?")
+                        + "', not the requested '" + sortKey + "'");
+            }
+            String castType = sortKey.equals("match") ? "::int" : "::timestamptz";
+            conditions.add(spec.keysetColumns() + " < (?" + castType + ", ?::uuid)");
+            params.add(decoded[1]);
+            params.add(decoded[2]);
+        }
+        // The sponsorship-analysis lookup is a LATERAL join, added only when
+        // actually filtered on — every other query keeps the exact join shape
+        // it always had.
+        String lateralJoin = filters.needsSponsorshipJoin()
+                ? " left join lateral (select a.sponsorship_status from job_analyses a"
+                + " where a.job_id = j.id order by a.created_at desc limit 1) la on true"
+                : "";
+        String sql = FEED_SELECT + lateralJoin + " where " + String.join(" and ", conditions)
+                + " order by " + spec.orderBy() + " limit ?";
         params.add(limit + 1);
 
-        List<FeedItem> rows = jdbcTemplate.query(sql, FEED_MAPPER, params.toArray());
+        List<FeedItem> rows = jdbcTemplate.query(sql, feedMapper, params.toArray());
         boolean hasMore = rows.size() > limit;
         List<FeedItem> page = hasMore ? rows.subList(0, limit) : rows;
-        String nextCursor = hasMore ? encodeCursor(page.get(page.size() - 1).job().id()) : null;
+        String nextCursor = hasMore ? encodeFeedCursor(sortKey, page.get(page.size() - 1)) : null;
         return new FeedPage(page, nextCursor);
+    }
+
+    private String encodeFeedCursor(String sortKey, FeedItem last) {
+        String value = switch (sortKey) {
+            case "match" -> String.valueOf(last.matchScore() == null ? -1 : last.matchScore());
+            case "posted" -> last.job().postedAt() == null ? "-infinity" : last.job().postedAt().toString();
+            default -> last.firstSeenAt().toString();
+        };
+        String payload = sortKey + "|" + value + "|" + last.job().id();
+        return Base64.getEncoder().encodeToString(payload.getBytes());
     }
 
     /** One posting with its freshness, source and the caller's own match — soft-deleted rows included and flagged. */
     public Optional<FeedItem> findFeedItem(UUID profileId, UUID jobId) {
-        return jdbcTemplate.query(FEED_SELECT + " where j.id = ?", FEED_MAPPER, profileId, jobId)
+        return jdbcTemplate.query(FEED_SELECT + " where j.id = ?", feedMapper, profileId, jobId)
                 .stream().findFirst();
     }
 

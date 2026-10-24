@@ -70,6 +70,16 @@ class ZohoRecruitExecutionPlanServiceTest {
                 .thenReturn(Map.of("display_name", displayName, "email", email));
     }
 
+    private void stubCandidate(String displayName, String email, String phone, String linksJson) {
+        Map<String, Object> row = new java.util.LinkedHashMap<>();
+        row.put("display_name", displayName);
+        row.put("email", email);
+        row.put("phone", phone);
+        row.put("links", linksJson);
+        when(db.queryForMap(contains("from applications a join profiles p"), eq(APPLICATION), eq(PROFILE), eq(JOB)))
+                .thenReturn(row);
+    }
+
     @Test
     void handlesDelegatesToTheZohoAdapter() {
         assertThat(service.handles(ZOHO_URL)).isTrue();
@@ -111,6 +121,50 @@ class ZohoRecruitExecutionPlanServiceTest {
         assertThat(body).contains("ZOHO_RECRUIT_APPLY");
         // Never: a REAL_SUBMIT or MOCK_SUBMIT capability in a Zoho Recruit plan.
         assertThat(body).doesNotContain("REAL_SUBMIT_CLICK").doesNotContain("MOCK_SUBMIT");
+    }
+
+    @Test
+    void createsAZohoRecruitPlanWithTheCandidatesPhoneAndLinkedInPhase13() {
+        stubApplication(ZOHO_URL);
+        stubCandidate("Ada Lovelace", "ada@example.test", "+44 7700 900123",
+                "{\"linkedin\":\"https://linkedin.com/in/ada\",\"github\":\"https://github.com/ada\"}");
+        when(plans.create(eq(PROFILE), eq(APPLICATION), eq(JOB), eq(ZOHO_URL),
+                eq("zoho-recruit:" + APPLICATION), org.mockito.ArgumentMatchers.anyList()))
+                .thenReturn(PLAN_ID);
+        when(plans.findById(PLAN_ID)).thenReturn(java.util.Optional.of(new AutomationPlanRepository.PlanRow(
+                PLAN_ID, APPLICATION, ZOHO_URL, "PREPARED", Map.of(), java.util.List.of(), false, Instant.now(), Instant.now())));
+        when(db.update(contains("update automation_plans set plan"), anyString(), eq(PLAN_ID), eq(PROFILE), eq(APPLICATION)))
+                .thenReturn(1);
+
+        service.createExecutionPlan(PROFILE, APPLICATION, JOB);
+
+        org.mockito.ArgumentCaptor<String> bodyCaptor = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(db).update(contains("update automation_plans set plan"), bodyCaptor.capture(), eq(PLAN_ID), eq(PROFILE), eq(APPLICATION));
+        String body = bodyCaptor.getValue();
+        assertThat(body).contains("\"phone\":\"+44 7700 900123\"");
+        assertThat(body).contains("\"linkedIn\":\"https://linkedin.com/in/ada\"");
+        // github is a real profiles.links entry too, but Zoho's identity has
+        // no github field — never pass through an unrequested key.
+        assertThat(body).doesNotContain("github.com");
+    }
+
+    @Test
+    void neverIncludesPhoneOrLinkedInWhenNeitherIsOnTheProfile() {
+        stubApplication(ZOHO_URL);
+        stubCandidate("Ada Lovelace", "ada@example.test");
+        when(plans.create(eq(PROFILE), eq(APPLICATION), eq(JOB), eq(ZOHO_URL),
+                eq("zoho-recruit:" + APPLICATION), org.mockito.ArgumentMatchers.anyList()))
+                .thenReturn(PLAN_ID);
+        when(plans.findById(PLAN_ID)).thenReturn(java.util.Optional.of(new AutomationPlanRepository.PlanRow(
+                PLAN_ID, APPLICATION, ZOHO_URL, "PREPARED", Map.of(), java.util.List.of(), false, Instant.now(), Instant.now())));
+        when(db.update(contains("update automation_plans set plan"), anyString(), eq(PLAN_ID), eq(PROFILE), eq(APPLICATION)))
+                .thenReturn(1);
+
+        service.createExecutionPlan(PROFILE, APPLICATION, JOB);
+
+        org.mockito.ArgumentCaptor<String> bodyCaptor = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(db).update(contains("update automation_plans set plan"), bodyCaptor.capture(), eq(PLAN_ID), eq(PROFILE), eq(APPLICATION));
+        assertThat(bodyCaptor.getValue()).doesNotContain("\"phone\"").doesNotContain("\"linkedIn\"");
     }
 
     @Test
@@ -338,5 +392,38 @@ class ZohoRecruitExecutionPlanServiceTest {
 
         assertThat(result).contains(PLAN_ID);
         verify(db, never()).update(contains("update automation_plans set plan"), anyString(), eq(PLAN_ID), eq(PROFILE), eq(APPLICATION));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void usesManagedEmailWhenConfiguredWithoutModifyingLoginEmail() {
+        com.personal.jobagent.mailbox.RegistrationIdentityService mockIdentities =
+                mock(com.personal.jobagent.mailbox.RegistrationIdentityService.class);
+        when(mockIdentities.resolveApplicationContactEmail(eq(PROFILE), eq(ZOHO_URL), eq("ada@example.test")))
+                .thenReturn("ada.lovelace-fulcrum@mail.aplivenosi.com");
+
+        org.springframework.beans.factory.ObjectProvider<com.personal.jobagent.mailbox.RegistrationIdentityService> provider =
+                mock(org.springframework.beans.factory.ObjectProvider.class);
+        when(provider.getIfAvailable()).thenReturn(mockIdentities);
+
+        ZohoRecruitExecutionPlanService serviceWithMail = new ZohoRecruitExecutionPlanService(
+                plans, zohoAdapter, documentSelector, db, new ObjectMapper(), provider);
+
+        stubApplication(ZOHO_URL);
+        stubCandidate("Ada Lovelace", "ada@example.test", "+44 7700 900123", "{}");
+        when(plans.create(eq(PROFILE), eq(APPLICATION), eq(JOB), eq(ZOHO_URL),
+                eq("zoho-recruit:" + APPLICATION), org.mockito.ArgumentMatchers.anyList()))
+                .thenReturn(PLAN_ID);
+        when(plans.findById(PLAN_ID)).thenReturn(java.util.Optional.of(new AutomationPlanRepository.PlanRow(
+                PLAN_ID, APPLICATION, ZOHO_URL, "PREPARED", Map.of(), java.util.List.of(), false, Instant.now(), Instant.now())));
+        when(db.update(contains("update automation_plans set plan"), anyString(), eq(PLAN_ID), eq(PROFILE), eq(APPLICATION)))
+                .thenReturn(1);
+
+        serviceWithMail.createExecutionPlan(PROFILE, APPLICATION, JOB);
+
+        org.mockito.ArgumentCaptor<String> planCaptor = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(db).update(contains("update automation_plans set plan"), planCaptor.capture(), eq(PLAN_ID), eq(PROFILE), eq(APPLICATION));
+        assertThat(planCaptor.getValue()).contains("ada.lovelace-fulcrum@mail.aplivenosi.com");
+        assertThat(planCaptor.getValue()).doesNotContain("ada@example.test");
     }
 }

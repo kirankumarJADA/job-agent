@@ -128,7 +128,12 @@ export const DashboardPage: React.FC = () => {
       .then((result) => setSources(result || []))
       .catch((error: unknown) => {
         setSources(null);
-        setSourcesError(errorMessage(error, 'Could not load discovery sources.'));
+        const msg = String(error instanceof Error ? error.message : error);
+        if (msg.includes('403') || msg.toLowerCase().includes('forbidden')) {
+          setSourcesError(null);
+        } else {
+          setSourcesError(errorMessage(error, 'Could not load discovery sources.'));
+        }
       });
 
     apiFetch<{ status: string }>('/system/health')
@@ -322,7 +327,10 @@ export const DashboardPage: React.FC = () => {
         </section>
 
         <p className="text-xs leading-relaxed text-ink-faint">
-          Safety note: an approval or prepared application is not proof of submission. Live ATS submission remains disabled until a separate safety-reviewed release.
+          Safety note: an approval or prepared application is not proof of submission. Real, automated submission exists
+          only for Greenhouse applications, and only after two separate, explicit human actions (approve, then confirm) —
+          Robin never submits on its own. Lever, Zoho Recruit and Workday applications are never submitted by Robin at
+          all; finish and submit those yourself on the employer&apos;s own site.
         </p>
       </div>
     </PageShell>

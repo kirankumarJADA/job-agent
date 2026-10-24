@@ -45,6 +45,36 @@ class TrackTimelineMapperTest {
         }
     }
 
+    /** Phase 14: the same neutralisation guarantee, now for the Ashby audit actions. */
+    @Test
+    void ashbyPlatformNamedInternalTypesAreNeutralisedToo() {
+        for (TimelineRow row : List.of(
+                event("ASHBY_PLAN_CREATED", "{\"plan_id\":\"x\"}", "INTERNAL", "NOT_APPLICABLE", null, "EXACT", null, "SYSTEM"),
+                audit("ASHBY_SUBMIT_APPROVED", "{\"approvedForSubmission\":true,\"submissionEnabled\":false}", "alice@example.com"),
+                audit("ASHBY_SUBMIT_APPROVAL_REFUSED", "{}", "alice@example.com"),
+                audit("ASHBY_FORM_REVIEWED", "{}", "alice@example.com"))) {
+            Map<String, Object> item = mapper.map(row);
+            assertThat(item.toString().toLowerCase()).doesNotContain("ashby").doesNotContain("alice@example.com");
+        }
+    }
+
+    /**
+     * Unlike Greenhouse's approval summary (accurately describing a
+     * permanently-disabled submission action at the time that text was
+     * written), Ashby's real submission genuinely can proceed once a
+     * separate authorization step (prepare-submit) is also taken — so this
+     * summary must never claim submission is disabled, only that nothing
+     * has been sent YET.
+     */
+    @Test
+    void anAshbyApprovalNeverClaimsSubmissionIsDisabled() {
+        Map<String, Object> item = mapper.map(audit("ASHBY_SUBMIT_APPROVED", "{}", "alice@example.com"));
+        assertThat(item.get("type")).isEqualTo("PACKAGE_APPROVED");
+        assertThat((String) item.get("summary")).doesNotContain("submission is disabled");
+        assertThat((String) item.get("summary")).contains("separate authorization step is still required");
+        assertThat(item.get("actor")).isEqualTo("YOU");
+    }
+
     @Test
     void anApprovalSaysNothingWasSent() {
         Map<String, Object> item = mapper.map(audit("GREENHOUSE_SUBMIT_APPROVED", "{}", "alice@example.com"));

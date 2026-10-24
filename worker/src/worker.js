@@ -170,6 +170,24 @@ export function zohoRecruitPackageNeedsMaterialization(plan) {
   return plan.planType === 'ZOHO_RECRUIT' && Boolean(plan.package);
 }
 
+/**
+ * Phase 14: the ASHBY counterpart — {@code AshbyExecutionPlanService} embeds
+ * its package the same way Zoho's own service does (cv only, never a cover
+ * letter — see that service's own module comment), so the same
+ * presence-gated reasoning applies unchanged. Exported for its own direct
+ * unit test, same as {@link zohoRecruitPackageNeedsMaterialization}.
+ */
+export function ashbyPackageNeedsMaterialization(plan) {
+  return plan.planType === 'ASHBY' && Boolean(plan.package);
+}
+
+/**
+ * Phase 19: Workday package materialization counterpart.
+ */
+export function workdayPackageNeedsMaterialization(plan) {
+  return plan.planType === 'WORKDAY' && Boolean(plan.package);
+}
+
 export async function materializeArtifacts(plan, backendBase) {
   // Shared by GREENHOUSE and ZOHO_RECRUIT (any plan type whose package
   // carries cv/coverLetter + a matching artifacts list) — error identifiers
@@ -270,6 +288,18 @@ if (planFile) {
         const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
         if (apiRoot === pollUrl) throw new Error('INVALID_WORKER_POLL_URL');
         await materializeArtifacts(plan, new URL(apiRoot).origin);
+      } else if (ashbyPackageNeedsMaterialization(plan)) {
+        // Phase 14: same reasoning as ZOHO_RECRUIT above — AshbyExecutionPlanService
+        // embeds the package directly in the claimed plan JSON (cv only, no
+        // cover letter — see that service's own module comment), so only the
+        // résumé bytes themselves need downloading via the same shared path.
+        const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
+        if (apiRoot === pollUrl) throw new Error('INVALID_WORKER_POLL_URL');
+        await materializeArtifacts(plan, new URL(apiRoot).origin);
+      } else if (workdayPackageNeedsMaterialization(plan)) {
+        const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
+        if (apiRoot === pollUrl) throw new Error('INVALID_WORKER_POLL_URL');
+        await materializeArtifacts(plan, new URL(apiRoot).origin);
       }
 
       // Heartbeat on an interval while executing. A single missed beat is
@@ -300,6 +330,11 @@ if (planFile) {
       // validate-form exactly as before, always awaiting human review.
       const isSubmitAttempt = plan.planType === 'GREENHOUSE'
         && plan.steps.at(-1)?.type === 'REAL_SUBMIT_CLICK';
+      // Phase 14: Ashby's own counterpart — see outcome.js's isAshbySubmitAttempt
+      // for the same reasoning (only the last step's exact type decides this,
+      // never an assumption about what a given run "should" have done).
+      const isAshbySubmitAttempt = plan.planType === 'ASHBY'
+        && plan.steps.at(-1)?.type === 'ASHBY_SUBMIT_CLICK';
       const { outcome, detail, result } = computePlanOutcome(plan, runResult);
       if (plan.planType === 'GREENHOUSE' && !isSubmitAttempt) {
         await Promise.allSettled([
@@ -315,6 +350,57 @@ if (planFile) {
             resumeUploadState: zoho.resumeUploadState ?? 'NO_FIELD',
             coverLetterUploadState: zoho.coverLetterUploadState ?? 'NO_FIELD' }),
         ]);
+      } else if (plan.planType === 'LEVER') {
+        const lever = runResult.leverResult ?? {};
+        await Promise.allSettled([
+          eventSink({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
+            applicationId: plan.correlation.applicationId, requiredGaps: lever.requiredGaps ?? [],
+            filled: lever.filled ?? [], fields: lever.fields ?? [],
+            resumeUploadState: lever.resumeUploadState ?? 'NO_FIELD' }),
+        ]);
+      } else if (plan.planType === 'WORKDAY') {
+        const isWorkdaySubmitAttempt = plan.steps.at(-1)?.type === StepType.WORKDAY_SUBMIT_CLICK;
+        if (!isWorkdaySubmitAttempt) {
+          const workday = runResult.workdayResult ?? {};
+          if (plan.steps.some((s) => s.type === StepType.WORKDAY_APPLY)) {
+            await Promise.allSettled([
+              eventSink({
+                type: 'HUMAN_REVIEW_REQUIRED',
+                planId,
+                jobId: plan.correlation.jobId,
+                applicationId: plan.correlation.applicationId,
+                requiredGaps: workday.requiredGaps ?? [],
+                filledCategories: workday.filledCategories ?? [],
+                step: workday.step ?? 'APPLICATION_STEP',
+                cvUploadState: workday.cvUploadState ?? 'NO_FIELD',
+                coverLetterUploadState: workday.coverLetterUploadState ?? 'NO_FIELD',
+              }),
+            ]);
+          } else {
+            await Promise.allSettled([
+              eventSink({
+                type: 'HUMAN_REVIEW_REQUIRED',
+                planId,
+                jobId: plan.correlation.jobId,
+                applicationId: plan.correlation.applicationId,
+                loginStatus: plan.credentialSaved === true ? (workday.status ?? 'FORM_NOT_FOUND') : 'CREDENTIAL_REQUIRED',
+              }),
+            ]);
+          }
+        }
+      } else if (plan.planType === 'ASHBY' && !isAshbySubmitAttempt) {
+        // Phase 14: mirrors the ZOHO_RECRUIT/LEVER review-notification shape
+        // exactly. A genuine submit attempt (isAshbySubmitAttempt) is
+        // deliberately excluded — same as GREENHOUSE's own isSubmitAttempt
+        // guard — since that outcome is either SUBMITTED or a distinct
+        // "submission unconfirmed" state, never a form-preparation review.
+        const ashby = runResult.ashbyResult ?? {};
+        await Promise.allSettled([
+          eventSink({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
+            applicationId: plan.correlation.applicationId, requiredGaps: ashby.requiredGaps ?? [],
+            filled: ashby.filled ?? [], fields: ashby.fields ?? [],
+            resumeUploadState: ashby.resumeUploadState ?? 'NO_FIELD' }),
+        ]);
       }
       await reportOutcome(planId, outcome, detail, result);
       console.log(JSON.stringify({ type: 'PLAN_ENDED', planId, outcome }));
@@ -326,7 +412,10 @@ if (planFile) {
         console.error(JSON.stringify({ type: 'PLAN_DEFERRED_ON_SHUTDOWN', planId }));
       } else {
         const outcome = error.name === 'HardStopError'
-          ? (/CAPTCHA|ANTI_BOT|ACCESS_DENIED/i.test(String(error.reason)) ? 'BLOCKED_ANTI_BOT' : 'FAILED')
+          // MFA_REQUIRED (Phase 7: Workday) is the same bucket as CAPTCHA/
+          // anti-bot — a genuine stop condition requiring the human, never a
+          // logic failure on Robin's part, and never auto-retried either way.
+          ? (/CAPTCHA|ANTI_BOT|ACCESS_DENIED|MFA_REQUIRED/i.test(String(error.reason)) ? 'BLOCKED_ANTI_BOT' : 'FAILED')
           : 'FAILED';
         console.error(JSON.stringify({ type: 'POLL_ERROR', planId, outcome, error: error.message }));
         // Persist WHY this plan stopped so the review panel can show the candidate
