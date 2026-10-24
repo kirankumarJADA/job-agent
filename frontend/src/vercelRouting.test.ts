@@ -23,6 +23,11 @@ describe('Vercel SPA routing', () => {
       '/models',
       '/sources',
       '/logs',
+      '/applications',
+      '/review-queue',
+      '/approval-rules',
+      '/auto-apply',
+      '/auto-apply-activity',
     ];
     const sources = config.rewrites.map(({ source }) => source);
 

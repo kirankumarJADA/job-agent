@@ -38,7 +38,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "spring.flyway.placeholders.remove_seed_dev_account=false",
         "app.worker-event-token=test-worker-token-0123456789abcdef",
         "app.cors.allowed-origins=https://job-agent-beige.vercel.app",
-        "app.discovery.scheduler-enabled=false"
+        "app.discovery.scheduler-enabled=false", "app.security.operator-emails=dev@example.local"
 })
 @AutoConfigureMockMvc
 @Testcontainers

@@ -68,6 +68,7 @@ class RateLimitServiceTest {
         assertThat(limiter.bucketFor("POST", "/api/v1/cover-letters/generate")).isEqualTo("llm");
         assertThat(limiter.bucketFor("POST", "/api/v1/applications/abc/re-prepare")).isEqualTo("llm");
         assertThat(limiter.bucketFor("POST", "/api/v1/discovery/run")).isEqualTo("discovery");
+        assertThat(limiter.bucketFor("POST", "/api/v1/discovery/run-for-me")).isEqualTo("discovery");
         assertThat(limiter.bucketFor("POST", "/api/v1/jobs/seed-uk")).isEqualTo("discovery");
         // The health check runs a live board fetch, so it shares the discovery quota:
         assertThat(limiter.bucketFor("POST", "/api/v1/sources/0b7e-id/health-check")).isEqualTo("discovery");
@@ -92,6 +93,29 @@ class RateLimitServiceTest {
         assertThat(limiter.bucketFor("GET", "/api/v1/track/reviews")).isNull();
         assertThat(limiter.bucketFor("POST", "/api/v1/applications/abc/status")).isNull();
         assertThat(limiter.bucketFor("POST", "/api/v1/applications/abc/track/reports/extra")).isNull();
+    }
+
+    @Test
+    void theManagedMailWebhookIsBoundedPerClientWithoutAffectingOtherRoutes() {
+        RateLimitService limiter = new RateLimitService(true);
+        assertThat(limiter.bucketFor("POST", "/api/v1/managed-mail/inbound/mailgun")).isEqualTo("mail-inbound");
+        assertThat(limiter.bucketFor("GET", "/api/v1/managed-mail/inbound/mailgun")).isNull();
+        assertThat(limiter.bucketFor("POST", "/api/v1/managed-mail/address")).isNull();
+        for (int i = 0; i < 120; i++) {
+            assertThat(limiter.checkAndRecord("mail-inbound", "ip:198.51.100.7")).isEqualTo(-1);
+        }
+        assertThat(limiter.checkAndRecord("mail-inbound", "ip:198.51.100.7")).isPositive();
+        assertThat(limiter.checkAndRecord("mail-inbound", "ip:198.51.100.8")).isEqualTo(-1);
+    }
+
+    @Test
+    void theProductionGmailAuthorizationRuleBoundsOAuthStateCreation() {
+        RateLimitService limiter = new RateLimitService(true);
+        for (int i = 0; i < 10; i++) {
+            assertThat(limiter.checkAndRecord("gmail-authorize", "profile-1")).isEqualTo(-1);
+        }
+        assertThat(limiter.checkAndRecord("gmail-authorize", "profile-1")).isPositive();
+        assertThat(limiter.checkAndRecord("gmail-authorize", "profile-2")).isEqualTo(-1);
     }
 
     @Test

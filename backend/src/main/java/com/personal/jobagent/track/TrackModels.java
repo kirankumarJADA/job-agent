@@ -35,8 +35,22 @@ public final class TrackModels {
         }
     }
 
-    /** Latest automation plan for the application, or null when none exists. */
-    public record PlanState(String status, boolean submitApproved) {
+    /**
+     * Latest automation plan for the application, or null when none exists.
+     *
+     * @param reconciliationNote Phase 15: the worker's own persisted
+     *     evidence for why a real submit-click attempt's outcome could not
+     *     be confirmed — populated only when {@code status} is {@code
+     *     RECONCILIATION_REQUIRED} (read from the plan's own {@code result}
+     *     column, the same {@code SUBMISSION_RECONCILIATION} shape {@code
+     *     outcome.js} persists); {@code null} for every other status,
+     *     including {@code SUBMITTED} (a confirmed submission's own evidence
+     *     lives in the audit trail, not duplicated here).
+     */
+    public record PlanState(String status, boolean submitApproved, String reconciliationNote) {
+        public PlanState(String status, boolean submitApproved) {
+            this(status, submitApproved, null);
+        }
     }
 
     /** A pre-8.3 STATUS_CHANGED row: a candidate transition or an inference from an email. */

@@ -53,7 +53,8 @@ class PlatformLiveIT {
             "PINPOINT, workwithus.pinpointhq.com",
             "RECRUITEE, vandebron",
             "TEAMTAILOR, career.teamtailor.com",
-            "TSENTA, jobs"
+            "TSENTA, jobs",
+            "FREEHIRE, backend"
     })
     void liveBoardAnswersAndParses(String kind, String board) {
         PlatformKind platform = PlatformKind.valueOf(kind);

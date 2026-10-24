@@ -122,4 +122,116 @@ class ResumeAtsIntelligenceServiceTest {
             assertThat(new org.apache.pdfbox.text.PDFTextStripper().getText(doc)).contains("José Núñez").contains("Café Systems");
         }
     }
+
+    /**
+     * A CV with every supported section populated multiple times over
+     * (several jobs each with several bullets, several education entries,
+     * several projects, several certifications) renders every one of them,
+     * in the canonical section order, across as many pages as it needs.
+     */
+    @Test
+    void rendersEverySupportedSectionWithMultipleEntriesInCanonicalOrder() throws Exception {
+        UUID profileId = UUID.randomUUID();
+        ProfileRecord profile = new ProfileRecord(profileId, UUID.randomUUID(), "Staff Engineer", "+1 555 0100", "Remote",
+                Map.of(), Map.of(), "Verified full-stack engineer with a decade of experience.",
+                Map.of("github", "https://github.com/kitchen-sink"), 1, "READY");
+        ContactRecord contact = new ContactRecord("Kitchen Sink Candidate", "candidate@example.test");
+        List<SkillRecord> skills = new ArrayList<>();
+        for (int i = 0; i < 15; i++) {
+            skills.add(new SkillRecord(UUID.randomUUID(), profileId, "Skill" + i, "Category", 3, null, null));
+        }
+        List<WorkExperienceRecord> experiences = new ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            List<Map<String, Object>> bullets = new ArrayList<>();
+            for (int b = 0; b < 5; b++) bullets.add(Map.of("text", "Job" + i + " achievement " + b));
+            experiences.add(new WorkExperienceRecord(UUID.randomUUID(), profileId, "Company" + i, "Role" + i,
+                    LocalDate.of(2010 + i, 1, 1), i == 5 ? null : LocalDate.of(2011 + i, 1, 1), "City" + i, bullets, i));
+        }
+        List<ProjectRecord> projects = new ArrayList<>();
+        for (int i = 0; i < 4; i++) {
+            projects.add(new ProjectRecord(UUID.randomUUID(), profileId, "Project" + i, "Summary of project " + i,
+                    "https://example.test/project" + i, List.of(Map.of("text", "Project" + i + " detail")), i));
+        }
+        List<EducationRecord> education = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            education.add(new EducationRecord(UUID.randomUUID(), profileId, "University" + i, "Degree" + i,
+                    "Field" + i, 2000 + i, 2004 + i, "Distinction"));
+        }
+        List<CertificationRecord> certifications = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            certifications.add(new CertificationRecord(UUID.randomUUID(), profileId, "Cert" + i, "Issuer" + i,
+                    LocalDate.of(2015 + i, 1, 1), "CRED" + i));
+        }
+        ResumeAtsIntelligenceService.Source source = new ResumeAtsIntelligenceService.Source(
+                profile, contact, skills, experiences, education, projects, certifications);
+
+        ResumeAtsIntelligenceService service = new ResumeAtsIntelligenceService(
+                mock(JobRepository.class), mock(ProfileRepository.class), mock(ResumeAtsRepository.class),
+                mock(NotificationService.class), new CvArtifactService());
+        String markdown = service.render(source, Set.of());
+
+        int summaryIdx = markdown.indexOf("## Summary");
+        int skillsIdx = markdown.indexOf("## Skills");
+        int experienceIdx = markdown.indexOf("## Experience");
+        int projectsIdx = markdown.indexOf("## Projects");
+        int educationIdx = markdown.indexOf("## Education");
+        int certsIdx = markdown.indexOf("## Certifications");
+        assertThat(List.of(summaryIdx, skillsIdx, experienceIdx, projectsIdx, educationIdx, certsIdx))
+                .allMatch(i -> i >= 0);
+        assertThat(summaryIdx).isLessThan(skillsIdx);
+        assertThat(skillsIdx).isLessThan(experienceIdx);
+        assertThat(experienceIdx).isLessThan(projectsIdx);
+        assertThat(projectsIdx).isLessThan(educationIdx);
+        assertThat(educationIdx).isLessThan(certsIdx);
+
+        byte[] pdf = new CvArtifactService().renderPdf(markdown);
+        try (var doc = org.apache.pdfbox.Loader.loadPDF(pdf)) {
+            assertThat(doc.getNumberOfPages()).isGreaterThan(1);
+            String text = new org.apache.pdfbox.text.PDFTextStripper().getText(doc);
+            for (int i = 0; i < 6; i++) {
+                assertThat(text).contains("Company" + i).contains("Role" + i);
+                for (int b = 0; b < 5; b++) assertThat(text).contains("Job" + i + " achievement " + b);
+            }
+            for (int i = 0; i < 4; i++) assertThat(text).contains("Project" + i).contains("https://example.test/project" + i);
+            for (int i = 0; i < 3; i++) assertThat(text).contains("University" + i).contains("Degree" + i);
+            for (int i = 0; i < 3; i++) assertThat(text).contains("Cert" + i).contains("Issuer" + i);
+            for (int i = 0; i < 15; i++) assertThat(text).contains("Skill" + i);
+        }
+    }
+
+    /**
+     * A profile with no summary, no skills, no projects, no education and no
+     * certifications — only contact details and one job — never emits a
+     * heading for a section that has nothing to show, and still renders a
+     * normal, valid single-page PDF (no stray gaps, no crash).
+     */
+    @Test
+    void omitsEveryEmptyOptionalSectionWithoutStrayHeadingsOrGaps() throws Exception {
+        UUID profileId = UUID.randomUUID();
+        ProfileRecord profile = new ProfileRecord(profileId, UUID.randomUUID(), null, null, null,
+                Map.of(), Map.of(), null, Map.of(), 1, "READY");
+        ContactRecord contact = new ContactRecord("Minimal Candidate", "minimal@example.test");
+        WorkExperienceRecord onlyJob = new WorkExperienceRecord(UUID.randomUUID(), profileId, "Only Co", "Only Role",
+                LocalDate.of(2020, 1, 1), null, null, List.of(Map.of("text", "Did the one thing")), 0);
+        ResumeAtsIntelligenceService.Source source = new ResumeAtsIntelligenceService.Source(
+                profile, contact, List.of(), List.of(onlyJob), List.of(), List.of(), List.of());
+
+        ResumeAtsIntelligenceService service = new ResumeAtsIntelligenceService(
+                mock(JobRepository.class), mock(ProfileRepository.class), mock(ResumeAtsRepository.class),
+                mock(NotificationService.class), new CvArtifactService());
+        String markdown = service.render(source, Set.of());
+
+        assertThat(markdown).doesNotContain("## Summary").doesNotContain("## Skills")
+                .doesNotContain("## Projects").doesNotContain("## Education").doesNotContain("## Certifications")
+                .contains("## Experience").contains("Only Co").contains("Did the one thing");
+
+        byte[] pdf = new CvArtifactService().renderPdf(markdown);
+        try (var doc = org.apache.pdfbox.Loader.loadPDF(pdf)) {
+            assertThat(doc.getNumberOfPages()).isEqualTo(1);
+            String text = new org.apache.pdfbox.text.PDFTextStripper().getText(doc);
+            assertThat(text).contains("Minimal Candidate").contains("Only Co").doesNotContain("Summary")
+                    .doesNotContain("Skills").doesNotContain("Projects").doesNotContain("Education")
+                    .doesNotContain("Certifications");
+        }
+    }
 }

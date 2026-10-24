@@ -1,6 +1,7 @@
 package com.personal.jobagent.application;
 
 import com.personal.jobagent.audit.AuditLogWriter;
+import com.personal.jobagent.common.QuotaService;
 import com.personal.jobagent.security.OwnerContext;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -37,6 +38,7 @@ class ApprovalRulesControllerTest {
     private final AuditLogWriter audit = mock(AuditLogWriter.class);
     private final OwnerContext ownerContext = mock(OwnerContext.class);
     private final HttpServletRequest httpRequest = mock(HttpServletRequest.class);
+    private final QuotaService quotas = mock(QuotaService.class);
 
     private ApprovalRulesController controller;
 
@@ -46,7 +48,7 @@ class ApprovalRulesControllerTest {
         when(ownerContext.actorOr("user")).thenReturn("test@example.com");
         when(httpRequest.getRemoteAddr()).thenReturn("127.0.0.1");
         when(decisions.effectiveApplicationMode(PROFILE)).thenReturn("ASSISTED");
-        controller = new ApprovalRulesController(decisions, audit, ownerContext);
+        controller = new ApprovalRulesController(decisions, audit, ownerContext, quotas);
     }
 
     private void ruleStateIs(ApplicationDecisionService.RuleAvailability availability,
@@ -215,6 +217,58 @@ class ApprovalRulesControllerTest {
             // Verify saveRule is called with PROFILE from ownerContext,
             // not with any id from the request body
             verify(decisions).saveRule(eq(PROFILE), any(), any());
+        }
+    }
+
+    @Nested
+    class Activity {
+
+        @Test
+        void requiresProfile() {
+            when(ownerContext.profileIdOrNull()).thenReturn(null);
+
+            ResponseEntity<?> response = controller.activity();
+
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+            verify(decisions, never()).activitySummary(any());
+        }
+
+        @Test
+        void reportsConsideredCountsByDecisionAndTodaysQuotaUsage() {
+            when(decisions.activitySummary(PROFILE)).thenReturn(new ApplicationDecisionService.ActivitySummary(
+                    new ApplicationDecisionService.ActivityWindow(3,
+                            Map.of("AUTO_APPLY", 2, "NEEDS_REVIEW", 1)),
+                    new ApplicationDecisionService.ActivityWindow(10,
+                            Map.of("AUTO_APPLY", 6, "NEEDS_REVIEW", 3, "SKIP", 1))));
+            when(quotas.check(PROFILE, "application_daily"))
+                    .thenReturn(new QuotaService.QuotaCheckResult(true, 2, 25, "calls"));
+
+            ResponseEntity<?> response = controller.activity();
+
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+            Map<String, Object> body = bodyOf(response);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> today = (Map<String, Object>) body.get("today");
+            assertThat(today.get("considered")).isEqualTo(3);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> quota = (Map<String, Object>) body.get("dailyApplicationQuota");
+            assertThat(quota.get("used")).isEqualTo(2.0);
+            assertThat(quota.get("limit")).isEqualTo(25.0);
+            assertThat(quota.get("remaining")).isEqualTo(23.0);
+        }
+
+        @Test
+        void neverTakesOwnershipFromAnythingButTheAuthenticatedProfile() {
+            when(decisions.activitySummary(PROFILE)).thenReturn(new ApplicationDecisionService.ActivitySummary(
+                    new ApplicationDecisionService.ActivityWindow(0, Map.of()),
+                    new ApplicationDecisionService.ActivityWindow(0, Map.of())));
+            when(quotas.check(PROFILE, "application_daily"))
+                    .thenReturn(new QuotaService.QuotaCheckResult(true, 0, 25, "calls"));
+
+            controller.activity();
+
+            verify(decisions).activitySummary(PROFILE);
+            verify(quotas).check(PROFILE, "application_daily");
         }
     }
 }

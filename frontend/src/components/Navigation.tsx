@@ -104,6 +104,24 @@ const MAIN_NAV: NavItem[] = [
       </svg>
     ),
   },
+  {
+    name: 'Auto Apply',
+    path: '/auto-apply',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" className={iconClass} aria-hidden="true">
+        <path d="M13 3L4 14h6l-1 7 9-11h-6l1-7Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+      </svg>
+    ),
+  },
+  {
+    name: 'Auto Apply Activity',
+    path: '/auto-apply-activity',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" className={iconClass} aria-hidden="true">
+        <path d="M4 19V5m0 14h16M8 15v-4m4 4V9m4 10V7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    ),
+  },
 ];
 
 const SYSTEM_NAV: NavItem[] = [

@@ -57,15 +57,21 @@ class PlatformCoverageAuditTest {
             Map.entry(PlatformKind.RECRUITEE, List.of("recruitee-offers.json")),
             Map.entry(PlatformKind.TEAMTAILOR, List.of("teamtailor.rss")),
             Map.entry(PlatformKind.TSENTA, List.of("tsenta-list-page2.html", "tsenta-list-page3.html", "tsenta-detail-zoho.html",
-                    "tsenta-detail-unsupported.html", "tsenta-robots.txt")));
+                    "tsenta-detail-unsupported.html", "tsenta-robots.txt")),
+            Map.entry(PlatformKind.FREEHIRE, List.of("freehire-search-page1.json")),
+            Map.entry(PlatformKind.ARBEITNOW, List.of("arbeitnow-page1.json")),
+            Map.entry(PlatformKind.ADZUNA, List.of("adzuna-search-page1.json")));
 
     private final PlatformRegistry registry = new PlatformRegistry(40);
 
     @Test
-    void theManifestIsExactlyTsentasThirtyPlatformsPlusTsentaAsASeparateSource() {
+    void theManifestIsExactlyTsentasThirtyPlatformsPlusTheFourAggregatorSources() {
         assertThat(PlatformKind.atsPlatforms()).extracting(PlatformKind::displayName).containsExactlyElementsOf(TSENTA_LIST);
-        assertThat(PlatformKind.values()).hasSize(31);
+        assertThat(PlatformKind.values()).hasSize(34);
         assertThat(PlatformKind.TSENTA.isAggregator()).isTrue();
+        assertThat(PlatformKind.FREEHIRE.isAggregator()).isTrue();
+        assertThat(PlatformKind.ARBEITNOW.isAggregator()).isTrue();
+        assertThat(PlatformKind.ADZUNA.isAggregator()).isTrue();
         assertThat(PlatformKind.atsPlatforms()).noneMatch(PlatformKind::isAggregator);
     }
 
@@ -189,8 +195,16 @@ class PlatformCoverageAuditTest {
 
     @Test
     void theDatabaseAcceptsEveryManifestKind() throws IOException {
+        // The CHECK constraint is replaced wholesale by each migration that
+        // touches it (drop + re-add), so the CURRENT accepted set is whatever
+        // the LATEST such migration says — V048 (Adzuna) superseded V045
+        // (Arbeitnow), which superseded V044 (FreeHire), which itself
+        // superseded V037 (Tsenta + the 30 ATS platforms), with every one of
+        // its kinds plus 'ADZUNA'. Reading the latest migration, not an
+        // earlier one, is what makes this assertion true to the actual
+        // current constraint.
         String migration;
-        try (InputStream in = getClass().getResourceAsStream("/db/migration/V037__platform_discovery_expansion.sql")) {
+        try (InputStream in = getClass().getResourceAsStream("/db/migration/V048__adzuna_and_region_aware_sources.sql")) {
             assertThat(in).isNotNull();
             migration = new String(in.readAllBytes(), StandardCharsets.UTF_8);
         }

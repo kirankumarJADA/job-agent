@@ -3,7 +3,13 @@ import { apiFetch } from '../api/client';
 import { ApplicationSummary, ApplicationTimelineEvent, AutomationPackageView } from '../types';
 import { ApplicationPrepStatus } from '../components/ApplicationPrepStatus';
 import { ApplyWorkspace } from '../components/ApplyWorkspace';
+import { ZohoRecruitReviewPanel } from '../components/ZohoRecruitReviewPanel';
+import { LeverReviewPanel } from '../components/LeverReviewPanel';
+import { WorkdayReviewPanel } from '../components/WorkdayReviewPanel';
+import { AshbyReviewPanel } from '../components/AshbyReviewPanel';
 import { ApplicationTrackPanel } from '../components/ApplicationTrackPanel';
+import { GmailMailboxCard } from '../components/GmailMailboxCard';
+import { RobinMailboxCard } from '../components/RobinMailboxCard';
 import { TrackReviewQueue } from '../components/TrackReviewQueue';
 import { stageTone } from '../components/trackShared';
 import {
@@ -29,12 +35,33 @@ import {
  * is still shown as such. Each card has a timeline/evidence panel, and
  * employer messages awaiting the candidate are listed above the queue.
  */
+function extractErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error) {
+    try {
+      const parsed = JSON.parse(err.message);
+      if (parsed && typeof parsed.error === 'string') return parsed.error;
+      if (parsed && typeof parsed.message === 'string') return parsed.message;
+    } catch {
+      // not JSON
+    }
+    return err.message;
+  }
+  return fallback;
+}
+
+function isSubmissionCapablePlan(planType?: string | null, planId?: string | null): boolean {
+  if (!planId || !planType) return false;
+  return planType === 'GREENHOUSE' || planType === 'ASHBY';
+}
+
 export const ApplicationsPage: React.FC = () => {
   const [applications, setApplications] = useState<ApplicationSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reviewingPlan, setReviewingPlan] = useState<string | null>(null);
   const [approvingPlan, setApprovingPlan] = useState<string | null>(null);
+  const [queueingPlan, setQueueingPlan] = useState<string | null>(null);
+  const [reconcilingPlan, setReconcilingPlan] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
   // TRACK refresh keys: a change made in one place reloads the other views of
   // the same evidence without collapsing them.
@@ -75,6 +102,13 @@ export const ApplicationsPage: React.FC = () => {
     void refreshQuietly();
   }, [refreshQuietly]);
 
+  /** A mailbox sync can add employer messages to any application and to the queue. */
+  const onMailboxChanged = useCallback(() => {
+    setQueueKey((k) => k + 1);
+    setPanelsKey((k) => k + 1);
+    void refreshQuietly();
+  }, [refreshQuietly]);
+
   useEffect(() => {
     fetchApplications();
   }, [fetchApplications]);
@@ -89,7 +123,7 @@ export const ApplicationsPage: React.FC = () => {
       });
       await fetchApplications();
     } catch (err) {
-      setReviewError(err instanceof Error ? err.message : 'Could not record review');
+      setReviewError(extractErrorMessage(err, 'Could not record review'));
     } finally {
       setReviewingPlan(null);
     }
@@ -99,14 +133,57 @@ export const ApplicationsPage: React.FC = () => {
     setApprovingPlan(planId);
     setReviewError(null);
     try {
-      // Explicit APPROVED_FOR_SUBMISSION. The backend keeps actual submission
-      // disabled: the plan becomes READY_TO_SUBMIT and nothing ever submits it.
+      // Explicit approval of intent only: the plan becomes READY_TO_SUBMIT.
+      // This alone never submits anything — a separate, explicit action
+      // (queueSubmission, below) is required before a real submission click
+      // is ever queued for the worker.
       await apiFetch(`/automation/plans/${planId}/approve-submit`, { method: 'POST' });
       await fetchApplications();
     } catch (err) {
-      setReviewError(err instanceof Error ? err.message : 'Approval failed');
+      setReviewError(extractErrorMessage(err, 'Approval failed'));
     } finally {
       setApprovingPlan(null);
+    }
+  };
+
+  /**
+   * The second, deliberately separate human action (Phase 4): queues the
+   * real submission click for an already-approved, READY_TO_SUBMIT plan.
+   * This is the one action in this entire page that leads to a genuine,
+   * irreversible external submission — the worker picks up the queued
+   * (PREPARED) plan and performs the real click, then reports SUBMITTED only
+   * with confirmation evidence Robin actually observed (never on a generic
+   * HTTP success or a started request alone).
+   */
+  const queueSubmission = async (planId: string) => {
+    setQueueingPlan(planId);
+    setReviewError(null);
+    try {
+      await apiFetch(`/automation/plans/${planId}/prepare-submit`, { method: 'POST' });
+      await fetchApplications();
+    } catch (err) {
+      setReviewError(extractErrorMessage(err, 'Could not queue the real submission'));
+    } finally {
+      setQueueingPlan(null);
+    }
+  };
+
+  /**
+   * Phase 15: Safe candidate reconciliation for a plan in RECONCILIATION_REQUIRED.
+   * Calls POST /api/v1/automation/plans/{id}/reconcile.
+   * Creates a fresh independent retry attempt if platform-confirmed evidence allows it;
+   * otherwise the server returns 409 explaining why human verification is required.
+   */
+  const reconcilePlan = async (planId: string) => {
+    setReconcilingPlan(planId);
+    setReviewError(null);
+    try {
+      await apiFetch(`/automation/plans/${planId}/reconcile`, { method: 'POST' });
+      await fetchApplications();
+    } catch (err) {
+      setReviewError(extractErrorMessage(err, 'Reconciliation could not create a new attempt'));
+    } finally {
+      setReconcilingPlan(null);
     }
   };
 
@@ -143,6 +220,16 @@ export const ApplicationsPage: React.FC = () => {
       )}
 
       {reviewError && <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300" role="alert">{reviewError}</div>}
+
+      {/* One of each mailbox per account, shown once (not per application):
+          the Robin-managed address that employer accounts are registered with
+          (Phase 8.5), and the read-only Gmail connection used for tracking (Phase 8.4). */}
+      {!loading && (
+        <div className="mb-4 space-y-4">
+          <RobinMailboxCard />
+          <GmailMailboxCard onChanged={onMailboxChanged} />
+        </div>
+      )}
 
       {!loading && !error && applications.length > 0 && (
         <TrackReviewQueue
@@ -206,14 +293,59 @@ export const ApplicationsPage: React.FC = () => {
                 refreshKey={panelsKey}
                 onChanged={onPanelChanged}
               />
-              <ApplyWorkspace
-                applicationId={application.id}
-                planId={application.planId}
-                planStatus={application.planStatus}
-                onChanged={fetchApplications}
-              />
+              {application.planType !== 'ZOHO_RECRUIT' && application.planType !== 'LEVER' && application.planType !== 'WORKDAY' && (
+                <ApplyWorkspace
+                  applicationId={application.id}
+                  planId={application.planId}
+                  planStatus={application.planStatus}
+                  isSubmissionCapable={isSubmissionCapablePlan(application.planType, application.planId)}
+                  onChanged={fetchApplications}
+                />
+              )}
 
-              {application.planId && (
+              {application.planId && application.planType === 'ZOHO_RECRUIT' && (
+                <div className="mt-3">
+                  <ZohoRecruitReviewPanel planId={application.planId} onChanged={fetchApplications} />
+                </div>
+              )}
+
+              {application.planId && application.planType === 'LEVER' && (
+                <div className="mt-3">
+                  <LeverReviewPanel planId={application.planId} onChanged={fetchApplications} />
+                </div>
+              )}
+
+              {application.planId && application.planType === 'WORKDAY' && (
+                <div className="mt-3">
+                  <WorkdayReviewPanel planId={application.planId} onChanged={fetchApplications} />
+                </div>
+              )}
+
+              {application.planId && application.planType === 'ASHBY' && (
+                <div className="mt-3">
+                  <AshbyReviewPanel
+                    planId={application.planId}
+                    planStatus={application.planStatus}
+                    onChanged={fetchApplications}
+                  />
+                </div>
+              )}
+
+              {application.planId && application.planType === 'INSPECTION' && (
+                <div className="mt-3 rounded-lg border border-line bg-surface-sunken px-3 py-2">
+                  <div className="flex items-center gap-3 text-sm">
+                    <span className="text-ink-muted">Form inspection</span>
+                    <PlanStatusBadge status={application.planStatus} />
+                    <span className="text-xs text-ink-muted">
+                      {application.planStatus === 'COMPLETED'
+                        ? 'Inspection complete — this employer requires manual application. Use your prepared materials to apply directly on their site.'
+                        : 'Robin is inspecting the employer form to identify required questions.'}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {isSubmissionCapablePlan(application.planType, application.planId) && (
                 <div className="mt-3 rounded-lg border border-line bg-surface-sunken px-3 py-2">
                   <div className="flex items-center gap-3 text-sm">
                     <span className="text-ink-muted">Automation</span>
@@ -222,16 +354,42 @@ export const ApplicationsPage: React.FC = () => {
                       <span className="text-amber-400 text-xs font-medium">Human review required</span>
                     )}
                     {application.planStatus === 'READY_TO_SUBMIT' && (
-                      <span className="text-emerald-400 text-xs font-medium">Ready to submit — actual submission is disabled</span>
+                      <span className="text-emerald-400 text-xs font-medium">
+                        Approved — queuing will submit this application to the employer
+                      </span>
+                    )}
+                    {application.planStatus === 'PREPARED' && (
+                      <span className="text-blue-400 text-xs font-medium">
+                        Real submission queued — waiting for the worker to run it
+                      </span>
+                    )}
+                    {application.planStatus === 'RUNNING' && (
+                      <span className="text-yellow-400 text-xs font-medium">
+                        Submitting now — outcome not yet confirmed
+                      </span>
+                    )}
+                    {application.planStatus === 'SUBMITTED' && (
+                      <span className="text-green-400 text-xs font-medium">
+                        Confirmed submitted by the employer&apos;s own form
+                      </span>
                     )}
                     {application.planStatus === 'AWAITING_SUBMIT_APPROVAL' && (
                       <span className="text-red-400 text-xs font-medium">Submission is disabled</span>
                     )}
                     {application.planStatus === 'FAILED' && (
-                      <span className="text-red-400 text-xs">Plan failed</span>
+                      <span className="text-red-400 text-xs">
+                        Plan failed — review and use &quot;Fix &amp; requeue&quot; from the automation package below
+                      </span>
                     )}
                     {application.planStatus === 'BLOCKED_ANTI_BOT' && (
-                      <span className="text-red-400 text-xs">Blocked by anti-bot</span>
+                      <span className="text-red-400 text-xs">
+                        Blocked by anti-bot — an uncertain outcome; Robin never guesses what happened
+                      </span>
+                    )}
+                    {application.planStatus === 'RECONCILIATION_REQUIRED' && (
+                      <span className="text-purple-400 text-xs font-medium">
+                        Submission unconfirmed — human reconciliation required
+                      </span>
                     )}
                     {application.planStatus === 'AWAITING_APPROVAL' && application.planId && (
                       <div className="ml-auto flex items-center gap-2">
@@ -250,6 +408,32 @@ export const ApplicationsPage: React.FC = () => {
                           className="rounded-md border border-emerald-500/40 px-3 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50"
                         >
                           {approvingPlan === application.planId ? 'Approving…' : 'Approve for submission'}
+                        </button>
+                      </div>
+                    )}
+                    {application.planStatus === 'READY_TO_SUBMIT' && application.planId && (
+                      <div className="ml-auto flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={queueingPlan === application.planId}
+                          onClick={() => queueSubmission(application.planId!)}
+                          title="This queues a real submission of your approved resume, cover letter and answers to the employer's own application form. This cannot be undone once the worker runs it."
+                          className="rounded-md border border-red-500/40 px-3 py-1 text-xs font-semibold text-red-300 hover:bg-red-500/10 disabled:opacity-50"
+                        >
+                          {queueingPlan === application.planId ? 'Queuing…' : 'Submit to employer now'}
+                        </button>
+                      </div>
+                    )}
+                    {application.planStatus === 'RECONCILIATION_REQUIRED' && application.planId && (
+                      <div className="ml-auto flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={reconcilingPlan === application.planId}
+                          onClick={() => reconcilePlan(application.planId!)}
+                          title="Attempts safe recovery. A fresh attempt is prepared only if platform evidence confirmed the employer rejected the previous attempt."
+                          className="rounded-md border border-purple-500/40 px-3 py-1 text-xs font-semibold text-purple-200 hover:bg-purple-500/10 disabled:opacity-50"
+                        >
+                          {reconcilingPlan === application.planId ? 'Reconciling…' : 'Reconcile & prepare retry'}
                         </button>
                       </div>
                     )}
@@ -426,10 +610,18 @@ function TrackStatusPill({ application }: { application: ApplicationSummary }) {
 }
 
 function PlanStatusBadge({ status }: { status?: string | null }) {  if (!status) return null;
+  // SUBMITTED is the one, narrowly-reachable terminal state a real
+  // submission confirms (AutomationPlanRepository#completeRealSubmission) —
+  // it is the ONLY status styled green. COMPLETED means the worker finished
+  // its steps without error, which for a plain inspection plan is routine
+  // and for every ATS-automated plan (GREENHOUSE, ZOHO_RECRUIT) never even
+  // occurs (both always end AWAITING_APPROVAL or SUBMITTED — see
+  // worker/src/outcome.js) — styled neutral so it is never mistaken for a
+  // successful submission at a glance.
   const colors: Record<string, string> = {
     PREPARED: 'bg-blue-500/20 text-blue-300',
     RUNNING: 'bg-yellow-500/20 text-yellow-300',
-    COMPLETED: 'bg-green-500/20 text-green-300',
+    COMPLETED: 'bg-gray-500/20 text-gray-400',
     SUBMITTED: 'bg-green-500/20 text-green-300',
     FAILED: 'bg-red-500/20 text-red-300',
     BLOCKED_ANTI_BOT: 'bg-red-500/20 text-red-300',
@@ -437,6 +629,7 @@ function PlanStatusBadge({ status }: { status?: string | null }) {  if (!status)
     READY_TO_SUBMIT: 'bg-emerald-500/20 text-emerald-300',
     AWAITING_SUBMIT_APPROVAL: 'bg-red-500/20 text-red-300',
     ABANDONED: 'bg-gray-500/20 text-gray-400',
+    RECONCILIATION_REQUIRED: 'bg-purple-500/20 text-purple-300',
   };
   return (
     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${colors[status] || 'bg-gray-500/20 text-gray-400'}`}>

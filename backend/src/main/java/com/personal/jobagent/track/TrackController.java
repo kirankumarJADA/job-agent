@@ -31,6 +31,9 @@ import java.util.function.Supplier;
  * <pre>
  * GET  /api/v1/applications/{id}/track                       reconciled status, evidence, reviews
  * GET  /api/v1/applications/{id}/track/timeline?cursor&limit chronological timeline page
+ * GET  /api/v1/applications/{id}/receipt                     durable submission receipt (latest attempt)
+ * GET  /api/v1/applications/{id}/receipts/{attemptId}        durable receipt for specific attempt
+ * GET  /api/v1/applications/{id}/receipts                    attempt history list for application
  * POST /api/v1/applications/{id}/track/reports               candidate report (e.g. "I applied myself")
  * POST /api/v1/applications/{id}/track/receipts/{rid}/review confirm/reject a piece of evidence
  * GET  /api/v1/track/reviews                                 employer messages awaiting the candidate
@@ -44,10 +47,12 @@ public class TrackController {
     private static final Logger log = LoggerFactory.getLogger(TrackController.class);
 
     private final ApplicationTrackingService tracking;
+    private final ApplicationReceiptService receipts;
     private final OwnerContext ownerContext;
 
-    public TrackController(ApplicationTrackingService tracking, OwnerContext ownerContext) {
+    public TrackController(ApplicationTrackingService tracking, ApplicationReceiptService receipts, OwnerContext ownerContext) {
         this.tracking = tracking;
+        this.receipts = receipts;
         this.ownerContext = ownerContext;
     }
 
@@ -76,6 +81,28 @@ public class TrackController {
                 .<ResponseEntity<?>>map(page -> ResponseEntity.ok(Map.of("items", page.items(),
                         "nextCursor", page.nextCursor() == null ? "" : page.nextCursor(), "limit", page.limit())))
                 .orElseGet(() -> notFound(request, "No application with that id")));
+    }
+
+    @GetMapping("/applications/{id}/receipt")
+    public ResponseEntity<?> receipt(@PathVariable UUID id, HttpServletRequest request) {
+        UUID profileId = ownerContext.profileIdOrNull();
+        return run(request, () -> receipts.getReceipt(profileId, id, null)
+                .<ResponseEntity<?>>map(ResponseEntity::ok)
+                .orElseGet(() -> notFound(request, "No application with that id")));
+    }
+
+    @GetMapping("/applications/{id}/receipts/{attemptId}")
+    public ResponseEntity<?> receiptAttempt(@PathVariable UUID id, @PathVariable UUID attemptId, HttpServletRequest request) {
+        UUID profileId = ownerContext.profileIdOrNull();
+        return run(request, () -> receipts.getReceipt(profileId, id, attemptId)
+                .<ResponseEntity<?>>map(ResponseEntity::ok)
+                .orElseGet(() -> notFound(request, "No receipt attempt with that id")));
+    }
+
+    @GetMapping("/applications/{id}/receipts")
+    public ResponseEntity<?> receiptsList(@PathVariable UUID id, HttpServletRequest request) {
+        UUID profileId = ownerContext.profileIdOrNull();
+        return run(request, () -> ResponseEntity.ok(Map.of("items", receipts.getAttempts(profileId, id))));
     }
 
     @PostMapping("/applications/{id}/track/reports")

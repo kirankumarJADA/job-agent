@@ -68,6 +68,9 @@ to the dependency major, non-root `pwuser`, graceful-shutdown entrypoint).
 | `WORKER_COMPLETE_URL` | `https://<backend>/api/v1/automation/plans/{id}/complete` |
 | `WORKER_EVENT_URL` | `https://<backend>/api/v1/automation/events` |
 | `WORKER_EVENT_TOKEN` | same value as the backend's `WORKER_EVENT_TOKEN` (sent as Bearer) |
+| `WORKER_REGISTRATION_IDENTITY_URL` | `https://<backend>/api/v1/mailbox-verification/registration-identity` — which address an employer account is registered with (Robin-managed by default); 409 pauses with `MANAGED_MAILBOX_NOT_READY` |
+| `WORKER_VERIFICATION_URL` | `https://<backend>/api/v1/mailbox-verification/resolve` — the fresh verification code or link for that account; a miss pauses for the human |
+| `WORKER_EMPLOYER_CREDENTIAL_URL` | `https://<backend>/api/v1/employer-credentials/resolve` — this candidate's saved portal password for an employer domain (`EmployerCredentialService`); a miss (no credential saved) pauses for the human, it is never guessed or generated |
 | `WORKER_POLL_INTERVAL_MS` | optional, default `10000` |
 
 `WORKER_POLL_URL` is also the base the worker derives package and artifact

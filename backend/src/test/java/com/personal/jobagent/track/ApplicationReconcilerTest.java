@@ -121,6 +121,36 @@ class ApplicationReconcilerTest {
         }
     }
 
+    @Test
+    void aConfirmedRobinSubmissionIsAppliedAndVerified() {
+        S s = new S();
+        s.plan = new PlanState("SUBMITTED", true);
+        TrackState state = reconcile(s);
+        assertThat(state.status()).isEqualTo(Stage.APPLIED);
+        assertThat(state.basis()).isEqualTo(Basis.VERIFIED);
+        assertThat(state.label()).isEqualTo("Applied — verified");
+        assertThat(state.submission().state()).isEqualTo(SubmissionState.CONFIRMED);
+        assertThat(state.robinSubmitted()).isTrue();
+        assertThat(state.robinSubmissionNote()).contains("Robin submitted this application and confirmed it with platform evidence");
+        assertThat(state.reason()).contains("Robin submitted this application and confirmed it with platform evidence");
+    }
+
+    @Test
+    void anUnconfirmedRealSubmitClickRequiresReconciliationAndNeverAutoRetries() {
+        S s = new S();
+        s.plan = new PlanState("RECONCILIATION_REQUIRED", true, "[FORM_STILL_PRESENT] the form was still visible");
+        TrackState state = reconcile(s);
+        assertThat(state.status()).isEqualTo(Stage.READY_TO_APPLY);
+        assertThat(state.basis()).isEqualTo(Basis.INTERNAL);
+        assertThat(state.robinSubmitted()).isFalse();
+        assertThat(state.submission().state()).isEqualTo(SubmissionState.UNVERIFIED);
+        assertThat(state.reason()).contains("A real submission was attempted but its outcome could not be confirmed — Robin will never retry it automatically");
+        assertThat(state.attention()).extracting(TrackModels.Attention::code).contains("RECONCILIATION_REQUIRED");
+        assertThat(state.attention()).extracting(TrackModels.Attention::message)
+                .anyMatch(m -> m.contains("[FORM_STILL_PRESENT] the form was still visible") && m.contains("verify with the employer"));
+        assertThat(state.robinSubmissionNote()).contains("A real submission was attempted by Robin, but the employer's acceptance could not be confirmed");
+    }
+
     // ── candidate reports and receipts ──────────────────────────────────
 
     @Test

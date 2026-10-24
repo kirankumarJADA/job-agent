@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.time.LocalDate;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -71,10 +72,20 @@ class ApplicationDecisionServiceTest {
         when(preferenceSets.findActiveByProfileId(PROFILE)).thenReturn(Optional.of(record));
     }
 
+    /**
+     * Stubs the atomic reservation {@code decide()} now makes at the one
+     * point it is actually about to return AUTO_APPLY
+     * (ApplicationDecisionService#tryAutoApply), replacing the old
+     * read-only {@code check()} peek this helper used to stub — kept under
+     * the same name/call sites throughout this file since every existing
+     * test's intent ("the quota allows/blocks this") is unchanged, only the
+     * underlying QuotaService method is.
+     */
+    private static final LocalDate RESERVATION_PERIOD_START = LocalDate.of(2026, 1, 15);
+
     private void quotaAllowed(boolean allowed) {
-        when(quotaService.check(eq(PROFILE), eq("application_daily")))
-                .thenReturn(new QuotaService.QuotaCheckResult(
-                        allowed, allowed ? 1 : 50, allowed ? 50 : 50, "applications"));
+        when(quotaService.tryReserve(eq(PROFILE), eq("application_daily"), eq(1.0)))
+                .thenReturn(new QuotaService.ReservationResult(allowed, allowed ? 1 : 50, 50, RESERVATION_PERIOD_START));
     }
 
     /** Simulates a persisted user_approval_rules row for PROFILE only. */
@@ -143,8 +154,14 @@ class ApplicationDecisionServiceTest {
 
         @Test
         void anExhaustedDailyQuotaFallsToReviewRegardlessOfMode() {
+            // Quota is now reserved only at the point a mode/rule/threshold
+            // combination would otherwise actually return AUTO_APPLY (see
+            // ApplicationDecisionService#tryAutoApply) — so this needs a
+            // rule that WOULD authorise CONTROLLED_AUTO, to prove the quota
+            // gate, not the rule, is what ultimately refuses it.
             mode("CONTROLLED_AUTO");
             quotaAllowed(false);
+            ruleExists(true, 50);
 
             var decision = service.decide(PROFILE, JOB, 95, "APPLY");
 
@@ -460,10 +477,10 @@ class ApplicationDecisionServiceTest {
             verify(db).queryForList(contains("user_approval_rules"), eq(PROFILE));
         }
 
-        // ── Quota is checked before any rule can authorise approval ──
+        // ── Quota is reserved atomically at the point a rule would otherwise approve ──
 
         @Test
-        void quotaIsCheckedEvenWhenAnEnabledRuleWouldOtherwiseApprove() {
+        void exhaustedQuotaRefusesAutoApplyEvenWhenAnEnabledRuleWouldOtherwiseApprove() {
             mode("CONTROLLED_AUTO");
             quotaAllowed(false);
             ruleExists(true, 1);
@@ -471,10 +488,11 @@ class ApplicationDecisionServiceTest {
             var decision = service.decide(PROFILE, JOB, 100, "APPLY");
 
             // Score 100 with an enabled rule at threshold 1 would auto-apply,
-            // so the quota reason proves the quota gate ran first.
+            // so the quota reason proves the reservation attempt is what
+            // ultimately blocked it, not the rule.
             assertThat(decision.decision()).isEqualTo("NEEDS_REVIEW");
             assertThat(decision.reason()).contains("quota exceeded");
-            verify(quotaService).check(eq(PROFILE), eq("application_daily"));
+            verify(quotaService).tryReserve(eq(PROFILE), eq("application_daily"), eq(1.0));
         }
 
         // ── Manual mode is always immune to rules ──
@@ -803,6 +821,61 @@ class ApplicationDecisionServiceTest {
             var decision = service.decide(PROFILE, JOB, 90, "APPLY");
 
             assertThat(decision.decision()).isEqualTo("APPROVED");
+        }
+
+        @Test
+        void aReplayThatHitsTheTerminalDecisionGuardReleasesItsReservationRatherThanLeakingIt() {
+            // A match that would authorise AUTO_APPLY this time around, but a
+            // terminal decision (e.g. a human already APPROVED or REJECTED
+            // this exact match) already exists for this (profile, job) pair
+            // — record()'s own upsert guard refuses the overwrite. The
+            // reservation tryAutoApply made just before calling record() was
+            // never actually spent on a real auto-apply, so it must be
+            // released here rather than silently shrinking today's quota.
+            mode("ASSISTED");
+            quotaAllowed(true);
+            when(db.update(contains("application_decisions"), any(Object[].class)))
+                    .thenReturn(0);
+            when(db.queryForList(contains("select decision, reason"), any(UUID.class), any(UUID.class)))
+                    .thenReturn(List.of(Map.of("decision", "REJECTED", "reason", "Not interested")));
+
+            var decision = service.decide(PROFILE, JOB, 95, "APPLY");
+
+            assertThat(decision.decision()).isEqualTo("REJECTED");
+            verify(quotaService).tryReserve(eq(PROFILE), eq("application_daily"), eq(1.0));
+            verify(quotaService).release(eq(PROFILE), eq("application_daily"), eq(1.0), eq(RESERVATION_PERIOD_START));
+        }
+    }
+
+    // ── Robin x Tsenta continuation: Auto Apply run-history summary ──
+    @Nested
+    class ActivitySummaryTest {
+
+        @Test
+        void aggregatesTodayAndLast7DaysSeparatelyByDecision() {
+            when(db.queryForList(contains("application_decisions"), eq(PROFILE), any(java.sql.Timestamp.class)))
+                    .thenReturn(
+                            List.of(Map.of("decision", "AUTO_APPLY", "n", 2L), Map.of("decision", "NEEDS_REVIEW", "n", 1L)),
+                            List.of(Map.of("decision", "AUTO_APPLY", "n", 6L), Map.of("decision", "SKIP", "n", 1L)));
+
+            var summary = service.activitySummary(PROFILE);
+
+            assertThat(summary.today().considered()).isEqualTo(3);
+            assertThat(summary.today().byDecision()).containsEntry("AUTO_APPLY", 2).containsEntry("NEEDS_REVIEW", 1);
+            assertThat(summary.last7Days().considered()).isEqualTo(7);
+            assertThat(summary.last7Days().byDecision()).containsEntry("AUTO_APPLY", 6).containsEntry("SKIP", 1);
+        }
+
+        @Test
+        void emptyActivityReportsZeroRatherThanThrowing() {
+            when(db.queryForList(contains("application_decisions"), eq(PROFILE), any(java.sql.Timestamp.class)))
+                    .thenReturn(List.of());
+
+            var summary = service.activitySummary(PROFILE);
+
+            assertThat(summary.today().considered()).isZero();
+            assertThat(summary.today().byDecision()).isEmpty();
+            assertThat(summary.last7Days().considered()).isZero();
         }
     }
 }

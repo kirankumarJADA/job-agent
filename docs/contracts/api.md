@@ -265,12 +265,22 @@ Validation specifics per resource (drawn directly from V001's `check` constraint
 
 ## Jobs (P1-g)
 
-### `GET /api/v1/jobs` — **PLANNED-P1-g**
+### `GET /api/v1/jobs` — **IMPLEMENTED (Phase 4)**
 
 - **Auth:** requires active session
-- **Query params:** `status`, `minScore`, `q` (full-text via the existing `search_vector` column), `postedAfter`, `cursor`
-- **Response 200:** `{ "items": [ {jobSummary} ], "next_cursor": "..." | null }`
-- **Validation:** `status` must be one of the DB enum values (`DISCOVERED|FILTERED_OUT|ANALYSED|SCORED|DECIDED|ARCHIVED|PIPELINE_ERROR`) — invalid value → 400, not silently ignored.
+- **Query params:**
+  - `status` — one of `DISCOVERED|FILTERED_OUT|ANALYSED|SCORED|DECIDED|ARCHIVED|PIPELINE_ERROR`; invalid value → 400.
+  - `q` — full-text search via `search_vector` (title, description and, since Phase 4, employer name).
+  - `location` — case-insensitive match against city, country or free-text location.
+  - `remote_type` — one of `REMOTE|HYBRID|ONSITE|UNKNOWN`; invalid value → 400.
+  - `employment_type`, `experience_level` — case-insensitive substring match against the stated free text (no controlled vocabulary exists for either field across sources).
+  - `salary_min` — only jobs with a KNOWN `salary_max` at or above this floor qualify; an unknown salary never silently satisfies it.
+  - `sponsorship` — one of `LIKELY_AVAILABLE|POSSIBLE|UNKNOWN|LIKELY_NOT_AVAILABLE|NOT_AVAILABLE`; only jobs that have actually been analysed qualify. Invalid value → 400.
+  - `posted_after` — ISO-8601 instant; only jobs with a KNOWN `posted_at` at or after it qualify. Invalid value → 400.
+  - `sort` — one of `recent` (default, `first_seen_at desc` — "newest discovered first"), `match` (the caller's own persisted `job_matches.score`, candidate-isolated), `posted` (`posted_at desc`, unknown dates sort last). Invalid value → 400.
+  - `cursor`, `limit` — keyset pagination; a cursor carries the sort it was issued for and is rejected (400) if replayed under a different `sort`.
+- **Response 200:** `{ "items": [ {jobSummary} ], "next_cursor": "..." | "" }`
+- **Deliberately not a filter:** source/ATS type — the candidate feed never reveals which site, ATS or aggregator surfaced a posting (Phase 8.2.5 source hiding).
 
 ### `GET /api/v1/jobs/{id}` — **PLANNED-P1-g**
 
@@ -330,6 +340,49 @@ Validation specifics per resource (drawn directly from V001's `check` constraint
 
 - **Response 200:** updated `routing_policies` row, `basis: 'BENCHMARK'`.
 - **Response 409:** promotion criteria not met (per §C6's promotion gate — quality gap ≥ ε, two consecutive runs within δ) — must return a clear reason, not a generic failure.
+
+---
+
+## Auto Apply batch workflow (Phase 5, Robin x Tsenta continuation) — **IMPLEMENTED**
+
+A separate, explicit, user-triggered sweep over the candidate's existing
+matched-job backlog, distinct from the continuous MANUAL/ASSISTED/CONTROLLED_AUTO
+decision engine behind `GET/PUT /api/v1/approval-rules` and
+`GET /api/v1/approval-rules/activity` — that engine keeps running unconditionally
+on every newly matched job regardless of these settings. "Prepared" here always
+means an application was created and handed to the existing asynchronous
+CV/cover-letter/answer preparation pipeline; it is never evidence of
+submission, and REAL_SUBMIT stays hard-stopped exactly as everywhere else.
+
+### `GET /api/v1/auto-apply/settings` / `PUT /api/v1/auto-apply/settings` — **IMPLEMENTED (Phase 5)**
+
+- **Auth:** requires active session; owner-scoped (candidate's own profile only).
+- **Response 200 (GET):** `{ enabled, configured, minScore, dailyCap, maxBatchSize, remoteType, location, employmentType, salaryMin }`. A profile with no saved row gets the documented safe defaults (`enabled: false`, `minScore: 70`, `dailyCap: 10`, `maxBatchSize: 25`) with `configured: false`.
+- **Request (PUT):** any subset of the same fields plus `clearFilters: boolean`; an omitted field keeps its previously saved value (or the default, if never saved) rather than being reset. `clearFilters: true` explicitly removes `remoteType`/`location`/`employmentType`/`salaryMin`.
+- **Validation (400):** `minScore` 1–100, `dailyCap` 1–50, `maxBatchSize` 1–50, `remoteType` one of `REMOTE|HYBRID|ONSITE|UNKNOWN`, `salaryMin` non-negative.
+- **Enabling this setting never starts any automatic activity** — a run is always a separate, explicit `POST /auto-apply/runs`.
+
+### `GET /api/v1/auto-apply/preview` — **IMPLEMENTED (Phase 5)**
+
+- **Auth:** requires active session; owner-scoped.
+- **Response 200:** `{ jobsConsidered, jobsEligible, items: [{ jobId, jobTitle, companyName, matchScore, predictedOutcome, detail }] }`. `predictedOutcome` is one of `WOULD_PREPARE|SKIPPED_THRESHOLD|SKIPPED_DUPLICATE|QUOTA_LIMITED`.
+- Read-only: reads the candidate's current settings and persisted `job_matches` scores only. Creates nothing, reserves no quota, re-scores nothing.
+
+### `POST /api/v1/auto-apply/runs` — **IMPLEMENTED (Phase 5)**
+
+- **Auth:** requires active session; owner-scoped.
+- **Request:** no body — an explicit action with no parameters; every bound comes from the candidate's saved settings.
+- **Response 200:** the completed run summary (see below).
+- **Response 409 `AUTO_APPLY_DISABLED`:** the candidate has not enabled batch preparation — nothing is attempted.
+- **Response 409 `PROFILE_NOT_READY`:** the candidate's profile `setup_status` is not `READY` — nothing is attempted, per the rule that a job is left unprepared rather than a fabricated application being created from an insufficient profile.
+- For each eligible job (persisted score ≥ the candidate's configured `minScore`, matching their configured filters): checks for an existing live application (duplicate/previously-attempted exclusion), atomically reserves one unit of this feature's own daily cap (`QuotaService`, quota key `auto_apply_batch_daily`, limit = the candidate's `dailyCap` — a separate counter from the continuous engine's `application_daily`), then calls the same `ApplicationPipelineService#createApplicationFromMatch` the rest of Robin uses. A reservation that does not end in a genuinely new application (duplicate, idempotent replay, failure) is released in the same request.
+
+### `GET /api/v1/auto-apply/runs` / `GET /api/v1/auto-apply/runs/{id}` — **IMPLEMENTED (Phase 5)**
+
+- **Auth:** requires active session; owner-scoped — a run id belonging to another profile reads as 404.
+- **Response 200 (list):** `{ items: [ {runSummary}, ... ] }`, most recent first, `limit` query param (default 20, max 100).
+- **Response 200 (one run):** the run summary plus `items: [{ jobId, jobTitle, companyName, applicationId, matchScore, outcome, detail, createdAt }]` — one row per job the run actually looked at, so every total is reconstructable from evidence.
+- **Run summary shape:** `{ id, status: RUNNING|COMPLETED|FAILED, jobsConsidered, jobsEligible, prepared, skippedDuplicate, skippedThreshold, skippedMissingProfile, skippedUnsupportedFlow, quotaLimited, failures, startedAt, completedAt, error }`. `skippedMissingProfile` and `skippedUnsupportedFlow` are reserved for forward compatibility; in the current architecture profile-readiness is a whole-run gate (see the 409 above) and every job's application/document flow is already handled gracefully downstream (inspection-only plan for an unsupported ATS), so neither currently increments per item — documented here rather than left to look like an unexplained always-zero field.
 
 ---
 

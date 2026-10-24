@@ -599,9 +599,12 @@ discovered from a platform until a board is configured.
 | 29 | SAP SuccessFactors | UNVERIFIED | Classic career sites render jobs client-side; no stable public listing endpoint validated | — | — | — |
 | 30 | Teamtailor | LIVE_VALIDATED | `{host}/jobs.rss` (full descriptions) | `*.teamtailor.com` host | career.teamtailor.com | **never** (feed not documented as exhaustive) |
 | 31 | Tsenta (aggregator) | LIVE_VALIDATED | Public SSR pages (see 12.4) | scope `jobs`, `jobs/remote`, `jobs/internships`, `jobs/entry-level` | tsenta.com/jobs | **never** |
+| 32 | FreeHire (aggregator) | LIVE_VALIDATED | Keyless public REST API, `GET /api/v1/agent/jobs/search` (see 12.6) | `category` facet value, e.g. `software_engineering`, `backend`, `frontend`, `fullstack`, `devops` | freehire.me/api/v1 | **never** |
 
 Totals: 21 of 30 ATS platforms LIVE_VALIDATED (adapter + real fixtures + live fetch), 8
-UNVERIFIED, 1 BLOCKED; Tsenta LIVE_VALIDATED. Unverified/blocked platforms have **no adapter** —
+UNVERIFIED, 1 BLOCKED; Tsenta and FreeHire both LIVE_VALIDATED (added later, Robin x Tsenta
+continuation — see 12.6; the 21/8/1 ATS-platform split above is unaffected since both
+aggregators are excluded from that count, same as Tsenta always was). Unverified/blocked platforms have **no adapter** —
 no placeholder that returns nothing or fake data — but their URLs are still recognised, so an
 import explains exactly which platform it is and why it cannot be followed yet.
 
@@ -772,6 +775,61 @@ and APPLY readiness lose the provenance fields listed in 12.8.
 - Zoho Recruit pagination beyond the first public response has not been observed (the validated
   tenant has 8 openings), so its listings are reported partial and never remove anything.
 - Workday hosts on `*.myworkdaysite.com` are not recognised (only `*.myworkdayjobs.com`).
+
+## 12.11 FreeHire
+
+Robin x Tsenta continuation (2026-10-19): FreeHire (https://freehire.me, MIT-licensed,
+https://github.com/strelov1/freehire) is a second aggregator source, added as
+`FreeHireAdapter` (`PlatformKind.FREEHIRE`). Unlike Tsenta, FreeHire is used through its own
+documented, keyless public REST API (https://freehire.me/docs/api,
+https://freehire.me/openapi.yaml v1.1.0, verified live 2026-10-19) rather than scraping
+HTML — FreeHire's own Go crawler already does the ATS-level crawling (92 platforms, confirmed
+from its README) and deduplication; re-crawling the same source a second time would duplicate
+that work, so this adapter reads FreeHire's finished catalogue instead.
+
+Endpoint: `GET /api/v1/agent/jobs/search?category={category}&limit={<=100}&offset={n}&sort=posted_at&order=desc&description_format=text`
+— the `/agent/...` variant specifically, because the sibling `/jobs/search` only returns a
+truncated description preview; `/agent/jobs/search` returns the full text in the same one call,
+so no separate per-job detail fetch is needed (every `ListingEntry` this adapter produces is
+already `complete()`). Pagination: FreeHire enforces `offset + limit <= 10000` server-side
+(confirmed live: exceeding it returns `400 {"error":"pagination too deep"}`); the adapter checks
+that ceiling itself before ever sending a request that would cross it.
+
+Search partitions: FreeHire has no per-employer board to import — it is one global catalogue —
+so `org_identifier` names a `category` facet value instead (validated against the full
+documented vocabulary). Five categories are seeded as separate `job_sources` rows (V044):
+`software_engineering`, `backend`, `frontend`, `fullstack`, `devops` — chosen for direct overlap
+with Robin's own existing skills/scoring vocabulary; confirmed live via `/jobs/facets` that these
+are five distinct, non-overlapping category values, not a parent/child hierarchy, so each
+genuinely widens coverage. Any other documented category can be added as a sixth row with no code
+change.
+
+Application URL: FreeHire's own `url` field is used directly as both the application and source
+URL — FreeHire's docs state every listing "links straight to the company's own careers page," and
+this is confirmed for the large majority of records (e.g. `source: workday/zohorecruit/...`, just
+carrying a `utm_source=freehire.me` tracking parameter FreeHire itself appends). FreeHire's own
+`source` vocabulary is confirmed live as 225 values wide and includes, alongside direct ATS
+platforms, secondary job-board aggregators (e.g. `whatjobs-ca`, `adzuna`) whose `url` is one hop
+short of the employer's own page; classifying which of those 225 values are "direct" with
+confidence was judged out of scope — this adapter passes FreeHire's own stated URL through
+unchanged, the same restraint every other adapter already applies to its own source's stated URL.
+
+Never exhaustive, by the same reasoning as Tsenta (12.4): even one category can hold well over
+10,000 postings, so every FreeHire listing is reported PARTIAL regardless of how clean the run
+was; absence from one run's bounded slice never removes anything. Defaults: page size 100, the
+shared discovery `max-pages` setting (no FreeHire-specific override needed — its clean JSON API
+needs none of Tsenta's slow-HTML-scraping accommodations), one HTTP call per page, no detail
+budget consumed at all (nothing ever needs a detail fetch).
+
+Live-verified (2026-10-19, read-only, a handful of small GET requests): `GET /api/v1/jobs`
+(unfiltered catalogue, `meta.total` 5,367,516 at request time — FreeHire's own advertised
+catalogue is "3.3M+" per its README; the live total is larger and growing, both numbers kept
+distinct from anything Robin actually imports), `GET /api/v1/jobs/search` with
+`category=software_engineering&work_mode=remote` (12,439 matches), `GET /api/v1/jobs/facets`
+(confirmed the full category vocabulary and per-category totals), the exact 10,000-offset
+rejection, and `GET /api/v1/agent/jobs/search` (confirmed full-text descriptions and the real
+record shape used to build this adapter's fixtures). See
+`ROBIN_TSENTA_FEATURE_IMPLEMENTATION_REPORT.md`'s FreeHire section for the complete live-check log.
 
 ---
 
@@ -1185,3 +1243,95 @@ fewer; the authentication/CSRF IT was then added and everything below was re-run
 Unchanged and hard-stopped. TRACK adds no submission path, no employer-side action and no outbound
 message. Approving a package still records approval only; the timeline and every status say
 nothing was sent.
+
+
+## 14. Phase 8.4 — Gmail read-only integration (feature branch, not live-verified)
+
+Branch: `phase8.4-gmail-integration`. Draft PR #6 targets `phase8.2.5-ats-discovery-expansion`; it is intentionally separate and has not been merged or deployed.
+
+### 14.1 Implemented path
+
+- OAuth endpoints: `GET /api/v1/integrations/gmail/status`, `GET /authorize`, `GET /callback`, `POST /sync`, `POST /disconnect`.
+- Explicit environment mapping in `application.yml`:
+  - `GMAIL_CLIENT_ID` → `app.gmail.client-id`
+  - `GMAIL_CLIENT_SECRET` → `app.gmail.client-secret`
+  - `GMAIL_REDIRECT_URI` → `app.gmail.redirect-uri`
+  - `APP_GMAIL_TOKEN_KEY` → `app.gmail.token-key` (base64-encoded 32-byte key recommended)
+  - `APP_GMAIL_STATE_SECRET` → `app.gmail.state-secret`
+  - `APP_FRONTEND_URL` → `app.frontend-url` (production must set the Vercel origin explicitly)
+  - Optional `APP_GMAIL_LOOKBACK_DAYS` → bounded initial lookback (maximum 90 days).
+- The requested and explicitly accepted OAuth scope is only `https://www.googleapis.com/auth/gmail.readonly`. No Gmail write endpoint is implemented.
+- Refresh tokens are encrypted using AES-256-GCM; OAuth state is signed, bound to the profile, time-limited and consumed from a database-backed hash table exactly once.
+- Initial sync reads the provider's `historyId` from `users.getProfile` before the bounded, paginated message list. Initial-list page tokens and the snapshot cursor are persisted together. Incremental sync handles sparse history records by fetching full message resources before checking their Gmail labels. Expired history cursors trigger a bounded resync; failed/partial work does not delete earlier evidence.
+- Message time is taken from Gmail's provider-supplied `internalDate`, not a sender-controlled `Date` header. Inbox eligibility comes from Gmail's structured label IDs, not the sender-controlled `To` / `Delivered-To` headers.
+- The provider's first `Authentication-Results` header is considered only when its authentication-service identifier is `mx.google.com`; an untrusted first header fails closed. This parsing and the receipt policy still require a real-mailbox validation before live receipt verification is claimed.
+- The Connect button preserves the configured API base path (`/api/v1`) when navigating to the OAuth start endpoint.
+- OAuth initiation is rate-limited to 10 attempts/hour per profile; manual sync is rate-limited to 6 attempts/hour. OAuth state creation stores only a SHA-256 hash and consumes each valid state once.
+
+### 14.2 Important verification boundary
+
+Fixture/mocked tests do not prove a real Google OAuth grant or real mailbox sync. Live Gmail authorization has not been performed because credentials and the consent screen are not configured in this environment. Do not say that a live application receipt has been verified until a connected mailbox provides acceptable evidence and that end-to-end path is demonstrated.
+
+PR #6 remains draft. Check the latest CI result on the PR head before changing this status. No production secrets were added, no deployment was performed, no mail was sent or mutated, no real application was submitted, and `REAL_SUBMIT` remains hard-stopped.
+
+### 14.3 Closure audit (2026-10-11)
+
+CI run #38 on `9549ec2` was green (backend, frontend, worker). A bounded audit of the Gmail code against
+documented provider behaviour found five defects. Each was reproduced by a failing test before the fix.
+
+1. **Sync stalled on a message that no longer exists.** Gmail history keeps `messageAdded` entries for
+   messages deleted since (replaced drafts, deleted mail), and `messages.get` answers 404 for them. The run
+   failed without advancing, and a stored backlog containing such an ID failed on every later sync. A 404 on
+   a message fetch now skips that ID (there is nothing to ingest); any other error still fails the run and
+   keeps the cursor and backlog.
+2. **Expired or revoked refresh tokens were never flagged.** The code caught `GoogleJsonResponseException`,
+   but the token endpoint throws `TokenResponseException`, so the connection stayed `CONNECTED` and every sync
+   failed with a raw error. `invalid_grant` (revoked, or the 7-day expiry of an OAuth app in Testing status)
+   now marks the connection `REAUTH_REQUIRED` and the card offers Connect again; `invalid_client` and other
+   token errors stay `FAILED` because reconnecting would not fix a configuration fault.
+3. **Gmail's DKIM result was not read.** Gmail reports the signer as `header.i=@domain`, not `header.d=`, so
+   the DKIM domain was always empty and no real Gmail message could pass sender authentication (fail-closed,
+   but `VERIFIED` was unreachable). The identity's domain is now used when `header.d` is absent; RFC 6376
+   requires it to equal or be a subdomain of the signing domain, so alignment is never looser. Only the first
+   `Authentication-Results` header is used, and only from `mx.google.com`, as before.
+4. **Connecting a different mailbox inherited the previous mailbox's history cursor, initial page token and
+   backlog.** These are now reset when the mailbox address changes; reconnecting the same mailbox keeps them.
+   The new `GmailConnectionStoreIT` (PostgreSQL 16, V039) also proves the round trip of cursor, page token,
+   backlog and status, their preservation on failure, single-use owner-bound expiring OAuth state hashes and the
+   purge cascade. Before this, those paths were covered only by mocks.
+5. **The Gmail card was rendered inside every application card** (one card and one status request per
+   application, and none when there are no applications), and the callback result
+   (`gmail=connected|refused|invalid_state|failed`) was never shown. The card is now rendered once on the
+   Applications page, explains the callback result in fixed wording (unknown values are ignored and nothing is
+   echoed), and refreshes the TRACK views after a sync or disconnect.
+
+Verification on Windows, run on the committed code tree:
+- `mvn -B verify` with a disposable `postgres:16` on 127.0.0.1:55436 for `UserDataIsolationIT`, removed
+  afterwards: BUILD SUCCESS.
+  - Unit: 995 run, 0 failures, 1 skipped (Redis assumption).
+  - Integration: 170 run, 0 failures, 1 skipped (opt-in live suite).
+  - Includes `GmailSyncServiceTest` 17, `GmailMessageMapperTest` 7, `GmailConnectionStoreIT` 5 and
+    `UserDataIsolationIT` 21.
+- Frontend: `tsc -b` clean, 300/300 tests (31 files), production build clean.
+- Worker: 19/19.
+
+### 14.4 Still to be done outside this repository (not verifiable here)
+
+- **Google Cloud project.**
+  - Enable the Gmail API.
+  - Configure the OAuth consent screen and add the `gmail.readonly` scope. It is a restricted scope: production
+    use needs Google's app verification and a security assessment. In Testing status, only listed test users
+    can connect and refresh tokens expire after 7 days (handled as `REAUTH_REQUIRED`).
+  - Create a Web OAuth client whose authorized redirect URI is exactly
+    `https://<backend-host>/api/v1/integrations/gmail/callback`.
+- **Backend environment.** Set `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REDIRECT_URI` (the same URI),
+  `APP_GMAIL_TOKEN_KEY` and `APP_GMAIL_STATE_SECRET` (generate each with `openssl rand -base64 32`), and
+  `APP_FRONTEND_URL` (the frontend origin, with no path). Keep `APP_GMAIL_TOKEN_KEY` stable: rotating it makes
+  stored grants undecryptable and every candidate must reconnect.
+- **Live check with a test account.**
+  1. Connect, and confirm the return to `/applications` says "Gmail connected".
+  2. Run Sync now, and confirm a real employer acknowledgement's `Authentication-Results` yields DKIM pass with
+     a domain and the expected verification outcome.
+  3. Disconnect, and confirm the grant disappears from the Google account's third-party access list.
+- **Manual sync only.** There is no background poller: each run reads at most 50 messages and is limited to
+  6 runs per hour per account.

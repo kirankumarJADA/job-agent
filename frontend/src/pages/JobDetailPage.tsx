@@ -260,19 +260,72 @@ export const JobDetailPage: React.FC = () => {
                   </div>
                   <ScoreBar value={match.score} />
                   <div className="space-y-1.5 text-xs">
-                    {(['skill_overlap', 'remote_fit', 'salary_fit'] as const).map((factor) => (
-                      <div key={factor} className="flex items-center justify-between text-ink-soft">
-                        <span className="capitalize">{factor.replace(/_/g, ' ')}</span>
-                        <span className="font-mono font-semibold text-ink">
-                          {match.breakdown?.[factor] != null ? `${match.breakdown[factor]}%` : '—'}
-                        </span>
-                      </div>
-                    ))}
+                    {(
+                      [
+                        ['skill_overlap', 'skill'],
+                        ['experience_fit', 'experience'],
+                        ['visa_fit', 'visa'],
+                        ['location_fit', 'location'],
+                        ['salary_fit', 'salary'],
+                        // Workplace-type fit is shown for context but is never
+                        // one of the weighted scoringWeights categories — see
+                        // JobMatchService#evaluateMatch — so it has no
+                        // `applicable` entry at all.
+                        ['remote_fit', null],
+                      ] as const
+                    ).map(([factor, applicableKey]) => {
+                      const weighed = applicableKey == null ? null : match.breakdown?.applicable?.[applicableKey];
+                      return (
+                        <div key={factor} className="flex items-center justify-between text-ink-soft">
+                          <span className="capitalize">
+                            {factor.replace(/_/g, ' ')}
+                            {weighed === false && (
+                              <span className="ml-1.5 text-[10px] font-semibold uppercase tracking-wide text-ink-faint">
+                                not weighted
+                              </span>
+                            )}
+                          </span>
+                          <span className="font-mono font-semibold text-ink">
+                            {match.breakdown?.[factor] != null ? `${match.breakdown[factor]}%` : '—'}
+                          </span>
+                        </div>
+                      );
+                    })}
                   </div>
                   {match.breakdown?.why && (
                     <p className="border-t border-line pt-3 text-xs leading-relaxed text-ink-muted">
                       {match.breakdown.why}
                     </p>
+                  )}
+                  {match.breakdown?.highlights && match.breakdown.highlights.length > 0 && (
+                    <div className="border-t border-line pt-3">
+                      <span className="block text-[11px] font-bold uppercase tracking-wider text-forest-800">
+                        Strengths & Alignment
+                      </span>
+                      <ul className="mt-1.5 space-y-1 text-xs text-forest-900">
+                        {match.breakdown.highlights.map((h, i) => (
+                          <li key={i} className="flex items-start gap-1.5">
+                            <span className="font-bold text-emerald-600" aria-hidden="true">✓</span>
+                            <span>{h}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {match.breakdown?.concerns && match.breakdown.concerns.length > 0 && (
+                    <div className="border-t border-line pt-3">
+                      <span className="block text-[11px] font-bold uppercase tracking-wider text-amber-800">
+                        Gaps & Points to Consider
+                      </span>
+                      <ul className="mt-1.5 space-y-1 text-xs text-amber-950">
+                        {match.breakdown.concerns.map((c, i) => (
+                          <li key={i} className="flex items-start gap-1.5">
+                            <span className="font-bold text-amber-600" aria-hidden="true">!</span>
+                            <span>{c}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   )}
                   {match.breakdown?.decision && (
                     <p className="text-xs font-medium leading-relaxed text-ink-soft">{match.breakdown.decision}</p>

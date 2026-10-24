@@ -25,7 +25,6 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -58,6 +57,11 @@ class ApplicationPipelineServiceTest {
     private final NotificationService notifications = mock(NotificationService.class);
     private final PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
     private ApplicationPipelineService service;
+    // The exact instance preferenceSets.findActiveByProfileId(PROFILE_A) returns —
+    // captured so tests can verify evaluateMatch was called with THIS object
+    // (PreferenceSetRecord has no stable equality across separately-constructed
+    // instances: its `id` is a fresh random UUID every time).
+    private PreferenceSetRecord prefsA;
 
     @BeforeEach
     void setUp() {
@@ -65,7 +69,8 @@ class ApplicationPipelineServiceTest {
                 preferenceSets, profileRepository, db, notifications, objectMapper,
                 mock(com.personal.jobagent.apply.ApplicationIdentityService.class), transactionManager);
         when(profileRepository.findAllIds()).thenReturn(List.of(PROFILE_A, PROFILE_B));
-        when(preferenceSets.findActiveByProfileId(PROFILE_A)).thenReturn(Optional.of(preferences("CONTROLLED_AUTO", 60000L)));
+        prefsA = preferences("CONTROLLED_AUTO", 60000L);
+        when(preferenceSets.findActiveByProfileId(PROFILE_A)).thenReturn(Optional.of(prefsA));
         when(preferenceSets.findActiveByProfileId(PROFILE_B)).thenReturn(Optional.empty());
 
         // Provide a default job and make hard filters pass by default
@@ -84,31 +89,31 @@ class ApplicationPipelineServiceTest {
     }
 
     private static JobMatchService.MatchResult match(int score, String recommendation) {
-        return new JobMatchService.MatchResult(JOB, score, recommendation, 1.0, 0.5, 0.5, false);
+        return new JobMatchService.MatchResult(JOB, score, recommendation, 1.0, 0.5, 0.5, 0.5, 0.5, 0.5, false);
     }
 
     @Test
-    void matchesEveryProfileWithPreferenceDerivedConstraintsAndNoRemoteConstraint() {
-        when(matchService.evaluateMatch(eq(JOB), eq(PROFILE_A), eq(60000L), isNull()))
+    void matchesEveryProfileWithItsOwnActivePreferenceSetOrNullWhenNoneExists() {
+        when(matchService.evaluateMatch(eq(JOB), eq(PROFILE_A), eq(prefsA)))
                 .thenReturn(match(80, "APPLY"));
-        when(matchService.evaluateMatch(eq(JOB), eq(PROFILE_B), isNull(), isNull()))
+        when(matchService.evaluateMatch(eq(JOB), eq(PROFILE_B), isNull()))
                 .thenReturn(match(20, "SKIP"));
 
         service.onJobIngested(JOB, "INSERTED");
 
-        verify(matchService).evaluateMatch(JOB, PROFILE_A, 60000L, null);
-        verify(matchService).evaluateMatch(JOB, PROFILE_B, null, null);
+        verify(matchService).evaluateMatch(JOB, PROFILE_A, prefsA);
+        verify(matchService).evaluateMatch(JOB, PROFILE_B, null);
     }
 
     @Test
     void matchingFailureForOneProfileDoesNotBlockTheOthersOrThrow() {
-        when(matchService.evaluateMatch(eq(JOB), eq(PROFILE_A), any(), any()))
+        when(matchService.evaluateMatch(eq(JOB), eq(PROFILE_A), any()))
                 .thenThrow(new IllegalStateException("scorer down"));
-        when(matchService.evaluateMatch(eq(JOB), eq(PROFILE_B), any(), any()))
+        when(matchService.evaluateMatch(eq(JOB), eq(PROFILE_B), any()))
                 .thenReturn(match(20, "SKIP"));
 
         assertThatCode(() -> service.onJobIngested(JOB, "TOUCHED")).doesNotThrowAnyException();
-        verify(matchService).evaluateMatch(JOB, PROFILE_B, null, null);
+        verify(matchService).evaluateMatch(JOB, PROFILE_B, null);
     }
 
     @Test
@@ -185,11 +190,11 @@ class ApplicationPipelineServiceTest {
 
     @Test
     void touchActionStillTriggersMatchingSoThePipelineSelfHeals() {
-        when(matchService.evaluateMatch(any(), any(), anyDouble(), isNull()))
+        when(matchService.evaluateMatch(any(), any(), any()))
                 .thenReturn(match(80, "APPLY"));
 
         service.onJobIngested(JOB, "TOUCHED");
 
-        verify(matchService, times(2)).evaluateMatch(eq(JOB), any(), any(), any());
+        verify(matchService, times(2)).evaluateMatch(eq(JOB), any(), any());
     }
 }
