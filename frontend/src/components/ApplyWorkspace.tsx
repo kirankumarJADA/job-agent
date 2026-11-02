@@ -23,8 +23,9 @@ export const ApplyWorkspace: React.FC<{
   applicationId: string;
   planId?: string | null;
   planStatus?: string | null;
+  isSubmissionCapable?: boolean;
   onChanged?: () => void;
-}> = ({ applicationId, planId = null, planStatus = null, onChanged }) => {
+}> = ({ applicationId, planId = null, planStatus = null, isSubmissionCapable = false, onChanged }) => {
   const [readiness, setReadiness] = useState<ApplyReadiness | null>(null);
   const [loading, setLoading] = useState(true);
   const [unavailable, setUnavailable] = useState<string | null>(null);
@@ -97,7 +98,9 @@ export const ApplyWorkspace: React.FC<{
       // Reported only after the server has confirmed it.
       setSuccess(
         `Server confirmed the approval: ${result.status}. ` +
-          'Actual submission stays disabled (REAL_SUBMIT is hard-stopped).',
+          'This records intent only — nothing has been submitted. A separate, explicit ' +
+          '"Submit to employer now" action (in the Automation panel below) is required ' +
+          'before a real submission is ever queued for the worker.',
       );
       onChanged?.();
       refresh();
@@ -368,12 +371,22 @@ export const ApplyWorkspace: React.FC<{
               >
                 {busy === 'package' ? 'Preparing…' : 'Prepare execution package'}
               </PrimaryButton>
-              {planId && planStatus === 'AWAITING_APPROVAL' && (
+              {planId && planStatus === 'AWAITING_APPROVAL' && isSubmissionCapable && (
                 <SecondaryButton type="button" onClick={approve} disabled={busy !== null}>
                   {busy === 'approve' ? 'Approving…' : 'Approve for submission'}
                 </SecondaryButton>
               )}
-              {planId && planStatus !== 'AWAITING_APPROVAL' && (
+              {planId && planStatus === 'AWAITING_APPROVAL' && !isSubmissionCapable && (
+                <span className="text-xs text-ink-muted">
+                  This employer requires manual application — approval for automated submission is not supported.
+                </span>
+              )}
+              {planId && planStatus === 'RECONCILIATION_REQUIRED' && (
+                <span className="text-xs text-purple-300 font-medium">
+                  A real submission attempt could not be confirmed — approval is disabled and reconciliation is required.
+                </span>
+              )}
+              {planId && planStatus !== 'AWAITING_APPROVAL' && planStatus !== 'RECONCILIATION_REQUIRED' && (
                 <span className="text-xs text-ink-muted">
                   Automation plan {planId} is {planStatus ?? 'not awaiting approval'} — approval is only
                   possible once the plan awaits human review.
@@ -381,8 +394,9 @@ export const ApplyWorkspace: React.FC<{
               )}
             </div>
             <p className="mt-3 text-xs text-ink-faint">
-              Approval records intent only. No endpoint submits an application: REAL_SUBMIT remains
-              hard-stopped.
+              Approval records intent only and never submits anything by itself. A separate,
+              explicit action in the Automation panel below ("Submit to employer now") is required
+              before a real submission is ever queued.
             </p>
           </SectionCard>
         </>

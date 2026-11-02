@@ -86,6 +86,7 @@ public class RateLimitService {
                 || path.equals("/api/v1/application-answers/draft")) return "llm";
         if (path.matches("/api/v1/applications/[^/]+/re-prepare")) return "llm";
         if (path.equals("/api/v1/discovery/run")
+                || path.equals("/api/v1/discovery/run-for-me")
                 || path.equals("/api/v1/discovery/ingest")
                 || path.equals("/api/v1/discovery/linkedin/search")
                 || path.equals("/api/v1/discovery/maintenance")
@@ -110,7 +111,7 @@ public class RateLimitService {
         // Phase 8.5: the managed-mail webhook is public (signature-authenticated),
         // so unauthenticated floods are bounded per client address. A 429 is
         // retried by Mailgun, so a burst of genuine mail is delayed, not lost.
-        if (path.equals("/api/v1/managed-mail/inbound/mailgun")) return "mail-inbound";
+        if (path.startsWith("/api/v1/managed-mail/inbound/")) return "mail-inbound";
         return null;
     }
 

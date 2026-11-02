@@ -59,7 +59,6 @@ test('classifyZohoField never auto-fills what it cannot confidently identify', (
   assert.equal(classifyZohoField('City *', 'input', 'text'), ZohoFieldCategory.REQUIRES_HUMAN);
   assert.equal(classifyZohoField('Country *', 'input', 'text'), ZohoFieldCategory.REQUIRES_HUMAN);
   assert.equal(classifyZohoField('Experience in Years', 'input', 'text'), ZohoFieldCategory.REQUIRES_HUMAN);
-  assert.equal(classifyZohoField('LinkedIn', 'input', 'text'), ZohoFieldCategory.REQUIRES_HUMAN);
   assert.equal(classifyZohoField(null, 'input', 'text'), ZohoFieldCategory.UNRECOGNIZED);
 });
 
@@ -75,6 +74,18 @@ test('classifyZohoField fills Mobile/Phone verbatim, but never the country-dial-
   // A field merely labelled "Mobile" that isn't a text/tel input (e.g. a
   // hidden composite control) is not safely fillable either.
   assert.equal(classifyZohoField('Mobile *', 'select', null), ZohoFieldCategory.REQUIRES_HUMAN);
+});
+
+test('classifyZohoField fills the LinkedIn field verbatim (Phase 13), but never a non-text control sharing its label', () => {
+  // Live-verified (fulcrumdigital.zohorecruit.com, 2026-10-21): an optional
+  // "Social Links" -> "LinkedIn" plain text field, distinct from the
+  // unrelated "Apply with LinkedIn" OAuth-style button on the same page.
+  assert.equal(classifyZohoField('LinkedIn', 'input', 'text'), ZohoFieldCategory.IDENTITY_LINKEDIN);
+  assert.equal(classifyZohoField('LinkedIn', 'input', 'url'), ZohoFieldCategory.IDENTITY_LINKEDIN);
+  // A field merely labelled "LinkedIn" that isn't a text/url input is not
+  // safely fillable either.
+  assert.equal(classifyZohoField('LinkedIn', 'select', null), ZohoFieldCategory.REQUIRES_HUMAN);
+  assert.equal(classifyZohoField('LinkedIn', 'input', 'checkbox'), ZohoFieldCategory.REQUIRES_HUMAN);
 });
 
 test('classifyZohoField never auto-checks a consent/legal checkbox regardless of its label', () => {
@@ -100,6 +111,24 @@ test('planZohoFormActions fills only matched identity fields and reports every o
   assert.equal(result.captchaPresent, false);
   assert.deepEqual(result.toFill.map((f) => f.index), [0, 1, 2]);
   assert.deepEqual(result.requiredGaps.map((g) => g.index), [3]);
+});
+
+test('planZohoFormActions fills phone and LinkedIn (Phase 13) when the candidate has them, never invents either', () => {
+  const fields = [
+    { index: 0, rawLabel: 'Mobile *', tag: 'input', type: 'text', required: true },
+    { index: 1, rawLabel: 'LinkedIn', tag: 'input', type: 'text', required: false },
+  ];
+  const withBoth = planZohoFormActions(fields, { phone: '+44 7700 900123', linkedIn: 'https://linkedin.com/in/ada' });
+  assert.deepEqual(withBoth.toFill, [
+    { index: 0, value: '+44 7700 900123', category: 'IDENTITY_PHONE' },
+    { index: 1, value: 'https://linkedin.com/in/ada', category: 'IDENTITY_LINKEDIN' },
+  ]);
+  assert.deepEqual(withBoth.requiredGaps, []);
+
+  // Without either value, phone (required) is a gap and LinkedIn (optional) is silently skipped.
+  const withNeither = planZohoFormActions(fields, {});
+  assert.deepEqual(withNeither.toFill, []);
+  assert.deepEqual(withNeither.requiredGaps.map((g) => g.index), [0]);
 });
 
 test('planZohoFormActions fills nothing at all when a CAPTCHA is present anywhere on the form', () => {

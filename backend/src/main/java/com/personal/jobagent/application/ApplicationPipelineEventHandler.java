@@ -64,6 +64,9 @@ public class ApplicationPipelineEventHandler implements EventHandler {
     private final InspectionPlanService inspectionPlanService;
     private final GreenhouseExecutionPlanService greenhousePlanService;
     private final com.personal.jobagent.automation.ZohoRecruitExecutionPlanService zohoRecruitPlanService;
+    private final com.personal.jobagent.automation.LeverExecutionPlanService leverPlanService;
+    private final com.personal.jobagent.automation.WorkdayExecutionPlanService workdayPlanService;
+    private final com.personal.jobagent.automation.AshbyExecutionPlanService ashbyPlanService;
     private final ResumeAtsIntelligenceService resumeService;
     private final CoverLetterService coverLetterService;
     private final ApplicationAnswerService answerService;
@@ -80,6 +83,9 @@ public class ApplicationPipelineEventHandler implements EventHandler {
                                            InspectionPlanService inspectionPlanService,
                                            GreenhouseExecutionPlanService greenhousePlanService,
                                            com.personal.jobagent.automation.ZohoRecruitExecutionPlanService zohoRecruitPlanService,
+                                           com.personal.jobagent.automation.LeverExecutionPlanService leverPlanService,
+                                           com.personal.jobagent.automation.WorkdayExecutionPlanService workdayPlanService,
+                                           com.personal.jobagent.automation.AshbyExecutionPlanService ashbyPlanService,
                                            ResumeAtsIntelligenceService resumeService,
                                            CoverLetterService coverLetterService,
                                            ApplicationAnswerService answerService,
@@ -95,6 +101,9 @@ public class ApplicationPipelineEventHandler implements EventHandler {
         this.inspectionPlanService = inspectionPlanService;
         this.greenhousePlanService = greenhousePlanService;
         this.zohoRecruitPlanService = zohoRecruitPlanService;
+        this.leverPlanService = leverPlanService;
+        this.workdayPlanService = workdayPlanService;
+        this.ashbyPlanService = ashbyPlanService;
         this.resumeService = resumeService;
         this.coverLetterService = coverLetterService;
         this.answerService = answerService;
@@ -306,6 +315,27 @@ public class ApplicationPipelineEventHandler implements EventHandler {
                                 record(applicationId, "ZOHO_RECRUIT_PLAN_CREATED",
                                         Map.of("plan_id", planId.toString()));
                                 log.info("Zoho Recruit plan {} queued for application {}", planId, applicationId);
+                            });
+                } else if (leverPlanService.handles(applicationUrl)) {
+                    leverPlanService.createExecutionPlan(profileId, applicationId, jobId)
+                            .ifPresent(planId -> {
+                                record(applicationId, "LEVER_PLAN_CREATED",
+                                        Map.of("plan_id", planId.toString()));
+                                log.info("Lever plan {} queued for application {}", planId, applicationId);
+                            });
+                } else if (workdayPlanService.handles(applicationUrl)) {
+                    workdayPlanService.createExecutionPlan(profileId, applicationId, jobId)
+                            .ifPresent(planId -> {
+                                record(applicationId, "WORKDAY_PLAN_CREATED",
+                                        Map.of("plan_id", planId.toString()));
+                                log.info("Workday plan {} queued for application {}", planId, applicationId);
+                            });
+                } else if (ashbyPlanService.handles(applicationUrl)) {
+                    ashbyPlanService.createExecutionPlan(profileId, applicationId, jobId)
+                            .ifPresent(planId -> {
+                                record(applicationId, "ASHBY_PLAN_CREATED",
+                                        Map.of("plan_id", planId.toString()));
+                                log.info("Ashby plan {} queued for application {}", planId, applicationId);
                             });
                 } else {
                     inspectionPlanService.createInspectionPlan(profileId, applicationId, jobId)

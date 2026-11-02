@@ -15,7 +15,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Which e-mail address an employer account is registered with (Phase 8.5).
+ * Which e-mail address an employer account is registered with (Phase 8.5, Phase 20).
  *
  * <p><b>Robin-managed email is the default.</b> A new registration for an
  * employer domain gets the candidate's Robin-managed address, so the employer's
@@ -172,10 +172,107 @@ public class RegistrationIdentityService {
         return rows.get(0);
     }
 
-    private Optional<Map<String, Object>> identity(UUID ownerProfileId, String domain) {
+    Optional<Map<String, Object>> identity(UUID ownerProfileId, String domain) {
         return db.queryForList("""
-                select id, applicant_email::text as applicant_email, account_status from applicant_identities
+                select id, applicant_email::text as applicant_email, account_status, provider from applicant_identities
                 where profile_id = ? and domain = ?
                 """, ownerProfileId, domain).stream().findFirst();
+    }
+
+    /**
+     * Resolves the candidate's contact email for an application form (Phase 20).
+     *
+     * <p>When Robin-managed email is active and usable on this deployment, returns
+     * the candidate's separate Robin-managed application address (recorded in
+     * {@code applicant_identities} for this employer domain). If managed email is
+     * not configured or not yet verified for receiving, returns the candidate's
+     * personal login email.
+     *
+     * <p>Fail-safe constraint: If managed email was explicitly selected or reserved
+     * for this profile or employer domain, and managed email is not active,
+     * {@link ManagedMailboxNotReadyException} is raised instead of silently leaking
+     * the candidate's personal login email.
+     */
+    public String resolveApplicationContactEmail(UUID profileId, String applicationUrl, String personalEmail) {
+        if (profileId == null) return personalEmail;
+        String domain = domainOf(applicationUrl);
+        if (domain != null) {
+            Optional<Map<String, Object>> existing = identity(profileId, domain);
+            if (existing.isPresent()) {
+                Map<String, Object> idRow = existing.get();
+                String provider = String.valueOf(idRow.get("provider"));
+                String accountStatus = String.valueOf(idRow.get("account_status"));
+                if ("ROBIN_MANAGED".equals(provider)) {
+                    if (!"ACTIVE".equals(accountStatus)) {
+                        throw new ManagedMailboxNotReadyException("IDENTITY_DISABLED");
+                    }
+                    if (mailboxes.readiness() != ManagedMailboxService.Readiness.ACTIVE) {
+                        throw new ManagedMailboxNotReadyException(mailboxes.readiness().name());
+                    }
+                    Object registered = idRow.get("applicant_email");
+                    if (registered != null && !String.valueOf(registered).isBlank()) {
+                        return String.valueOf(registered).toLowerCase(java.util.Locale.ROOT).trim();
+                    }
+                }
+                if ("ACTIVE".equals(accountStatus)) {
+                    Object registered = idRow.get("applicant_email");
+                    if (registered != null && !String.valueOf(registered).isBlank()) {
+                        return String.valueOf(registered).toLowerCase(java.util.Locale.ROOT).trim();
+                    }
+                }
+            }
+        }
+
+        // When the candidate has explicitly reserved a Robin-managed address, do not
+        // silently leak their personal email if receiving is not ready.
+        Optional<ManagedMailboxService.ManagedAddress> candidateAddress = mailboxes.findAddress(profileId);
+        if (candidateAddress.isPresent()) {
+            if (mailboxes.readiness() != ManagedMailboxService.Readiness.ACTIVE) {
+                throw new ManagedMailboxNotReadyException(mailboxes.readiness().name());
+            }
+            ManagedMailboxService.ManagedAddress address = candidateAddress.get();
+            if (!address.active()) {
+                throw new ManagedMailboxNotReadyException("ADDRESS_DISABLED");
+            }
+            String managedEmail = address.address().toLowerCase(java.util.Locale.ROOT).trim();
+            if (domain != null) {
+                db.update("""
+                        insert into applicant_identities (id, profile_id, applicant_email, provider, domain)
+                        values (?, ?, ?, 'ROBIN_MANAGED', ?)
+                        on conflict (profile_id, domain) do nothing
+                        """, UuidV7.generate(), profileId, managedEmail, domain);
+            }
+            return managedEmail;
+        }
+
+        if (mailboxes.readiness() == ManagedMailboxService.Readiness.ACTIVE) {
+            try {
+                ManagedMailboxService.ManagedAddress address = mailboxes.ensureAddress(profileId);
+                if (address != null && address.active()) {
+                    String managedEmail = address.address().toLowerCase(java.util.Locale.ROOT).trim();
+                    if (domain != null) {
+                        db.update("""
+                                insert into applicant_identities (id, profile_id, applicant_email, provider, domain)
+                                values (?, ?, ?, 'ROBIN_MANAGED', ?)
+                                on conflict (profile_id, domain) do nothing
+                                """, UuidV7.generate(), profileId, managedEmail, domain);
+                    }
+                    return managedEmail;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return personalEmail;
+    }
+
+    public static String domainOf(String url) {
+        if (url == null || url.isBlank()) return null;
+        try {
+            String host = java.net.URI.create(url).getHost();
+            if (host == null) return null;
+            return MailAddresses.employerDomain(host).orElse(null);
+        } catch (Exception e) {
+            return null;
+        }
     }
 }

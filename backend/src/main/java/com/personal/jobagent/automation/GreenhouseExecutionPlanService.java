@@ -51,21 +51,50 @@ public class GreenhouseExecutionPlanService {
         if (profileId == null || applicationId == null || jobId == null) {
             throw new IllegalArgumentException("profile, application, and job correlation are required");
         }
+        String applicationUrl = applicationUrlOf(profileId, applicationId, jobId);
+        if (applicationUrl == null) return Optional.empty();
+        return buildPlan(profileId, applicationId, jobId, applicationUrl, "greenhouse:" + applicationId);
+    }
+
+    /**
+     * Phase 15: the Greenhouse counterpart of {@code
+     * AshbyExecutionPlanService#createRetryExecutionPlan} — see that
+     * method's own doc comment for the full reasoning (a distinct
+     * idempotency key, keyed by the SUPERSEDED plan's own id, so this can
+     * never collide with or overwrite it; idempotent against a double
+     * "request a new attempt" click). Called only from {@code
+     * AutomationController#reconcile} once that endpoint's own evidence and
+     * authorization checks already passed for a plan in {@code
+     * RECONCILIATION_REQUIRED}.
+     */
+    @Transactional
+    public Optional<UUID> createRetryExecutionPlan(UUID profileId, UUID applicationId, UUID jobId, UUID supersededPlanId) {
+        if (profileId == null || applicationId == null || jobId == null || supersededPlanId == null) {
+            throw new IllegalArgumentException("profile, application, job and superseded-plan correlation are required");
+        }
+        String applicationUrl = applicationUrlOf(profileId, applicationId, jobId);
+        if (applicationUrl == null) return Optional.empty();
+        return buildPlan(profileId, applicationId, jobId, applicationUrl, "greenhouse-retry:" + supersededPlanId);
+    }
+
+    private String applicationUrlOf(UUID profileId, UUID applicationId, UUID jobId) {
         Map<String, Object> application = db.queryForMap("""
                 select a.id, a.profile_id, a.job_id, j.application_url
                 from applications a join jobs j on j.id = a.job_id
                 where a.id = ? and a.profile_id = ? and a.job_id = ?
                 """, applicationId, profileId, jobId);
         String applicationUrl = (String) application.get("application_url");
-        if (!handles(applicationUrl)) return Optional.empty();
+        return handles(applicationUrl) ? applicationUrl : null;
+    }
 
+    private Optional<UUID> buildPlan(UUID profileId, UUID applicationId, UUID jobId, String applicationUrl,
+                                     String idempotencyKey) {
         // ExecutionPackageService performs read-only inspection after the
         // application owner/job correlation has been established above.
         List<AutomationPlan.Step> baseSteps = List.of(
                 new AutomationPlan.Step("navigate-application", "NAVIGATE", "AUTO", Map.of("url", applicationUrl)),
                 new AutomationPlan.Step("screenshot-landing", "SCREENSHOT", "AUTO", Map.of()));
-        UUID planId = plans.create(profileId, applicationId, jobId, applicationUrl,
-                "greenhouse:" + applicationId, baseSteps);
+        UUID planId = plans.create(profileId, applicationId, jobId, applicationUrl, idempotencyKey, baseSteps);
 
         // An idempotent event replay must not rewrite a plan already claimed or
         // completed by a worker. A PREPARED row is invisible until this transaction commits.

@@ -142,4 +142,26 @@ describe('JobDetailPage FIND detail', () => {
     expect(await screen.findByText('No job with that id')).toBeTruthy();
     expect(screen.getByRole('link', { name: /Back to Jobs Feed/ })).toBeTruthy();
   });
+
+  it('renders strengths and gaps when breakdown contains highlights and concerns', async () => {
+    jobResponse = detail({}, {
+      score: 75,
+      recommendation: 'APPLY',
+      breakdown: {
+        skill_overlap: 80,
+        remote_fit: 100,
+        salary_fit: 100,
+        why: 'Matched Java.',
+        highlights: ['Matched 4 of 4 required skills', 'Workplace type aligns with preference'],
+        concerns: ['No salary declared on posting'],
+      },
+      scoredAt: '2026-10-01T10:00:00Z',
+    });
+    renderAt();
+    expect(await screen.findByText('Strengths & Alignment')).toBeTruthy();
+    expect(screen.getByText('Matched 4 of 4 required skills')).toBeTruthy();
+    expect(screen.getByText('Workplace type aligns with preference')).toBeTruthy();
+    expect(screen.getByText('Gaps & Points to Consider')).toBeTruthy();
+    expect(screen.getByText('No salary declared on posting')).toBeTruthy();
+  });
 });

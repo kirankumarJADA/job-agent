@@ -40,8 +40,13 @@ import java.util.UUID;
  * live DOM, classifies each by its RENDERED LABEL TEXT (the one thing that
  * stayed consistent, modulo minor wording, across both tenants sampled —
  * see {@code worker/src/zoho_recruit.js}'s module comment), and fills only
- * first name, last name and email — the fields unambiguous enough to never
- * guess. Everything else a real form also carries (a composite phone/mobile
+ * first name, last name, email, phone and LinkedIn — the fields unambiguous
+ * enough to never guess. (Phase 13: phone and LinkedIn were already
+ * supported by the worker's own classifier but never actually populated
+ * into this plan's {@code identity} from the backend — a wiring gap, not a
+ * missing-data gap, closed by reusing the same {@code profiles.phone}/
+ * {@code profiles.links} sources {@link LeverFieldMapper} already draws
+ * from.) Everything else a real form also carries (a composite phone/mobile
  * widget, a custom "Current Job Title" dropdown, résumé upload, required
  * consent/legal checkboxes with per-tenant wording, and any CAPTCHA) is
  * reported to the human, never fabricated. This plan type never submits —
@@ -105,14 +110,23 @@ public class ZohoRecruitExecutionPlanService {
     private final ApplyDocumentSelector documentSelector;
     private final JdbcTemplate db;
     private final ObjectMapper json;
+    private final com.personal.jobagent.mailbox.RegistrationIdentityService registrationIdentities;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public ZohoRecruitExecutionPlanService(AutomationPlanRepository plans, AtsAdapters.ZohoAdapter zohoAdapter,
-                                           ApplyDocumentSelector documentSelector, JdbcTemplate db, ObjectMapper json) {
+                                           ApplyDocumentSelector documentSelector, JdbcTemplate db, ObjectMapper json,
+                                           org.springframework.beans.factory.ObjectProvider<com.personal.jobagent.mailbox.RegistrationIdentityService> registrationIdentities) {
         this.plans = plans;
         this.zohoAdapter = zohoAdapter;
         this.documentSelector = documentSelector;
         this.db = db;
         this.json = json;
+        this.registrationIdentities = registrationIdentities == null ? null : registrationIdentities.getIfAvailable();
+    }
+
+    public ZohoRecruitExecutionPlanService(AutomationPlanRepository plans, AtsAdapters.ZohoAdapter zohoAdapter,
+                                           ApplyDocumentSelector documentSelector, JdbcTemplate db, ObjectMapper json) {
+        this(plans, zohoAdapter, documentSelector, db, json, null);
     }
 
     public boolean handles(String applicationUrl) {
@@ -156,12 +170,17 @@ public class ZohoRecruitExecutionPlanService {
         }
 
         Map<String, Object> candidateRow = db.queryForMap("""
-                select u.email::text as email, u.display_name
+                select u.email::text as email, u.display_name, p.phone::text as phone,
+                       coalesce(p.links::text, '{}') as links
                 from applications a join profiles p on p.id = a.profile_id
                 join users u on u.id = p.user_id
                 where a.id = ? and a.profile_id = ? and a.job_id = ?
                 """, applicationId, profileId, jobId);
         String email = (String) candidateRow.get("email");
+        if (registrationIdentities != null) {
+            email = registrationIdentities.resolveApplicationContactEmail(profileId, applicationUrl, email);
+        }
+        String phone = (String) candidateRow.get("phone");
         GreenhouseFieldMapper.NameSplit name = GreenhouseFieldMapper.splitName((String) candidateRow.get("display_name"));
 
         Map<String, Object> identity = new LinkedHashMap<>();
@@ -171,6 +190,13 @@ public class ZohoRecruitExecutionPlanService {
         }
         if (email != null && !email.isBlank()) {
             identity.put("email", email);
+        }
+        if (phone != null && !phone.isBlank()) {
+            identity.put("phone", phone);
+        }
+        String linkedIn = linkedInOf(candidateRow.get("links"));
+        if (linkedIn != null) {
+            identity.put("linkedIn", linkedIn);
         }
 
         List<AutomationPlan.Step> steps = new java.util.ArrayList<>(baseSteps);
@@ -247,6 +273,29 @@ public class ZohoRecruitExecutionPlanService {
         letterMap.put("fileName", "cover-letter-" + version + ".txt");
         letterMap.put("url", url);
         return letterMap;
+    }
+
+    /**
+     * Mirrors {@code LeverFieldMapper#linkOutcome} exactly (same {@code
+     * profiles.links} map, same case-insensitive key-contains match) — the
+     * one verified, non-guessed source Robin has for a candidate's LinkedIn
+     * URL, reused rather than reinvented.
+     */
+    private String linkedInOf(Object linksJson) {
+        Map<String, Object> links;
+        try {
+            links = json.readValue(String.valueOf(linksJson), Map.class);
+        } catch (Exception ignored) {
+            return null;
+        }
+        if (links == null) return null;
+        for (var entry : links.entrySet()) {
+            if (entry.getKey() != null && entry.getKey().toLowerCase(java.util.Locale.ROOT).contains("linkedin")
+                    && entry.getValue() instanceof String url && !url.isBlank()) {
+                return url;
+            }
+        }
+        return null;
     }
 
     private void persistWorkerPlan(UUID planId, UUID profileId, UUID applicationId, UUID jobId,

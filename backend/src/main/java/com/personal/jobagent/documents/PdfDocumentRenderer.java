@@ -40,7 +40,7 @@ import java.util.Map;
 public final class PdfDocumentRenderer {
 
     /** Bumped whenever layout changes, so tailoring input hashes change with it. */
-    public static final String RENDERER_VERSION = "pdfbox-3.0.3/liberation-sans/layout-1";
+    public static final String RENDERER_VERSION = "pdfbox-3.0.3/liberation-sans/layout-2";
 
     private static final String FONT_RESOURCE = "/org/apache/pdfbox/resources/ttf/LiberationSans-Regular.ttf";
     private static final PDRectangle PAGE = PDRectangle.A4;
@@ -170,6 +170,21 @@ public final class PdfDocumentRenderer {
             float leading = style.size() * 1.35f;
             float maxWidth = PAGE.getWidth() - 2 * MARGIN - style.indent();
             List<String> lines = wrap(text, style.size(), maxWidth);
+
+            if ((block.kind() == Kind.HEADING || block.kind() == Kind.SUBHEADING) && y < PAGE.getHeight() - MARGIN) {
+                // A heading stranded as the last line on a page, with
+                // everything it introduces pushed to the next page, reads as
+                // a mistake. If there is not enough room left for the
+                // heading AND at least the start of what follows it, move
+                // the whole heading to a fresh page instead. Never applies
+                // right after an explicit page break (y already at the top)
+                // — that would force a blank page to "fix" a heading that
+                // simply opens the new page on its own.
+                float headingHeight = style.before() + leading * lines.size()
+                        + (block.kind() == Kind.HEADING ? 3f : 0f) + style.after();
+                float nextContentLeading = STYLES.get(Kind.PARAGRAPH).size() * 1.35f;
+                if (y - headingHeight - nextContentLeading < MARGIN) newPage();
+            }
 
             y -= style.before();
             boolean first = true;

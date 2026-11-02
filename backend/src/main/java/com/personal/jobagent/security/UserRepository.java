@@ -17,7 +17,7 @@ import java.util.UUID;
 public class UserRepository {
 
     private static final String COLUMNS =
-            "id, email, password_hash, display_name, firebase_uid, auth_provider";
+            "id, email, password_hash, display_name, firebase_uid, auth_provider, coalesce(role, 'CANDIDATE') as role";
 
     private static final RowMapper<UserRecord> ROW_MAPPER = (rs, rowNum) -> new UserRecord(
             (UUID) rs.getObject("id"),
@@ -25,7 +25,8 @@ public class UserRepository {
             rs.getString("password_hash"),
             rs.getString("display_name"),
             rs.getString("firebase_uid"),
-            rs.getString("auth_provider")
+            rs.getString("auth_provider"),
+            rs.getString("role") != null ? rs.getString("role") : "CANDIDATE"
     );
 
     private final JdbcTemplate jdbcTemplate;
@@ -96,10 +97,17 @@ public class UserRepository {
      */
     public UUID insertFirebaseUser(UUID id, String email, String displayName, String firebaseUid) {
         jdbcTemplate.update(
-                "insert into users (id, email, password_hash, display_name, firebase_uid, auth_provider) "
-                        + "values (?, ?, null, ?, ?, 'FIREBASE')",
+                "insert into users (id, email, password_hash, display_name, firebase_uid, auth_provider, role) "
+                        + "values (?, ?, null, ?, ?, 'FIREBASE', 'CANDIDATE')",
                 id, email, displayName, firebaseUid);
         return id;
+    }
+
+    /** Updates the user's role (e.g. CANDIDATE, OPERATOR, ADMIN). */
+    public boolean updateRole(UUID userId, String role) {
+        return jdbcTemplate.update(
+                "update users set role = ?, updated_at = now() where id = ?",
+                role, userId) > 0;
     }
 
     /** Bumps {@code updated_at} on a successful Firebase sign-in. Best-effort. */

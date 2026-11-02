@@ -253,12 +253,13 @@ describe('ApplyWorkspace', () => {
     const onChanged = vi.fn();
     mocked.mockResolvedValueOnce(readiness());
     mocked.mockResolvedValueOnce({ status: 'READY_TO_SUBMIT', submissionEnabled: false });
-    renderWorkspace({ planId: 'plan-1', planStatus: 'AWAITING_APPROVAL', onChanged });
+    renderWorkspace({ planId: 'plan-1', planStatus: 'AWAITING_APPROVAL', isSubmissionCapable: true, onChanged });
 
     fireEvent.click(await screen.findByRole('button', { name: /Approve for submission/ }));
 
     expect(await screen.findByText(/Server confirmed the approval: READY_TO_SUBMIT/)).toBeTruthy();
-    expect(screen.getByText(/REAL_SUBMIT is hard-stopped/)).toBeTruthy();
+    expect(screen.getByText(/nothing has been submitted/)).toBeTruthy();
+    expect(screen.getAllByText(/Submit to employer now/).length).toBeGreaterThan(0);
     expect(mocked).toHaveBeenCalledWith('/automation/plans/plan-1/approve-submit', { method: 'POST' });
     expect(onChanged).toHaveBeenCalled();
   });
@@ -274,13 +275,21 @@ describe('ApplyWorkspace', () => {
         }),
       ),
     );
-    renderWorkspace({ planId: 'plan-1', planStatus: 'AWAITING_APPROVAL' });
+    renderWorkspace({ planId: 'plan-1', planStatus: 'AWAITING_APPROVAL', isSubmissionCapable: true });
 
     fireEvent.click(await screen.findByRole('button', { name: /Approve for submission/ }));
 
     expect(await screen.findByText(/The server refused this action/)).toBeTruthy();
     expect(screen.getByText(/has changed since it was built/)).toBeTruthy();
     expect(screen.queryByText(/Server confirmed the approval/)).toBeNull();
+  });
+
+  it('fails closed when isSubmissionCapable is omitted or false, suppressing approval controls', async () => {
+    mocked.mockResolvedValueOnce(readiness());
+    renderWorkspace({ planId: 'plan-1', planStatus: 'AWAITING_APPROVAL' });
+
+    expect(screen.queryByRole('button', { name: /Approve for submission/ })).toBeNull();
+    expect(await screen.findByText(/This employer requires manual application — approval for automated submission is not supported/)).toBeTruthy();
   });
 
   it('confirms an unconfirmed answer and refreshes the readiness state afterwards', async () => {

@@ -339,13 +339,15 @@ public class TrackRepository {
 
         Map<UUID, PlanState> plans = new HashMap<>();
         db.query("""
-                select distinct on (p.application_id) p.application_id, p.status, p.submit_approved
+                select distinct on (p.application_id) p.application_id, p.status, p.submit_approved, p.result::text as result
                 from automation_plans p join applications a on a.id = p.application_id and a.profile_id = p.profile_id
                 where a.profile_id = ?""" + appFilter + "\n" + """
                 order by p.application_id, p.created_at desc, p.id desc
                 """, (ResultSet rs) -> {
+            String status = rs.getString("status");
             plans.put((UUID) rs.getObject("application_id"),
-                    new PlanState(rs.getString("status"), rs.getBoolean("submit_approved")));
+                    new PlanState(status, rs.getBoolean("submit_approved"),
+                            "RECONCILIATION_REQUIRED".equals(status) ? reconciliationNoteOf(rs.getString("result")) : null));
         }, args);
 
         Map<UUID, List<StatusChange>> changes = new HashMap<>();
@@ -547,6 +549,24 @@ public class TrackRepository {
         } catch (JsonProcessingException e) {
             return List.of();
         }
+    }
+
+    /**
+     * Phase 15: the worker's own persisted {@code category}/{@code evidence}
+     * for a {@code RECONCILIATION_REQUIRED} plan — the same {@code
+     * SUBMISSION_RECONCILIATION} shape {@code outcome.js} writes via {@code
+     * transitionWithResult}. Returns a short, human-readable note, or
+     * {@code null} when the result carries no such entry (never fabricated).
+     */
+    private String reconciliationNoteOf(String resultJson) {
+        for (Map<String, Object> entry : readList(resultJson)) {
+            if ("SUBMISSION_RECONCILIATION".equals(entry.get("type"))) {
+                Object category = entry.get("category");
+                Object evidence = entry.get("evidence");
+                return "[" + (category == null ? "UNKNOWN" : category) + "] " + (evidence == null ? "" : evidence);
+            }
+        }
+        return null;
     }
 
     private Map<String, Object> readMap(String value) {

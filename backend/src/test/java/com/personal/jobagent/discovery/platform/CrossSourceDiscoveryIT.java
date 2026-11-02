@@ -44,7 +44,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * API surfaces.
  */
 @SpringBootTest(properties = {"spring.flyway.placeholders.remove_seed_dev_account=false",
-        "app.discovery.scheduler-enabled=false"})
+        "app.discovery.scheduler-enabled=false", "app.security.operator-emails=dev@example.local"})
 @AutoConfigureMockMvc
 @Testcontainers
 class CrossSourceDiscoveryIT {

@@ -1,0 +1,18 @@
+{
+  "name": "robin-cloudflare-email-worker",
+  "version": "0.1.0",
+  "description": "Cloudflare Email Routing Worker for Robin AI Job Agent",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "robin",
+    "job-agent",
+    "cloudflare-workers",
+    "email-routing"
+  ],
+  "author": "Robin Team",
+  "license": "UNLICENSED"
+}

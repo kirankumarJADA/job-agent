@@ -127,7 +127,7 @@ export const SecondaryButton: React.FC<
 /* Pills and chips                                                     */
 /* ------------------------------------------------------------------ */
 
-export type PillTone = 'forest' | 'emerald' | 'amber' | 'red' | 'slate' | 'sky';
+export type PillTone = 'forest' | 'emerald' | 'amber' | 'red' | 'slate' | 'sky' | 'purple';
 
 const PILL_TONES: Record<PillTone, string> = {
   forest: 'border-forest-200 bg-forest-50 text-forest-800',
@@ -136,6 +136,7 @@ const PILL_TONES: Record<PillTone, string> = {
   red: 'border-red-200 bg-red-50 text-red-700',
   slate: 'border-line bg-surface-sunken text-ink-soft',
   sky: 'border-sky-200 bg-sky-50 text-sky-800',
+  purple: 'border-purple-300 bg-purple-50 text-purple-800',
 };
 
 /** Rounded pill badge for statuses, workplace types, recommendations. */
@@ -175,6 +176,23 @@ export const FilterPill: React.FC<{
 export const Chip: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <span className="inline-flex items-center whitespace-nowrap rounded-md border border-line bg-surface-sunken px-2 py-0.5 text-[11px] font-medium text-ink-soft">
     {children}
+  </span>
+);
+
+/** An active-filter chip with its own dismiss control — same visual family as {@link Chip}. */
+export const RemovableFilterChip: React.FC<{ label: string; onRemove: () => void }> = ({ label, onRemove }) => (
+  <span className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-forest-200 bg-forest-50 px-2 py-0.5 text-[11px] font-medium text-forest-800">
+    {label}
+    <button
+      type="button"
+      onClick={onRemove}
+      aria-label={`Remove filter: ${label}`}
+      className={`rounded-full p-0.5 text-forest-700 hover:bg-forest-100 ${focusRing}`}
+    >
+      <svg viewBox="0 0 12 12" fill="none" className="h-2.5 w-2.5" aria-hidden="true">
+        <path d="M2.5 2.5 9.5 9.5M9.5 2.5 2.5 9.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    </button>
   </span>
 );
 
@@ -391,6 +409,51 @@ const WORKPLACE_TONES: Record<string, PillTone> = {
 export const WorkplacePill: React.FC<{ type?: string }> = ({ type }) =>
   type ? <StatusPill tone={WORKPLACE_TONES[type] ?? 'slate'}>{type}</StatusPill> : null;
 
+/**
+ * Phase 10: a non-technical "what can Robin actually do here?" signal,
+ * derived from the SAME `application_url` the candidate already sees on the
+ * job detail page (`JobDetailPage.tsx`) — this classifies a field already
+ * shown to the candidate, it does not add a new one. Classification itself is
+ * driven entirely by the backend's own honest capability model
+ * (`GET /api/v1/ats-capabilities`, `AtsCapabilityRegistry` server-side) rather
+ * than a separate, hardcoded guess here — so this label can never drift from
+ * what the backend actually enforces. It deliberately never names a site,
+ * platform or vendor (that stays confined to the operational Sources page,
+ * per `Job`'s own "source hiding" contract in types.ts) — only what Robin can
+ * do with this one application.
+ */
+export function classifyApplyCapability(
+  applicationUrl: string | null | undefined,
+  capabilities: import('../types').AtsCapabilityRow[] | null | undefined,
+): import('../types').AtsCapabilityRow['summary'] | 'UNKNOWN' {
+  if (!applicationUrl || !capabilities || capabilities.length === 0) return 'UNKNOWN';
+  const lower = applicationUrl.toLowerCase();
+  const match = capabilities.find((row) => row.hostPatterns.some((pattern) => lower.includes(pattern.toLowerCase())));
+  if (match) return match.summary;
+  // No specific platform's own declared host patterns matched — mirrors the
+  // backend's own AtsCapabilityRegistry#byApplicationUrl fallback: a
+  // resolvable application URL that matches no specific adapter still falls
+  // to GENERIC (manual application required), never to "no information at
+  // all" — only a genuinely missing/malformed URL is UNKNOWN.
+  const generic = capabilities.find((row) => row.kind === 'GENERIC');
+  return generic ? generic.summary : 'UNKNOWN';
+}
+
+export const ApplyCapabilityPill: React.FC<{
+  applicationUrl?: string | null;
+  capabilities?: import('../types').AtsCapabilityRow[] | null;
+}> = ({ applicationUrl, capabilities }) => {
+  const capability = classifyApplyCapability(applicationUrl, capabilities);
+  if (capability === 'UNKNOWN' || capability === 'DISCOVERY_ONLY') return null;
+  if (capability === 'SUBMISSION_AVAILABLE' || capability === 'FORM_FILL_AVAILABLE') {
+    return <StatusPill tone="forest">Robin can help with this application</StatusPill>;
+  }
+  if (capability === 'SIGN_IN_READINESS_ONLY') {
+    return <StatusPill tone="amber">Robin can check your sign-in before you apply</StatusPill>;
+  }
+  return <StatusPill tone="slate">Apply on the employer&apos;s site</StatusPill>;
+};
+
 /** Salary line, e.g. "£50,000 – £65,000"; falls back to a generic label. */
 export const SalaryText: React.FC<{ min?: number; max?: number; period?: string }> = ({
   min,
@@ -412,15 +475,18 @@ export const JobCard: React.FC<{
   job: import('../types').Job;
   footer?: React.ReactNode;
   actions?: React.ReactNode;
-}> = ({ job, footer, actions }) => {
+  atsCapabilities?: import('../types').AtsCapabilityRow[] | null;
+}> = ({ job, footer, actions, atsCapabilities }) => {
   // Some imported postings have no usable timestamps; never render "Invalid Date".
   // Missing data is shown as missing — never replaced with an assumed
   // location, currency or "Competitive" salary.
   const seen = toShortDate(job.last_seen_at || job.first_seen_at);
+  const posted = toShortDate(job.posted_at);
   const metaSegments = [
     job.location_raw || 'Location not listed',
     formatSalary(job.salary_min, job.salary_max, job.salary_currency),
-    seen ? `Last seen ${seen}` : null,
+    posted ? `Posted ${posted}` : null,
+    seen ? (job.stale ? `Last seen ${seen}` : `Verified ${seen}`) : null,
     // No "via <source>": candidates are never told which site or ATS surfaced a job.
   ].filter((segment): segment is string => segment !== null);
 
@@ -449,6 +515,7 @@ export const JobCard: React.FC<{
 
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           <MatchPill score={job.match_score} recommendation={job.match_recommendation} />
+          <ApplyCapabilityPill applicationUrl={job.application_url} capabilities={atsCapabilities} />
           {job.stale && (
             <StatusPill tone="amber">
               Not seen for {STALE_AFTER_DAYS}+ days
@@ -482,6 +549,26 @@ export const JobCard: React.FC<{
               <Chip key={`${skill}-${i}`}>{skill}</Chip>
             ))}
             {job.skills_extracted.length > 6 && <Chip>+{job.skills_extracted.length - 6}</Chip>}
+          </div>
+        )}
+
+        {job.match_breakdown?.matched_skills && job.match_breakdown.matched_skills.length > 0 && (
+          <div className="mt-2.5 flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="font-semibold text-emerald-800">Matches:</span>
+            {job.match_breakdown.matched_skills.slice(0, 4).map((s, i) => (
+              <span key={i} className="rounded-md border border-emerald-200/60 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800">
+                {s}
+              </span>
+            ))}
+            {job.match_breakdown.matched_skills.length > 4 && (
+              <span className="text-[11px] text-emerald-700">+{job.match_breakdown.matched_skills.length - 4} more</span>
+            )}
+          </div>
+        )}
+        {job.match_breakdown?.highlights && job.match_breakdown.highlights.length > 0 && (
+          <div className="mt-2 flex items-center gap-1.5 text-xs font-medium text-forest-800">
+            <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-600" />
+            <span className="truncate">{job.match_breakdown.highlights[0]}</span>
           </div>
         )}
       </div>

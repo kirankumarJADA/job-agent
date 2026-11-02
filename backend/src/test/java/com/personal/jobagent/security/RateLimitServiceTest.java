@@ -68,6 +68,7 @@ class RateLimitServiceTest {
         assertThat(limiter.bucketFor("POST", "/api/v1/cover-letters/generate")).isEqualTo("llm");
         assertThat(limiter.bucketFor("POST", "/api/v1/applications/abc/re-prepare")).isEqualTo("llm");
         assertThat(limiter.bucketFor("POST", "/api/v1/discovery/run")).isEqualTo("discovery");
+        assertThat(limiter.bucketFor("POST", "/api/v1/discovery/run-for-me")).isEqualTo("discovery");
         assertThat(limiter.bucketFor("POST", "/api/v1/jobs/seed-uk")).isEqualTo("discovery");
         // The health check runs a live board fetch, so it shares the discovery quota:
         assertThat(limiter.bucketFor("POST", "/api/v1/sources/0b7e-id/health-check")).isEqualTo("discovery");

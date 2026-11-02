@@ -27,8 +27,13 @@ public record UserRecord(
         String passwordHash,
         String displayName,
         String firebaseUid,
-        String authProvider
+        String authProvider,
+        String role
 ) {
+
+    public UserRecord(UUID id, String email, String passwordHash, String displayName, String firebaseUid, String authProvider) {
+        this(id, email, passwordHash, displayName, firebaseUid, authProvider, "CANDIDATE");
+    }
 
     /** True when this account authenticates through Firebase rather than a local password. */
     public boolean isFirebaseAccount() {
@@ -38,5 +43,12 @@ public record UserRecord(
     /** True when a local password exists and can be compared. */
     public boolean hasLocalPassword() {
         return passwordHash != null && !passwordHash.isBlank();
+    }
+
+    /** True when this account has operator or administrator privileges. */
+    public boolean isOperator() {
+        if (role == null) return false;
+        String r = role.trim().toUpperCase(java.util.Locale.ROOT);
+        return "OPERATOR".equals(r) || "ADMIN".equals(r);
     }
 }

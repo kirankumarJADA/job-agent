@@ -35,10 +35,9 @@
  * per-field candidate data exists for either — Robin's profile stores one
  * free-text `location` string, not separate city/country columns, and
  * splitting it would itself be a guess), a custom non-native "Current Job
- * Title" dropdown, "Experience in Years", "Skill Set", per-tenant salary
- * questions, and LinkedIn (no established, non-guessed source column exists
- * for it in Robin's schema) are all honestly reported as REQUIRES_HUMAN
- * rather than guessed at. A required consent/legal-agreement checkbox
+ * Title" dropdown, "Experience in Years", "Skill Set", and per-tenant salary
+ * questions are all honestly reported as REQUIRES_HUMAN rather than guessed
+ * at. A required consent/legal-agreement checkbox
  * (observed on one sampled tenant: data privacy, declaration of accuracy,
  * background-check consent, each with its own per-tenant legal text) is
  * always REQUIRES_HUMAN — Robin never fabricates a candidate's legal
@@ -86,6 +85,22 @@
  * found, and `#runZohoRecruitApply` reports that honestly
  * (`coverLetterUploadState: 'NO_FIELD'`) rather than inventing a requirement
  * the employer's own form never asked for.
+ *
+ * <p><b>LinkedIn (Phase 13).</b> Re-inspecting a live tenant
+ * (`fulcrumdigital.zohorecruit.com`, 2026-10-21) found a "Social Links" →
+ * "LinkedIn" plain text field, optional, on its own card separate from
+ * "Apply with LinkedIn" (an unrelated OAuth-style button, observed
+ * "currently unavailable" and never a form field at all — must not be
+ * confused with it). The field was absent on the second sampled tenant
+ * (`execo.zohorecruit.com`) entirely, so this is evidence from one tenant,
+ * not two, stated precisely rather than inflated. Robin's own schema already
+ * has a verified, non-guessed source for this — `profiles.links`, the same
+ * map {@code LeverFieldMapper#linkOutcome} already fills Lever's
+ * {@code urls[LinkedIn]} from — so this was a backend wiring gap, not a
+ * missing-data gap: the Java side simply never passed a `linkedIn` value
+ * into this plan's `identity`. Fixed in
+ * {@code ZohoRecruitExecutionPlanService}; this module only had to add the
+ * category and the (one-tenant-evidenced) label match.
  */
 
 export const ZohoFieldCategory = Object.freeze({
@@ -93,6 +108,7 @@ export const ZohoFieldCategory = Object.freeze({
   IDENTITY_LAST_NAME: 'IDENTITY_LAST_NAME',
   IDENTITY_EMAIL: 'IDENTITY_EMAIL',
   IDENTITY_PHONE: 'IDENTITY_PHONE',
+  IDENTITY_LINKEDIN: 'IDENTITY_LINKEDIN',
   RESUME_UPLOAD: 'RESUME_UPLOAD',
   COVER_LETTER_UPLOAD: 'COVER_LETTER_UPLOAD',
   CAPTCHA: 'CAPTCHA',
@@ -128,6 +144,7 @@ export const AUTO_FILLABLE_CATEGORIES = Object.freeze([
   ZohoFieldCategory.IDENTITY_LAST_NAME,
   ZohoFieldCategory.IDENTITY_EMAIL,
   ZohoFieldCategory.IDENTITY_PHONE,
+  ZohoFieldCategory.IDENTITY_LINKEDIN,
 ]);
 
 /**
@@ -162,6 +179,7 @@ const EXACT_MATCHES = new Map([
   ['phone', ZohoFieldCategory.IDENTITY_PHONE],
   ['mobile number', ZohoFieldCategory.IDENTITY_PHONE],
   ['phone number', ZohoFieldCategory.IDENTITY_PHONE],
+  ['linkedin', ZohoFieldCategory.IDENTITY_LINKEDIN],
   ['resume', ZohoFieldCategory.RESUME_UPLOAD],
   ['résumé', ZohoFieldCategory.RESUME_UPLOAD],
   ['cover letter', ZohoFieldCategory.COVER_LETTER_UPLOAD],
@@ -199,6 +217,9 @@ export function classifyZohoField(rawLabel, tag, htmlType, placeholder = null) {
     if (category === ZohoFieldCategory.IDENTITY_PHONE && !['text', 'tel'].includes(htmlType)) {
       return ZohoFieldCategory.REQUIRES_HUMAN;
     }
+    if (category === ZohoFieldCategory.IDENTITY_LINKEDIN && !['text', 'url'].includes(htmlType)) {
+      return ZohoFieldCategory.REQUIRES_HUMAN;
+    }
     return category;
   }
   // Broad, deliberately over-inclusive: any label mentioning "captcha" is
@@ -217,7 +238,7 @@ export function classifyZohoField(rawLabel, tag, htmlType, placeholder = null) {
  * browser_worker.js performs separately, with its own I/O.
  *
  * @param {Array<{index:number, rawLabel:string|null, tag:string, type:string|null, placeholder?:string|null, required:boolean}>} fields
- * @param {{firstName?:string, lastName?:string, email?:string, phone?:string}} identity
+ * @param {{firstName?:string, lastName?:string, email?:string, phone?:string, linkedIn?:string}} identity
  * @returns {{captchaPresent: boolean, fields: Array<object>, toFill: Array<{index:number, value:string, category:string}>, requiredGaps: Array<object>}}
  */
 export function planZohoFormActions(fields, identity = {}) {
@@ -226,6 +247,7 @@ export function planZohoFormActions(fields, identity = {}) {
     [ZohoFieldCategory.IDENTITY_LAST_NAME]: identity.lastName,
     [ZohoFieldCategory.IDENTITY_EMAIL]: identity.email,
     [ZohoFieldCategory.IDENTITY_PHONE]: identity.phone,
+    [ZohoFieldCategory.IDENTITY_LINKEDIN]: identity.linkedIn,
   };
   const classified = fields.map((field) => ({
     ...field,

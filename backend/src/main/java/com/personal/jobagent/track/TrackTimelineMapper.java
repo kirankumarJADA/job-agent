@@ -83,7 +83,7 @@ public final class TrackTimelineMapper {
         return switch (kind) {
             case "APPLICATION_CREATED" -> new Neutral("APPLICATION_CREATED", "Application record created", "ROBIN");
             case "PREPARATION" -> preparation(payload);
-            case "GREENHOUSE_PLAN_CREATED", "INSPECTION_PLAN_CREATED" -> new Neutral("FORM_PLAN_PREPARED",
+            case "GREENHOUSE_PLAN_CREATED", "ASHBY_PLAN_CREATED", "INSPECTION_PLAN_CREATED" -> new Neutral("FORM_PLAN_PREPARED",
                     "Form-filling plan prepared — nothing is sent to the employer", "ROBIN");
             case "EXECUTION_PACKAGE_DEFERRED" -> new Neutral("PACKAGE_DEFERRED",
                     "Package deferred until your documents are reviewed", "ROBIN");
@@ -136,8 +136,11 @@ public final class TrackTimelineMapper {
             case "GREENHOUSE_FORM_REVIEWED" -> new Neutral("FORM_REVIEWED", "You reviewed the filled application form", "YOU");
             case "GREENHOUSE_SUBMIT_APPROVED" -> new Neutral("PACKAGE_APPROVED",
                     "You approved the package for submission — submission is disabled, nothing was sent", "YOU");
-            case "GREENHOUSE_SUBMIT_APPROVAL_REFUSED" -> new Neutral("PACKAGE_APPROVAL_REFUSED",
+            case "GREENHOUSE_SUBMIT_APPROVAL_REFUSED", "ASHBY_SUBMIT_APPROVAL_REFUSED" -> new Neutral("PACKAGE_APPROVAL_REFUSED",
                     "Approval refused: the package was not ready", "ROBIN");
+            case "ASHBY_FORM_REVIEWED" -> new Neutral("FORM_REVIEWED", "You reviewed the filled application form", "YOU");
+            case "ASHBY_SUBMIT_APPROVED" -> new Neutral("PACKAGE_APPROVED",
+                    "You approved the package for submission — a separate authorization step is still required before anything is sent", "YOU");
             case "PACKAGE_APPROVAL_INVALIDATED" -> new Neutral("PACKAGE_APPROVAL_WITHDRAWN",
                     "Package approval withdrawn because a document or answer changed", "ROBIN");
             case "AUTOMATION_PLAN_HUMAN_REQUIRED" -> new Neutral("FORM_FILL_PAUSED",

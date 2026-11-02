@@ -56,6 +56,19 @@ describe('ZohoRecruitReviewPanel', () => {
     expect(screen.queryByText(/^Uploaded automatically/)).toBeNull();
   });
 
+  it('shows a filled LinkedIn field with its friendly category label (Phase 13)', async () => {
+    mocked.mockResolvedValue(PLAN([{
+      type: 'ZOHO_RECRUIT_OUTCOME', planType: 'ZOHO_RECRUIT',
+      filled: [{ label: 'LinkedIn', category: 'IDENTITY_LINKEDIN' }],
+      requiredGaps: [], resumeUploadState: 'NO_ARTIFACT', resumeUploadReason: 'no reviewed résumé is available for this application',
+    }]));
+
+    renderPanel();
+
+    expect(await screen.findByText('LinkedIn')).toBeTruthy();
+    expect(screen.getAllByText(/LinkedIn/).length).toBeGreaterThanOrEqual(1);
+  });
+
   it('shows the specific reason a résumé could not be attached, never a bare failure', async () => {
     mocked.mockResolvedValue(PLAN([{
       type: 'ZOHO_RECRUIT_OUTCOME', planType: 'ZOHO_RECRUIT',

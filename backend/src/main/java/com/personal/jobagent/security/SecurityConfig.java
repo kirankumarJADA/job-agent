@@ -2,6 +2,7 @@ package com.personal.jobagent.security;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -87,13 +88,23 @@ public class SecurityConfig {
     private final RestAuthenticationEntryPoint restAuthenticationEntryPoint;
     private final FirebaseTokenVerifier firebaseTokenVerifier;
     private final UserRepository userRepository;
+    private final OperatorAccessPolicy operatorPolicy;
+
+    @Autowired
+    public SecurityConfig(RestAuthenticationEntryPoint restAuthenticationEntryPoint,
+                          FirebaseTokenVerifier firebaseTokenVerifier,
+                          UserRepository userRepository,
+                          OperatorAccessPolicy operatorPolicy) {
+        this.restAuthenticationEntryPoint = restAuthenticationEntryPoint;
+        this.firebaseTokenVerifier = firebaseTokenVerifier;
+        this.userRepository = userRepository;
+        this.operatorPolicy = operatorPolicy;
+    }
 
     public SecurityConfig(RestAuthenticationEntryPoint restAuthenticationEntryPoint,
                           FirebaseTokenVerifier firebaseTokenVerifier,
                           UserRepository userRepository) {
-        this.restAuthenticationEntryPoint = restAuthenticationEntryPoint;
-        this.firebaseTokenVerifier = firebaseTokenVerifier;
-        this.userRepository = userRepository;
+        this(restAuthenticationEntryPoint, firebaseTokenVerifier, userRepository, new OperatorAccessPolicy(""));
     }
 
     /**
@@ -119,6 +130,7 @@ public class SecurityConfig {
      * cookies grant nothing there, so exempting it from CSRF exposes nothing.
      */
     private static final String MANAGED_MAIL_INBOUND_PATH = "/api/v1/managed-mail/inbound/mailgun";
+    private static final String MANAGED_MAIL_CLOUDFLARE_INBOUND_PATH = "/api/v1/managed-mail/inbound/cloudflare";
 
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
@@ -132,7 +144,7 @@ public class SecurityConfig {
                     var customizer = csrf
                             .csrfTokenRepository(csrfRepository)
                             .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler());
-                    customizer.ignoringRequestMatchers(MANAGED_MAIL_INBOUND_PATH);
+                    customizer.ignoringRequestMatchers(MANAGED_MAIL_INBOUND_PATH, MANAGED_MAIL_CLOUDFLARE_INBOUND_PATH);
                     if (workerEventToken == null || workerEventToken.isBlank()) {
                         customizer.ignoringRequestMatchers(SESSION_ESTABLISHING_PATHS);
                     } else {
@@ -174,7 +186,7 @@ public class SecurityConfig {
                 // created exclusively by /auth/firebase/session, which enforces
                 // the registration invite code. See FirebaseAuthenticationFilter.
                 .addFilterBefore(
-                        new FirebaseAuthenticationFilter(firebaseTokenVerifier, userRepository, securityContextRepository()),
+                        new FirebaseAuthenticationFilter(firebaseTokenVerifier, userRepository, securityContextRepository(), operatorPolicy),
                         org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter.class)
                 // Feature 8 live-verification fix: without this filter the
                 // deferred CsrfToken is never materialized, so the XSRF-TOKEN
@@ -196,9 +208,20 @@ public class SecurityConfig {
                                 // required and whether registration is open. Lets
                                 // the sign-up form label itself honestly.
                                 "/api/v1/auth/registration-policy",
+                                "/api/v1/ats-capabilities",
                                 // Signature-authenticated provider webhook (see above).
-                                MANAGED_MAIL_INBOUND_PATH
+                                MANAGED_MAIL_INBOUND_PATH,
+                                MANAGED_MAIL_CLOUDFLARE_INBOUND_PATH
                         ).permitAll()
+                        // Phase 18 Security Closure: Shared operational discovery and sources
+                        // are restricted to authorized OPERATOR or ADMIN roles.
+                        .requestMatchers("/api/v1/sources/**").hasAnyRole("OPERATOR", "ADMIN")
+                        .requestMatchers(
+                                "/api/v1/discovery/run",
+                                "/api/v1/discovery/ingest",
+                                "/api/v1/discovery/maintenance",
+                                "/api/v1/discovery/linkedin/**"
+                        ).hasAnyRole("OPERATOR", "ADMIN")
                         .anyRequest().authenticated()
                 );
         return http.build();

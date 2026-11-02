@@ -77,7 +77,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Testcontainers
 class ManagedMailIT {
 
-    static final String DOMAIN = "mail.robin-it.example";
+    static final String DOMAIN = "mail.aplivenosi-test.net";
     static final String SIGNING_KEY = "it-webhook-signing-key-7f3a9c2d";
     static final String INBOUND = "/api/v1/managed-mail/inbound/mailgun";
     private static final String WORKER = "Bearer managed-mail-it-token";
@@ -526,6 +526,92 @@ class ManagedMailIT {
         assertThat(resolved.get("link").asText()).isEqualTo("https://careers." + employer + "/account/confirm?token=abc123");
     }
 
+    @Test
+    void endToEndCandidateJourneyFromApplicationToRecruiterTracking() throws Exception {
+        // 1. Candidate registers & reserves managed address
+        String alias = reserve(session);
+        proveReceiving();
+        assertThat(alias).endsWith("@" + DOMAIN);
+
+        // 2. Candidate has two applications at the same employer
+        String employerDomain = "careers.employer-it.example";
+        String jobUrl1 = "https://boards.greenhouse.io/employerit/jobs/8001";
+        String jobUrl2 = "https://boards.greenhouse.io/employerit/jobs/8002";
+        UUID app1 = applicationWithJob(devProfile, "Employer IT", "Senior Systems Engineer", jobUrl1, "REQ-8001");
+        UUID app2 = applicationWithJob(devProfile, "Employer IT", "Lead Cloud Architect", jobUrl2, "REQ-8002");
+
+        // 3. Applications resolve and use the candidate's managed address, while personal login email remains intact
+        String contactEmail1 = registrationIdentities.resolveApplicationContactEmail(devProfile, jobUrl1, "dev@example.local");
+        String contactEmail2 = registrationIdentities.resolveApplicationContactEmail(devProfile, jobUrl2, "dev@example.local");
+        assertThat(contactEmail1).isEqualTo(alias);
+        assertThat(contactEmail2).isEqualTo(alias);
+
+        String loginEmail = jdbc.queryForObject(
+                "select u.email from profiles p join users u on u.id = p.user_id where p.id = ?", String.class, devProfile);
+        assertThat(loginEmail).isEqualTo("dev@example.local");
+
+        // 4. Inbound message 1 arrives for App 1 with specific job link
+        Delivery msg1 = Delivery.to(alias)
+                .from("Employer IT Recruiting <recruiting@" + employerDomain + ">")
+                .subject("Application Received: Senior Systems Engineer")
+                .body("Thank you for applying to Senior Systems Engineer at Employer IT! View your application: " + jobUrl1)
+                .messageId("<app1-ack@careers.employer-it.example>");
+        deliver(msg1).andExpect(status().isOk());
+
+        // Verify message was stored and mapped to app1
+        Map<String, Object> emailRow1 = jdbc.queryForMap(
+                "select application_id, classification from emails where message_id = '<app1-ack@careers.employer-it.example>' and profile_id = ?",
+                devProfile);
+        assertThat(emailRow1.get("application_id")).isEqualTo(app1);
+        assertThat(emailRow1.get("classification")).isEqualTo("APPLICATION_ACKNOWLEDGEMENT");
+
+        // Verify event recorded on app1 timeline
+        assertThat(count("select count(*) from application_events where application_id = ? and profile_id = ?", app1, devProfile))
+                .isGreaterThanOrEqualTo(1);
+
+        // 5. Inbound message 2 is a duplicate replay of message 1 (same token and payload, or same message ID)
+        assertThat(outcome(deliver(msg1).andExpect(status().isOk()).andReturn())).isEqualTo("duplicate");
+        // No duplicate row inserted
+        assertThat(count("select count(*) from emails where message_id = '<app1-ack@careers.employer-it.example>' and profile_id = ?", devProfile))
+                .isEqualTo(1);
+
+        // 6. Inbound message 3 is ambiguous between App 1 and App 2 (only company name mentioned, no requisition or URL)
+        Delivery ambiguousMsg = Delivery.to(alias)
+                .from("Employer IT Talent <talent@" + employerDomain + ">")
+                .subject("Update on your candidacy at Employer IT")
+                .body("Hello, we are actively reviewing your background for opportunities at Employer IT.")
+                .messageId("<ambiguous-update@careers.employer-it.example>");
+        deliver(ambiguousMsg).andExpect(status().isOk());
+
+        // Verify ambiguous message is NOT blindly assigned to either application
+        Map<String, Object> ambRow = jdbc.queryForMap(
+                "select application_id from emails where message_id = '<ambiguous-update@careers.employer-it.example>' and profile_id = ?",
+                devProfile);
+        assertThat(ambRow.get("application_id")).isNull();
+
+        // Verify it was routed to track review for candidate review
+        assertThat(count("select count(*) from email_application_links where profile_id = ? and status = 'PENDING_REVIEW'", devProfile))
+                .isGreaterThanOrEqualTo(1);
+
+        // 7. Inbound delivery to unknown recipient is safely rejected with 406
+        Delivery unknownRecipientMsg = Delivery.to("nonexistentalias@" + DOMAIN)
+                .from("Recruiter <recruiter@random-employer.example>")
+                .subject("Job Offer")
+                .body("Offer details")
+                .messageId("<offer-unknown@random-employer.example>");
+        deliver(unknownRecipientMsg).andExpect(status().isNotAcceptable());
+        assertThat(count("select count(*) from emails where message_id = '<offer-unknown@random-employer.example>'")).isZero();
+
+        // 8. Cross-candidate isolation: other candidate cannot see dev candidate's messages or events
+        String otherMessagesJson = mvc.perform(get("/api/v1/managed-mail/messages").with(asOtherCandidate()))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
+        assertThat(otherMessagesJson).doesNotContain("<app1-ack@careers.employer-it.example>")
+                .doesNotContain("<ambiguous-update@careers.employer-it.example>");
+
+        assertThat(count("select count(*) from emails where profile_id = ?", otherProfile())).isZero();
+    }
+
     // ── delete my data ───────────────────────────────────────────────────
 
     @Test
@@ -740,6 +826,23 @@ class ManagedMailIT {
                 values (?, ?, ?, ?, 'Employer IT', 'Platform Engineer', 'Build services.', '{}', 'SCORED', ?, ?, ?)
                 """, jobId, SOURCE, externalId, "dedup-" + externalId, "hash-" + externalId, url, url);
         return pipeline.createApplicationFromMatch(profileId, jobId).applicationId();
+    }
+
+    private UUID applicationWithJob(UUID profileId, String company, String title, String url, String req) {
+        UUID jobId = UuidV7.generate();
+        String externalId = "managed-mail-job-" + jobId;
+        jdbc.update("""
+                insert into jobs (id, source_id, external_id, dedup_key, company_name_raw, title,
+                                  description_text, skills_extracted, status, content_hash, application_url, canonical_url)
+                values (?, ?, ?, ?, ?, ?, 'Role desc', '{}', 'SCORED', ?, ?, ?)
+                """, jobId, SOURCE, externalId, "dedup-" + externalId, company, title, "hash-" + externalId, url, url);
+        UUID appId = pipeline.createApplicationFromMatch(profileId, jobId).applicationId();
+        for (com.personal.jobagent.discovery.platform.JobIdentity.Key k :
+                com.personal.jobagent.discovery.platform.JobIdentity.keys(SOURCE, externalId, url, url, company, req)) {
+            jdbc.update("insert into job_identity_keys (key, job_id, key_type, source_id) values (?, ?, ?, ?) on conflict do nothing",
+                    k.asString(), jobId, k.type().name(), SOURCE);
+        }
+        return appId;
     }
 
     private UUID otherUserId() {

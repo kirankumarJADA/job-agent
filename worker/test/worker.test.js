@@ -65,7 +65,7 @@ test('mailbox rejects stale, wrong-application, and wrong-domain messages', asyn
 // is computed once, at module-load time, from this env var.
 const materializeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-materialize-'));
 process.env.WORKER_ARTIFACT_DIR = materializeRoot;
-const { materializeArtifacts, zohoRecruitPackageNeedsMaterialization } = await import('../src/worker.js');
+const { materializeArtifacts, zohoRecruitPackageNeedsMaterialization, ashbyPackageNeedsMaterialization } = await import('../src/worker.js');
 
 const hash = (content) => crypto.createHash('sha256').update(content).digest('hex');
 
@@ -94,6 +94,21 @@ test('a ZOHO_RECRUIT plan with no package at all needs no materialization', () =
 
 test('a non-ZOHO_RECRUIT plan never triggers this path regardless of its package', () => {
   assert.equal(zohoRecruitPackageNeedsMaterialization({ planType: 'GREENHOUSE', package: { cv: {} } }), false);
+});
+
+// ── ashbyPackageNeedsMaterialization (Phase 14) ──────────────────────────
+
+test('an ASHBY package with a cv needs materialization', () => {
+  const plan = { planType: 'ASHBY', package: { cv: { versionId: 'v1' }, artifacts: [{ kind: 'cv' }] } };
+  assert.equal(ashbyPackageNeedsMaterialization(plan), true);
+});
+
+test('an ASHBY plan with no package at all needs no materialization', () => {
+  assert.equal(ashbyPackageNeedsMaterialization({ planType: 'ASHBY', package: undefined }), false);
+});
+
+test('a non-ASHBY plan never triggers the Ashby materialization path regardless of its package', () => {
+  assert.equal(ashbyPackageNeedsMaterialization({ planType: 'ZOHO_RECRUIT', package: { cv: {} } }), false);
 });
 
 // ── materializeArtifacts: proves the cover-letter-only case actually downloads ──

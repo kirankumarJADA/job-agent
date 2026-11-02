@@ -50,17 +50,28 @@ public class ExecutionPackageService {
     private final JobFormQuestionService formQuestions;
     private final CoverLetterRepository letters;
     private final ObjectMapper json;
+    private final com.personal.jobagent.mailbox.RegistrationIdentityService registrationIdentities;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public ExecutionPackageService(JdbcTemplate db, GreenhouseAdapter greenhouseAdapter,
                                    ApplyDocumentSelector documentSelector,
                                    JobFormQuestionService formQuestions,
-                                   CoverLetterRepository letters, ObjectMapper json) {
+                                   CoverLetterRepository letters, ObjectMapper json,
+                                   org.springframework.beans.factory.ObjectProvider<com.personal.jobagent.mailbox.RegistrationIdentityService> registrationIdentities) {
         this.db = db;
         this.greenhouseAdapter = greenhouseAdapter;
         this.documentSelector = documentSelector;
         this.formQuestions = formQuestions;
         this.letters = letters;
         this.json = json;
+        this.registrationIdentities = registrationIdentities == null ? null : registrationIdentities.getIfAvailable();
+    }
+
+    public ExecutionPackageService(JdbcTemplate db, GreenhouseAdapter greenhouseAdapter,
+                                   ApplyDocumentSelector documentSelector,
+                                   JobFormQuestionService formQuestions,
+                                   CoverLetterRepository letters, ObjectMapper json) {
+        this(db, greenhouseAdapter, documentSelector, formQuestions, letters, json, null);
     }
 
     /**
@@ -170,8 +181,12 @@ public class ExecutionPackageService {
             coverLetter = letterMap;
         }
 
+        String rawEmail = (String) candidateRow.get("email");
+        String effectiveEmail = registrationIdentities != null
+                ? registrationIdentities.resolveApplicationContactEmail(profileId, targetUrl, rawEmail)
+                : rawEmail;
         var candidate = new GreenhouseFieldMapper.CandidateData(
-                (String) candidateRow.get("email"), (String) candidateRow.get("display_name"),
+                effectiveEmail, (String) candidateRow.get("display_name"),
                 (String) candidateRow.get("phone"), (String) candidateRow.get("location"),
                 readJson(candidateRow.get("links")), readJson(candidateRow.get("work_eligibility")),
                 selection.cv() != null, selection.cv() == null ? null : selection.cv().versionId(),

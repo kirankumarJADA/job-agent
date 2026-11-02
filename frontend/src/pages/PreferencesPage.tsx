@@ -34,6 +34,11 @@ export const PreferencesPage: React.FC = () => {
   const [sponsorshipPolicy, setSponsorshipPolicy] = useState<PreferenceSet['sponsorshipPolicy']>('SHOW_ALL');
   const [appMode, setAppMode] = useState<PreferenceSet['applicationMode']>('ASSISTED');
   const [remoteTypes, setRemoteTypes] = useState<string[]>(['REMOTE', 'HYBRID']);
+  // Phase 9: which region-scoped discovery sources `POST /discovery/run-for-me`
+  // selects (see PreferredSourcesDiscoveryService's own doc comment) — a
+  // different concern from locationsAllowed, which only filters jobs already
+  // discovered.
+  const [countries, setCountries] = useState<string[]>(['GB']);
 
   const [weights, setWeights] = useState<ScoringWeights>({
     skill: 30,
@@ -71,6 +76,7 @@ export const PreferencesPage: React.FC = () => {
       setSponsorshipPolicy(p.sponsorshipPolicy || 'SHOW_ALL');
       setAppMode(p.applicationMode || 'ASSISTED');
       setRemoteTypes(p.remoteTypes || ['REMOTE', 'HYBRID']);
+      setCountries(p.extraFilters?.countries && p.extraFilters.countries.length > 0 ? p.extraFilters.countries : ['GB']);
       if (p.scoringWeights) {
         setWeights(p.scoringWeights);
       }
@@ -89,6 +95,10 @@ export const PreferencesPage: React.FC = () => {
     setRemoteTypes((prev) =>
       prev.includes(type) ? prev.filter((t) => t !== type) : [...prev, type]
     );
+  };
+
+  const toggleCountry = (code: string) => {
+    setCountries((prev) => (prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]));
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -126,6 +136,7 @@ export const PreferencesPage: React.FC = () => {
           sponsorshipPolicy,
           applicationMode: appMode,
           scoringWeights: weights,
+          extraFilters: { ...(prefs?.extraFilters || {}), countries },
         }),
       });
       setMessage({ type: 'success', text: 'Preferences updated successfully! Audit log recorded.' });
@@ -203,6 +214,48 @@ export const PreferencesPage: React.FC = () => {
                 </Select>
               </div>
             </div>
+
+            <fieldset>
+              <legend className="mb-2 text-xs font-semibold text-ink-soft">
+                Countries to search
+              </legend>
+              <p className="mb-2 text-[11px] text-ink-faint">
+                Robin only queries discovery sources scoped to these countries (plus any that cover every region).
+                This is separate from the location filter above, which only narrows jobs already found.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { code: 'GB', label: 'United Kingdom' },
+                  { code: 'US', label: 'United States' },
+                  { code: 'DE', label: 'Germany' },
+                  { code: 'FR', label: 'France' },
+                  { code: 'CA', label: 'Canada' },
+                  { code: 'AU', label: 'Australia' },
+                ].map(({ code, label }) => {
+                  const selected = countries.includes(code);
+                  return (
+                    <button
+                      key={code}
+                      type="button"
+                      aria-pressed={selected}
+                      onClick={() => toggleCountry(code)}
+                      className={`rounded-full border px-4 py-1.5 text-xs font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600 ${
+                        selected
+                          ? 'border-forest-700 bg-forest-900 text-cream-50'
+                          : 'border-line bg-surface text-ink-soft hover:border-forest-300 hover:bg-forest-50'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+              {countries.length === 0 && (
+                <p className="mt-2 text-[11px] text-amber-700">
+                  Select at least one country, or Robin will default to the United Kingdom.
+                </p>
+              )}
+            </fieldset>
 
             <fieldset>
               <legend className="mb-2 text-xs font-semibold text-ink-soft">Workplace preferences</legend>

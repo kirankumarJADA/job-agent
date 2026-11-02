@@ -155,13 +155,17 @@ public final class TrackText {
         return s == null ? "" : s.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
     }
 
-    public static String sha256(String value) {
+    public static String sha256(byte[] bytes) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            return HexFormat.of().formatHex(digest.digest((value == null ? "" : value).getBytes(StandardCharsets.UTF_8)));
+            return HexFormat.of().formatHex(digest.digest(bytes == null ? new byte[0] : bytes));
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    public static String sha256(String value) {
+        return sha256(value == null ? new byte[0] : value.getBytes(StandardCharsets.UTF_8));
     }
 
     /** Truncate to a maximum length (null-safe). */

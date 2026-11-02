@@ -149,6 +149,26 @@ export const SourcesPage: React.FC = () => {
       await fetchCoverage();
     }
   };
+  const toggleSource = async (source: JobSource) => {
+    const nextEnabled = !source.enabled;
+    try {
+      await apiFetch<JobSource>('/sources/' + encodeURIComponent(source.id), {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: nextEnabled }),
+      });
+      setRunMessage({
+        tone: 'success',
+        text: `${source.display_name} is now ${nextEnabled ? 'enabled' : 'disabled'}.`,
+      });
+      await fetchSources();
+      await fetchCoverage();
+    } catch (err: unknown) {
+      setRunMessage({
+        tone: 'error',
+        text: `Could not update ${source.display_name}: ${err instanceof Error ? err.message : 'Unknown error'}`,
+      });
+    }
+  };
 
   const submitImport = async (mode: 'check' | 'confirm') => {
     if (!importUrl.trim()) return;
@@ -174,6 +194,9 @@ export const SourcesPage: React.FC = () => {
   };
 
   const supportedPlatforms = (coverage || []).filter((row) => row.adapter);
+  const isForbidden =
+    Boolean(sourcesError && (sourcesError.includes('403') || sourcesError.toLowerCase().includes('forbidden'))) ||
+    Boolean(coverageError && (coverageError.includes('403') || coverageError.toLowerCase().includes('forbidden')));
 
   return (
     <PageShell>
@@ -184,6 +207,13 @@ export const SourcesPage: React.FC = () => {
           subtitle="The public job boards Robin follows, their recorded health, and the platforms it can read."
         />
 
+        {isForbidden ? (
+          <Alert tone="info">
+            <span className="block font-bold mb-1">Operator Access Required</span>
+            Discovery source configuration, background crawling schedules, and manual crawler executions are restricted to authorized platform operators. Your candidate preferences, job recommendations, and application preparation remain active and unaffected.
+          </Alert>
+        ) : (
+          <>
         <div className="rounded-xl border border-forest-200 bg-forest-50 px-4 py-3 text-xs leading-relaxed text-forest-900">
           <span className="mb-0.5 block font-bold">How discovery is allowed to work</span>
           Discovery reads public job-board endpoints and public listing pages only — no logins, no CAPTCHAs or
@@ -270,7 +300,12 @@ export const SourcesPage: React.FC = () => {
                   <span className="font-semibold text-ink">{src.display_name}</span>,
                   <span className="font-mono text-xs text-forest-700">{src.kind}</span>,
                   <span className="font-mono text-xs text-ink-muted">{src.org_identifier}</span>,
-                  <StatusPill tone="forest">{src.policy}</StatusPill>,
+                  <span className="flex flex-col gap-1">
+                    <StatusPill tone="forest">{src.policy}</StatusPill>
+                    <span className="font-mono text-[10px] text-ink-muted">
+                      {src.schedule_cron ? `cron: ${src.schedule_cron}` : 'no schedule'} · {src.rate_limit_per_min || 10}/min
+                    </span>
+                  </span>,
                   <span className="flex flex-col gap-1">
                     <StatusPill tone={health.tone}>{health.label}</StatusPill>
                     {typeof error === 'string' && error && <span className="text-[11px] text-red-700">{error}</span>}
@@ -281,14 +316,23 @@ export const SourcesPage: React.FC = () => {
                         (lastRun.complete === false ? ' · partial listing' : '')
                       : 'No run recorded'}
                   </span>,
-                  <PrimaryButton
-                    onClick={() => void runDiscovery(src)}
-                    disabled={!runnable || checkingId !== null}
-                    className="whitespace-nowrap px-3 py-1.5 text-xs"
-                    aria-label={`Run discovery for ${src.display_name}`}
-                  >
-                    {checkingId === src.id ? 'Running…' : 'Run discovery'}
-                  </PrimaryButton>,
+                  <div className="flex items-center gap-1.5">
+                    <PrimaryButton
+                      onClick={() => void runDiscovery(src)}
+                      disabled={!runnable || checkingId !== null}
+                      className="whitespace-nowrap px-3 py-1.5 text-xs"
+                      aria-label={`Run discovery for ${src.display_name}`}
+                    >
+                      {checkingId === src.id ? 'Running…' : 'Run discovery'}
+                    </PrimaryButton>
+                    <SecondaryButton
+                      onClick={() => void toggleSource(src)}
+                      className="whitespace-nowrap px-2.5 py-1.5 text-xs"
+                      aria-label={`Toggle ${src.display_name}`}
+                    >
+                      {src.enabled && src.policy !== 'DISABLED' ? 'Disable' : 'Enable'}
+                    </SecondaryButton>
+                  </div>,
                 ];
               })}
             />
@@ -314,6 +358,8 @@ export const SourcesPage: React.FC = () => {
             />
           ) : null}
         </SectionCard>
+          </>
+        )}
       </div>
     </PageShell>
   );

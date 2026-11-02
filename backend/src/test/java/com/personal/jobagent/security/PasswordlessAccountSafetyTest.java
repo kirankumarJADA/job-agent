@@ -85,7 +85,8 @@ class PasswordlessAccountSafetyTest {
         assertThat(principal.getPassword()).isNull();
         assertThat(principal.getUserId()).isEqualTo(account.id());
         assertThat(principal.getUsername()).isEqualTo("person@example.com");
-        assertThat(principal.getAuthorities()).extracting(Object::toString).containsExactly("USER");
+        assertThat(principal.getAuthorities()).extracting(Object::toString)
+                .containsExactlyInAnyOrder("ROLE_USER", "ROLE_CANDIDATE", "USER");
         assertThat(principal.isEnabled()).isTrue();
         assertThat(principal.isAccountNonLocked()).isTrue();
         assertThat(principal.isAccountNonExpired()).isTrue();

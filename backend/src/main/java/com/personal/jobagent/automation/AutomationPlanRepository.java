@@ -265,6 +265,88 @@ public class AutomationPlanRepository {
     }
 
     /**
+     * Phase 14: the Ashby counterpart of {@link #prepareRealSubmission},
+     * mirroring its exact safety shape (same {@code READY_TO_SUBMIT and
+     * submit_approved=true} atomic guard, same "return to PREPARED so the
+     * existing claim-next/resume path picks it up" behaviour) but gated on
+     * {@code "ASHBY".equals(planType)} and appending a single, parameter-less
+     * {@code ASHBY_SUBMIT_CLICK} step (id {@code ashby-submit-click}) — the
+     * worker's own {@code #runAshbySubmit} locates the real submit button by
+     * a fixed, live-verified class name
+     * ({@code button.ashby-application-form-submit-button}), never a
+     * caller-supplied selector, so no params are needed here. The worker's
+     * own {@code #validateAshbyPlan} independently re-checks the same shape
+     * (last step, exactly one, preceded by {@code ASHBY_APPLY}) before ever
+     * running it. {@link #completeRealSubmission} and
+     * {@code AutomationController}'s {@code /complete} endpoint need no
+     * changes at all — both are already ATS-agnostic (no {@code planType}
+     * check), so Ashby's real submission inherits every downstream safety
+     * guarantee (the single-submission-per-application unique index, the
+     * worker-request/non-blank-evidence guards) with zero changes to shared
+     * infrastructure.
+     *
+     * @return false if the plan was not in that exact state, or is not an
+     *         ASHBY plan
+     */
+    public boolean prepareAshbySubmission(UUID id) {
+        PlanRow current = findById(id).orElse(null);
+        if (current == null || !"READY_TO_SUBMIT".equals(current.status()) || !current.submitApproved()) {
+            return false;
+        }
+        Map<String, Object> stored = current.plan() == null ? Map.of() : current.plan();
+        if (!"ASHBY".equals(stored.get("planType")) || !(stored.get("steps") instanceof List<?> existingSteps)) {
+            return false;
+        }
+        List<Object> newSteps = new java.util.ArrayList<>(existingSteps);
+        newSteps.add(Map.of(
+                "id", "ashby-submit-click",
+                "type", "ASHBY_SUBMIT_CLICK",
+                "policy", "AUTO",
+                "params", Map.of()));
+        Map<String, Object> updated = new java.util.LinkedHashMap<>(stored);
+        updated.put("steps", newSteps);
+        try {
+            return db.update("""
+                    update automation_plans set plan=?::jsonb, status='PREPARED', updated_at=now()
+                    where id=? and status='READY_TO_SUBMIT' and submit_approved=true
+                    """, json.writeValueAsString(updated), id) == 1;
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to persist Ashby submission step", e);
+        }
+    }
+
+    /**
+     * Phase 19: Workday submission preparation. Appends a WORKDAY_SUBMIT_CLICK step
+     * to an approved Workday application plan and transitions back to PREPARED.
+     */
+    public boolean prepareWorkdaySubmission(UUID id) {
+        PlanRow current = findById(id).orElse(null);
+        if (current == null || !"READY_TO_SUBMIT".equals(current.status()) || !current.submitApproved()) {
+            return false;
+        }
+        Map<String, Object> stored = current.plan() == null ? Map.of() : current.plan();
+        if (!"WORKDAY".equals(stored.get("planType")) || !(stored.get("steps") instanceof List<?> existingSteps)) {
+            return false;
+        }
+        List<Object> newSteps = new java.util.ArrayList<>(existingSteps);
+        newSteps.add(Map.of(
+                "id", "workday-submit-click",
+                "type", "WORKDAY_SUBMIT_CLICK",
+                "policy", "AUTO",
+                "params", Map.of()));
+        Map<String, Object> updated = new java.util.LinkedHashMap<>(stored);
+        updated.put("steps", newSteps);
+        try {
+            return db.update("""
+                    update automation_plans set plan=?::jsonb, status='PREPARED', updated_at=now()
+                    where id=? and status='READY_TO_SUBMIT' and submit_approved=true
+                    """, json.writeValueAsString(updated), id) == 1;
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to persist Workday submission step", e);
+        }
+    }
+
+    /**
      * Phase 4: the one, narrowly-scoped transition to {@code SUBMITTED}.
      * Reachable only from {@code RUNNING} (the second, post-approval worker
      * pass started by {@link #prepareRealSubmission}'s own {@code PREPARED}

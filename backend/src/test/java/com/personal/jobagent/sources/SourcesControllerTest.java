@@ -132,4 +132,158 @@ class SourcesControllerTest {
 
         assertThat(controller.healthCheck(SOURCE).getStatusCode().value()).isEqualTo(404);
     }
+
+    @Test
+    void getSourceReturnsDetailsWhenFound() {
+        Map<String, Object> row = Map.of("id", SOURCE, "display_name", "Acme", "schedule_cron", "0 0 * * * *");
+        when(db.queryForList(contains("where id = ?"), eq(SOURCE))).thenReturn(List.of(row));
+
+        ResponseEntity<?> response = controller.getSource(SOURCE);
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        assertThat(response.getBody()).isEqualTo(row);
+    }
+
+    @Test
+    void getSourceReturns404WhenNotFound() {
+        when(db.queryForList(contains("where id = ?"), eq(SOURCE))).thenReturn(List.of());
+
+        ResponseEntity<?> response = controller.getSource(SOURCE);
+        assertThat(response.getStatusCode().value()).isEqualTo(404);
+    }
+
+    @Test
+    void updateSourceAppliesValidPatches() {
+        when(db.queryForList("select id from job_sources where id = ?", SOURCE)).thenReturn(List.of(Map.of("id", SOURCE)));
+        Map<String, Object> row = Map.of("id", SOURCE, "enabled", false, "policy", "DISABLED", "schedule_cron", "0 0 12 * * *", "rate_limit_per_min", 30);
+        when(db.queryForList(contains("from job_sources\nwhere id = ?"), eq(SOURCE))).thenReturn(List.of(row));
+
+        SourcesController.UpdateSourceRequest req = new SourcesController.UpdateSourceRequest(
+                false, "DISABLED", "0 0 12 * * *", 30);
+        ResponseEntity<?> response = controller.updateSource(SOURCE, req);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        verify(db).update(contains("update job_sources set"), any(Object[].class));
+    }
+
+    @Test
+    void updateSourceRejectsInvalidCron() {
+        when(db.queryForList("select id from job_sources where id = ?", SOURCE)).thenReturn(List.of(Map.of("id", SOURCE)));
+
+        SourcesController.UpdateSourceRequest req = new SourcesController.UpdateSourceRequest(
+                null, null, "invalid-cron-string", null);
+        ResponseEntity<?> response = controller.updateSource(SOURCE, req);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(400);
+    }
+
+    @Test
+    void updateSourceRejectsInvalidRateLimit() {
+        when(db.queryForList("select id from job_sources where id = ?", SOURCE)).thenReturn(List.of(Map.of("id", SOURCE)));
+
+        SourcesController.UpdateSourceRequest req = new SourcesController.UpdateSourceRequest(
+                null, null, null, 0);
+        ResponseEntity<?> response = controller.updateSource(SOURCE, req);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(400);
+    }
+
+    @Test
+    void updateSourceRejectsInvalidPolicy() {
+        when(db.queryForList("select id from job_sources where id = ?", SOURCE)).thenReturn(List.of(Map.of("id", SOURCE)));
+
+        SourcesController.UpdateSourceRequest req = new SourcesController.UpdateSourceRequest(
+                null, "INVALID_POLICY", null, null);
+        ResponseEntity<?> response = controller.updateSource(SOURCE, req);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(400);
+    }
+
+    @Test
+    void runSourceExecutesManualModeAndReturnsReport() {
+        when(db.queryForList(KIND_QUERY, SOURCE)).thenReturn(List.of(row("GREENHOUSE", true, "DISCOVERY_ONLY")));
+        when(boards.run(SOURCE, BoardDiscoveryService.Mode.MANUAL)).thenReturn(report(null));
+
+        ResponseEntity<?> response = controller.runSource(SOURCE);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        verify(boards).run(SOURCE, BoardDiscoveryService.Mode.MANUAL);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getBody();
+        assertThat(body).containsKey("run");
+    }
+
+    @Test
+    void runSourceRejectsNonRunnablePlatform() {
+        when(db.queryForList(KIND_QUERY, SOURCE)).thenReturn(List.of(row("CUSTOM_WEB", true, "DISCOVERY_ONLY")));
+        when(boards.isRunnable("CUSTOM_WEB")).thenReturn(false);
+
+        ResponseEntity<?> response = controller.runSource(SOURCE);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(400);
+        verify(boards, never()).run(any(), any());
+    }
+
+    @Test
+    void runSourceReturns404WhenSourceNotFound() {
+        when(db.queryForList(KIND_QUERY, SOURCE)).thenReturn(List.of());
+
+        ResponseEntity<?> response = controller.runSource(SOURCE);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(404);
+        verify(boards, never()).run(any(), any());
+    }
+
+    @Test
+    void runSourceHandlesRunRefusedWhenSourceIsDisabledOrUnavailable() {
+        when(db.queryForList(KIND_QUERY, SOURCE)).thenReturn(List.of(row("GREENHOUSE", true, "DISCOVERY_ONLY")));
+        when(boards.run(SOURCE, BoardDiscoveryService.Mode.MANUAL))
+                .thenThrow(new BoardDiscoveryService.RunRefused("Discovery source is disabled", false));
+
+        ResponseEntity<?> response = controller.runSource(SOURCE);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(400);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getBody();
+        assertThat(body).containsEntry("error", "Discovery source is disabled");
+    }
+
+    @Test
+    void runSourceReturnsFailedReportWhenUpstreamFails() {
+        when(db.queryForList(KIND_QUERY, SOURCE)).thenReturn(List.of(row("GREENHOUSE", true, "DISCOVERY_ONLY")));
+        when(boards.run(SOURCE, BoardDiscoveryService.Mode.MANUAL)).thenReturn(report("UPSTREAM_ERROR"));
+
+        ResponseEntity<?> response = controller.runSource(SOURCE);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) response.getBody();
+        assertThat(body).containsKey("run");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> run = (Map<String, Object>) body.get("run");
+        assertThat(run).containsEntry("ok", false);
+        assertThat(run).containsEntry("failure_category", "UPSTREAM_ERROR");
+    }
+
+    @Test
+    void updateSourceWithNullBodyReturnsExistingSource() {
+        when(db.queryForList("select id from job_sources where id = ?", SOURCE)).thenReturn(List.of(Map.of("id", SOURCE)));
+        Map<String, Object> existing = Map.of("id", SOURCE, "display_name", "Acme");
+        when(db.queryForList(contains("from job_sources\nwhere id = ?"), eq(SOURCE))).thenReturn(List.of(existing));
+
+        ResponseEntity<?> response = controller.updateSource(SOURCE, null);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        assertThat(response.getBody()).isEqualTo(existing);
+        verify(db, never()).update(contains("update job_sources set"), any(Object[].class));
+    }
+
+    @Test
+    void updateSourceReturns404WhenSourceNotFound() {
+        when(db.queryForList("select id from job_sources where id = ?", SOURCE)).thenReturn(List.of());
+
+        ResponseEntity<?> response = controller.updateSource(SOURCE, new SourcesController.UpdateSourceRequest(true, null, null, null));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(404);
+        verify(db, never()).update(contains("update job_sources set"), any(Object[].class));
+    }
 }

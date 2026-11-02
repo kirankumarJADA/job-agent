@@ -13,6 +13,7 @@ import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 
 import java.util.Map;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -47,6 +48,30 @@ public class AuthController {
     private final FirebaseTokenVerifier firebaseTokenVerifier;
     private final FirebaseUserService firebaseUserService;
     private final RegistrationGate registrationGate;
+    private final OperatorAccessPolicy operatorPolicy;
+
+    @Autowired
+    public AuthController(AuthenticationManager authenticationManager,
+                          SecurityContextRepository securityContextRepository,
+                          AuditLogWriter auditLogWriter,
+                          org.springframework.security.crypto.password.PasswordEncoder passwordEncoder,
+                          PurgeService purgeService,
+                          NotificationService notificationService,
+                          FirebaseTokenVerifier firebaseTokenVerifier,
+                          FirebaseUserService firebaseUserService,
+                          RegistrationGate registrationGate,
+                          OperatorAccessPolicy operatorPolicy) {
+        this.authenticationManager = authenticationManager;
+        this.securityContextRepository = securityContextRepository;
+        this.auditLogWriter = auditLogWriter;
+        this.passwordEncoder = passwordEncoder;
+        this.purgeService = purgeService;
+        this.notificationService = notificationService;
+        this.firebaseTokenVerifier = firebaseTokenVerifier;
+        this.firebaseUserService = firebaseUserService;
+        this.registrationGate = registrationGate;
+        this.operatorPolicy = operatorPolicy;
+    }
 
     public AuthController(AuthenticationManager authenticationManager,
                            SecurityContextRepository securityContextRepository,
@@ -57,21 +82,18 @@ public class AuthController {
                            FirebaseTokenVerifier firebaseTokenVerifier,
                            FirebaseUserService firebaseUserService,
                            RegistrationGate registrationGate) {
-        this.authenticationManager = authenticationManager;
-        this.securityContextRepository = securityContextRepository;
-        this.auditLogWriter = auditLogWriter;
-        this.passwordEncoder = passwordEncoder;
-        this.purgeService = purgeService;
-        this.notificationService = notificationService;
-        this.firebaseTokenVerifier = firebaseTokenVerifier;
-        this.firebaseUserService = firebaseUserService;
-        this.registrationGate = registrationGate;
+        this(authenticationManager, securityContextRepository, auditLogWriter, passwordEncoder,
+                purgeService, notificationService, firebaseTokenVerifier, firebaseUserService,
+                registrationGate, new OperatorAccessPolicy(""));
     }
 
     public record LoginRequest(@NotBlank @Email String email, @NotBlank String password) {
     }
 
-    public record UserResponse(UUID userId, String email, String displayName) {
+    public record UserResponse(UUID userId, String email, String displayName, String role, boolean isOperator) {
+        public UserResponse(UUID userId, String email, String displayName) {
+            this(userId, email, displayName, "CANDIDATE", false);
+        }
     }
 
     @PostMapping("/login")
@@ -141,7 +163,8 @@ public class AuthController {
             }
 
             return ResponseEntity.ok(new UserResponse(
-                    principal.getUserId(), principal.getUsername(), principal.getDisplayName()));
+                    principal.getUserId(), principal.getUsername(), principal.getDisplayName(),
+                    principal.getRole(), principal.isOperator()));
 
         } catch (BadCredentialsException | org.springframework.security.core.userdetails.UsernameNotFoundException e) {
             // Deliberately identical response/logging shape for "no such
@@ -268,7 +291,7 @@ public class AuthController {
         }
 
         UserRecord user = provisioned.user();
-        AppUserDetails principal = new AppUserDetails(user);
+        AppUserDetails principal = new AppUserDetails(user, operatorPolicy.isOperator(user));
 
         // Same session mechanism as POST /auth/login: the authenticated context
         // is saved into the HTTP session so the CSRF pair and every existing

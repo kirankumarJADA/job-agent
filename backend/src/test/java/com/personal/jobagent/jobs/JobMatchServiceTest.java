@@ -58,7 +58,9 @@ class JobMatchServiceTest {
         JdbcTemplate cacheDb = mock(JdbcTemplate.class);
         ModelRouter router = mock(ModelRouter.class);
         SemanticSkillMatcher semanticMatcher = new SemanticSkillMatcher(cacheDb, router);
-        service = new JobMatchService(jobRepository, semanticMatcher, profileRepository, jdbc, notifications, tm, new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
+        service = new JobMatchService(jobRepository, semanticMatcher, profileRepository, jdbc, notifications, tm,
+                new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()),
+                new com.fasterxml.jackson.databind.ObjectMapper());
         when(jdbc.update(anyString(), any(Object[].class))).thenReturn(1);
     }
 
@@ -107,6 +109,8 @@ class JobMatchServiceTest {
                 eq("APPLY"), breakdown.capture());
         assertThat(breakdown.getValue())
                 .contains("\"matched_skills\":[\"Java\",\"Spring\"]")
+                .contains("\"missing_skills\":[]")
+                .contains("\"highlights\":")
                 .contains("Robin semantically matched 2 of the 2 skills")
                 .contains("The offered salary meets your stated minimum.")
                 // Since Phase 5 the decision engine (mode + approval rules) decides
@@ -134,6 +138,8 @@ class JobMatchServiceTest {
                 eq("REVIEW"), breakdown.capture());
         assertThat(breakdown.getValue())
                 .contains("Robin semantically matched 1 of the 2 skills")
+                .contains("\"missing_skills\":[\"Spring\"]")
+                .contains("\"concerns\":")
                 .contains("below the APPLY threshold of 70")
                 .contains("you decide from here");
         verify(notifications, never()).emit(any(NotificationService.NotificationCommand.class));
@@ -190,7 +196,32 @@ class JobMatchServiceTest {
                 any(String.class), breakdown.capture());
         assertThat(breakdown.getValue()).contains("The job lists no skills");
                 // and the honest branch for a salary the job never declares:
-                
+
+    }
+
+    /**
+     * The persisted breakdown is built as a real {@code Map} and serialised
+     * through Jackson (not hand-rolled JSON string concatenation that only
+     * ever escaped a literal {@code "}) — a candidate-entered skill name
+     * containing a backslash or an embedded quote must still produce valid,
+     * round-trippable JSON rather than a malformed {@code ::jsonb} value the
+     * database would reject.
+     */
+    @Test
+    void aSkillNameWithJsonSignificantCharactersStillProducesValidJson() throws Exception {
+        when(jobRepository.findById(JOB)).thenReturn(Optional.of(job(List.of("C\\C++", "Say \"hi\""), 60000)));
+        profileSkills("C\\C++", "Say \"hi\"");
+
+        service.evaluateMatch(JOB, PROFILE, preferencesWithSalaryMin(50000L));
+
+        ArgumentCaptor<String> breakdown = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).update(contains("job_matches"), eq(PROFILE), eq(JOB), any(Object.class),
+                any(String.class), breakdown.capture());
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        Map<?, ?> parsed = mapper.readValue(breakdown.getValue(), Map.class);
+        @SuppressWarnings("unchecked")
+        List<String> matchedSkills = (List<String>) parsed.get("matched_skills");
+        assertThat(matchedSkills).containsExactlyInAnyOrder("C\\C++", "Say \"hi\"");
     }
 
     @Test
