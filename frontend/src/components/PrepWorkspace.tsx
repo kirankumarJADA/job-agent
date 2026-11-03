@@ -469,6 +469,9 @@ export const CoverLetterSection: React.FC<{ jobId: string; applicationId: string
 
   const letter = letters?.find((l) => l.id === selectedId) ?? null;
   const validation = letter?.claimsValidation as DocumentValidation | undefined;
+  const staleLetterValidation = !!letter && (!validation?.validator_version
+    || validation.validator_version !== CURRENT_DOCUMENT_VALIDATOR_VERSION);
+  const letterApproved = !!letter?.isApproved && !staleLetterValidation;
 
   const run = async (action: () => Promise<unknown>, success: string) => {
     setBusy(true); setActionError(null); setNotice(null);
@@ -528,12 +531,15 @@ export const CoverLetterSection: React.FC<{ jobId: string; applicationId: string
             >
               {letters.map((l) => (
                 <option key={l.id} value={l.id}>
-                  v{l.version}{l.origin === 'USER_CORRECTED' ? ' (your correction)' : ''}{l.isApproved ? ' — approved' : ''}
+                  v{l.version}{l.origin === 'USER_CORRECTED' ? ' (your correction)' : ''}{l.isApproved ? (
+                    (l.claimsValidation as DocumentValidation | undefined)?.validator_version === CURRENT_DOCUMENT_VALIDATOR_VERSION
+                      ? ' — approved' : ' — validation outdated'
+                  ) : ''}
                 </option>
               ))}
             </select>
-            <StatusPill tone={letter.isApproved ? 'emerald' : validation?.validator_version && !validation.passed ? 'red' : 'amber'}>
-              {letter.isApproved ? 'Approved by you' : validation?.validator_version && !validation.passed ? 'Blocked by validation' : 'Awaiting your review'}
+            <StatusPill tone={staleLetterValidation || (validation?.validator_version && !validation.passed) ? 'red' : letterApproved ? 'emerald' : 'amber'}>
+              {staleLetterValidation ? 'Validation outdated' : letterApproved ? 'Approved by you' : validation?.validator_version && !validation.passed ? 'Blocked by validation' : 'Awaiting your review'}
             </StatusPill>
             {applicationId && (
               <span className="text-xs text-ink-muted">
@@ -542,7 +548,14 @@ export const CoverLetterSection: React.FC<{ jobId: string; applicationId: string
             )}
           </div>
 
-          <FindingsList validation={validation} legacyNote="This letter was checked only by earlier, weaker checks. Approving it re-runs the current checks first." />
+          {staleLetterValidation ? (
+            <Alert tone="warning">
+              This cover letter has not been checked by the current validator. Use “Revalidate & approve this version”
+              to rerun the current checks against your profile before application use.
+            </Alert>
+          ) : (
+            <FindingsList validation={validation} legacyNote="This letter was checked only by earlier, weaker checks. Revalidation is required before approval." />
+          )}
 
           {editing ? (
             <div className="space-y-2">
@@ -567,10 +580,12 @@ export const CoverLetterSection: React.FC<{ jobId: string; applicationId: string
             <SecondaryButton onClick={() => file.download(`/cover-letters/${letter.id}/pdf`, `cover-letter-${letter.id}.pdf`)} disabled={file.busy}>
               {file.busy ? 'Downloading…' : 'Download PDF'}
             </SecondaryButton>
-            {letter.isApproved ? (
+            {letterApproved ? (
               <SecondaryButton onClick={() => approve(false)} disabled={busy}>Withdraw approval</SecondaryButton>
             ) : (
-              <PrimaryButton onClick={() => approve(true)} disabled={busy}>Approve this version</PrimaryButton>
+              <PrimaryButton onClick={() => approve(true)} disabled={busy}>
+                {staleLetterValidation ? 'Revalidate & approve this version' : 'Approve this version'}
+              </PrimaryButton>
             )}
             {!editing && <SecondaryButton onClick={() => { setDraft(letter.bodyMarkdown); setEditing(true); }}>Correct this letter</SecondaryButton>}
             <SecondaryButton onClick={generate} disabled={busy}>{busy ? 'Working…' : 'Generate a new version'}</SecondaryButton>
