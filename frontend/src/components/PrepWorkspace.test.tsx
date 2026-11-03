@@ -205,6 +205,32 @@ describe('PrepWorkspace', () => {
     expect(vi.mocked(saveDownload)).not.toHaveBeenCalled();
   });
 
+  it('offers current revalidation for a previously approved cover letter with stale checks', async () => {
+    let revalidated = false;
+    const staleLetter = {
+      ...letters[0],
+      isApproved: true,
+      claimsValidation: { ...validation(true), validator_version: 'fact-validator-1' },
+    };
+    routes({
+      '/cover-letters/job/job-1': () => [revalidated
+        ? { ...staleLetter, claimsValidation: validation(true) }
+        : staleLetter],
+      '/cover-letters/cl-2/approval': () => {
+        revalidated = true;
+        return { ...staleLetter, claimsValidation: validation(true) };
+      },
+    });
+    renderWorkspace();
+    expect(await screen.findByText('Validation outdated')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Revalidate & approve this version' })).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Revalidate & approve this version' }));
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/cover-letters/cl-2/approval',
+      { method: 'PUT', body: JSON.stringify({ approved: true }) }));
+    expect(await screen.findByText('Approved by you')).toBeTruthy();
+  });
+
   it('lists letter versions, surfaces a refused approval and saves corrections as a new version', async () => {
     routes({
       '/cover-letters/cl-1/approval': () => new Error('This letter has 1 blocking validation finding(s). Submit a correction (a new version) before approving.'),
