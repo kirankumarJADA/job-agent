@@ -36,7 +36,7 @@ import java.util.regex.Pattern;
  */
 public final class DocumentFactValidator {
 
-    public static final String VERSION = "fact-validator-1";
+    public static final String VERSION = "fact-validator-2";
 
     public enum Severity { BLOCKER, WARNING }
     public enum Kind { DETERMINISTIC, HEURISTIC }
