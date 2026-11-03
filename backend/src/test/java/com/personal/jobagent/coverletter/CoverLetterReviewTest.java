@@ -114,7 +114,7 @@ class CoverLetterReviewTest {
         ArgumentCaptor<LlmCompletionRequest> request = ArgumentCaptor.forClass(LlmCompletionRequest.class);
         verify(router).execute(eq(TaskType.COVER_LETTER), request.capture(), any(Duration.class));
         String prompt = request.getValue().messages().getFirst().get("content");
-        assertThat(prompt).contains("Verified Professional Summary")
+        assertThat(prompt).contains("Candidate-Provided Professional Summary")
                 .contains("Candidate-authored summary with verified API delivery experience.")
                 .contains("Verified Certifications")
                 .contains("AWS Certified Developer")
