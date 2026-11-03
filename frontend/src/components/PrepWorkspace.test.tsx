@@ -134,6 +134,21 @@ describe('PrepWorkspace', () => {
     expect(screen.getByText(/It is not an ATS score and guarantees nothing/)).toBeTruthy();
   });
 
+  it('marks a passing CV from an older validator as outdated and requires regeneration', async () => {
+    routes({
+      '/resume-intelligence/job/job-1': () => {
+        const stale = cvResponse(true, true);
+        stale.cv.analysis.atsReport.validation.validator_version = 'fact-validator-1';
+        return stale;
+      },
+    });
+    renderWorkspace();
+    expect(await screen.findByText('Validation outdated')).toBeTruthy();
+    expect(screen.getByText(/checked by an older validation version/i)).toBeTruthy();
+    expect(screen.getByText(/Regenerate it, review the new validation findings/)).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Approve this CV' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('approves a valid CV through the review endpoint', async () => {
     let approved = false;
     routes({
