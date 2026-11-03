@@ -35,7 +35,7 @@ const readiness = (overrides: Record<string, unknown> = {}) => ({
 });
 
 const validation = (passed: boolean) => ({
-  validator_version: 'fact-validator-1',
+  validator_version: 'fact-validator-2',
   passed,
   blocker_count: passed ? 0 : 1,
   warning_count: 1,
