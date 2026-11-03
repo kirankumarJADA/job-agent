@@ -4,7 +4,9 @@ Each entry cites exact file/line evidence. Severity: **P0** (user-facing truthfu
 
 ---
 
-## P0 — Workday capability is overstated to the candidate
+## P0 — Workday capability was overstated to the candidate — **FIXED, commit `610d574`**
+
+**Status:** Fixed in this review cycle. The data values described below have already been corrected; this entry is kept as the evidentiary record of why the fix was needed.
 
 **Evidence:** `backend/src/main/java/com/personal/jobagent/automation/AtsCapabilityRegistry.java:140-149` sets the `WORKDAY` row's `formFilling = FULL` (12th positional value in the `AtsCapabilities` record, confirmed via `AtsCapabilities.java:35-51`). `AtsCapabilities.summary()` (`AtsCapabilities.java:59-74`) returns `FORM_FILL_AVAILABLE` whenever `formFilling != NONE`, with no other gate. This summary is served verbatim to the frontend via `GET /api/v1/ats-capabilities` (`AtsCapabilityController.java:43-46`).
 
@@ -12,13 +14,13 @@ Meanwhile `WorkdayExecutionPlanService.java:29-83` — the actual implementation
 
 **Impact:** a candidate opening a Workday job in Robin is told the form can be filled, when the shipped service can only check that a saved password still works. This is exactly the class of claim the whole project's stated philosophy ("never claim a capability the code doesn't prove") exists to prevent.
 
-**Fix:** correct the `WORKDAY` row's `formInspection`, `requiredFieldValidation`, `documentAttachment`, and `formFilling` values to `NONE` (matching what `WorkdayExecutionPlanService` actually does), which will make `summary()` correctly fall through to `SIGN_IN_READINESS_ONLY`. This is a one-table-row change in a single file, fully covered by `AtsCapabilityRegistryTest.java` (update its Workday assertions to match). Low risk, high trust impact — recommend doing this immediately after Phase 20 closes (or even before, since it's unrelated to the mail gate and purely corrects a truthfulness bug).
+**Fix (applied):** `AtsCapabilityRegistry.WORKDAY`'s `formInspection`, `requiredFieldValidation`, `questionAnswering`, `documentAttachment`, `formFilling`, `finalSubmission`, and `submissionConfirmation` values are now `NONE`, so `summary()` correctly falls through to `SIGN_IN_READINESS_ONLY`. `AtsCapabilityRegistryTest` and `AtsCapabilityControllerTest` were updated to match (re-run and confirmed independently in this review cycle — see the accompanying review's Task D for the exact command and result). Committed as `610d574`, not yet pushed to `origin/master`.
 
 ---
 
-## P1 — Phase 20 managed mail: production-unverified (full detail in `ROBIN_PHASE20_VERIFICATION.md`)
+## P1 — Phase 20 managed mail: partially verified in production, not fully closed (full detail in `ROBIN_PHASE20_VERIFICATION.md`)
 
-No evidence of a real inbound email completing Cloudflare → Worker → Render → Postgres → UI. Candidate currently sees `APP_SECRETS_KEY` reported missing; root cause narrowed to 4 possibilities in the verification report, not yet isolated. Blocked on your access to Render/Supabase, not on more engineering.
+**Update 2026-11-03:** a real inbound email completed Cloudflare → Worker → Render → Postgres → UI for the first time — one message, encrypted, persisted, zero purged. The `APP_SECRETS_KEY`-missing state is resolved (new key generated and added, backend restarted). Encryption-key continuity is also resolved: a pre-provisioning count found zero rows in both `employer_credentials` and `managed_inbound_messages`, so no row can depend on a lost prior key. **Still open:** duplicate webhook redelivery/idempotency in production, email-to-application association, automatic OTP extraction, and the full recruiter-communication lifecycle — none of these are proven yet. See `ROBIN_PHASE20_VERIFICATION.md` §4.3.
 
 ## P1 — `cloudflare-email-worker` has no CI coverage
 

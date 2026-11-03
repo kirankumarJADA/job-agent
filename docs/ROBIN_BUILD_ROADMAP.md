@@ -4,13 +4,13 @@ Evidence → Tsenta comparison → prioritisation → implementation → verific
 
 ## Phase 20 (current, open) — Managed-mail production verification
 **Goal:** prove the Cloudflare inbound-mail chain end-to-end with a real test email.
-**Blocked on:** your access to Render/Supabase/Cloudflare dashboards (see `ROBIN_PHASE20_VERIFICATION.md` §6 for the exact 3 lookups needed). Not blocked on more code.
-**Exit criteria:** the 10-item checklist in `ROBIN_PHASE20_VERIFICATION.md` §5, all green.
+**Status (2026-11-03):** the first real test email succeeded end-to-end — Cloudflare → Worker → Render → Postgres, encrypted, persisted, visible in Robin. Encryption-key continuity is resolved for both ciphertext tables. **Not closed yet** — duplicate-delivery idempotency, email-to-application association, automatic OTP extraction, and the full recruiter-communication lifecycle are still production-unverified. Not blocked on dashboard access anymore; blocked only on exercising those four remaining flows.
+**Exit criteria:** the checklist in `ROBIN_PHASE20_VERIFICATION.md` §5, all green.
 
-## Phase 20.1 (new, zero-dependency, can run in parallel with Phase 20's blockers) — Fix the Workday capability-registry truthfulness bug
-**Why first:** it's a one-file, fully-test-covered correction (`AtsCapabilityRegistry.java` + `AtsCapabilityRegistryTest.java`) with no production dependency, no DB/Cloudflare/Render access needed, and it fixes a live truthfulness gap in exactly the dimension this whole product claims to compete on. Doing this costs nothing and removes the single worst finding in the Gap Register.
-**Acceptance criteria:** `AtsCapabilities.summary()` for Workday returns `SIGN_IN_READINESS_ONLY`, not `FORM_FILL_AVAILABLE`; `AtsCapabilityRegistryTest` updated and passing; `mvn -f backend/pom.xml test -Dtest=AtsCapabilityRegistryTest` green.
-**Candidate value:** a candidate opening a Workday job is told the truth about what Robin will do for them.
+## Phase 20.1 — Fix the Workday capability-registry truthfulness bug — **DONE, commit `610d574`**
+**Why first:** it was a one-file, fully-test-covered correction (`AtsCapabilityRegistry.java` + `AtsCapabilityRegistryTest.java`) with no production dependency, no DB/Cloudflare/Render access needed, and it fixed a live truthfulness gap in exactly the dimension this whole product claims to compete on.
+**Acceptance criteria (met):** `AtsCapabilities.summary()` for Workday now returns `SIGN_IN_READINESS_ONLY`, not `FORM_FILL_AVAILABLE`; `AtsCapabilityRegistryTest` and `AtsCapabilityControllerTest` updated and passing.
+**Candidate value:** a candidate opening a Workday job is now told the truth about what Robin will do for them. Committed, not yet pushed to `origin/master`.
 
 ## Phase 20.2 — Add CI coverage for `cloudflare-email-worker`
 **Why:** the one package in the Phase 20 critical path currently has zero CI gate.
@@ -38,4 +38,4 @@ Sequenced exactly per your own §6 items G–K. Not detailed further here until 
 ---
 
 **Testing requirement for every phase above:** run the actual command, report the actual exit code and pass/fail count. Never state a result I have not executed.
-**Deployment requirement:** no phase above requires a production deployment except the final step of Phase 20 (the real test email) and eventually Phase 24 (a real sandbox ATS submission) — both require your explicit go-ahead at the moment of action, not before.
+**Deployment requirement:** no phase above requires a production deployment except Phase 20's remaining live-flow tests (duplicate delivery, application association, OTP extraction, recruiter lifecycle — the initial test email has already been run) and eventually Phase 24 (a real sandbox ATS submission) — both require your explicit go-ahead at the moment of action, not before.
