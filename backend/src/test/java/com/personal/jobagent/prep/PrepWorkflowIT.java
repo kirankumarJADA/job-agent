@@ -200,7 +200,7 @@ class PrepWorkflowIT {
 
         // Adversarially inject a qualification absent from this real DB profile.
         var injected = new com.personal.jobagent.documents.DocumentFactValidator().validate(
-                cv.get("resumeMarkdown").asText() + "\\nI hold a PhD in Physics.",
+                cv.get("resumeMarkdown").asText() + "\nI hold a PhD in Physics.",
                 tailoring.loadSource(devProfile).facts(), null);
         assertThat(injected.passed()).isFalse();
         assertThat(injected.findings()).anySatisfy(finding -> {
