@@ -122,6 +122,10 @@ public class ResumeAtsController {
                 return ResponseEntity.status(409).body(Map.of("error",
                         "This CV was generated before the current validation existed. Regenerate it before approving."));
             }
+            if (!DocumentFactValidator.VERSION.equals(v.get("validator_version"))) {
+                return ResponseEntity.status(409).body(Map.of("error",
+                        "This CV was checked by an older validation version. Regenerate it and review the new version before approving."));
+            }
             if (!Boolean.TRUE.equals(v.get("passed"))) {
                 return ResponseEntity.status(409).body(Map.of("error",
                         "This CV has blocking validation findings. Correct your profile and regenerate before approving."));
