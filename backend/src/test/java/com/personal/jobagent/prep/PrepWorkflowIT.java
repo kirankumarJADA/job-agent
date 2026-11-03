@@ -239,6 +239,28 @@ class PrepWorkflowIT {
     }
 
     @Test
+    void staleValidatorVersionCannotBeApprovedEvenWhenItsOldReportPassed() throws Exception {
+        UUID job = seedJob("Stale Validation Engineer");
+        UUID application = seedApplication(devProfile, job);
+        String cvId = tailor(job, application).get("cvVersionId").asText();
+
+        // Simulate a CV persisted under validator v1 with a passing v1 report.
+        jdbc.update("""
+                update resume_ats_analyses
+                set ats_report = jsonb_set(ats_report, '{validation,validator_version}', to_jsonb(?::text), true)
+                where cv_version_id = ?::uuid
+                """, "fact-validator-1", cvId);
+
+        mvc.perform(put("/api/v1/resume-intelligence/cv/" + cvId + "/review").session(session).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"approved\":true}"))
+                .andExpect(status().isConflict())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("older validation version")));
+
+        assertThat(jdbc.queryForObject(
+                "select count(*) from cv_version_reviews where cv_version_id = ?::uuid", Integer.class, cvId)).isZero();
+    }
+
+    @Test
     void anotherOwnersCvAndApplicationsAreNeverReachable() throws Exception {
         UUID job = seedJob("Security Engineer");
         UUID foreignCv = tailoring.tailor(otherProfile, job, null).cvVersionId();
