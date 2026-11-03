@@ -15,13 +15,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 class AtsCapabilityRegistryTest {
 
     @Test
-    void onlyGreenhouseAshbyAndWorkdayAreEverCreditedWithRealSubmission() {
-        // Phase 14 added Ashby and Phase 19 added Workday as platforms with a genuine,
-        // guarded final-submission mechanism — every other platform must still never
-        // be credited with one.
+    void onlyGreenhouseAndAshbyAreEverCreditedWithRealSubmission() {
+        // Phase 14 added Ashby as a platform with a genuine, guarded
+        // final-submission mechanism — every other platform must never be
+        // credited with one. Workday is deliberately NOT in this list:
+        // WorkdayExecutionPlanService's own module comment establishes that
+        // it only verifies a saved credential signs in and never reaches,
+        // inspects, or fills the real application form, so it can never
+        // submit one either.
         for (AtsCapabilities row : AtsCapabilityRegistry.all()) {
             boolean submits = row.finalSubmission() == AtsCapabilityLevel.FULL;
-            boolean expected = "GREENHOUSE".equals(row.kind()) || "ASHBY".equals(row.kind()) || "WORKDAY".equals(row.kind());
+            boolean expected = "GREENHOUSE".equals(row.kind()) || "ASHBY".equals(row.kind());
             assertThat(submits).as(row.kind() + " finalSubmission").isEqualTo(expected);
         }
     }
@@ -62,15 +66,25 @@ class AtsCapabilityRegistryTest {
     }
 
     @Test
-    void workdaySummarisesAsFormFillAvailableWithGuardedFinalSubmission() {
+    void workdaySummarisesAsSignInReadinessOnlyNeverFormFillOrSubmission() {
+        // WorkdayExecutionPlanService's own module comment is explicit: the real,
+        // multi-step Workday APPLICATION form was never observed and is never
+        // reached, inspected, or filled. This service only verifies that a
+        // candidate's saved credential still signs in on Workday's real sign-in
+        // page. Crediting formInspection/formFilling/documentAttachment/
+        // finalSubmission with FULL here (as this test previously did) was a
+        // registry bug that made the candidate-facing /api/v1/ats-capabilities
+        // endpoint overstate Workday's real capability — fixed in this phase.
         var workday = AtsCapabilityRegistry.byPlanType("WORKDAY");
-        assertThat(workday.summary()).isEqualTo(AtsCapabilitySummary.FORM_FILL_AVAILABLE);
-        assertThat(workday.formInspection()).isEqualTo(AtsCapabilityLevel.FULL);
-        assertThat(workday.formFilling()).isEqualTo(AtsCapabilityLevel.FULL);
         assertThat(workday.signInReadiness()).isEqualTo(AtsCapabilityLevel.FULL);
-        assertThat(workday.documentAttachment()).isEqualTo(AtsCapabilityLevel.FULL);
-        assertThat(workday.finalSubmission()).isEqualTo(AtsCapabilityLevel.FULL);
-        assertThat(workday.submissionConfirmation()).isEqualTo(AtsCapabilityLevel.PARTIAL);
+        assertThat(workday.formInspection()).isEqualTo(AtsCapabilityLevel.NONE);
+        assertThat(workday.requiredFieldValidation()).isEqualTo(AtsCapabilityLevel.NONE);
+        assertThat(workday.questionAnswering()).isEqualTo(AtsCapabilityLevel.NONE);
+        assertThat(workday.documentAttachment()).isEqualTo(AtsCapabilityLevel.NONE);
+        assertThat(workday.formFilling()).isEqualTo(AtsCapabilityLevel.NONE);
+        assertThat(workday.finalSubmission()).isEqualTo(AtsCapabilityLevel.NONE);
+        assertThat(workday.submissionConfirmation()).isEqualTo(AtsCapabilityLevel.NONE);
+        assertThat(workday.summary()).isEqualTo(AtsCapabilitySummary.SIGN_IN_READINESS_ONLY);
     }
 
     @Test
@@ -78,8 +92,10 @@ class AtsCapabilityRegistryTest {
         var workday = AtsCapabilityRegistry.byPlanType("WORKDAY");
         // Phase 11 implemented account creation itself; Phase 11A established that what
         // happens after it (OTP? link? neither?) is unknown — PARTIAL says both facts honestly.
+        // Account-creation readiness does not change the top-line summary: the form itself
+        // is still never reached, so the summary stays SIGN_IN_READINESS_ONLY.
         assertThat(workday.accountCreationReadiness()).isEqualTo(AtsCapabilityLevel.PARTIAL);
-        assertThat(workday.summary()).isEqualTo(AtsCapabilitySummary.FORM_FILL_AVAILABLE);
+        assertThat(workday.summary()).isEqualTo(AtsCapabilitySummary.SIGN_IN_READINESS_ONLY);
     }
 
     @Test

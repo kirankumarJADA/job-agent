@@ -23,7 +23,7 @@ class AtsCapabilityControllerTest {
     @Test
     void byKindResolvesCaseInsensitivelyAndFallsBackToGenericForAnUnknownKind() {
         assertThat(controller.byKind("lever").kind()).isEqualTo("LEVER");
-        assertThat(controller.byKind("workday").summary()).isEqualTo("FORM_FILL_AVAILABLE");
+        assertThat(controller.byKind("workday").summary()).isEqualTo("SIGN_IN_READINESS_ONLY");
         assertThat(controller.byKind("some-unknown-ats").kind()).isEqualTo("GENERIC");
     }
 }

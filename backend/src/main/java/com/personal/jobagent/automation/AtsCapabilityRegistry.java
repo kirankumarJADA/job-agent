@@ -140,13 +140,18 @@ public final class AtsCapabilityRegistry {
     private static final AtsCapabilities WORKDAY = new AtsCapabilities(
             "WORKDAY", "Workday",
             List.of("myworkdayjobs.com"),
-            FULL, FULL, FULL, PARTIAL, FULL, FULL, PARTIAL, FULL, FULL, FULL, PARTIAL, FULL,
-            "Verified live (2026) against Workday platform data-automation-id standards. The multi-step wizard, "
-                    + "honeypot anti-bot trap (beecatcher/website), and MFA/CAPTCHA detection are protected against live-observed markup. "
-                    + "Candidate identity and contact details are mapped to standard fields, documents (CV and cover letter) are verified and attached, "
-                    + "and custom questions or declarations are surfaced as human-required gaps. Guarded submission is approval-gated and atomic "
-                    + "with platform confirmation verification and reconciliation support. SubmissionConfirmation is rated PARTIAL because no live "
-                    + "test application was submitted against a real employer.");
+            FULL, FULL, NONE, PARTIAL, FULL, NONE, NONE, NONE, NONE, NONE, NONE, FULL,
+            "Verified live (2026) against Workday platform data-automation-id standards, but only up to the sign-in "
+                    + "page: the multi-step wizard, honeypot anti-bot trap (beecatcher/website), and MFA/CAPTCHA detection "
+                    + "on that sign-in page are protected against live-observed markup. WorkdayExecutionPlanService's own "
+                    + "module comment is explicit that the actual multi-step APPLICATION form was never observed and is "
+                    + "never reached, inspected, or filled — reaching it would require signing in with a real candidate's "
+                    + "real credentials against a real employer's live tenant, which was deliberately not done. This "
+                    + "service only verifies that a candidate's saved credential still signs in, reporting success, "
+                    + "failure, or an MFA/CAPTCHA human-handoff. Phase 11 separately added a genuine, consent-gated, "
+                    + "idempotent account-CREATION path (accountCreationReadiness is PARTIAL because the real "
+                    + "post-creation verification mechanism is unknown). No form inspection, field filling, document "
+                    + "attachment, question answering, or submission of any kind exists for Workday today.");
 
     private static final AtsCapabilities ASHBY = new AtsCapabilities(
             "ASHBY", "Ashby",
