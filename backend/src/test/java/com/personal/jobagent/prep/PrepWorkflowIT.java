@@ -185,8 +185,29 @@ class PrepWorkflowIT {
             assertThat(text).contains("Zoë Brontë-Núñez").contains("Café Systems").contains("Zürich release item 1 ")
                     .contains("“reliably”").contains("FINAL-BULLET-MARKER");
         }
+        // Trace a fact from the authenticated user's persisted profile through
+        // deterministic CV rendering, provenance, and the validator report.
+        assertThat(cv.get("resumeMarkdown").asText()).contains("Java").contains("Café Systems");
+        assertThat(cv.get("verifiedEvidence").toString())
+                .contains("\"source_type\":\"SKILL\"")
+                .contains("\"claim\":\"Java\"")
+                .contains("\"evidence_status\":\"USER_VERIFIED\"");
+        JsonNode validation = cv.path("atsReport").path("validation");
+        assertThat(validation.path("validator_version").asText()).isEqualTo("fact-validator-2");
+        assertThat(validation.path("passed").asBoolean()).isTrue();
         assertThat(cv.get("resumeMarkdown").asText()).doesNotContain("PhD").doesNotContain("{text=");
         assertThat(cv.get("gaps").toString()).contains("kubernetes");
+
+        // Adversarially inject a qualification absent from this real DB profile.
+        var injected = new com.personal.jobagent.documents.DocumentFactValidator().validate(
+                cv.get("resumeMarkdown").asText() + "\\nI hold a PhD in Physics.",
+                tailoring.loadSource(devProfile).facts(), null);
+        assertThat(injected.passed()).isFalse();
+        assertThat(injected.findings()).anySatisfy(finding -> {
+            assertThat(finding.code()).isEqualTo("UNSUPPORTED_QUALIFICATION");
+            assertThat(finding.severity()).isEqualTo(
+                    com.personal.jobagent.documents.DocumentFactValidator.Severity.BLOCKER);
+        });
     }
 
     @Test
