@@ -7,6 +7,8 @@ import com.personal.jobagent.profile.SkillRecord;
 import com.personal.jobagent.profile.WorkExperienceRecord;
 
 import java.time.LocalDate;
+import java.time.YearMonth;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -98,7 +100,7 @@ public final class DocumentFactValidator {
     private static final Pattern FIGURE = Pattern.compile(
             "(?:[£$€]\\s?\\d[\\d,.]*\\s?[kKmMbB]?\\b)|(?:\\b\\d[\\d,.]*\\s?%)|(?:\\b\\d[\\d,.]*\\s?[xX]\\b)|(?:\\b\\d+(?:\\.\\d+)?[kKmM]\\b)");
     private static final Pattern EMPLOYER = Pattern.compile(
-            "\\b(?:(?:worked|working|employed)\\s+(?:at|with|for)|(?:role|position|time|tenure|career|internship|experience)\\s+at)\\s+"
+            "\\b(?:(?:worked|working|employed)\\s+(?:at|with|for)|(?:internship|experience)\\s+at)\\s+"
                     + "((?:[A-Z][\\w&.'\\-]*)(?:\\s+(?:[A-Z][\\w&.'\\-]*|&|of|and))*)");
 
     private record DegreeFamily(String label, List<String> textTerms, List<String> recordTerms) {}
@@ -118,9 +120,17 @@ public final class DocumentFactValidator {
 
     private static final List<String> WORK_AUTH_TERMS = List.of(
             "right to work", "work permit", "visa", "visa sponsorship", "require sponsorship", "requires sponsorship",
-            "citizen", "citizenship",
+            "need sponsorship", "needs sponsorship", "citizen", "citizenship",
             "settled status", "pre-settled", "indefinite leave", "authorised to work", "authorized to work",
-            "green card", "work authorisation", "work authorization", "permanent resident");
+            "eligible to work", "green card", "work authorisation", "work authorization", "permanent resident");
+    private static final Pattern SPONSORSHIP_NOT_REQUIRED = Pattern.compile(
+            "\\b(?:do not|don't|dont|does not|doesn't|never)\\s+(?:currently\\s+)?(?:need|require)\\s+(?:a\\s+)?(?:visa\\s+)?sponsorship\\b"
+                    + "|\\bno\\s+(?:visa\\s+)?sponsorship\\s+(?:is\\s+)?required\\b"
+                    + "|\\bwithout\\s+(?:a\\s+)?(?:visa\\s+)?sponsorship\\b",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern SPONSORSHIP_REQUIRED = Pattern.compile(
+            "\\b(?:need|needs|require|requires|requiring)\\s+(?:a\\s+)?(?:visa\\s+)?sponsorship\\b",
+            Pattern.CASE_INSENSITIVE);
 
     private static final List<String> CLEARANCE_TERMS = List.of(
             "security clearance", "sc cleared", "dv cleared", "sc clearance", "dv clearance", "top secret", "nato secret");
@@ -173,30 +183,64 @@ public final class DocumentFactValidator {
     }
 
     private void checkYearsOfExperience(String text, CandidateFacts facts, List<Finding> findings) {
-        int now = LocalDate.now().getYear();
-        int span = facts.experiences().stream().filter(e -> e.startMonth() != null)
-                .mapToInt(e -> e.startMonth().getYear()).min().stream().map(first -> now - first + 1).max().orElse(0);
+        // Count completed months across the recorded work periods. The previous
+        // earliest-start-year-to-now calculation ignored end dates and career
+        // gaps, allowing short/old roles to support inflated experience claims.
+        int workYears = totalDocumentedExperienceMonths(facts.experiences()) / 12;
         int skillYears = facts.skills().stream().filter(s -> s.years() != null)
-                .mapToInt(s -> (int) Math.ceil(s.years().doubleValue())).max().orElse(0);
-        int supported = Math.max(span, skillYears);
+                .mapToInt(s -> Math.max(0, s.years().intValue())).max().orElse(0);
+        int supported = Math.max(workYears, skillYears);
         Matcher m = YEARS_OF_EXPERIENCE.matcher(text);
         while (m.find()) {
             int claimed = Integer.parseInt(m.group(1));
             if (claimed > supported) {
                 findings.add(new Finding("UNSUPPORTED_YEARS_OF_EXPERIENCE", Severity.BLOCKER, Kind.DETERMINISTIC, m.group(),
-                        "The text claims " + m.group().trim() + ", but your dated work history and skill records support at most "
-                                + supported + " year(s)."));
+                        "The text claims " + m.group().trim() + ", but your non-overlapping dated work periods and skill records support at most "
+                                + supported + " completed year(s)."));
             }
         }
+    }
+
+    private int totalDocumentedExperienceMonths(List<WorkExperienceRecord> experiences) {
+        record MonthRange(YearMonth start, YearMonth end) {}
+        YearMonth current = YearMonth.now();
+        List<MonthRange> ranges = new ArrayList<>();
+        for (WorkExperienceRecord experience : experiences) {
+            if (experience.startMonth() == null) continue;
+            YearMonth start = YearMonth.from(experience.startMonth());
+            if (start.isAfter(current)) continue;
+            YearMonth end = experience.endMonth() == null ? current : YearMonth.from(experience.endMonth());
+            if (end.isAfter(current)) end = current;
+            if (end.isBefore(start)) continue;
+            ranges.add(new MonthRange(start, end));
+        }
+        if (ranges.isEmpty()) return 0;
+        ranges.sort(Comparator.comparing(MonthRange::start));
+
+        long total = 0;
+        YearMonth rangeStart = ranges.getFirst().start();
+        YearMonth rangeEnd = ranges.getFirst().end();
+        for (int i = 1; i < ranges.size(); i++) {
+            MonthRange next = ranges.get(i);
+            if (!next.start().isAfter(rangeEnd.plusMonths(1))) {
+                if (next.end().isAfter(rangeEnd)) rangeEnd = next.end();
+            } else {
+                total += ChronoUnit.MONTHS.between(rangeStart, rangeEnd) + 1;
+                rangeStart = next.start();
+                rangeEnd = next.end();
+            }
+        }
+        total += ChronoUnit.MONTHS.between(rangeStart, rangeEnd) + 1;
+        return (int) Math.min(Integer.MAX_VALUE, total);
     }
 
     private void checkFigures(String text, String source, List<Finding> findings) {
         Matcher m = FIGURE.matcher(text);
         while (m.find()) {
             String figure = m.group().trim();
-            String digits = figure.replaceAll("[^0-9.,]", "");
-            if (digits.isEmpty()) continue;
-            if (!source.contains(figure.toLowerCase(Locale.ROOT)) && !source.contains(digits)) {
+            // Preserve units and currency: a source "30%" is not evidence for
+            // a generated claim of "£30" merely because both contain the digits 30.
+            if (!source.contains(figure.toLowerCase(Locale.ROOT))) {
                 findings.add(new Finding("UNSUPPORTED_FIGURE", Severity.BLOCKER, Kind.DETERMINISTIC, figure,
                         "The figure \"" + figure + "\" does not appear in any of your profile records. Quantitative "
                                 + "achievements must come from your own records."));
@@ -238,13 +282,91 @@ public final class DocumentFactValidator {
     private void checkWorkAuthorisation(String lower, CandidateFacts facts, List<Finding> findings) {
         Optional<String> term = WORK_AUTH_TERMS.stream().filter(t -> containsTerm(lower, t)).findFirst();
         if (term.isEmpty()) return;
-        if (facts.workEligibility().isEmpty()) {
+
+        Map<String, Object> eligibility = facts.workEligibility();
+        Boolean recordedRightToWork = booleanValue(firstPresent(eligibility, "right_to_work_uk", "rightToWorkUk"));
+        String visaStatus = normaliseVisaStatus(firstPresent(eligibility, "visa_status", "visaStatus"));
+        boolean contradiction = false;
+        boolean specificallyChecked = false;
+
+        boolean mentionsRightToWork = List.of("right to work", "work permit", "authorised to work",
+                "authorized to work", "eligible to work").stream().anyMatch(t -> containsTerm(lower, t));
+        if (mentionsRightToWork && recordedRightToWork != null) {
+            Boolean claimedRightToWork = rightToWorkClaim(lower);
+            if (claimedRightToWork != null) {
+                specificallyChecked = true;
+                if (!recordedRightToWork.equals(claimedRightToWork)) {
+                    findings.add(new Finding("CONTRADICTED_WORK_AUTHORISATION", Severity.BLOCKER, Kind.DETERMINISTIC,
+                            term.get(), "The text's right-to-work claim contradicts the right_to_work_uk value recorded in your profile."));
+                    contradiction = true;
+                }
+            }
+        }
+
+        Boolean claimedSponsorship = sponsorshipRequirementClaim(lower);
+        if (claimedSponsorship != null) {
+            Boolean recordedSponsorship = sponsorshipRequirement(visaStatus);
+            if (recordedSponsorship != null) {
+                specificallyChecked = true;
+                if (!recordedSponsorship.equals(claimedSponsorship)) {
+                    findings.add(new Finding("CONTRADICTED_SPONSORSHIP_REQUIREMENT", Severity.BLOCKER, Kind.DETERMINISTIC,
+                            term.get(), "The text's sponsorship claim contradicts the visa status recorded in your profile."));
+                    contradiction = true;
+                }
+            }
+        }
+
+        if (contradiction) return;
+        if (specificallyChecked) return;
+        if (eligibility.isEmpty()) {
             findings.add(new Finding("UNSUPPORTED_WORK_AUTHORISATION", Severity.BLOCKER, Kind.DETERMINISTIC, term.get(),
                     "The text refers to work authorisation (\"" + term.get() + "\") but your profile records no work-eligibility details."));
         } else {
             findings.add(new Finding("WORK_AUTHORISATION_STATEMENT", Severity.WARNING, Kind.HEURISTIC, term.get(),
-                    "The text makes a work-authorisation statement. Confirm it matches the eligibility recorded in your profile exactly."));
+                    "The text makes a work-authorisation statement that the structured profile cannot fully verify. Confirm the country and exact permission before approval."));
         }
+    }
+
+    private static Object firstPresent(Map<String, Object> values, String first, String second) {
+        Object value = values.get(first);
+        return value != null ? value : values.get(second);
+    }
+
+    private static Boolean booleanValue(Object value) {
+        if (value instanceof Boolean b) return b;
+        if (value instanceof String s) {
+            if ("true".equalsIgnoreCase(s.trim())) return Boolean.TRUE;
+            if ("false".equalsIgnoreCase(s.trim())) return Boolean.FALSE;
+        }
+        return null;
+    }
+
+    private static String normaliseVisaStatus(Object value) {
+        return value == null ? "" : String.valueOf(value).trim().replaceAll("[\\s-]+", "_").toUpperCase(Locale.ROOT);
+    }
+
+    private static Boolean sponsorshipRequirement(String visaStatus) {
+        return switch (visaStatus) {
+            case "REQUIRES_SPONSORSHIP" -> Boolean.TRUE;
+            case "NOT_REQUIRED", "SETTLED_OR_CITIZEN" -> Boolean.FALSE;
+            default -> null; // VISA_HELD and legacy/unknown values do not prove sponsorship needs.
+        };
+    }
+
+    private static Boolean sponsorshipRequirementClaim(String lower) {
+        if (SPONSORSHIP_NOT_REQUIRED.matcher(lower).find()) return Boolean.FALSE;
+        if (SPONSORSHIP_REQUIRED.matcher(lower).find()) return Boolean.TRUE;
+        return null;
+    }
+
+    private static Boolean rightToWorkClaim(String lower) {
+        boolean negative = Pattern.compile(
+                "\\b(?:do not|don't|dont|does not|doesn't|cannot|can't|not|never)\\s+(?:(?:currently|legally)\\s+)?(?:(?:have|hold)\\s+)?(?:the\\s+)?right to work\\b",
+                Pattern.CASE_INSENSITIVE).matcher(lower).find()
+                || Pattern.compile("\\bno right to work\\b", Pattern.CASE_INSENSITIVE).matcher(lower).find()
+                || Pattern.compile("\\bnot\\s+(?:legally\\s+)?(?:authorised|authorized|eligible)\\s+to\\s+work\\b",
+                Pattern.CASE_INSENSITIVE).matcher(lower).find();
+        return negative ? Boolean.FALSE : Boolean.TRUE;
     }
 
     private void checkClearance(String lower, String source, List<Finding> findings) {
@@ -257,12 +379,11 @@ public final class DocumentFactValidator {
     }
 
     private void checkEmployers(String text, CandidateFacts facts, JobContext job, List<Finding> findings) {
+        // Only recorded employers can substantiate an employment claim. The
+        // target hiring company, a school, project, or skill is not proof that
+        // the candidate previously worked there.
         List<String> known = new ArrayList<>();
         facts.experiences().forEach(e -> known.add(e.company().toLowerCase(Locale.ROOT)));
-        facts.education().forEach(e -> known.add(e.institution().toLowerCase(Locale.ROOT)));
-        facts.projects().forEach(p -> known.add(p.name().toLowerCase(Locale.ROOT)));
-        if (job != null && job.hiringCompany() != null) known.add(job.hiringCompany().toLowerCase(Locale.ROOT));
-        facts.skills().forEach(s -> known.add(s.name().toLowerCase(Locale.ROOT)));
         Matcher m = EMPLOYER.matcher(text);
         while (m.find()) {
             String org = m.group(1).trim();
