@@ -328,7 +328,7 @@ export const TailoredCvSection: React.FC<{ jobId: string; applicationId: string 
           </div>
 
           {staleValidation ? (
-            <Alert tone="warning">
+            <Alert tone="info">
               This CV was checked by an older validation version. It cannot be approved or used in an application.
               Regenerate it, review the new validation findings, and approve the new version.
             </Alert>
@@ -549,7 +549,7 @@ export const CoverLetterSection: React.FC<{ jobId: string; applicationId: string
           </div>
 
           {staleLetterValidation ? (
-            <Alert tone="warning">
+            <Alert tone="info">
               This cover letter has not been checked by the current validator. Use “Revalidate & approve this version”
               to rerun the current checks against your profile before application use.
             </Alert>
