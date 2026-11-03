@@ -1,36 +1,42 @@
 # ROBIN — Current State
 
-**Prepared:** 2026-11-03, from direct source inspection (31 backend packages, 51 migrations, frontend, both workers), local Git state, and the live GitHub repository (PR #9, Actions run #60, open PR list). No production dashboard (Render/Cloudflare/Vercel/Supabase) access in this session.
+**Prepared:** 2026-11-03. This snapshot separates the merged `master` state from the open Phase 21 PR and from operator-reported production evidence. A passing test suite is not described as production verification.
 
 ## Architecture (confirmed from source)
 
-Java 21 / Spring Boot 3.3.4 modular monolith (`backend/pom.xml`), React 18.3.1 / TypeScript / Vite SPA (`frontend/package.json`), separate Node/Playwright browser-automation worker (`worker/`), separate Cloudflare Email Worker (`cloudflare-email-worker/`, no runtime npm dependencies — Web Crypto only), optional Python/Scrapling sidecar (`sidecar/scrapling/`). PostgreSQL via Flyway, 51 migrations `V001`–`V051` confirmed present on disk. Package map (`backend/src/main/java/com/personal/jobagent/*`) has exactly the 31 packages the handover claimed — verified by directory listing, not assumed.
+Java 21 / Spring Boot 3.3.4 modular monolith (`backend/pom.xml`), React 18.3.1 / TypeScript / Vite SPA (`frontend/package.json`), separate Node/Playwright browser-automation worker (`worker/`), separate Cloudflare Email Worker (`cloudflare-email-worker/`), optional Python/Scrapling sidecar (`sidecar/scrapling/`). PostgreSQL with Flyway migrations; Redis supports cache/health behavior.
 
-## Repository / production status
+## Repository and CI state
 
-- `origin/master` HEAD = `5d893245937e0956fc90b69790ec7b62e12eb79f` (PR #9 merge commit); local `master` is 3 commits ahead of it (`e56c2a9` wrangler.toml fix, `610d574` Workday registry fix, `9e66c7a` this documentation set), none pushed yet — see `ROBIN_PHASE20_VERIFICATION.md` §3.
-- GitHub Actions run #60 on that commit: "completed successfully" (backend/worker/frontend CI jobs). **`cloudflare-email-worker` has no CI job at all** in `.github/workflows/ci.yml` — its test-pass claims were never CI-verified, only run locally/manually.
-- 3 stale open PRs (#1, #7, #6 — earlier phase branches) exist on GitHub but their content is already folded into `master` via commit `1b49773`; not blocking.
-- PR #9's own description states inbound Cloudflare mail delivery is explicitly unproven and Phase 20 must stay open.
+- `master` baseline: `6c3a72a0150a9fca08df9a21536b88c6ae9a0284`.
+- PR #10 is merged as `6c3a72a`. It adds a dedicated Node 22 GitHub Actions job for `cloudflare-email-worker`; run #62 passed all four jobs.
+- PR #11, `phase21-candidate-knowledge-integrity`, contains the Phase 21 candidate-fact validator and PREP/CV/cover-letter changes. The code head `cd668c6` passed GitHub Actions run #75: backend, browser worker, frontend and Cloudflare email worker all successful. The backend results were Surefire 1,397 tests (0 failures, 6 skipped) and Failsafe 272 tests (0 failures, 25 skipped).
+- PR #11 is **not merged**. Documentation updates have since been added to the same PR branch; those doc-only commits need the latest branch CI to complete before PR closure.
+- No Phase 21 production deployment or real employer submission was performed.
 
-## Confirmed COMPLETE (code-level, tested, matches its own documentation)
+## Confirmed candidate knowledge / document path
 
-- Cloudflare inbound-mail HMAC pipeline: Worker → `CloudflareInboundController` → `CloudflareSignatureVerifier` → `ManagedInboundService` — full replay/duplicate/idempotency handling, AES-256-GCM content encryption, correct response-code contract (200/401/406/503) matched on both sides of the Worker/backend boundary.
-- `ManagedMailboxService` readiness model (`NOT_CONFIGURED` / `PENDING_RECEIVING_VERIFICATION` / `ACTIVE`) — evidence-based, requires an actual signed delivery before claiming `ACTIVE`, not just correct config.
-- CORS allowlist: fail-closed, exact-match, loopback-origin-stripping in prod (`SecurityConfig.java`).
-- Frontend build-time API-base-URL guard (`apiBaseContract.ts`) — added specifically after a documented prior incident where a malformed `VITE_API_BASE_URL` caused opaque production CORS failures.
-- Application receipts: real SHA-256/byte-size/confirmation-evidence fields exist (`ApplicationReceiptService`), with an explicit "not confirmed" fallback rather than a false positive.
+- Authentication is used to resolve the caller's profile; CV source data is loaded from structured profile records.
+- `ResumeAtsIntelligenceService` renders the tailored CV deterministically from stored candidate records. Job-description content changes relevance ordering/gap reporting, not candidate facts.
+- `verifiedEvidence` records carry `USER_VERIFIED` provenance. This means candidate-attested/user-provided evidence, not independent third-party verification.
+- `DocumentFactValidator` is now `fact-validator-2` on the PR branch. It checks supported claim categories and returns blockers/warnings; it is not a universal semantic truth detector.
+- `ApplyDocumentSelector` requires current passing validation, artifact integrity and explicit review approval before packaging a CV for application. The PR also rejects approval of stale CV validation in the API and clearly surfaces stale documents in PREP.
+- Cover-letter generation remains LLM-assisted. The prompt now includes additional structured profile evidence, while work-eligibility data and certification credential IDs are excluded from the LLM prompt. The generated text is revalidated before approval.
+- `PrepWorkflowIT` demonstrates a database-backed profile fact flowing into the CV, a provenance record and a passing validator result; it injects an unsupported PhD claim and asserts a blocking `UNSUPPORTED_QUALIFICATION` finding.
 
-## Confirmed INCOMPLETE / OVERSTATED (code-level evidence, not speculation)
+See `ROBIN_PHASE21_VERIFICATION.md` for the detailed trace, test results and limitations.
 
-- **Workday capability was overstated to the candidate — FIXED this session, commit `610d574`.** `WorkdayExecutionPlanService`'s own module Javadoc states it *only* verifies a saved credential against the real sign-in page and *never* reaches, inspects, or fills the actual multi-step application form. The `AtsCapabilityRegistry.WORKDAY` row previously set `formFilling = FULL`, making `GET /api/v1/ats-capabilities` report Workday as form-fill-capable when the actual service never touches the form. Commit `610d574` sets `formFilling` (and the other form/submission dimensions) to `NONE`, so `AtsCapabilities.summary()` now correctly returns `SIGN_IN_READINESS_ONLY` for Workday, matching the frontend's `ui.tsx`/`JobsFeedPage.test.tsx` expectations, which already anticipated this value. **See `ROBIN_GAP_REGISTER.md` §1 for the original finding; it is marked resolved there.** The fix is committed locally but **not yet pushed** to `origin/master`.
-- No ATS adapter (including Greenhouse) is ever assigned `SUBMISSION_VERIFIED` — this is enforced *by design* in `AtsCapabilityRegistry`'s own class comment ("Phase 10's own rules... explicitly forbid ever submitting a real application as a test"). Greenhouse's real-submit path is implemented and worker-validated, but only against fixtures.
-- Lever's real submission is permanently blocked by hCaptcha (enforced two independent ways — backend plan-type gate + worker plan validator); this is architecture, not a bug to fix.
-- Zoho Recruit: partial identity-field filling only; most custom questions surfaced as gaps, never submits.
-- Phase 20 (managed mail) is implementation-complete and **has its first real production proof point as of 2026-11-03**: a real inbound email completed the full Cloudflare → Worker → Render → Postgres chain, encrypted at rest, visible in Robin (see `ROBIN_PHASE20_VERIFICATION.md` §4). The earlier `APP_SECRETS_KEY`-missing state is resolved — the operator generated and added a new key and restarted the backend. Phase 20 is **still not fully closed**: duplicate-delivery idempotency, email-to-application association, automatic OTP extraction, and the full recruiter-communication lifecycle remain production-unverified (`ROBIN_PHASE20_VERIFICATION.md` §4.3).
+## Confirmed limitations / open work
 
-## Known blockers (require your action, not more code reading)
+- Phase 20 is still **open**. One real email reached Cloudflare → Worker → Render → Postgres, was encrypted and appeared in Robin. Live duplicate redelivery, specific application association, real OTP extraction/use and the full recruiter-communication lifecycle remain production-unverified (`ROBIN_PHASE20_VERIFICATION.md` §4.3).
+- ATS submissions remain unverified against real employers/sandbox postings; do not claim `SUBMISSION_VERIFIED`.
+- Workday capability is corrected to `SIGN_IN_READINESS_ONLY` in the merged master baseline; it does not fill the Workday application form.
+- Lever real submission remains blocked by hCaptcha; Zoho Recruit remains partial.
+- Discovery freshness/dedup, matching/ranking quality, wider factual-accuracy rates, review-diff quality, automation intelligence, UX/accessibility and commercial readiness still need independent evidence passes.
 
-1. Encryption-key continuity for `employer_credentials`/`managed_inbound_messages` is resolved — a pre-provisioning count found zero rows in both tables before the new `APP_SECRETS_KEY` was added, so no row can depend on a lost prior key (`ROBIN_PHASE20_VERIFICATION.md` §2.2).
-2. Duplicate-delivery idempotency, email-to-application association, automatic OTP extraction, and the recruiter-communication lifecycle are still not production-verified — see `ROBIN_PHASE20_VERIFICATION.md` §4.3.
-3. The three code/doc fixes plus this documentation set are committed locally but not pushed — awaiting your go-ahead, since a push to `master` is production-adjacent.
+## Current safe next steps
+
+1. Complete the latest PR #11 CI after its documentation updates.
+2. Review/merge PR #11 only after the final branch head is green and deployment impact is explicitly accepted.
+3. Keep Phase 20's remaining live-mail proof items visible; do not silently mark Phase 20 closed.
+4. Start Phase 22 only after Phase 21 is merged and formally closed.
