@@ -91,21 +91,18 @@ No key has been generated, rotated, or changed by any Claude session. The `APP_S
 
 ## 3. Worker / backend reconciliation
 
-### 3.1 Confirmed Git state (re-verified 2026-11-03, immediately before this file's own finalizing commit — see §3.3 for the resulting 4-commit state)
+### 3.1 Current merged repository state (2026-11-03)
 
 ```
-git rev-parse HEAD           → 9e66c7a1b2fe8956c433ecffbd9bc06732d900c8
-git rev-parse origin/master  → 5d893245937e0956fc90b69790ec7b62e12eb79f
-git log --oneline origin/master..HEAD:
-  9e66c7a docs: add Phase 20 verification, current-state, gap, scorecard and roadmap reports
-  610d574 fix(automation): correct Workday capability row to match actual service behavior
-  e56c2a9 fix(cloudflare-email-worker): reconcile wrangler.toml with deployed config
-git status --short:
- M GEMINI.md
-git merge-base HEAD origin/master → 5d893245937e0956fc90b69790ec7b62e12eb79f  (= origin/master; clean linear history, no conflicts)
+master = 6c3a72a0150a9fca08df9a21536b88c6ae9a0284
+PR #10 = merged (Cloudflare email-worker CI job)
 ```
 
-Local `master` is exactly 3 commits ahead of `origin/master`, cleanly based on it. `GEMINI.md` (a personal, unrelated file) is the only working-tree modification, and is not touched by any of the three commits — confirmed by `git log --oneline origin/master..HEAD -- GEMINI.md` returning nothing.
+The merged master baseline contains the Worker configuration reconciliation (`e56c2a9`), Workday capability-registry correction (`610d574`) and Phase 20 evidence documents. PR #10 added a dedicated `cloudflare-email-worker` job using Node 22 and `npm test --prefix cloudflare-email-worker`.
+
+GitHub Actions run #62 for PR #10 completed successfully across all four jobs: backend, browser worker, frontend and Cloudflare email worker. This resolves the former absence of a Cloudflare email-worker CI gate.
+
+The historical local Git snapshot above was superseded by the PR #10 merge. The personal `GEMINI.md` file was not part of these changes.
 
 ### 3.2 The wrangler.toml discrepancy — resolved and committed
 
@@ -125,7 +122,9 @@ The `ROBIN_BACKEND_URL` correction matches the host used consistently elsewhere 
 
 ### 3.3 Action taken
 
-Four commits exist locally, none pushed: the `wrangler.toml` fix (`e56c2a9`), a correction to the Workday ATS capability registry (`610d574`, unrelated to Phase 20 — see §4.4), the initial set of five documentation reports (`9e66c7a`), and a fourth, documentation-only commit finalizing this evidence (this file plus the other four docs, incorporating both corrections in §2.2 and §3.2). Pushing to `origin/master` is a production-adjacent, visible-to-others action that can trigger CI and connected auto-deploys on Render/Vercel/Cloudflare — **not done, pending explicit operator approval**.
+PR #10 is merged to `master` as `6c3a72a`. It adds CI coverage for the Cloudflare Email Worker; it does not change Worker runtime code or rotate production secrets. The `wrangler.toml` configuration reconciliation and Workday registry correction are included in the merged master baseline.
+
+The merge status does not close Phase 20. The four production behaviors listed in §4.3 remain unverified and must not be inferred from code-level integration tests.
 
 ---
 
@@ -181,13 +180,13 @@ A separate, pre-existing truthfulness bug in `AtsCapabilityRegistry`'s `WORKDAY`
 | Encryption-key continuity safe for `managed_inbound_messages` | ✅ Confirmed — pre-provisioning count was 0, post-provisioning is 1/1 encrypted, 0 purged (§2.2, §4.2) |
 | Encryption-key continuity safe for `employer_credentials` | ✅ Resolved — pre-provisioning count was 0, so no row can depend on a lost prior key (§2.2). Current row count was not re-captured and is not claimed. |
 | Worker ↔ backend HMAC config matched | ✅ Names confirmed correct in code; behaviorally confirmed working since a real message was accepted and persisted |
-| Repo config matches intended deployed Worker config | ⚠️ Fix committed (`e56c2a9`), **not yet pushed**; config itself (including `addresses`) confirmed valid against current Wrangler/Cloudflare docs (§3.2) |
+| Repo config matches intended Worker config | ✅ `e56c2a9` is in the merged master baseline; config (including `addresses`) is confirmed valid against current Wrangler/Cloudflare docs (§3.2) |
 | Genuine inbound test email succeeds | ✅ **Done 2026-11-03** — real Gmail → alias → `ACTIVE` mailbox → message visible in Robin (§4.2) |
 | Encrypted record persisted + visible in Robin | ✅ Confirmed — 1 row, `content_encrypted` populated, visible in recent messages (§4.2) |
 | Candidate ownership / application association correct | ❌ Not proven — code path exists, not confirmed against this specific message (§4.3) |
 | Idempotency / error handling tested | ✅ Unit/integration-tested; ❌ not tested against a live duplicate Cloudflare delivery (§4.3) |
-| Tests/build/regression pass | ✅ Confirmed via GitHub Actions run #60 on `origin/master`; this session's own test runs recorded separately in the accompanying review |
-| Deployment state and GitHub state reconciled | ⚠️ 4 commits made, none pushed — awaiting operator approval |
+| Tests/build/regression pass | ✅ GitHub Actions run #62 passed all four jobs, including the new Cloudflare email-worker test job; managed-mail Testcontainers suites also pass locally and in backend CI |
+| Deployment state and GitHub state reconciled | ✅ Repository configuration is merged to master; current Render/Cloudflare dashboard state is based on operator-reported evidence, not an independent live dashboard inspection in this report |
 
 **Phase 20 is implementation-complete and has its first real production proof point, but is not fully closed.** Duplicate-delivery idempotency in production, email-to-application association, automatic OTP extraction, and the full recruiter-communication lifecycle all remain production-unverified and should not be claimed otherwise.
 
@@ -195,5 +194,5 @@ A separate, pre-existing truthfulness bug in `AtsCapabilityRegistry`'s `WORKDAY`
 
 ## 6. Remaining actions
 
-1. **(Your approval needed)** Push the local commits to `origin/master`. This does not itself change the live Cloudflare/Render configuration (Cloudflare already has the corrected `wrangler.toml` values live from the prior manual `wrangler deploy`) — it makes Git match what is already running, plus the unrelated Workday registry fix and this documentation. See the accompanying review's Task E for the exact command.
-2. Before claiming Phase 20 fully closed: exercise or explicitly scope-defer duplicate-delivery idempotency, email-to-application association, OTP extraction, and recruiter-lifecycle verification in production (§4.3). These four are the only remaining open items — encryption-key continuity (§2.2) and the `wrangler.toml` configuration (§3.2) are both now resolved.
+1. No additional push is pending for the Phase 20 configuration/evidence commits: PR #10 is merged to `master` as `6c3a72a`.
+2. Before claiming Phase 20 fully closed: exercise or explicitly scope-defer duplicate-delivery idempotency, email-to-application association, OTP extraction, and recruiter-lifecycle verification in production (§4.3). These four are the remaining open items — encryption-key continuity (§2.2), Worker config reconciliation (§3.2), the first real delivery (§4.2), and CI coverage (PR #10) are resolved.

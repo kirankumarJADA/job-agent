@@ -3,6 +3,7 @@ package com.personal.jobagent.resume;
 import com.personal.jobagent.audit.AuditEntry;
 import com.personal.jobagent.audit.AuditLogWriter;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.documents.DocumentFactValidator;
 import com.personal.jobagent.profile.ProfileRecord;
 import com.personal.jobagent.profile.ProfileRepository;
 import com.personal.jobagent.security.AppUserDetails;
@@ -121,6 +122,10 @@ public class ResumeAtsController {
             if (!(validation instanceof Map<?, ?> v)) {
                 return ResponseEntity.status(409).body(Map.of("error",
                         "This CV was generated before the current validation existed. Regenerate it before approving."));
+            }
+            if (!DocumentFactValidator.VERSION.equals(v.get("validator_version"))) {
+                return ResponseEntity.status(409).body(Map.of("error",
+                        "This CV was checked by an older validation version. Regenerate it and review the new version before approving."));
             }
             if (!Boolean.TRUE.equals(v.get("passed"))) {
                 return ResponseEntity.status(409).body(Map.of("error",
