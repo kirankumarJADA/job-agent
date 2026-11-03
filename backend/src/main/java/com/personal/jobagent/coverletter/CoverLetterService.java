@@ -59,11 +59,26 @@ public class CoverLetterService {
         profileContext.append("Verified Skills: ");
         facts.skills().forEach(s -> profileContext.append(s.name()).append(", "));
         profileContext.append("\nVerified Work Experiences:\n");
-        facts.experiences().forEach(e -> profileContext.append("- ").append(e.title()).append(" at ").append(e.company()).append("\n"));
+        facts.experiences().forEach(e -> {
+            profileContext.append("- ").append(e.title()).append(" at ").append(e.company()).append("\n");
+            DocumentFactValidator.bullets(e.bullets()).forEach(bullet -> profileContext.append("  - ").append(bullet).append("\n"));
+        });
         profileContext.append("Verified Education:\n");
-        facts.education().forEach(ed -> profileContext.append("- ").append(ed.qualification()).append(" at ").append(ed.institution()).append("\n"));
+        facts.education().forEach(ed -> profileContext.append("- ").append(ed.qualification()).append(" at ").append(ed.institution())
+                .append(ed.field() == null || ed.field().isBlank() ? "" : " (" + ed.field() + ")").append("\n"));
         profileContext.append("Verified Projects:\n");
-        facts.projects().forEach(p -> profileContext.append("- ").append(p.name()).append(": ").append(p.summary()).append("\n"));
+        facts.projects().forEach(p -> {
+            profileContext.append("- ").append(p.name()).append(": ").append(Objects.toString(p.summary(), "")).append("\n");
+            DocumentFactValidator.bullets(p.bullets()).forEach(bullet -> profileContext.append("  - ").append(bullet).append("\n"));
+        });
+        profileContext.append("Verified Certifications:\n");
+        facts.certifications().forEach(cert -> profileContext.append("- ").append(cert.name())
+                .append(cert.issuer() == null || cert.issuer().isBlank() ? "" : " — " + cert.issuer())
+                .append(cert.issuedOn() == null ? "" : " (" + cert.issuedOn() + ")").append("\n"));
+        if (facts.professionalSummary() != null && !facts.professionalSummary().isBlank()) {
+            profileContext.append("Verified Professional Summary:\n")
+                    .append(facts.professionalSummary().strip()).append("\n");
+        }
 
         // The job description is UNTRUSTED employer input: delimited and
         // explicitly marked as data, so scraped instructions inside it can
