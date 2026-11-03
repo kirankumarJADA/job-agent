@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.ats.GreenhouseAdapter;
 import com.personal.jobagent.application.ApplicationPipelineService;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.documents.DocumentFactValidator;
 import com.personal.jobagent.jobs.JobRecord;
 import com.personal.jobagent.jobs.JobRepository;
 import com.personal.jobagent.profile.ProfileRepository;
@@ -540,7 +541,7 @@ class ApplyWorkflowIT {
                         '[]'::jsonb, '[]'::jsonb, ?::jsonb, ?, 1, 'snap')
                 """, UuidV7.generate(), devProfile, jobId, applicationId, tag,
                 json.writeValueAsString(Map.of("validation", Map.of(
-                        "passed", true, "validator_version", "fact-validator-1"))), cvVersionId);
+                        "passed", true, "validator_version", DocumentFactValidator.VERSION))), cvVersionId);
         jdbc.update("""
                 insert into cv_version_reviews (cv_version_id, profile_id, approved, decided_by, content_sha256)
                 values (?, ?, true, 'owner', ?)
@@ -572,7 +573,7 @@ class ApplyWorkflowIT {
                         '[]'::jsonb, '[]'::jsonb, ?::jsonb, ?, 1, 'snap')
                 """, UuidV7.generate(), devProfile, jobId, applicationId, tag,
                 json.writeValueAsString(Map.of("validation", Map.of(
-                        "passed", true, "validator_version", "fact-validator-1"))), cvVersionId);
+                        "passed", true, "validator_version", DocumentFactValidator.VERSION))), cvVersionId);
         jdbc.update("update applications set cv_version_id = ? where id = ?", cvVersionId, applicationId);
     }
 
@@ -584,7 +585,7 @@ class ApplyWorkflowIT {
                 values (?, ?, ?, ?, ?, 'Cover letter', ?, ?, ?::jsonb, true, 'GENERATED', now(), now())
                 """, UuidV7.generate(), devProfile, jobId, applicationId, version, body,
                 com.personal.jobagent.automation.ExecutionPackageService.Sha256.of(body),
-                json.writeValueAsString(Map.of("passed", true, "validator_version", "fact-validator-1")));
+                json.writeValueAsString(Map.of("passed", true, "validator_version", DocumentFactValidator.VERSION)));
     }
 
     private UUID seedConfirmedAnswer(UUID applicationId, String tag, String question, String answer) {
