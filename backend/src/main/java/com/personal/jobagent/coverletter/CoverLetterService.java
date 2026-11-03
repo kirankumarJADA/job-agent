@@ -76,7 +76,7 @@ public class CoverLetterService {
                 .append(cert.issuer() == null || cert.issuer().isBlank() ? "" : " — " + cert.issuer())
                 .append(cert.issuedOn() == null ? "" : " (" + cert.issuedOn() + ")").append("\n"));
         if (facts.professionalSummary() != null && !facts.professionalSummary().isBlank()) {
-            profileContext.append("Verified Professional Summary:\n")
+            profileContext.append("Candidate-Provided Professional Summary:\n")
                     .append(facts.professionalSummary().strip()).append("\n");
         }
 
