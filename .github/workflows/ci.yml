@@ -47,6 +47,20 @@ jobs:
         working-directory: worker
         run: npm test
 
+  cloudflare-email-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # This package uses Node's built-in test runner and has no dependencies.
+      - name: Cloudflare email worker tests
+        run: npm test --prefix cloudflare-email-worker
+
   frontend:
     runs-on: ubuntu-latest
     steps:
