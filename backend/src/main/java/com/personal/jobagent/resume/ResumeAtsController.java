@@ -3,6 +3,7 @@ package com.personal.jobagent.resume;
 import com.personal.jobagent.audit.AuditEntry;
 import com.personal.jobagent.audit.AuditLogWriter;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.documents.DocumentFactValidator;
 import com.personal.jobagent.profile.ProfileRecord;
 import com.personal.jobagent.profile.ProfileRepository;
 import com.personal.jobagent.security.AppUserDetails;
