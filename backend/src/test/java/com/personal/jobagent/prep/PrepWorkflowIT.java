@@ -254,7 +254,8 @@ class PrepWorkflowIT {
         mvc.perform(put("/api/v1/resume-intelligence/cv/" + cvId + "/review").session(session).with(csrf())
                         .contentType(MediaType.APPLICATION_JSON).content("{\"approved\":true}"))
                 .andExpect(status().isConflict())
-                .andExpect(content().string(org.hamcrest.Matchers.containsString("older validation version")));
+                .andExpect(result -> assertThat(result.getResponse().getContentAsString())
+                        .contains("older validation version"));
 
         assertThat(jdbc.queryForObject(
                 "select count(*) from cv_version_reviews where cv_version_id = ?::uuid", Integer.class, cvId)).isZero();
