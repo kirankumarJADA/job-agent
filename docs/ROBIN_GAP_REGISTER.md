@@ -1,53 +1,77 @@
 # ROBIN — Gap Register
 
-Each entry cites exact file/line evidence. Severity: **P0** (user-facing truthfulness/safety bug, fix before anything else) · **P1** (blocks Phase 20 or a core promise) · **P2** (real but not blocking).
+Each entry records evidence and status. Severity: **P0** user-facing truthfulness/safety defect; **P1** blocks a core promise or phase exit; **P2** genuine but not a current phase blocker.
 
 ---
 
-## P0 — Workday capability was overstated to the candidate — **FIXED, commit `610d574`**
+## P0 — Workday capability was overstated — **FIXED IN MASTER BASELINE**
 
-**Status:** Fixed in this review cycle. The data values described below have already been corrected; this entry is kept as the evidentiary record of why the fix was needed.
+**Evidence:** the former `AtsCapabilityRegistry.WORKDAY` row reported form-filling capability even though `WorkdayExecutionPlanService` only verifies a saved credential against the real sign-in page and does not reach or fill the application form.
 
-**Evidence:** `backend/src/main/java/com/personal/jobagent/automation/AtsCapabilityRegistry.java:140-149` sets the `WORKDAY` row's `formFilling = FULL` (12th positional value in the `AtsCapabilities` record, confirmed via `AtsCapabilities.java:35-51`). `AtsCapabilities.summary()` (`AtsCapabilities.java:59-74`) returns `FORM_FILL_AVAILABLE` whenever `formFilling != NONE`, with no other gate. This summary is served verbatim to the frontend via `GET /api/v1/ats-capabilities` (`AtsCapabilityController.java:43-46`).
-
-Meanwhile `WorkdayExecutionPlanService.java:29-83` — the actual implementation — states explicitly, as its own module Javadoc: *"this service implements exactly the stage that IS genuinely supported end to end: verifying the candidate's SAVED Workday credential... It NEVER attempts the application form itself."* Even `AtsCapabilityRegistry`'s own class-level comment (lines 47-62, the prose describing what was verified) repeats this same limitation correctly. **The row's own Javadoc (lines 144-149) and its data values (line 143) contradict the file's own class-level comment three paragraphs above it.**
-
-**Impact:** a candidate opening a Workday job in Robin is told the form can be filled, when the shipped service can only check that a saved password still works. This is exactly the class of claim the whole project's stated philosophy ("never claim a capability the code doesn't prove") exists to prevent.
-
-**Fix (applied):** `AtsCapabilityRegistry.WORKDAY`'s `formInspection`, `requiredFieldValidation`, `questionAnswering`, `documentAttachment`, `formFilling`, `finalSubmission`, and `submissionConfirmation` values are now `NONE`, so `summary()` correctly falls through to `SIGN_IN_READINESS_ONLY`. `AtsCapabilityRegistryTest` and `AtsCapabilityControllerTest` were updated to match (re-run and confirmed independently in this review cycle — see the accompanying review's Task D for the exact command and result). Committed as `610d574`, not yet pushed to `origin/master`.
+**Fix:** commit `610d574` sets the Workday form/submission dimensions to `NONE`, so the API returns `SIGN_IN_READINESS_ONLY`. The fix is included in the `master` baseline used by merged PR #10. This source-level correction does not prove a real Workday application submission; Robin does not claim that capability.
 
 ---
 
-## P1 — Phase 20 managed mail: partially verified in production, not fully closed (full detail in `ROBIN_PHASE20_VERIFICATION.md`)
+## P1 — Phase 20 managed-mail production verification remains open
 
-**Update 2026-11-03:** a real inbound email completed Cloudflare → Worker → Render → Postgres → UI for the first time — one message, encrypted, persisted, zero purged. The `APP_SECRETS_KEY`-missing state is resolved (new key generated and added, backend restarted). Encryption-key continuity is also resolved: a pre-provisioning count found zero rows in both `employer_credentials` and `managed_inbound_messages`, so no row can depend on a lost prior key. **Still open:** duplicate webhook redelivery/idempotency in production, email-to-application association, automatic OTP extraction, and the full recruiter-communication lifecycle — none of these are proven yet. See `ROBIN_PHASE20_VERIFICATION.md` §4.3.
+A real inbound email reached Cloudflare → Worker → Render → Postgres, was encrypted and appeared in Robin. Unit/integration tests also cover signature verification, replay protection and deduplication.
 
-## P1 — `cloudflare-email-worker` has no CI coverage
+**Still not production-proven:** live duplicate webhook redelivery/idempotency, association of a received message to the correct specific application, actual automatic OTP extraction/use in a supported employer verification flow, and the complete recruiter-communication lifecycle. A single real email or an isolated Testcontainers run does not prove these live flows. See `ROBIN_PHASE20_VERIFICATION.md` §4.3.
 
-**Evidence:** `.github/workflows/ci.yml` has jobs for `backend`, `worker`, `frontend` only — no job runs `npm test --prefix cloudflare-email-worker`. Every "6/6 passed" claim for this package (including in PR #9's own description) was necessarily a local/manual run.
+Encryption-key continuity and the initial end-to-end delivery are resolved; do not conflate that with full Phase 20 closure.
 
-**Impact:** a future change to the email Worker could silently break without CI catching it — the one component directly in the Phase 20 critical path is the one with no automated gate.
+---
 
-**Fix:** add a fourth CI job mirroring the `frontend`/`worker` pattern (Node setup, `npm install`, `npm test`), ~10 lines.
+## P1 — ATS submission is not yet production-verified
 
-## P1 — No ATS ever reaches `SUBMISSION_VERIFIED` by design — product messaging must not imply otherwise
+No ATS adapter is assigned `SUBMISSION_VERIFIED` by design. The registry's rules forbid real-employer test submissions. Greenhouse has a guarded submit path tested against fixtures, but this is not a verified production or candidate-owned sandbox submission. Any product messaging that implies a submission has been independently confirmed would be false.
 
-Not a code bug — a product-communication risk. `AtsCapabilityRegistry`'s own rules forbid ever testing against a real employer, so this state is structurally permanent until a controlled real-submission test is explicitly authorized by the candidate for their own application. Any roadmap or marketing copy claiming "submission verified" for Greenhouse/Ashby today would be false.
+---
 
-## P2 — Lever / Zoho Recruit: real submission permanently blocked, not a near-term fix
+## P1 — Candidate document-fact validation hardening — **IMPLEMENTED AND CI-VERIFIED IN PR #11; PENDING MERGE**
 
-Lever: hCaptcha, enforced in two independent places (`AutomationPlanRepository#prepareRealSubmission` plan-type gate + `browser_worker.js#validateLeverPlan`). Zoho: most custom questions remain unanswerable gaps even where identity-field filling works. These are correctly labeled `PARTIAL`/never-submits in the registry already — no overclaim found here, unlike Workday. No action needed beyond what's already honestly documented.
+The Phase 21 review found concrete weaknesses in the former validator: experience years derived from the earliest start year to the present; numeric figures could match by digits alone despite a different unit/currency; work-authorisation statements were not compared against specific structured eligibility values; and a target employer/school/project/skill could be mistaken for a previous employer.
+
+PR #11 (`phase21-candidate-knowledge-integrity`) addresses these and adds:
+- merged work-month interval calculations that respect end dates and gaps;
+- exact figure matching including unit/currency;
+- explicit structured UK right-to-work and sponsorship contradiction blockers;
+- prior-employer evidence limited to recorded work-experience employers;
+- additional persisted profile evidence in cover-letter generation context;
+- validator version `fact-validator-2`, with stale CV rejection in API/application packaging and explicit stale-state/revalidation handling in PREP.
+
+**Test evidence:** PR #11 CI run #75 is green. `DocumentFactValidatorTest` 13/13, `CoverLetterReviewTest` 8/8 and PostgreSQL-backed `PrepWorkflowIT` 7/7 passed. Full backend Surefire: 1,397 tests, 0 failures, 6 skipped; Failsafe: 272 tests, 0 failures, 25 skipped. The 25 skipped tests are not counted as executed proof. The PR is not merged, so these changes are not yet part of `master`.
+
+**Residual limitations:** the validator is bounded and cannot semantically prove every sentence. `USER_VERIFIED` means candidate-attested, not third-party verified. Employer/requirement extraction includes heuristics. Work eligibility is UK-shaped, not a global country-by-country rights engine. Textual unit/currency matching may reject equivalent formatting and needs future boundary/normalisation work. No aggregate CV factual-accuracy rate has been measured.
+
+Full trace and limitations: `docs/ROBIN_PHASE21_VERIFICATION.md`.
+
+---
+
+## P1 — Cloudflare email worker had no CI coverage — **RESOLVED BY MERGED PR #10**
+
+The original gap was that the Cloudflare Email Worker tests ran only locally. PR #10 added a Node 22 GitHub Actions job that runs `npm test --prefix cloudflare-email-worker`. PR #10 is merged to `master` as `6c3a72a`; CI run #62 passed all four jobs. This is no longer an open gap.
+
+---
+
+## P2 — Lever / Zoho Recruit: real submission is blocked or partial by design
+
+Lever: hCaptcha is enforced in both the backend plan-type gate and browser worker plan validator. Zoho: identity-field filling is partial and most custom questions remain surfaced as gaps; no real submission occurs. Keep capability labels honest; do not remove safety gates to improve a raw ATS count.
+
+---
 
 ## P2 — Workday account-creation verification is unknown
 
-**Evidence:** `AtsCapabilityRegistry.java:54-62` — account creation (`WORKDAY_CREATE_ACCOUNT`) is implemented and tested, but *"the real post-creation verification mechanism (an OTP? a link? neither?) is unknown."* This is honestly flagged as `PARTIAL`, not overstated — listed here only because it's a real open question worth resolving before Workday work expands.
-
-## P2 — Unverified claim retired this session: "15+ vs 30+ ATS" Tsenta inconsistency
-
-Direct check of `tsenta.com` and `help.tsenta.com` on 2026-11-03 found both consistently say "30+ ATSes." This specific inconsistency does not currently reproduce and should not be repeated in future competitive material (see `ROBIN_TSENTA_SCORECARD.md`).
+`AtsCapabilityRegistry` records that the real post-creation verification mechanism (OTP, link, or neither) has not been established. This is honestly labelled `PARTIAL`; resolve only with safe evidence before expanding Workday claims.
 
 ---
 
-## Not yet independently gap-analyzed this session (flagged, not assumed complete or broken)
+## P2 — Tsenta ATS-count inconsistency not reproduced
 
-Discovery adapters' actual freshness/dedup accuracy, matching/ranking precision, CV-tailoring factual-accuracy rate, and automation-intelligence limits all have real services present (`JobDeduplicationService`, `JobMatchService`, `HardFilterService`, `SemanticSkillMatcher` — all confirmed to exist by file, not yet read line-by-line for correctness). Per your own rule ("do not assume missing or complete from this list alone"), these need a dedicated evidence pass before being scored — see `ROBIN_BUILD_ROADMAP.md` for sequencing. Scoring them now without reading them would be exactly the kind of unverified claim this whole audit is trying to eliminate.
+A direct check on 2026-11-03 found both `tsenta.com` and `help.tsenta.com` consistently claimed "30+ ATSes". Do not repeat the earlier "15+ vs 30+" inconsistency absent new evidence.
+
+---
+
+## Not yet independently gap-analysed
+
+Discovery freshness/dedup accuracy, matching/ranking quality, hard-filter integrity under adversarial scores, broader CV factual-accuracy rates, automation-intelligence limits, review-before-send diff quality, UX/accessibility and commercial readiness remain unscored or only partially explored. Services existing in the codebase is not proof that their outputs meet the intended product standard. Follow the evidence passes in `ROBIN_BUILD_ROADMAP.md`.
