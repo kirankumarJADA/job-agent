@@ -241,6 +241,7 @@ class CloudflareManagedMailIT {
         String alteredBody = buildCloudflarePayload(address, "recruiter@acme.example", "Tampered", "Hacked body", "<inv-1@acme.example>");
         MvcResult replay = deliverSigned(alteredBody, token, now);
         assertThat(replay.getResponse().getStatus()).isEqualTo(406);
+        assertThat(json(replay).get("status").asText()).isEqualTo("rejected");
 
         // Same message re-sent with new token: acknowledged with 200 duplicate
         String newToken = "tok-fresh-" + UUID.randomUUID();

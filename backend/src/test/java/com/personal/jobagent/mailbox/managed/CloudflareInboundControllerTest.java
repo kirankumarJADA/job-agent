@@ -6,7 +6,6 @@ import com.personal.jobagent.track.TrackText;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
-import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
@@ -66,6 +65,114 @@ class CloudflareInboundControllerTest {
                         .header("X-Robin-Signature", signature))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("stored"));
+    }
+
+    @Test
+    void sameTokenDuplicateRequestAnswers200Duplicate() throws Exception {
+        String body = """
+                {
+                  "envelopeRecipient": "robin+u7kq2m9x4vb3tn5p@mail.aplivenosi.com",
+                  "subject": "Interview",
+                  "text": "Hello"
+                }
+                """;
+        String timestamp = String.valueOf(Instant.now().getEpochSecond());
+        String token = "randomtoken123456789";
+        String payloadSha256 = TrackText.sha256(body.getBytes(StandardCharsets.UTF_8));
+        String signature = CloudflareSignatureVerifier.hmacHex(SECRET, timestamp + "." + token + "." + payloadSha256);
+
+        when(inbound.accept(eq(ManagedMailSettings.PROVIDER_CLOUDFLARE), any(), any(), eq(token), any(), eq(payloadSha256)))
+                .thenReturn(ManagedInboundService.Outcome.DUPLICATE_REQUEST);
+
+        mvc.perform(post(CloudflareInboundController.PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body)
+                        .header("X-Robin-Timestamp", timestamp)
+                        .header("X-Robin-Token", token)
+                        .header("X-Robin-Signature", signature))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("duplicate"));
+    }
+
+    @Test
+    void sameMessageIdDuplicateMessageAnswers200Duplicate() throws Exception {
+        String body = """
+                {
+                  "envelopeRecipient": "robin+u7kq2m9x4vb3tn5p@mail.aplivenosi.com",
+                  "subject": "Interview",
+                  "text": "Hello"
+                }
+                """;
+        String timestamp = String.valueOf(Instant.now().getEpochSecond());
+        String token = "fresh-token-123456789";
+        String payloadSha256 = TrackText.sha256(body.getBytes(StandardCharsets.UTF_8));
+        String signature = CloudflareSignatureVerifier.hmacHex(SECRET, timestamp + "." + token + "." + payloadSha256);
+
+        when(inbound.accept(eq(ManagedMailSettings.PROVIDER_CLOUDFLARE), any(), any(), eq(token), any(), eq(payloadSha256)))
+                .thenReturn(ManagedInboundService.Outcome.DUPLICATE_MESSAGE);
+
+        mvc.perform(post(CloudflareInboundController.PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body)
+                        .header("X-Robin-Timestamp", timestamp)
+                        .header("X-Robin-Token", token)
+                        .header("X-Robin-Signature", signature))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("duplicate"));
+    }
+
+    @Test
+    void replayedTokenAnswers406Rejected() throws Exception {
+        String body = """
+                {
+                  "envelopeRecipient": "robin+u7kq2m9x4vb3tn5p@mail.aplivenosi.com",
+                  "subject": "Tampered",
+                  "text": "Hacked"
+                }
+                """;
+        String timestamp = String.valueOf(Instant.now().getEpochSecond());
+        String token = "randomtoken123456789";
+        String payloadSha256 = TrackText.sha256(body.getBytes(StandardCharsets.UTF_8));
+        String signature = CloudflareSignatureVerifier.hmacHex(SECRET, timestamp + "." + token + "." + payloadSha256);
+
+        when(inbound.accept(eq(ManagedMailSettings.PROVIDER_CLOUDFLARE), any(), any(), eq(token), any(), eq(payloadSha256)))
+                .thenReturn(ManagedInboundService.Outcome.REPLAYED_TOKEN);
+
+        mvc.perform(post(CloudflareInboundController.PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body)
+                        .header("X-Robin-Timestamp", timestamp)
+                        .header("X-Robin-Token", token)
+                        .header("X-Robin-Signature", signature))
+                .andExpect(status().is(406))
+                .andExpect(jsonPath("$.status").value("rejected"));
+    }
+
+    @Test
+    void unknownRecipientAnswers406Rejected() throws Exception {
+        String body = """
+                {
+                  "envelopeRecipient": "robin+unknown99999999999@mail.aplivenosi.com",
+                  "subject": "Interview",
+                  "text": "Hello"
+                }
+                """;
+        String timestamp = String.valueOf(Instant.now().getEpochSecond());
+        String token = "randomtoken123456789";
+        String payloadSha256 = TrackText.sha256(body.getBytes(StandardCharsets.UTF_8));
+        String signature = CloudflareSignatureVerifier.hmacHex(SECRET, timestamp + "." + token + "." + payloadSha256);
+
+        when(inbound.accept(eq(ManagedMailSettings.PROVIDER_CLOUDFLARE), any(), any(), eq(token), any(), eq(payloadSha256)))
+                .thenReturn(ManagedInboundService.Outcome.UNKNOWN_RECIPIENT);
+
+        mvc.perform(post(CloudflareInboundController.PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body)
+                        .header("X-Robin-Timestamp", timestamp)
+                        .header("X-Robin-Token", token)
+                        .header("X-Robin-Signature", signature))
+                .andExpect(status().is(406))
+                .andExpect(jsonPath("$.status").value("rejected"));
     }
 
     @Test

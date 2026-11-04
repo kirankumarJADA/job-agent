@@ -92,13 +92,13 @@ No key has been generated, rotated, or changed by any automated session. The `AP
 ### 3.1 Confirmed Git & CI State (2026-11-04)
 
 - **Target Branch**: `master`
-- **Latest Commit**: `c5f36268622e9a5b58e8894e7b4c137477c1ec8f`
+- **Latest Commit**: `d113f9787cb207b4e2b71e3eb185e26475f51958`
 - **Remote Sync**: `origin/master` matches local `master` with 0 ahead, 0 behind.
-- **GitHub Actions Check Runs (Commit `c5f3626`, Run ID: `41882949904`)**:
-  - `cloudflare-email-worker` (Job ID: `126759844730`): completed, **success** (duration: 6s)
-  - `backend` (Job ID: `126759845159`): completed, **success** (duration: 6m 20s)
-  - `frontend` (Job ID: `126759845370`): completed, **success** (duration: 54s)
-  - `worker` (Job ID: `126759845383`): completed, **success** (duration: 1m 2s)
+- **GitHub Actions Check Runs (Commit `d113f97`, Run ID: `41885197541`)**:
+  - `cloudflare-email-worker` (Job ID: `126767674076`): completed, **success** (duration: 24s)
+  - `frontend` (Job ID: `126767673921`): completed, **success** (duration: 44s)
+  - `worker` (Job ID: `126767673408`): completed, **success** (duration: 56s)
+  - `backend` (Job ID: `126767674105`): completed, **success** (duration: 4m 55s)
 
 All four automated CI gates passed cleanly on the latest commit.
 
@@ -166,6 +166,7 @@ Automated test suites executed against real PostgreSQL 16 Testcontainers with al
 |---|---|---|---|
 | Webhook Security | `CloudflareSignatureVerifierTest` | ✅ PASSED (6/6) | HMAC-SHA256 signature checking, timestamp freshness, replay refusal |
 | Recipient Routing | `CloudflareRecipientRoutingTest` | ✅ PASSED (7/7) | Strict envelope recipient (`RCPT TO`) routing, alias parsing |
+| Controller Response Mapping | `CloudflareInboundControllerTest` | ✅ PASSED (8/8) | Exact JSON responses for stored (`200 {"status":"stored"}`), same-token duplicate (`200 {"status":"duplicate"}`), same-message-ID duplicate (`200 {"status":"duplicate"}`), altered payload replay (`406 {"status":"rejected"}`), unknown recipient (`406 {"status":"rejected"}`), unauthenticated signature (`401 {"status":"unauthenticated"}`), stale timestamp (`406 {"status":"stale"}`), unconfigured (`503 {"status":"not_configured"}`) |
 | Verification Provider | `ManagedMailVerificationProviderTest` | ✅ PASSED (9/9) | OTP extraction, link resolution, session security |
 | Inbound Persistence | `CloudflareManagedMailIT` | ✅ PASSED (6/6) | Address reservation, receiving evidence transition to `ACTIVE`, encryption at rest |
 | App Association & Isolation | `CloudflareManagedMailIT#inboundCloudflareWebhookApplicationAssociationAndIsolation` | ✅ PASSED | Matching by job URL and requisition, creation of `email_application_links` (`LINKED`, `STRONG`), strict multi-tenant candidate isolation, weak-signal refusal |
@@ -176,7 +177,20 @@ Automated test suites executed against real PostgreSQL 16 Testcontainers with al
 
 ### 4.3 Webhook Idempotency, Replay & Error Handling Specifications
 
-The exact behaviors for Scenarios A through E across the Cloudflare Worker and Spring backend are confirmed from source:
+#### Exact Response Mapping Matrix
+
+| Delivery Scenario | HTTP Status | Response JSON Body | Backend Outcome Enum | Database Footprint Delta |
+|---|---|---|---|---|
+| **First delivery** | `200 OK` | `{"status":"stored"}` | `Outcome.STORED` | +1 token in `tokens`<br>+1 message in `messages`<br>+1 email in `emails`<br>+1 link in `links` |
+| **Same-token duplicate** | `200 OK` | `{"status":"duplicate"}` | `Outcome.DUPLICATE_REQUEST` | **0 new rows** (token PK conflict, payload SHA matches) |
+| **Same-message-ID duplicate** | `200 OK` | `{"status":"duplicate"}` | `Outcome.DUPLICATE_MESSAGE` | +1 token in `tokens`<br>**0 message rows** (address+message_id unique conflict) |
+| **Altered-payload replay** | `406 Not Acceptable` | `{"status":"rejected"}` | `Outcome.REPLAYED_TOKEN` | **0 rows** (token seen, payload SHA mismatch) |
+| **Altered-payload (Tampered Sig)** | `401 Unauthorized` | `{"status":"unauthenticated"}` | N/A (`INVALID_SIGNATURE`) | **0 rows** (HMAC verification failed) |
+| **Unknown recipient** | `406 Not Acceptable` | `{"status":"rejected"}` | `Outcome.UNKNOWN_RECIPIENT` | **0 rows** (recipient alias not in ACTIVE status) |
+| **Stale timestamp** | `406 Not Acceptable` | `{"status":"stale"}` | N/A (`STALE`) | **0 rows** (timestamp older than maxAge = 900s) |
+| **Unconfigured provider/secret** | `503 Service Unavailable` | `{"status":"not_configured"}` | N/A | **0 rows** (service not configured for Cloudflare) |
+
+The exact behaviors for Scenarios A through F across the Cloudflare Worker and Spring backend are confirmed from source:
 
 #### Scenario A: Same timestamp, token, payload, and signature delivered twice
 - **Spring Backend Behavior**:
@@ -219,6 +233,15 @@ The exact behaviors for Scenarios A through E across the Cloudflare Worker and S
   - When backend returns HTTP `406 Not Acceptable` (terminal rejection: unknown alias, untrusted domain, replayed token, or unroutable envelope), the Worker logs `console.error("Backend rejected email: " + errorText)`.
   - The Worker **returns normally** (`return;`).
   - Returning cleanly signals to Cloudflare Email Routing that message processing has concluded, so Cloudflare **does NOT retry**.
+
+#### Scenario F: Unknown recipient delivery
+- **Spring Backend Behavior**:
+  - HMAC signature and timestamp freshness verify successfully.
+  - Recipient routing via `ManagedMailboxService.routeEnvelopeRecipient()` returns empty because the envelope recipient is unreserved or not in `ACTIVE` status in `managed_mail_addresses`.
+  - `ManagedInboundService.accept()` returns `Outcome.UNKNOWN_RECIPIENT` (`outcome.accepted() == false`).
+  - `CloudflareInboundController` maps this unaccepted outcome to HTTP **`406 Not Acceptable {"status":"rejected"}`**.
+- **Database Footprint**: **0 rows inserted** in `managed_inbound_messages`, `emails`, or `email_application_links`.
+- **Worker Behavior**: Worker receives 406, logs rejection, and returns cleanly without throwing (no retry).
 
 ### 4.4 Production Database Side Effects, Cascades & Triggers
 
