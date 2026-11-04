@@ -42,7 +42,7 @@ Meanwhile `WorkdayExecutionPlanService.java:29-83` — the actual implementation
 
 ## Resolved — recruiter replies follow their thread (managed mail), `131823a`
 
-Until `131823a` neither the Worker nor the backend read `In-Reply-To`/`References`, so a follow-up that did not repeat the job link or requisition fell to a weak, review-only match. Replies now carry a `THREAD_REPLY` strong signal when an earlier message of the same owner's thread is LINKED/CONFIRMED; proven by `CloudflareRecruiterLifecycleIT` scenarios 5 and 6. Live effect requires the Worker redeploy and the Render deploy (`ROBIN_PHASE20_VERIFICATION.md` §3.4).
+Until `131823a` neither the Worker nor the backend read `In-Reply-To`/`References`, so a follow-up that did not repeat the job link or requisition fell to a weak, review-only match. Replies now carry a `THREAD_REPLY` strong signal when an earlier message of the same owner's thread is LINKED/CONFIRMED; proven by `CloudflareRecruiterLifecycleIT` scenarios 5 and 6. Worker redeployed 2026-11-04 23:36 UTC (version `579c2681…`); live effect still requires the Render deploy (`ROBIN_PHASE20_VERIFICATION.md` §3.4).
 
 ## Resolved — `cloudflare-email-worker` CI coverage
 
