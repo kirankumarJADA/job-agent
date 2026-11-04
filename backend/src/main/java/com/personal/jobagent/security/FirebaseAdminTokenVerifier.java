@@ -82,6 +82,7 @@ public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
 
     private final Object initLock = new Object();
 
+    @org.springframework.beans.factory.annotation.Autowired
     public FirebaseAdminTokenVerifier(FirebaseProperties properties) {
         this.properties = properties;
     }

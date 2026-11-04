@@ -76,6 +76,11 @@ public class FirebaseAuthenticationFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
+        if (Boolean.TRUE.equals(request.getAttribute(WorkerEventTokenFilter.WORKER_AUTH_ATTRIBUTE))) {
+            filterChain.doFilter(request, response);
+            return;
+        }
+
         String idToken = bearerToken(request);
         if (idToken == null) {
             // Pure cookie session or unauthenticated request: rely on standard session authentication.
