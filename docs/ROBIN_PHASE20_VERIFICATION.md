@@ -2,7 +2,7 @@
 
 **Prepared:** 2026-11-03, updated 2026-11-04 with recruiter-lifecycle integration evidence, CI verification and a production safety audit, then (22:16 UTC) with the Firebase revocation-hardening review, deployment-identity findings and operator probes.  
 **Scope:** Managed-mail (Cloudflare) production readiness, encryption-key safety, Worker/backend reconciliation, email intelligence, application tracking, database cascade/trigger analysis, recruiter communication lifecycle, and revocation-aware authentication.  
-**Verdict:** IMPLEMENTATION COMPLETE AND CI-VERIFIED (run #89 on `b2be7e0`: backend unit + ArchUnit + Testcontainers ITs, worker, frontend, email worker and probe tests all green). First genuine inbound-mail production test PASSED (one message, encrypted, persisted, mailbox ACTIVE). Phase 20 remains **OPEN**: production still runs the 2026-11-03 build without the Firebase revocation hardening (§3.3–§3.4), and live tenant isolation, duplicate-delivery idempotency, application association, employer OTP handling and recruiter communications are not yet verified in production (§5, §6).
+**Verdict:** IMPLEMENTATION COMPLETE AND CI-VERIFIED (run #93 on `131823a`: backend unit + ArchUnit + Testcontainers ITs, worker, frontend, email worker and probe tests all green). First genuine inbound-mail production test PASSED (one message, encrypted, persisted, mailbox ACTIVE). Phase 20 remains **OPEN**: production still runs the 2026-11-03 build without the Firebase revocation hardening (§3.3–§3.4), and live tenant isolation, duplicate-delivery idempotency, application association, employer OTP handling and recruiter communications are not yet verified in production (§5, §6).
 
 ---
 
@@ -89,12 +89,12 @@ No key has been generated, rotated, or changed by any automated session. The `AP
 
 ## 3. Worker / Backend Reconciliation, CI Pipeline & Deployment Identity
 
-### 3.1 Confirmed Git & CI State (2026-11-04, 22:16 UTC)
+### 3.1 Confirmed Git & CI State (2026-11-04, 22:43 UTC)
 
-- **Branch**: `master`. **Code head**: `b2be7e04260023c864a03c20d39fc05fb11b49d1` — pushed `484c5c5..b2be7e0`; local `HEAD`, `origin/master` and `git ls-remote` all matched after the push.
-- **CI run #89** (id `41922733784`) on `b2be7e0` — all four jobs **success**: `backend` (`mvn -B verify`: unit + ArchUnit + Testcontainers ITs, 22:09:34→22:15:53), `worker`, `frontend`, `cloudflare-email-worker` (including the new *Phase 20 operator probe tests* step).
-- **Earlier runs**: #88 on `484c5c5` — all four jobs success. #87 on `a442f9b` — `backend` failed in `mvn verify`; fixed by `484c5c5`. #85 on `d113f97` — all four success.
-- **Local runs (2026-11-04)**: backend `mvn -o test` — 1,435 tests, 0 failures, 0 errors, 1 skipped (160 classes); `cloudflare-email-worker` `npm test` — 15/15; `node --test scripts/phase20/*.test.mjs` — 8/8. Testcontainers ITs run only in CI (no Docker daemon locally).
+- **Branch**: `master`. **Code head**: `131823a4662c7a3d0fd2b55f9058f424b15f5ecc` (reply-thread linking). Every push this session (`484c5c5..b2be7e0`, `..1136997`, `..f93eaa8`, `..dc46f10`, `..131823a`) was followed by a check that local `HEAD`, `origin/master` and `git ls-remote` matched.
+- **CI run #93** (id `41926632187`) on `131823a` — all four jobs **success**: `backend` (`mvn -B verify`: unit + ArchUnit + Testcontainers ITs including lifecycle scenarios 5–6, 22:35:42→22:42:45), `worker`, `frontend`, `cloudflare-email-worker` (worker tests + *Phase 20 operator probe tests*).
+- **Earlier runs this session**: #89 (`b2be7e0`), #90 (`1136997`), #91 (`f93eaa8`), #92 (`dc46f10`) — all four jobs success each. Before: #88 on `484c5c5` success; #87 on `a442f9b` — `backend` failed in `mvn verify`, fixed by `484c5c5`.
+- **Local runs (2026-11-04)**: backend `mvn -o test` — 1,444 tests, 0 failures, 0 errors, 1 skipped; `cloudflare-email-worker` `npm test` — 17/17; `node --test scripts/phase20/*.test.mjs` — 8/8. Testcontainers ITs run only in CI (no Docker daemon locally).
 
 ### 3.2 The wrangler.toml Configuration — Reconciled & Pushed
 
@@ -151,12 +151,13 @@ The permission case matters for the first deploy specifically: `checkRevoked=tru
 
 **Deployment implications (to watch after the deploy):** the SPA attaches `Authorization: Bearer` to every API call (`frontend/src/api/client.ts`), so every authenticated request now costs one Identity Toolkit lookup — expect added per-request latency. Cookie-only requests are not revocation-checked (gap register, P2).
 
-**Deployment verification procedure (operator — Render dashboard access required):**
+**Deployment verification procedure (operator — Render dashboard and Wrangler access required):**
 1. Render → `job-agent` backend service → **Manual Deploy → Deploy latest commit** (branch `master`).
 2. When the deploy is live: `curl -s https://job-agent-mwhu.onrender.com/actuator/info` — `deployment.commit` must equal `git rev-parse origin/master` (field added by `5cd8238`; absent means the old build is still serving).
 3. `curl -s https://job-agent-mwhu.onrender.com/actuator/health` — `status` and every component `UP`.
 4. Sign in to Robin in the browser and open Applications. Success confirms the service account can perform revocation lookups. If sign-in returns 503 *"Firebase Admin credentials could not complete token verification"*, grant the service account Firebase Authentication read access (the default `firebase-adminsdk` account has it) — do not revert the hardening.
-5. Optional cut-off check, on the **test** account only: while signed in as it, disable it in the Firebase console (Authentication → Users → ⋮ → Disable account), reload Robin, and confirm the next API request is refused and the session does not survive (`USER_DISABLED` path). Re-enable the account afterwards.
+5. **Cloudflare Worker** (required for reply-header threading, `131823a`): `cd cloudflare-email-worker` then `npx wrangler deploy`. The Worker now forwards `In-Reply-To`/`References`; until it is redeployed the backend simply receives no reply headers and links exactly as before, so the two deploys can happen in either order.
+6. Optional cut-off check, on the **test** account only: while signed in as it, disable it in the Firebase console (Authentication → Users → ⋮ → Disable account), reload Robin, and confirm the next API request is refused and the session does not survive (`USER_DISABLED` path). Re-enable the account afterwards.
 
 ---
 
@@ -189,7 +190,9 @@ Automated test suites executed against real PostgreSQL 16 Testcontainers with al
 | Inbound Persistence | `CloudflareManagedMailIT` | ✅ PASSED (6/6) | Address reservation, receiving evidence transition to `ACTIVE`, encryption at rest |
 | App Association & Isolation | `CloudflareManagedMailIT#inboundCloudflareWebhookApplicationAssociationAndIsolation` | ✅ PASSED | Matching by job URL and requisition, creation of `email_application_links` (`LINKED`, `STRONG`), strict multi-tenant candidate isolation, weak-signal refusal |
 | Recruiter Lifecycle E2E | `CloudflareRecruiterLifecycleIT#scenario1_recruiterInterviewInvitationLifecycle` | ✅ PASSED | Inbound recruiter interview invitation, `TrackEmailClassifier` categorization, `EMPLOYER_MESSAGE_RECEIVED` timeline event, candidate review confirmation, stage transition to `Stage.INTERVIEW` (`CANDIDATE_CONFIRMED`) |
-| Thread Continuity | `CloudflareRecruiterLifecycleIT#scenario2_recruiterReplyAndThreadContinuity` | ✅ PASSED | Multiple messages linked to single application (`linkedMessages = 2`), `In-Reply-To`/`References`, strict chronological timeline ordering ($t_1 < t_2$) |
+| Thread Continuity | `CloudflareRecruiterLifecycleIT#scenario2_recruiterReplyAndThreadContinuity` | ✅ PASSED | Multiple messages linked to single application (`linkedMessages = 2`), strict chronological timeline ordering ($t_1 < t_2$). **Correction (2026-11-04):** until `131823a` neither the Worker nor the backend read `In-Reply-To`/`References`; this scenario passed only because its reply quoted the requisition and job URL again |
+| Header-only Thread Reply | `CloudflareRecruiterLifecycleIT#scenario5_replyWithoutIdentifiersFollowsItsThread` (`131823a`) | CI | A reply with no job link or requisition links to its thread's application via `In-Reply-To`/`References` (`LINKED`, `STRONG`, rationale `THREAD_REPLY`) and adds a second timeline event |
+| Thread Isolation | `CloudflareRecruiterLifecycleIT#scenario6_threadReferencesNeverCrossCandidates` (`131823a`) | CI | A reply referencing another candidate's linked Message-ID links nothing and leaves that candidate's timeline unchanged |
 | Tenant Isolation | `CloudflareRecruiterLifecycleIT#scenario3_candidateIsolationAndCrossTenantProtection` | ✅ PASSED | Candidate B application and timeline unaffected, cross-tenant review manipulation blocked (`NoSuchElementException`) |
 | Message Filtering | `CloudflareRecruiterLifecycleIT#scenario4_nonRecruiterAndAmbiguousMessagesHandling` | ✅ PASSED | Generic newsletter classified `UNRELATED_OR_AMBIGUOUS` (`UNMATCHED`), ambiguous recruiter classified `RECRUITER_FOLLOW_UP` (`PENDING_REVIEW`), neither auto-links to timeline, both surface in candidate review queue |
 
@@ -314,11 +317,11 @@ Analysis of Flyway migrations `V001` through `V051` and JPA/JDBC repositories re
 | AES-GCM encryption at rest | ✅ Tested in `CloudflareManagedMailIT` | ✅ Verified in Supabase (`content_encrypted` populated) |
 | Email-to-application association | ✅ Tested in `CloudflareRecruiterLifecycleIT` | ❌ **NOT YET VERIFIED IN PRODUCTION** (Procedure in §6.2) |
 | Employer OTP extraction & handling | ✅ Tested in `ManagedMailVerificationProviderTest` | ❌ **NOT YET VERIFIED IN PRODUCTION** (Procedure in §6.3) |
-| Recruiter communication & timeline tracking | ✅ Tested in `CloudflareRecruiterLifecycleIT` | ❌ **NOT YET VERIFIED IN PRODUCTION** (Procedure in §6.4) |
+| Recruiter communication & timeline tracking | ✅ Tested in `CloudflareRecruiterLifecycleIT`, including header-only thread replies and thread isolation (scenarios 5–6, `131823a`) | ❌ **NOT YET VERIFIED IN PRODUCTION** (Procedure in §6.4; needs the Worker redeploy in §3.4) |
 | Candidate multi-tenant isolation | ✅ Tested in `CloudflareRecruiterLifecycleIT` (scenario 3) | ❌ **NOT YET VERIFIED LIVE** — owner-scoped schema and queries are structural evidence only; authenticated check of the dedicated test candidate in §6.0 |
-| CI Pipeline & Build gates | ✅ All 4 jobs green on run #89 (`b2be7e0`) | ⚠️ Backend healthy on Render but serving the 2026-11-03 build, behind `master` (§3.3) |
+| CI Pipeline & Build gates | ✅ All 4 jobs green on run #93 (`131823a`) | ⚠️ Backend healthy on Render but serving the 2026-11-03 build, behind `master` (§3.3) |
 
-**Phase 20 Verdict**: IMPLEMENTATION COMPLETE. Automated coverage is green across all four communication-lifecycle scenarios and the revocation-aware authentication paths. Phase 20 remains **OPEN** until the operator runs, in order: the Render deploy and identity check (§3.4) → tenant isolation (§6.0) → duplicate-delivery idempotency (§6.1) → application association (§6.2) → recruiter lifecycle (§6.4). Employer OTP handling (§6.3) triggers a real employer verification email and needs separate explicit authorization; it may be scope-deferred instead, with the reason recorded here.
+**Phase 20 Verdict**: IMPLEMENTATION COMPLETE. Automated coverage is green across all four communication-lifecycle scenarios and the revocation-aware authentication paths. Phase 20 remains **OPEN** until the operator runs, in order: the Render deploy, identity check and Worker redeploy (§3.4) → tenant isolation (§6.0) → duplicate-delivery idempotency (§6.1) → application association (§6.2) → recruiter lifecycle (§6.4). Employer OTP handling (§6.3) triggers a real employer verification email and needs separate explicit authorization; it may be scope-deferred instead, with the reason recorded here.
 
 ---
 
@@ -461,10 +464,10 @@ Analysis of Flyway migrations `V001` through `V051` and JPA/JDBC repositories re
 - **Objective**: Verify that a multi-message thread from a recruiter is displayed in Robin's UI, tracks communication counts, and allows manual candidate confirmation of stage transitions.
 - **Exact Test Procedure**:
   1. Send an email formatted as an interview invitation from an external mailbox to the **test candidate's** managed alias, quoting the details of the test application from §6.2.
-  2. Follow up with a second reply message.
+  2. Reply to that message from the same mailbox using the mail client's **Reply** (so it sets `In-Reply-To`/`References`) and delete the quoted original, so the reply carries no job link or requisition. This exercises the thread path (`131823a`; requires the redeployed Worker, §3.4 step 5).
   3. Confirm the suggested interview stage in Robin's Track UI.
 - **Expected Result**:
-  - Both messages appear in chronological order on the application timeline.
+  - Both messages appear in chronological order on the application timeline; the reply's `email_application_links.rationale` contains `THREAD_REPLY`.
   - Robin UI prompts the candidate to confirm the inferred interview invitation.
   - Upon candidate confirmation, application stage updates to `INTERVIEW`.
 - **Production Side Effects**: Updates stage of candidate's test application.

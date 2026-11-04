@@ -10,7 +10,7 @@ Java 21 / Spring Boot 3.3.4 modular monolith (`backend/pom.xml`), React 18.3.1 /
 
 - **Updated 2026-11-04:** all Phase 20 work through `b2be7e0` is pushed to `origin/master` (local and remote SHAs verified after each push). CI evidence per commit is kept in one place: `ROBIN_PHASE20_VERIFICATION.md` §3.1.
 - CI now has four jobs — `backend`, `worker`, `frontend`, `cloudflare-email-worker` (added in `6c3a72a`; also runs the Phase 20 operator-probe tests since `b2be7e0`).
-- **Production lags `master`:** Render still serves the build from `2026-11-03T21:20:48Z`, which predates the Firebase revocation hardening. Render auto-deploy is off; backend deploys are manual (`ROBIN_PHASE20_VERIFICATION.md` §3.3–§3.4).
+- **Production lags `master`:** Render still serves the build from `2026-11-03T21:20:48Z`, which predates the Firebase revocation hardening and reply-thread linking. Render auto-deploy is off; backend deploys are manual. The deployed Cloudflare Worker also predates `131823a` (it does not forward `In-Reply-To`/`References`) and needs `wrangler deploy`. Procedure: `ROBIN_PHASE20_VERIFICATION.md` §3.3–§3.4.
 - 3 stale open PRs (#1, #7, #6 — earlier phase branches) exist on GitHub but their content is already folded into `master` via commit `1b49773`; not blocking.
 - PR #11 (`phase21-candidate-knowledge-integrity`, 26 commits, based on `6c3a72a`) holds the Phase 21 implementation. A trial merge into current `master` conflicts only in `docs/ROBIN_PHASE20_VERIFICATION.md`; it is reconciled after Phase 20 closes.
 - PR #9's own description states inbound Cloudflare mail delivery is explicitly unproven and Phase 20 must stay open.

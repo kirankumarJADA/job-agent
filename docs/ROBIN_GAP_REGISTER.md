@@ -36,6 +36,14 @@ Meanwhile `WorkdayExecutionPlanService.java:29-83` — the actual implementation
 
 **Evidence:** `TrackController#receiptsList` → `ApplicationReceiptService.getAttempts` filters by `profile_id` and returns an empty list, whereas every other application-scoped GET answers 404. Not a leak (no foreign row is returned), but inconsistent; the isolation probe treats an empty owner-filtered list as a refusal.
 
+## P2 — Gmail-ingested mail is not threaded (opened 2026-11-04)
+
+**Evidence:** `GmailMessageMapper.fromApi` stores Gmail's API message id (not the RFC Message-ID) in `emails.message_id` and captures `threadId` without passing it on, so `In-Reply-To`/`References` threading (`131823a`) cannot match Gmail-ingested messages. Managed-mail (Cloudflare) replies are threaded. A Gmail design would key on `threadId` or store the RFC Message-ID alongside.
+
+## Resolved — recruiter replies follow their thread (managed mail), `131823a`
+
+Until `131823a` neither the Worker nor the backend read `In-Reply-To`/`References`, so a follow-up that did not repeat the job link or requisition fell to a weak, review-only match. Replies now carry a `THREAD_REPLY` strong signal when an earlier message of the same owner's thread is LINKED/CONFIRMED; proven by `CloudflareRecruiterLifecycleIT` scenarios 5 and 6. Live effect requires the Worker redeploy and the Render deploy (`ROBIN_PHASE20_VERIFICATION.md` §3.4).
+
 ## Resolved — `cloudflare-email-worker` CI coverage
 
 `6c3a72a` added the `cloudflare-email-worker` job to `.github/workflows/ci.yml`; it has passed on every master run since (runs #63, #81–#88). `b2be7e0` adds a step in the same job for the Phase 20 operator-probe tests.
