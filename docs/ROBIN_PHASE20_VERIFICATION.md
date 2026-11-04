@@ -1,6 +1,6 @@
 # ROBIN — Phase 20 Verification Report
 
-**Prepared:** 2026-11-03, updated 2026-11-04 with comprehensive recruiter communication lifecycle integration test evidence, CI verification, and production preflight audit.  
+**Prepared:** 2026-11-03, updated 2026-11-04 with comprehensive recruiter communication lifecycle integration test evidence, CI verification, and production safety audit.  
 **Scope:** Managed-mail (Cloudflare) production readiness, encryption-key safety, Worker/backend reconciliation, email intelligence, application tracking, database cascade/trigger analysis, and recruiter communication lifecycle.  
 **Verdict:** IMPLEMENTATION COMPLETE. All automated test suites (147 unit tests, full `CloudflareManagedMailIT`, and end-to-end `CloudflareRecruiterLifecycleIT`) PASSED. First genuine inbound-mail production test PASSED (one message, encrypted, persisted, mailbox ACTIVE). Phase 20 remains **OPEN** until live production behaviors are formally verified: duplicate delivery idempotency, real application association, real employer OTP handling, and real recruiter communications (§4.3, §5, §6).
 
@@ -92,13 +92,15 @@ No key has been generated, rotated, or changed by any automated session. The `AP
 ### 3.1 Confirmed Git & CI State (2026-11-04)
 
 - **Target Branch**: `master`
-- **Latest Commit**: `7c882e80315f16f15100b3ac5da0b16471ba04be`
+- **Latest Commit**: `c5f36268622e9a5b58e8894e7b4c137477c1ec8f`
 - **Remote Sync**: `origin/master` matches local `master` with 0 ahead, 0 behind.
-- **GitHub Actions Check Runs (Commit `7c882e8`)**:
-  - `backend`: completed, **success** (`https://github.com/kirankumarJADA/job-agent/actions/runs/41753494319/job/126323974518`)
-  - `frontend`: completed, **success** (`https://github.com/kirankumarJADA/job-agent/actions/runs/41753494319/job/126323974427`)
-  - `worker`: completed, **success** (`https://github.com/kirankumarJADA/job-agent/actions/runs/41753494319/job/126323974549`)
-  - `cloudflare-email-worker`: completed, **success** (`https://github.com/kirankumarJADA/job-agent/actions/runs/41753494319/job/126323974209`)
+- **GitHub Actions Check Runs (Commit `c5f3626`, Run ID: `41882949904`)**:
+  - `cloudflare-email-worker` (Job ID: `126759844730`): completed, **success** (duration: 6s)
+  - `backend` (Job ID: `126759845159`): completed, **success** (duration: 6m 20s)
+  - `frontend` (Job ID: `126759845370`): completed, **success** (duration: 54s)
+  - `worker` (Job ID: `126759845383`): completed, **success** (duration: 1m 2s)
+
+All four automated CI gates passed cleanly on the latest commit.
 
 ### 3.2 The wrangler.toml Configuration — Reconciled & Pushed
 
@@ -124,8 +126,8 @@ Investigation of live backend at `https://job-agent-mwhu.onrender.com`:
     ```json
     {
       "build": {
-        "artifact": "backend",
-        "name": "backend",
+        "artifact": "jobagent",
+        "name": "job-agent-backend",
         "time": "2026-11-03T21:20:48.844Z",
         "version": "0.1.0-SNAPSHOT",
         "group": "com.personal"
@@ -135,8 +137,8 @@ Investigation of live backend at `https://job-agent-mwhu.onrender.com`:
     ```
   - **Why `git: {}` is Empty**: `backend/Dockerfile` builds the application container by copying only `pom.xml` and `src`, intentionally omitting the `.git` directory (`failOnNoGitDirectory=false` in `pom.xml:265`). Consequently, Spring Boot's `git-commit-id-plugin` cannot embed git properties into `app.jar` during Docker container creation.
   - **Build Provenance**: The build timestamp `2026-11-03T21:20:48.844Z` indicates the currently running container was built on Nov 3, immediately following the push of commit `dac5c4e` (committed at 2026-11-03 21:08:29 UTC).
-  - **Application Source Parity**: Between commit `dac5c4e` and current `master` (`7c882e8`), **no application production code in `backend/src/main` was modified**. Commits `6c3a72a`, `53e36e3`, `5bee725`, and `7c882e8` added CI workflows, test suites (`*IT.java`), and documentation. Because `backend/Dockerfile` runs `mvn -q package -DskipTests`, the compiled binary of `backend/src/main` is logically identical between `dac5c4e` and `7c882e8`.
-  - **Render Deployment State**: Render has not triggered a rebuild for test-only/doc-only commits. Render deployment ID and execution logs are held inside the Render dashboard and not exposed as public environment variables.
+  - **Application Source Parity**: Between commit `dac5c4e` and current `master` (`c5f3626`), **no application production code in `backend/src/main` was modified**. Commits `6c3a72a`, `53e36e3`, `5bee725`, `7c882e8`, and `c5f3626` added CI workflows, integration test suites (`*IT.java` in `backend/src/test`), and documentation. Because `backend/Dockerfile` runs `mvn -q package -DskipTests`, the compiled binary of `backend/src/main` is logically identical.
+  - **Render Deployment State**: The push of documentation commit `c5f3626` did **NOT** trigger a rebuild or redeployment on Render (verified by `build.time` remaining `2026-11-03T21:20:48.844Z`). Render deployment ID and execution logs are held inside the Render dashboard.
 
 ---
 
@@ -183,18 +185,18 @@ The exact behaviors for Scenarios A through E across the Cloudflare Worker and S
   - Primary key conflict on `token_sha256` causes the insert to return 0 rows.
   - Service queries existing row: `SELECT payload_sha256 FROM managed_mail_webhook_tokens WHERE token_sha256 = ?`.
   - Because payload SHA-256 matches, returns `Outcome.DUPLICATE_REQUEST` (`outcome.accepted() == true`).
-  - `CloudflareInboundController` maps this to HTTP **`200 OK {"status":"duplicate_request"}`**.
+  - `CloudflareInboundController` maps any accepted duplicate outcome (`DUPLICATE_REQUEST` or `DUPLICATE_MESSAGE`) to HTTP **`200 OK {"status":"duplicate"}`**.
 - **Database Footprint**: **0 new rows inserted** across all tables. No message stored, `EmailIntelligenceService` not invoked.
 - **Worker Behavior**: Worker receives 200 OK, logs completion, and returns cleanly.
 
 #### Scenario B: Same token with modified payload
 - **Spring Backend Behavior**:
-  - If the HMAC signature is computed over the modified payload: HMAC verification succeeds, but token conflict check in `managed_mail_webhook_tokens` detects that `payloadSha256.equals(seenPayloadSha256)` is false.
+  - If HMAC signature was recomputed over modified payload: HMAC verification passes, but token conflict check in `managed_mail_webhook_tokens` detects that `payloadSha256.equals(seenPayloadSha256)` is false.
   - Service returns `Outcome.REPLAYED_TOKEN` (`outcome.accepted() == false`).
-  - `CloudflareInboundController` maps this to HTTP **`406 Not Acceptable {"status":"replayed_token"}`**.
-  - If HMAC signature was not recalculated, `CloudflareSignatureVerifier` rejects with HTTP **`401 Unauthorized {"status":"rejected","reason":"INVALID_SIGNATURE"}`**.
+  - `CloudflareInboundController` maps unaccepted outcomes to HTTP **`406 Not Acceptable {"status":"rejected"}`**.
+  - If HMAC signature was not recomputed, `CloudflareSignatureVerifier` rejects with HTTP **`401 Unauthorized {"status":"unauthenticated"}`**.
 - **Database Footprint**: **0 rows inserted**. Request refused.
-- **Worker Behavior**: Worker receives 406 or 401, logs error, and returns cleanly without re-throwing.
+- **Worker Behavior**: Worker receives 406 or 401, logs error, and returns cleanly without throwing.
 
 #### Scenario C: Same Message-ID delivered with a fresh valid token
 - **Spring Backend Behavior**:
@@ -202,7 +204,7 @@ The exact behaviors for Scenarios A through E across the Cloudflare Worker and S
   - Recipient is routed to active candidate mailbox.
   - `INSERT INTO managed_inbound_messages` encounters conflict on unique index `(address_id, message_id_sha256)`. Insert returns 0 rows.
   - Returns `Outcome.DUPLICATE_MESSAGE`.
-  - `CloudflareInboundController` maps this to HTTP **`200 OK {"status":"duplicate_message"}`**.
+  - `CloudflareInboundController` maps this to HTTP **`200 OK {"status":"duplicate"}`**.
   - `stored == 0`, so `EmailIntelligenceService` is **NOT** invoked.
 - **Database Footprint**: Exactly **1 row inserted in `managed_mail_webhook_tokens`**. **0 rows inserted** in `managed_inbound_messages`, `emails`, or `email_application_links`.
 
@@ -224,14 +226,17 @@ Analysis of Flyway migrations `V001` through `V051` and JPA/JDBC repositories re
 
 1. **`managed_mail_webhook_tokens`**:
    - Independent token table (`token_sha256` PK).
+   - Stored key: `token_sha256 = TrackText.sha256(raw_token)` (64-character hex).
    - Has no foreign keys to other tables. Rows are retained for replay defense.
 2. **`managed_inbound_messages`**:
    - Independent raw message vault.
+   - `message_id_sha256` = `TrackText.sha256(cleanMessageId)` where `cleanMessageId` is normalized by stripping `<` and `>` (e.g. `probe-1@test.robin.internal`).
    - `profile_id` references `profiles(id) ON DELETE CASCADE`.
    - `address_id` references `managed_mail_addresses(id, profile_id) ON DELETE CASCADE`.
    - **Crucial Architectural Boundary**: There is **NO foreign key** between `managed_inbound_messages` and `emails`. Deleting a raw message row from `managed_inbound_messages` does **NOT** delete or cascade to `emails` or `email_application_links`.
 3. **`emails`**:
    - Stores normalized message evidence parsed by `EmailIntelligenceService`.
+   - `message_id` stores the unbracketed normalized Message-ID.
    - `profile_id` references `profiles(id) ON DELETE CASCADE`.
    - Referenced by:
      - `email_application_links.email_id` (`ON DELETE CASCADE`)
@@ -248,12 +253,12 @@ Analysis of Flyway migrations `V001` through `V051` and JPA/JDBC repositories re
    - **Direct `DELETE FROM application_events` is FORBIDDEN** by the database trigger.
    - Cascade deletion is only permitted when triggered by parent deletion (`pg_trigger_depth() > 1`), such as `DELETE FROM emails WHERE id = ...` or `DELETE FROM applications WHERE id = ...`.
 5. **`notifications` & `outbox_events`**:
-   - Ingestion emits events to `outbox_events`.
-   - Asynchronous fan-out consumer writes to `notifications` table (`dedup_key = 'track-email:' || email_id`).
-   - Notifications have no foreign key cascade to `emails`.
-6. **Safety Requirement for Synthetic Testing**:
-   - Because `application_events` and `notifications` create user-facing audit trails and timeline entries, synthetic webhook tests must **never** match an active candidate job application.
-   - Test payloads must use unmatched senders or unknown references so they classify as `UNRELATED_OR_AMBIGUOUS` with status `UNMATCHED`, creating zero application timeline events.
+   - Ingestion emits events to `outbox_events` (`payload.dedup_key = 'track-email:' || email_id`).
+   - Asynchronous fan-out consumer writes to `notifications` table (`dedup_key = ownerProfileId || ':track-email:' || email_id`).
+   - Notifications have no foreign key cascade to `emails`. Must be deleted by exact `dedup_key` or primary key.
+6. **Review Queue Impact (`GET /api/v1/track/reviews`)**:
+   - Any email ingested with `status = 'UNMATCHED'` is returned by `TrackRepository.reviewQueue(profileId)` because the query checks `where l.profile_id = ? and l.status in ('PENDING_REVIEW', 'UNMATCHED', 'CONFLICT')`.
+   - Consequently, sending any test email to a real candidate's address directly affects that candidate's review queue.
 
 ---
 
@@ -278,36 +283,89 @@ Analysis of Flyway migrations `V001` through `V051` and JPA/JDBC repositories re
 ## 6. Safe Live Verification Procedures (Operator Approval Required)
 
 > [!IMPORTANT]
-> The following procedures are designed for production safety. No emails, webhooks, or employer portal interactions will be initiated without explicit operator authorization.
+> The following procedures are designed for production safety. No emails, webhooks, or employer portal interactions will be initiated without explicit operator authorization and without establishing a dedicated test identity.
 
 ### 6.1 Direct Render Endpoint Duplicate Webhook Idempotency Verification
+- **Prerequisite**: A dedicated test candidate profile and active test alias MUST be established first (see safety report). Never use a real candidate's mailbox.
 - **Distinction**: Directly invokes the live Render backend endpoint with synthetic HMAC-signed payloads. Does not involve Cloudflare or send real emails.
 - **Objective**: Verify that re-sending an identical signed Cloudflare payload to the live Render endpoint is recognized as a duplicate and answered with HTTP 200 without creating duplicate database rows or polluting application timelines.
 - **Payload Safety Constraint**: The synthetic message MUST contain a generic subject (e.g. `Synthetic Idempotency Probe`) and unknown sender domain to ensure `EmailIntelligenceService` classifies it as `UNRELATED_OR_AMBIGUOUS` (`UNMATCHED`), preventing any link to candidate applications or creation of `application_events`.
 - **Exact Test Procedure**:
-  1. Generate a fresh timestamp $T$ and unique 64-hex token $K$.
-  2. Construct a synthetic JSON payload with message ID `<probe-1@test.robin.internal>` and recipient matching the candidate's active managed address.
+  1. Generate a fresh timestamp $T$ and unique 64-hex token $K_1$.
+  2. Construct a synthetic JSON payload with normalized message ID `probe-20261104-01@test.robin.internal` and recipient matching the dedicated test managed address.
   3. Compute HMAC-SHA256 signature using `CLOUDFLARE_EMAIL_WORKER_SECRET`.
   4. Send HTTP POST to `https://job-agent-mwhu.onrender.com/api/v1/managed-mail/inbound/cloudflare`.
   5. Immediately repeat the exact same request with identical headers, timestamp, token, body, and signature.
-  6. Send a third request with a fresh token $K_2$ but identical message ID `<probe-1@test.robin.internal>`.
+  6. Send a third request with a fresh token $K_2$ but identical message ID `probe-20261104-01@test.robin.internal`.
 - **Expected Results**:
   - Request 1: Returns HTTP `200 OK {"status":"stored"}`.
-  - Request 2: Returns HTTP `200 OK {"status":"duplicate_request"}`.
-  - Request 3: Returns HTTP `200 OK {"status":"duplicate_message"}`.
+  - Request 2: Returns HTTP `200 OK {"status":"duplicate"}`.
+  - Request 3: Returns HTTP `200 OK {"status":"duplicate"}`.
 - **Expected Database State**:
-  - `managed_mail_webhook_tokens`: exactly 2 rows inserted ($K$ and $K_2$).
-  - `managed_inbound_messages`: exactly 1 row inserted for `<probe-1@test.robin.internal>`.
+  - `managed_mail_webhook_tokens`: exactly 2 rows inserted ($K_1$ and $K_2$).
+  - `managed_inbound_messages`: exactly 1 row inserted for `probe-20261104-01@test.robin.internal`.
   - `emails`: exactly 1 row inserted.
   - `email_application_links`: exactly 1 row inserted with status `UNMATCHED`.
   - `application_events`: **0 rows inserted** (no application was matched).
-- **Cleanup Procedure**:
+- **Exact Two-Step Cleanup Procedure (Pre-Inspection then Targeted Deletion)**:
+  
+  **Step 1: Inspect and capture exact primary keys before deleting:**
   ```sql
-  DELETE FROM managed_inbound_messages WHERE message_id_sha256 = encode(sha256('<probe-1@test.robin.internal>'::bytea), 'hex');
-  DELETE FROM emails WHERE message_id = '<probe-1@test.robin.internal>'; -- cascades to email_application_links
-  DELETE FROM managed_mail_webhook_tokens WHERE token_sha256 in ('<hash_K>', '<hash_K2>');
+  -- A. Find webhook token rows by exact SHA-256 PK:
+  SELECT token_sha256, provider_id, signed_at, payload_sha256
+  FROM managed_mail_webhook_tokens
+  WHERE token_sha256 IN (
+      encode(sha256('<raw_token_K1>'::bytea), 'hex'),
+      encode(sha256('<raw_token_K2>'::bytea), 'hex')
+  );
+
+  -- B. Find inbound vault row by normalized message_id_sha256:
+  SELECT id, profile_id, address_id, message_id_sha256, sender_domain, subject_redacted, received_at
+  FROM managed_inbound_messages
+  WHERE message_id_sha256 = encode(sha256('probe-20261104-01@test.robin.internal'::bytea), 'hex');
+
+  -- C. Find normalized email row:
+  SELECT id, profile_id, message_id, subject, from_address, classification, application_id
+  FROM emails
+  WHERE message_id = 'probe-20261104-01@test.robin.internal';
+
+  -- D. Find associated link row using email_id from step C:
+  SELECT id, profile_id, email_id, application_id, status, match_strength, inferred_category
+  FROM email_application_links
+  WHERE email_id = '<email_id_from_step_C>';
+
+  -- E. Find notification row using dedup_key:
+  SELECT id, profile_id, dedup_key, title, created_at
+  FROM notifications
+  WHERE dedup_key = '<profile_id_from_step_C>:track-email:<email_id_from_step_C>';
+
+  -- F. Find outbox event:
+  SELECT id, aggregate_type, aggregate_id, event_type, created_at
+  FROM outbox_events
+  WHERE payload->>'dedup_key' = 'track-email:<email_id_from_step_C>';
   ```
-- **Evidence to Capture**: HTTP response status codes, JSON response bodies, and Supabase row count queries.
+
+  **Step 2: Delete by exact primary key (Never broad DELETE):**
+  ```sql
+  -- 1. Delete notification by exact PK:
+  DELETE FROM notifications WHERE id = '<notification_id_from_step_E>';
+
+  -- 2. Delete outbox event by exact PK:
+  DELETE FROM outbox_events WHERE id = '<outbox_id_from_step_F>';
+
+  -- 3. Delete email by exact PK (cascades to email_application_links):
+  DELETE FROM emails WHERE id = '<email_id_from_step_C>';
+
+  -- 4. Delete inbound vault message by exact PK:
+  DELETE FROM managed_inbound_messages WHERE id = '<inbound_id_from_step_B>';
+
+  -- 5. Delete webhook tokens by exact PK:
+  DELETE FROM managed_mail_webhook_tokens
+  WHERE token_sha256 IN (
+      encode(sha256('<raw_token_K1>'::bytea), 'hex'),
+      encode(sha256('<raw_token_K2>'::bytea), 'hex')
+  );
+  ```
 
 ### 6.2 Correct Application Association in Live Production Workflow
 - **Objective**: Verify that an inbound message quoting an active candidate application's requisition ID or job URL is linked to that application in the live database.
