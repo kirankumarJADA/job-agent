@@ -155,6 +155,26 @@ describe('Cloudflare Email Worker', () => {
     assert.ok(msg.getRejectReason()?.includes('exceeds maximum allowed size'), 'oversize rejected');
   });
 
+  it('rejects an oversize body even when rawSize under-reports it, without contacting the backend', async () => {
+    const msg = mockMessage('A'.repeat(500));
+    msg.rawSize = 50;
+    let fetched = false;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => { fetched = true; return { status: 200, json: async () => ({}) }; };
+    try {
+      await worker.email(msg, {
+        ROBIN_BACKEND_URL: BACKEND,
+        CLOUDFLARE_EMAIL_WORKER_SECRET: SECRET,
+        MAX_EMAIL_BYTES: 100
+      }, {});
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    assert.ok(msg.getRejectReason()?.includes('Message size 500 exceeds'), 'measured size is enforced');
+    assert.equal(fetched, false, 'an oversize message is never forwarded');
+  });
+
   describe('MIME Parser', () => {
     it('unfolds multiline headers and parses multipart MIME', () => {
       const multipartMime = 'From: "Hiring Manager" <hiring@company.example>\r\n' +
