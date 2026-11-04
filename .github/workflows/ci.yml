@@ -61,6 +61,10 @@ jobs:
       - name: Cloudflare email worker tests
         run: npm test --prefix cloudflare-email-worker
 
+      # Operator-run production probes (dependency-free, never contact a server in tests).
+      - name: Phase 20 operator probe tests
+        run: node --test scripts/phase20/*.test.mjs
+
   frontend:
     runs-on: ubuntu-latest
     steps:
