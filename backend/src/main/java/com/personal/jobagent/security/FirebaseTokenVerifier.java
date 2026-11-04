@@ -69,6 +69,8 @@ public interface FirebaseTokenVerifier {
         EXPIRED,
         REVOKED,
         USER_DISABLED,
+        /** The token is genuine but its Firebase account no longer exists. */
+        ACCOUNT_DELETED,
         INVALID_SIGNATURE,
         MALFORMED,
         UNKNOWN
@@ -99,8 +101,15 @@ public interface FirebaseTokenVerifier {
             return reason;
         }
 
+        /**
+         * True when the account itself has been cut off (revoked sessions,
+         * disabled, or deleted), as opposed to a token that is merely stale or
+         * malformed. Such a request must also end any existing server session.
+         */
         public boolean isRevokedOrDisabled() {
-            return reason == InvalidationReason.REVOKED || reason == InvalidationReason.USER_DISABLED;
+            return reason == InvalidationReason.REVOKED
+                    || reason == InvalidationReason.USER_DISABLED
+                    || reason == InvalidationReason.ACCOUNT_DELETED;
         }
     }
 

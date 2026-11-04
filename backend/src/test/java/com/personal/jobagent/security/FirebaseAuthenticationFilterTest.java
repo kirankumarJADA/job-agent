@@ -115,6 +115,30 @@ class FirebaseAuthenticationFilterTest {
         assertThat(request.getSession(false)).isNull();
     }
 
+    // 3b. Deleted Firebase account with an existing session
+    @Test
+    void deletedAccountBearerTokenClearsContextAndInvalidatesSession() throws Exception {
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.addHeader("Authorization", "Bearer deleted-account-token");
+        request.getSession(true);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        FilterChain chain = mock(FilterChain.class);
+
+        SecurityContext existingContext = SecurityContextHolder.createEmptyContext();
+        existingContext.setAuthentication(new UsernamePasswordAuthenticationToken(new AppUserDetails(userA, false), null, java.util.List.of()));
+        SecurityContextHolder.setContext(existingContext);
+
+        when(verifier.verifyIdToken("deleted-account-token"))
+                .thenThrow(new FirebaseTokenVerifier.InvalidToken("Account deleted", FirebaseTokenVerifier.InvalidationReason.ACCOUNT_DELETED, null));
+
+        filter.doFilter(request, response, chain);
+
+        verify(chain).doFilter(request, response);
+        assertThat(SecurityContextHolder.getContext().getAuthentication()).isNull();
+        assertThat(request.getSession(false)).isNull();
+        verify(contextRepository, never()).saveContext(any(), any(), any());
+    }
+
     // 4. Expired ID token without session
     @Test
     void expiredBearerTokenWithoutSessionLeavesUnauthenticated() throws Exception {

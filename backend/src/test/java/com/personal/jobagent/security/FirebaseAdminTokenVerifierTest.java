@@ -456,4 +456,95 @@ class FirebaseAdminTokenVerifierTest {
         assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.Unavailable.class);
         assertThat(thrown.getMessage()).contains("unavailable");
     }
+
+    // ── 8. Classification of revocation-lookup failures ────────────────────
+
+    @Test
+    void aTokenForADeletedAccountIsRejectedAsAccountDeletedAndEndsSessions() throws Exception {
+        Throwable thrown = verifyFailingWith(ErrorCode.NOT_FOUND, AuthErrorCode.USER_NOT_FOUND);
+
+        assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.InvalidToken.class);
+        FirebaseTokenVerifier.InvalidToken invalid = (FirebaseTokenVerifier.InvalidToken) thrown;
+        assertThat(invalid.reason()).isEqualTo(FirebaseTokenVerifier.InvalidationReason.ACCOUNT_DELETED);
+        assertThat(invalid.isRevokedOrDisabled()).isTrue();
+    }
+
+    @Test
+    void aServiceAccountWithoutPermissionIsAServerFaultNotABadToken() throws Exception {
+        Throwable thrown = verifyFailingWith(ErrorCode.PERMISSION_DENIED, null);
+
+        assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.Unavailable.class);
+        assertThat(thrown.getMessage()).contains("credentials could not complete token verification");
+    }
+
+    @Test
+    void aRefusedServiceAccountCredentialIsAServerFaultNotABadToken() throws Exception {
+        Throwable thrown = verifyFailingWith(ErrorCode.UNAUTHENTICATED, null);
+
+        assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.Unavailable.class);
+    }
+
+    @Test
+    void quotaExhaustionDuringTheRevocationLookupIsUnavailableNotARejection() throws Exception {
+        Throwable thrown = verifyFailingWith(ErrorCode.RESOURCE_EXHAUSTED, null);
+
+        assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.Unavailable.class);
+    }
+
+    @Test
+    void aGoogleSideInternalErrorIsUnavailableNotARejection() throws Exception {
+        Throwable thrown = verifyFailingWith(ErrorCode.INTERNAL, null);
+
+        assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.Unavailable.class);
+    }
+
+    @Test
+    void aMissingProjectConfigurationIsAServerFault() throws Exception {
+        Throwable thrown = verifyFailingWith(ErrorCode.NOT_FOUND, AuthErrorCode.CONFIGURATION_NOT_FOUND);
+
+        assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.Unavailable.class);
+    }
+
+    @Test
+    void aTokenFromAnotherTenantIsRejectedAsInvalid() throws Exception {
+        Throwable thrown = verifyFailingWith(ErrorCode.INVALID_ARGUMENT, AuthErrorCode.TENANT_ID_MISMATCH);
+
+        assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.InvalidToken.class);
+        FirebaseTokenVerifier.InvalidToken invalid = (FirebaseTokenVerifier.InvalidToken) thrown;
+        assertThat(invalid.reason()).isEqualTo(FirebaseTokenVerifier.InvalidationReason.INVALID_SIGNATURE);
+        assertThat(invalid.isRevokedOrDisabled()).isFalse();
+    }
+
+    @Test
+    void anUnrecognisedErrorStillFailsClosed() throws Exception {
+        Throwable thrown = verifyFailingWith(ErrorCode.FAILED_PRECONDITION, null);
+
+        assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.InvalidToken.class);
+        FirebaseTokenVerifier.InvalidToken invalid = (FirebaseTokenVerifier.InvalidToken) thrown;
+        assertThat(invalid.reason()).isEqualTo(FirebaseTokenVerifier.InvalidationReason.UNKNOWN);
+        assertThat(invalid.isRevokedOrDisabled()).isFalse();
+    }
+
+    @Test
+    void aTokenSpecificErrorCodeWinsOverAnAmbiguousTransportCode() throws Exception {
+        // A revoked token must never be retried as "unavailable" just because the
+        // SDK also attached a generic error code to the exception.
+        Throwable thrown = verifyFailingWith(ErrorCode.UNAVAILABLE, AuthErrorCode.REVOKED_ID_TOKEN);
+
+        assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.InvalidToken.class);
+        assertThat(((FirebaseTokenVerifier.InvalidToken) thrown).reason())
+                .isEqualTo(FirebaseTokenVerifier.InvalidationReason.REVOKED);
+    }
+
+    private static Throwable verifyFailingWith(ErrorCode errorCode, AuthErrorCode authCode) throws Exception {
+        FirebaseAuth auth = mock(FirebaseAuth.class);
+        FirebaseAuthException ex = mock(FirebaseAuthException.class);
+        when(ex.getErrorCode()).thenReturn(errorCode);
+        when(ex.getAuthErrorCode()).thenReturn(authCode);
+        when(ex.getMessage()).thenReturn("synthetic failure");
+        when(auth.verifyIdToken("token", true)).thenThrow(ex);
+
+        FirebaseAdminTokenVerifier verifier = new FirebaseAdminTokenVerifier(new FirebaseProperties(), auth);
+        return catchThrowable(() -> verifier.verifyIdToken("token"));
+    }
 }

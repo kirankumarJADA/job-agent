@@ -223,7 +223,9 @@ public class AuthController {
      *       verification email has not been followed, so no account may be
      *       claimed or created) or registration was refused by the invite
      *       gate; the body distinguishes the two</li>
-     *   <li>503 — the server has no usable Firebase credentials</li>
+     *   <li>503 — the server could not complete verification: no usable
+     *       Firebase credentials, credentials refused by Firebase, or Firebase
+     *       temporarily unavailable</li>
      * </ul>
      */
     @PostMapping("/firebase/session")
@@ -246,7 +248,7 @@ public class AuthController {
         } catch (FirebaseTokenVerifier.Unavailable e) {
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(ApiError.of(503,
                     "Authentication unavailable",
-                    "Firebase Authentication is not configured on this server: " + e.getMessage(),
+                    "Firebase sign-in could not be verified by this server: " + e.getMessage(),
                     httpRequest.getRequestURI(), correlationId.toString()));
         }
 
