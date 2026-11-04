@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.application.ApplicationPipelineService;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.discovery.platform.JobIdentity;
 import com.personal.jobagent.profile.ProfileRepository;
 import com.personal.jobagent.security.AppUserDetails;
 import com.personal.jobagent.security.UserRecord;
@@ -64,6 +65,7 @@ class CloudflareManagedMailIT {
     static final String DOMAIN = "mail.aplivenosi.com";
     static final String SECRET = "it-cloudflare-secret-key-abcdef123456";
     static final String INBOUND = "/api/v1/managed-mail/inbound/cloudflare";
+    private static final UUID FIXTURE_SOURCE = UUID.fromString("00000000-0000-7000-8000-00000000cf20");
 
     @Container
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
@@ -94,6 +96,14 @@ class CloudflareManagedMailIT {
         devProfile = jdbc.queryForObject(
                 "select p.id from profiles p join users u on u.id = p.user_id where u.email = 'dev@example.local'", UUID.class);
 
+        jdbc.update("""
+                insert into job_sources (id, kind, org_identifier, display_name, capabilities, policy)
+                values (?, 'GREENHOUSE', 'cf-managed-fixture', 'CF Managed Fixture Board', '{}', 'DISCOVERY_ONLY')
+                on conflict (kind, org_identifier) do nothing
+                """, FIXTURE_SOURCE);
+
+        jdbc.update("delete from email_application_links");
+        jdbc.update("delete from emails");
         jdbc.update("delete from managed_inbound_messages");
         jdbc.update("delete from managed_mail_domains");
     }
@@ -108,6 +118,35 @@ class CloudflareManagedMailIT {
         MvcResult res = mvc.perform(post("/api/v1/managed-mail/address").with(csrf()).with(auth))
                 .andExpect(status().isOk()).andReturn();
         return json(res).get("address").asText();
+    }
+
+    private record TestCandidate(UUID userId, UUID profileId, RequestPostProcessor auth, String emailAddress) {}
+
+    private TestCandidate createCandidate(String email, String displayName) throws Exception {
+        UUID userId = UuidV7.generate();
+        jdbc.update("insert into users (id, email, password_hash, display_name, auth_provider) values (?, ?, null, ?, 'FIREBASE')",
+                userId, email, displayName);
+        UUID profileId = profiles.createProfile(userId, null, null, null, null, null, null, null);
+        AppUserDetails principal = new AppUserDetails(new UserRecord(userId, email, null, displayName, null, "FIREBASE"));
+        RequestPostProcessor auth = authentication(new UsernamePasswordAuthenticationToken(principal, null, principal.getAuthorities()));
+        String address = reserve(auth);
+        return new TestCandidate(userId, profileId, auth, address);
+    }
+
+    private UUID createApplicationWithJob(UUID profileId, String company, String title, String url, String req) {
+        UUID jobId = UuidV7.generate();
+        String externalId = "cf-mail-job-" + jobId;
+        jdbc.update("""
+                insert into jobs (id, source_id, external_id, dedup_key, company_name_raw, title,
+                                  description_text, skills_extracted, status, content_hash, application_url, canonical_url)
+                values (?, ?, ?, ?, ?, ?, 'Job description for testing', '{}', 'SCORED', ?, ?, ?)
+                """, jobId, FIXTURE_SOURCE, externalId, "dedup-" + externalId, company, title, "hash-" + externalId, url, url);
+        UUID appId = pipeline.createApplicationFromMatch(profileId, jobId).applicationId();
+        for (JobIdentity.Key k : JobIdentity.keys(FIXTURE_SOURCE, externalId, url, url, company, req)) {
+            jdbc.update("insert into job_identity_keys (key, job_id, key_type, source_id) values (?, ?, ?, ?) on conflict (key) do nothing",
+                    k.asString(), jobId, k.type().name(), FIXTURE_SOURCE);
+        }
+        return appId;
     }
 
     private String buildCloudflarePayload(String envelopeRecipient, String from, String subject, String text, String messageId) throws Exception {
@@ -297,6 +336,117 @@ class CloudflareManagedMailIT {
         String c2Messages = mvc.perform(get("/api/v1/managed-mail/messages").with(cand2Auth))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
         assertThat(c2Messages).contains("Candidate 2 Letter").doesNotContain("Candidate 1 Letter");
+    }
+
+    @Test
+    @DisplayName("Cloudflare inbound webhook associates employer email with candidate's job application")
+    void inboundCloudflareWebhookApplicationAssociationAndIsolation() throws Exception {
+        // 1. Create isolated candidate A and candidate B
+        TestCandidate candidateA = createCandidate("candA-" + UUID.randomUUID() + "@test.local", "Candidate A");
+        TestCandidate candidateB = createCandidate("candB-" + UUID.randomUUID() + "@test.local", "Candidate B");
+
+        // 2. Create active job application for Candidate A at Acme Corp
+        String acmeUrl = "https://boards.greenhouse.io/acme/jobs/1000001";
+        UUID appA = createApplicationWithJob(candidateA.profileId(), "Acme Corp", "Senior Platform Engineer", acmeUrl, "REQ-ACME-101");
+
+        // Create an unrelated job application for Candidate B at Initech
+        String initechUrl = "https://boards.greenhouse.io/initech/jobs/2000002";
+        UUID appB = createApplicationWithJob(candidateB.profileId(), "Initech", "Backend Lead", initechUrl, "REQ-INI-202");
+
+        // 3. Construct realistic employer email matching Candidate A's application
+        String emailBody = buildCloudflarePayload(
+                candidateA.emailAddress(),
+                "Acme Careers <recruiting@acme.com>",
+                "Application Received: Senior Platform Engineer",
+                "Hi Candidate A, thank you for applying to the Senior Platform Engineer role at Acme Corp. "
+                        + "Your application for " + acmeUrl + " (Requisition: REQ-ACME-101) has been received.",
+                "<ack-acme-101@acme.com>"
+        );
+
+        // 4. Sign and send Cloudflare webhook
+        String tokenA = "tok-assoc-" + UUID.randomUUID();
+        MvcResult deliveryResult = deliverSigned(emailBody, tokenA, Instant.now());
+
+        // 5. Verify webhook response
+        assertThat(deliveryResult.getResponse().getStatus()).isEqualTo(200);
+        assertThat(json(deliveryResult).get("status").asText()).isEqualTo("stored");
+
+        // 6. Verify inbound message is persisted in managed_inbound_messages and emails
+        List<Map<String, Object>> managedMsgs = jdbc.queryForList(
+                "select profile_id, envelope_recipient, sender_domain, content_encrypted from managed_inbound_messages where envelope_recipient = ?",
+                candidateA.emailAddress());
+        assertThat(managedMsgs).hasSize(1);
+        assertThat(managedMsgs.get(0).get("profile_id")).isEqualTo(candidateA.profileId());
+        assertThat(managedMsgs.get(0).get("sender_domain")).isEqualTo("acme.com");
+        assertThat(managedMsgs.get(0).get("content_encrypted")).isNotNull();
+
+        List<Map<String, Object>> emailsA = jdbc.queryForList(
+                "select id, profile_id, application_id, classification, message_id from emails where profile_id = ?",
+                candidateA.profileId());
+        assertThat(emailsA).hasSize(1);
+        UUID emailIdA = (UUID) emailsA.get(0).get("id");
+        assertThat(emailsA.get(0).get("application_id")).isEqualTo(appA);
+        assertThat(emailsA.get(0).get("message_id")).isEqualTo("ack-acme-101@acme.com");
+        assertThat(emailsA.get(0).get("classification")).isEqualTo("APPLICATION_ACKNOWLEDGEMENT");
+
+        // 7. Verify email_application_links record links message to intended application
+        List<Map<String, Object>> linksA = jdbc.queryForList(
+                "select id, profile_id, email_id, application_id, status, match_strength from email_application_links where profile_id = ?",
+                candidateA.profileId());
+        assertThat(linksA).hasSize(1);
+        assertThat(linksA.get(0).get("email_id")).isEqualTo(emailIdA);
+        assertThat(linksA.get(0).get("application_id")).isEqualTo(appA);
+        assertThat(linksA.get(0).get("status")).isEqualTo("LINKED");
+        assertThat(linksA.get(0).get("match_strength")).isEqualTo("STRONG");
+
+        // 8. Verify the association belongs strictly to Candidate A
+        assertThat(linksA.get(0).get("profile_id")).isEqualTo(candidateA.profileId());
+
+        // 9. Verify no other candidate or unrelated application was modified
+        Integer candidateBEmailCount = jdbc.queryForObject(
+                "select count(*) from emails where profile_id = ?", Integer.class, candidateB.profileId());
+        assertThat(candidateBEmailCount).isZero();
+
+        Integer candidateBLinkCount = jdbc.queryForObject(
+                "select count(*) from email_application_links where profile_id = ?", Integer.class, candidateB.profileId());
+        assertThat(candidateBLinkCount).isZero();
+
+        Integer appBEventCount = jdbc.queryForObject(
+                "select count(*) from application_events where application_id = ? and type != 'APPLICATION_CREATED'",
+                Integer.class, appB);
+        assertThat(appBEventCount).isZero();
+
+        // 10. Negative Case: Ambiguous / weak message cannot be confidently associated
+        // An email from Acme mentioning only company name with no job URL, title, or requisition
+        String ambiguousBody = buildCloudflarePayload(
+                candidateA.emailAddress(),
+                "Acme Careers <recruiting@acme.com>",
+                "Checking in from Acme Corp",
+                "Hello, this is a general update regarding our hiring pipeline at Acme Corp. We are reviewing candidates.",
+                "<general-acme-update@acme.com>"
+        );
+        String tokenAmbiguous = "tok-ambig-" + UUID.randomUUID();
+        MvcResult ambResult = deliverSigned(ambiguousBody, tokenAmbiguous, Instant.now());
+        assertThat(ambResult.getResponse().getStatus()).isEqualTo(200);
+        assertThat(json(ambResult).get("status").asText()).isEqualTo("stored");
+
+        // Inbound message is persisted in emails, but application_id is null
+        Map<String, Object> ambEmailRow = jdbc.queryForMap(
+                "select id, application_id from emails where message_id = 'general-acme-update@acme.com' and profile_id = ?",
+                candidateA.profileId());
+        assertThat(ambEmailRow.get("application_id")).isNull();
+
+        // In email_application_links, application_id is null and status is PENDING_REVIEW (weak signals only)
+        Map<String, Object> ambLinkRow = jdbc.queryForMap(
+                "select application_id, status, match_strength from email_application_links where email_id = ?",
+                ambEmailRow.get("id"));
+        assertThat(ambLinkRow.get("application_id")).isNull();
+        assertThat(ambLinkRow.get("status")).isEqualTo("PENDING_REVIEW");
+        assertThat(ambLinkRow.get("match_strength")).isEqualTo("WEAK");
+
+        // Candidate B and App B remain completely untouched
+        assertThat(jdbc.queryForObject("select count(*) from emails where profile_id = ?", Integer.class, candidateB.profileId())).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from email_application_links where profile_id = ?", Integer.class, candidateB.profileId())).isZero();
     }
 
     private JsonNode json(MvcResult result) throws Exception {
