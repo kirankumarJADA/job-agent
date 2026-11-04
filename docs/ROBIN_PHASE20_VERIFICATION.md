@@ -332,7 +332,7 @@ Analysis of Flyway migrations `V001` through `V051` and JPA/JDBC repositories re
 - **Objective**: confirm in production that the test candidate cannot read another candidate's resources, before any synthetic traffic is sent to its alias.
 - **Tool**: `scripts/phase20/isolation-probe.mjs` (tested in CI: `Phase 20 operator probe tests`). GET requests only; response bodies are never printed; it stops after `GET /auth/me` if the token belongs to any account other than `--expect-email`.
 - **Procedure**:
-  1. As the **real** candidate, note one application id (Applications page URL), and optionally a cover-letter id and a tailored-CV version id.
+  1. As the **real** candidate, open Applications with DevTools → Network open, select the `GET /api/v1/applications` request, and copy one `items[].id` from its response (the UI does not display ids). Optionally take a cover-letter id and a tailored-CV version id the same way.
   2. As the **test** candidate, in a separate browser profile, copy its Firebase ID token: DevTools → Application → IndexedDB → `firebaseLocalStorageDb` → `firebaseLocalStorage` → entry value → `stsTokenManager.accessToken` (valid about one hour). Keep it in your own shell only.
   3. Run:
      ```bash
