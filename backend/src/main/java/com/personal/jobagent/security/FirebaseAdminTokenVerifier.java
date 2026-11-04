@@ -86,31 +86,58 @@ public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
         this.properties = properties;
     }
 
+    /**
+     * Package-private constructor allowing injection of a pre-configured or mocked
+     * {@link FirebaseAuth} instance for unit and regression testing without hitting
+     * production Google endpoints.
+     */
+    FirebaseAdminTokenVerifier(FirebaseProperties properties, FirebaseAuth firebaseAuth) {
+        this.properties = properties;
+        this.firebaseAuth = firebaseAuth;
+    }
+
     @Override
     public VerifiedIdentity verifyIdToken(String idToken) {
         if (idToken == null || idToken.isBlank()) {
-            throw new InvalidToken("No Firebase ID token was supplied.");
+            throw new InvalidToken("No Firebase ID token was supplied.", InvalidationReason.MALFORMED, null);
         }
 
         FirebaseToken decoded;
         try {
-            decoded = auth().verifyIdToken(idToken);
+            decoded = auth().verifyIdToken(idToken, true);
         } catch (FirebaseAuthException e) {
-            // Covers expiry, bad signature, wrong audience/issuer, revoked
-            // tokens and non-ID tokens. The SDK's message names which, which
-            // is useful in the server log; the HTTP response stays generic.
-            throw new InvalidToken("Firebase ID token could not be verified.", e);
+            com.google.firebase.auth.AuthErrorCode authCode = e.getAuthErrorCode();
+            com.google.firebase.ErrorCode errorCode = e.getErrorCode();
+
+            if (errorCode == com.google.firebase.ErrorCode.UNAVAILABLE
+                    || errorCode == com.google.firebase.ErrorCode.DEADLINE_EXCEEDED
+                    || authCode == com.google.firebase.auth.AuthErrorCode.CERTIFICATE_FETCH_FAILED
+                    || e.getCause() instanceof java.io.IOException) {
+                log.warn("Firebase authentication service is unavailable: {} (authCode: {})",
+                        com.personal.jobagent.common.LogScrubber.scrub(e.getMessage()), authCode);
+                throw new Unavailable("Firebase authentication service is unavailable.", e);
+            }
+
+            InvalidationReason reason = switch (authCode != null ? authCode : com.google.firebase.auth.AuthErrorCode.INVALID_ID_TOKEN) {
+                case REVOKED_ID_TOKEN -> InvalidationReason.REVOKED;
+                case USER_DISABLED -> InvalidationReason.USER_DISABLED;
+                case EXPIRED_ID_TOKEN -> InvalidationReason.EXPIRED;
+                default -> InvalidationReason.INVALID_SIGNATURE;
+            };
+
+            log.debug("Firebase ID token verification failed: reason={}, authCode={}", reason, authCode);
+            throw new InvalidToken("Firebase ID token could not be verified: " + reason, reason, e);
         } catch (IllegalArgumentException e) {
-            throw new InvalidToken("Firebase ID token was malformed.", e);
+            throw new InvalidToken("Firebase ID token was malformed.", InvalidationReason.MALFORMED, e);
         } catch (Unavailable e) {
             throw e; // configuration fault, not a credential fault
         } catch (RuntimeException e) {
-            throw new InvalidToken("Firebase ID token could not be verified.", e);
+            throw new InvalidToken("Firebase ID token could not be verified.", InvalidationReason.UNKNOWN, e);
         }
 
         String uid = decoded.getUid();
         if (uid == null || uid.isBlank()) {
-            throw new InvalidToken("Firebase ID token carried no subject.");
+            throw new InvalidToken("Firebase ID token carried no subject.", InvalidationReason.MALFORMED, null);
         }
 
         return new VerifiedIdentity(

@@ -9,8 +9,16 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.util.Base64;
 
+import com.google.firebase.auth.AuthErrorCode;
+import com.google.firebase.auth.FirebaseAuth;
+import com.google.firebase.auth.FirebaseAuthException;
+import com.google.firebase.auth.FirebaseToken;
+import com.google.firebase.ErrorCode;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * Regression tests for the Firebase Admin credential path.
@@ -314,5 +322,138 @@ class FirebaseAdminTokenVerifierTest {
         properties.setClientEmail(clientEmail);
         properties.setPrivateKey(privateKey);
         return new FirebaseAdminTokenVerifier(properties);
+    }
+    // ── 7. Revocation-aware verification tests ─────────────────────────────
+
+    @Test
+    void verifyIdTokenPassesCheckRevokedTrueAndReturnsIdentity() throws Exception {
+        FirebaseAuth auth = mock(FirebaseAuth.class);
+        FirebaseToken token = mock(FirebaseToken.class);
+        when(token.getUid()).thenReturn("user-123");
+        when(token.getEmail()).thenReturn("test@example.com");
+        when(token.getName()).thenReturn("Test User");
+        when(token.isEmailVerified()).thenReturn(true);
+        when(auth.verifyIdToken("valid-token", true)).thenReturn(token);
+
+        FirebaseProperties props = new FirebaseProperties();
+        FirebaseAdminTokenVerifier verifier = new FirebaseAdminTokenVerifier(props, auth);
+
+        FirebaseTokenVerifier.VerifiedIdentity identity = verifier.verifyIdToken("valid-token");
+
+        assertThat(identity.uid()).isEqualTo("user-123");
+        assertThat(identity.email()).isEqualTo("test@example.com");
+        assertThat(identity.displayName()).isEqualTo("Test User");
+        assertThat(identity.emailVerified()).isTrue();
+        verify(auth).verifyIdToken("valid-token", true);
+    }
+
+    @Test
+    void revokedTokenThrowsInvalidTokenWithRevokedReason() throws Exception {
+        FirebaseAuth auth = mock(FirebaseAuth.class);
+        FirebaseAuthException ex = mock(FirebaseAuthException.class);
+        when(ex.getAuthErrorCode()).thenReturn(AuthErrorCode.REVOKED_ID_TOKEN);
+        when(ex.getMessage()).thenReturn("Firebase ID token has been revoked.");
+        when(auth.verifyIdToken("revoked-token", true)).thenThrow(ex);
+
+        FirebaseProperties props = new FirebaseProperties();
+        FirebaseAdminTokenVerifier verifier = new FirebaseAdminTokenVerifier(props, auth);
+
+        Throwable thrown = catchThrowable(() -> verifier.verifyIdToken("revoked-token"));
+
+        assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.InvalidToken.class);
+        FirebaseTokenVerifier.InvalidToken invalidToken = (FirebaseTokenVerifier.InvalidToken) thrown;
+        assertThat(invalidToken.reason()).isEqualTo(FirebaseTokenVerifier.InvalidationReason.REVOKED);
+        assertThat(invalidToken.isRevokedOrDisabled()).isTrue();
+    }
+
+    @Test
+    void disabledUserThrowsInvalidTokenWithUserDisabledReason() throws Exception {
+        FirebaseAuth auth = mock(FirebaseAuth.class);
+        FirebaseAuthException ex = mock(FirebaseAuthException.class);
+        when(ex.getAuthErrorCode()).thenReturn(AuthErrorCode.USER_DISABLED);
+        when(ex.getMessage()).thenReturn("The user record is disabled.");
+        when(auth.verifyIdToken("disabled-token", true)).thenThrow(ex);
+
+        FirebaseProperties props = new FirebaseProperties();
+        FirebaseAdminTokenVerifier verifier = new FirebaseAdminTokenVerifier(props, auth);
+
+        Throwable thrown = catchThrowable(() -> verifier.verifyIdToken("disabled-token"));
+
+        assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.InvalidToken.class);
+        FirebaseTokenVerifier.InvalidToken invalidToken = (FirebaseTokenVerifier.InvalidToken) thrown;
+        assertThat(invalidToken.reason()).isEqualTo(FirebaseTokenVerifier.InvalidationReason.USER_DISABLED);
+        assertThat(invalidToken.isRevokedOrDisabled()).isTrue();
+    }
+
+    @Test
+    void expiredTokenThrowsInvalidTokenWithExpiredReason() throws Exception {
+        FirebaseAuth auth = mock(FirebaseAuth.class);
+        FirebaseAuthException ex = mock(FirebaseAuthException.class);
+        when(ex.getAuthErrorCode()).thenReturn(AuthErrorCode.EXPIRED_ID_TOKEN);
+        when(ex.getMessage()).thenReturn("Firebase ID token has expired.");
+        when(auth.verifyIdToken("expired-token", true)).thenThrow(ex);
+
+        FirebaseProperties props = new FirebaseProperties();
+        FirebaseAdminTokenVerifier verifier = new FirebaseAdminTokenVerifier(props, auth);
+
+        Throwable thrown = catchThrowable(() -> verifier.verifyIdToken("expired-token"));
+
+        assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.InvalidToken.class);
+        FirebaseTokenVerifier.InvalidToken invalidToken = (FirebaseTokenVerifier.InvalidToken) thrown;
+        assertThat(invalidToken.reason()).isEqualTo(FirebaseTokenVerifier.InvalidationReason.EXPIRED);
+        assertThat(invalidToken.isRevokedOrDisabled()).isFalse();
+    }
+
+    @Test
+    void invalidSignatureThrowsInvalidTokenWithInvalidSignatureReason() throws Exception {
+        FirebaseAuth auth = mock(FirebaseAuth.class);
+        FirebaseAuthException ex = mock(FirebaseAuthException.class);
+        when(ex.getAuthErrorCode()).thenReturn(AuthErrorCode.INVALID_ID_TOKEN);
+        when(ex.getMessage()).thenReturn("Failed to verify token signature.");
+        when(auth.verifyIdToken("bad-signature-token", true)).thenThrow(ex);
+
+        FirebaseProperties props = new FirebaseProperties();
+        FirebaseAdminTokenVerifier verifier = new FirebaseAdminTokenVerifier(props, auth);
+
+        Throwable thrown = catchThrowable(() -> verifier.verifyIdToken("bad-signature-token"));
+
+        assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.InvalidToken.class);
+        FirebaseTokenVerifier.InvalidToken invalidToken = (FirebaseTokenVerifier.InvalidToken) thrown;
+        assertThat(invalidToken.reason()).isEqualTo(FirebaseTokenVerifier.InvalidationReason.INVALID_SIGNATURE);
+        assertThat(invalidToken.isRevokedOrDisabled()).isFalse();
+    }
+
+    @Test
+    void firebaseServiceUnavailableThrowsUnavailable() throws Exception {
+        FirebaseAuth auth = mock(FirebaseAuth.class);
+        FirebaseAuthException ex = mock(FirebaseAuthException.class);
+        when(ex.getErrorCode()).thenReturn(ErrorCode.UNAVAILABLE);
+        when(ex.getMessage()).thenReturn("Service unavailable.");
+        when(auth.verifyIdToken("token", true)).thenThrow(ex);
+
+        FirebaseProperties props = new FirebaseProperties();
+        FirebaseAdminTokenVerifier verifier = new FirebaseAdminTokenVerifier(props, auth);
+
+        Throwable thrown = catchThrowable(() -> verifier.verifyIdToken("token"));
+
+        assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.Unavailable.class);
+        assertThat(thrown.getMessage()).contains("unavailable");
+    }
+
+    @Test
+    void certificateFetchFailureThrowsUnavailable() throws Exception {
+        FirebaseAuth auth = mock(FirebaseAuth.class);
+        FirebaseAuthException ex = mock(FirebaseAuthException.class);
+        when(ex.getAuthErrorCode()).thenReturn(AuthErrorCode.CERTIFICATE_FETCH_FAILED);
+        when(ex.getMessage()).thenReturn("Failed to fetch public certificates.");
+        when(auth.verifyIdToken("token", true)).thenThrow(ex);
+
+        FirebaseProperties props = new FirebaseProperties();
+        FirebaseAdminTokenVerifier verifier = new FirebaseAdminTokenVerifier(props, auth);
+
+        Throwable thrown = catchThrowable(() -> verifier.verifyIdToken("token"));
+
+        assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.Unavailable.class);
+        assertThat(thrown.getMessage()).contains("unavailable");
     }
 }

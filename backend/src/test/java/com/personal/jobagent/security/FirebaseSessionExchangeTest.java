@@ -9,6 +9,8 @@ import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.context.SecurityContextRepository;
@@ -305,5 +307,32 @@ class FirebaseSessionExchangeTest {
         request.setRemoteAddr("203.0.113.7");
         request.setRequestURI("/api/v1/auth/firebase/session");
         return request;
+    }
+    @Test
+    void aRevokedTokenIsRejectedWith401AndEstablishesNoSession() throws Exception {
+        when(verifier.verifyIdToken("revoked")).thenThrow(
+                new FirebaseTokenVerifier.InvalidToken("Revoked", FirebaseTokenVerifier.InvalidationReason.REVOKED, null));
+
+        var response = controller.firebaseSession(
+                new AuthController.FirebaseSessionRequest("revoked", null, null), request(), new MockHttpServletResponse());
+
+        assertThat(response.getStatusCode().value()).isEqualTo(401);
+        verify(userService, never()).signIn(any(), any());
+        verify(securityContextRepository, never()).saveContext(any(), any(), any());
+    }
+
+    @Test
+    void logoutInvalidatesSessionAndClearsSecurityContext() {
+        MockHttpServletRequest req = request();
+        req.getSession(true);
+        SecurityContext context = SecurityContextHolder.createEmptyContext();
+        context.setAuthentication(new UsernamePasswordAuthenticationToken("actor", "pwd"));
+        SecurityContextHolder.setContext(context);
+
+        var response = controller.logout(req, new MockHttpServletResponse());
+
+        assertThat(response.getStatusCode().value()).isEqualTo(204);
+        assertThat(SecurityContextHolder.getContext().getAuthentication()).isNull();
+        assertThat(req.getSession(false)).isNull();
     }
 }

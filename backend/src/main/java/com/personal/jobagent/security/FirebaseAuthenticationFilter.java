@@ -76,13 +76,9 @@ public class FirebaseAuthenticationFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
-        if (isAlreadyAuthenticated()) {
-            filterChain.doFilter(request, response);
-            return;
-        }
-
         String idToken = bearerToken(request);
         if (idToken == null) {
+            // Pure cookie session or unauthenticated request: rely on standard session authentication.
             filterChain.doFilter(request, response);
             return;
         }
@@ -98,6 +94,22 @@ public class FirebaseAuthenticationFilter extends OncePerRequestFilter {
                 return;
             }
 
+            // Cross-account isolation check: if an existing session belongs to a different user,
+            // invalidate that session so the bearer identity is not conflated with the cookie.
+            if (isAlreadyAuthenticated()) {
+                Authentication current = SecurityContextHolder.getContext().getAuthentication();
+                if (current != null && current.getPrincipal() instanceof AppUserDetails principal) {
+                    if (!user.get().id().equals(principal.getUserId())) {
+                        log.info("Cross-account request: bearer user {} differs from session user {}; invalidating old session",
+                                user.get().id(), principal.getUserId());
+                        jakarta.servlet.http.HttpSession existingSession = request.getSession(false);
+                        if (existingSession != null) {
+                            existingSession.invalidate();
+                        }
+                    }
+                }
+            }
+
             SecurityContext context = SecurityContextHolder.createEmptyContext();
             context.setAuthentication(authenticationFor(user.get()));
             SecurityContextHolder.setContext(context);
@@ -105,13 +117,28 @@ public class FirebaseAuthenticationFilter extends OncePerRequestFilter {
             // exactly as they do after a normal session login.
             securityContextRepository.saveContext(context, request, response);
         } catch (FirebaseTokenVerifier.InvalidToken e) {
-            log.debug("Rejected Firebase ID token: {}", e.getMessage());
+            log.debug("Rejected Firebase ID token: reason={}, message={}", e.reason(), e.getMessage());
+            if (e.isRevokedOrDisabled()) {
+                // An explicitly revoked token or disabled account must never ride on an existing session.
+                SecurityContextHolder.clearContext();
+                jakarta.servlet.http.HttpSession session = request.getSession(false);
+                if (session != null) {
+                    session.invalidate();
+                }
+            } else if (!isAlreadyAuthenticated()) {
+                SecurityContextHolder.clearContext();
+            }
         } catch (FirebaseTokenVerifier.Unavailable e) {
-            // Configuration fault. Not authenticated — a missing admin
-            // credential must never be treated as a valid identity.
+            // Configuration or network fault. Not authenticated via bearer.
             log.warn("Firebase token verification unavailable: {}", e.getMessage());
+            if (!isAlreadyAuthenticated()) {
+                SecurityContextHolder.clearContext();
+            }
         } catch (RuntimeException e) {
             log.warn("Unexpected failure verifying Firebase ID token", e);
+            if (!isAlreadyAuthenticated()) {
+                SecurityContextHolder.clearContext();
+            }
         }
 
         filterChain.doFilter(request, response);

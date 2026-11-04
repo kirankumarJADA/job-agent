@@ -62,17 +62,45 @@ public interface FirebaseTokenVerifier {
     }
 
     /**
+     * Category of token invalidation, identifying the underlying security failure
+     * without leaking sensitive detail to API callers.
+     */
+    enum InvalidationReason {
+        EXPIRED,
+        REVOKED,
+        USER_DISABLED,
+        INVALID_SIGNATURE,
+        MALFORMED,
+        UNKNOWN
+    }
+
+    /**
      * Thrown when a token is present but not acceptable. Mapped to 401.
      * Deliberately carries no detail about *why* beyond a coarse category, so
      * nothing useful leaks to a caller probing the endpoint.
      */
     class InvalidToken extends RuntimeException {
+        private final InvalidationReason reason;
+
         public InvalidToken(String message) {
-            super(message);
+            this(message, InvalidationReason.UNKNOWN, null);
         }
 
         public InvalidToken(String message, Throwable cause) {
+            this(message, InvalidationReason.UNKNOWN, cause);
+        }
+
+        public InvalidToken(String message, InvalidationReason reason, Throwable cause) {
             super(message, cause);
+            this.reason = reason == null ? InvalidationReason.UNKNOWN : reason;
+        }
+
+        public InvalidationReason reason() {
+            return reason;
+        }
+
+        public boolean isRevokedOrDisabled() {
+            return reason == InvalidationReason.REVOKED || reason == InvalidationReason.USER_DISABLED;
         }
     }
 
