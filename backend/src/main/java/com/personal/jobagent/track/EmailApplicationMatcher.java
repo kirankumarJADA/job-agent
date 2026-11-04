@@ -30,10 +30,17 @@ import java.util.UUID;
  *
  * <p>The list of applications passed in is already restricted to the owner, so
  * a message can never be proposed for another candidate's application.
+ *
+ * <p>A reply whose {@code In-Reply-To}/{@code References} names an earlier
+ * message already linked to one of those applications carries the
+ * {@code THREAD_REPLY} strong signal, so a recruiter's follow-up that no longer
+ * quotes the job still joins its thread. It links but is never receipt identity
+ * evidence: that must come from the message itself.
  */
 public final class EmailApplicationMatcher {
 
-    public static final String VERSION = "track-match-v1";
+    public static final String VERSION = "track-match-v2";
+    public static final String THREAD_REPLY = "THREAD_REPLY";
     private static final int MAX_CANDIDATES = 5;
 
     public record OwnedApplication(UUID applicationId, UUID jobId, String jobTitle, String company, String location,
@@ -64,8 +71,19 @@ public final class EmailApplicationMatcher {
 
     public Association match(MessageEvidence message, List<OwnedApplication> owned, UUID assertedApplicationId,
                              EmailCategory category) {
+        return match(message, owned, assertedApplicationId, category, Set.of());
+    }
+
+    /**
+     * @param threadApplications applications that earlier messages of this
+     *                           message's thread are already linked to; ids that
+     *                           are not in {@code owned} are ignored
+     */
+    public Association match(MessageEvidence message, List<OwnedApplication> owned, UUID assertedApplicationId,
+                             EmailCategory category, Set<UUID> threadApplications) {
         Objects.requireNonNull(message, "message");
         List<OwnedApplication> apps = owned == null ? List.of() : owned;
+        Set<UUID> thread = threadApplications == null ? Set.of() : threadApplications;
         if (category == EmailCategory.VERIFICATION_CODE) {
             return new Association(LinkStatus.NOT_APPLICABLE, MatchStrength.NONE, null, List.of(),
                     List.of(reason("NOT_TRACKING_EVIDENCE", "A sign-in verification message is not application evidence.")),
@@ -117,6 +135,7 @@ public final class EmailApplicationMatcher {
                     }
                 }
             }
+            if (thread.contains(app.applicationId())) strongSignals.add(THREAD_REPLY);
             if (companyNamed) weakSignals.add("COMPANY_NAME");
             if (titleNamed(app.jobTitle(), lowerText)) weakSignals.add("JOB_TITLE");
             if (!strongSignals.isEmpty()) {
@@ -226,11 +245,17 @@ public final class EmailApplicationMatcher {
                     + (requisition == null ? "" : " (" + requisition.toUpperCase(java.util.Locale.ROOT) + ")")
                     + " together with the employer's name."));
         }
+        if (signals.contains(THREAD_REPLY)) {
+            out.add(reason(THREAD_REPLY, "The message replies to an earlier message already linked to this application."));
+        }
         return out;
     }
 
+    /** Identity evidence the message itself carries; thread membership is not proof of which job it names. */
     private static List<String> strongOnly(List<String> signals) {
-        return signals.stream().filter(s -> !s.equals("COMPANY_NAME") && !s.equals("JOB_TITLE")).toList();
+        return signals.stream()
+                .filter(s -> !s.equals("COMPANY_NAME") && !s.equals("JOB_TITLE") && !s.equals(THREAD_REPLY))
+                .toList();
     }
 
     private static List<Candidate> cap(List<Candidate> candidates) {

@@ -491,6 +491,87 @@ class CloudflareRecruiterLifecycleIT {
         assertThat(reviews).extracting(r -> r.get("emailId")).contains(ambEmail.get("id").toString());
     }
 
+    @Test
+    @DisplayName("Scenario 5: A reply that no longer quotes the job joins its thread through In-Reply-To/References")
+    void scenario5_replyWithoutIdentifiersFollowsItsThread() throws Exception {
+        TestCandidate cand = createCandidate("cand-thread-only@example.com", "Thread Only Candidate");
+        String jobUrl = "https://careers.acme.com/jobs/platform-eng-101";
+        String reqId = "REQ-ACME-101";
+        UUID app = createApplicationWithJob(cand.profileId(), "Acme Corp", "Senior Platform Engineer", jobUrl, reqId);
+
+        String invitation = buildCloudflarePayload(cand.emailAddress(), "Sarah Recruiter <recruiter@acme.com>",
+                "Interview Invitation: Senior Platform Engineer",
+                "Hello, we would like to invite you to an interview for the Senior Platform Engineer position (Req "
+                        + reqId + ", " + jobUrl + ").",
+                "<thread-only-01@acme.com>", "Tue, 27 Oct 2026 10:00:00 +0000", null, null);
+        assertThat(deliverSigned(invitation, "tok-to-01-" + UUID.randomUUID(), Instant.now().minus(Duration.ofMinutes(3)))
+                .getResponse().getStatus()).isEqualTo(200);
+
+        // No job link, no requisition: without the thread headers this would only be a weak, review-only match.
+        String reply = buildCloudflarePayload(cand.emailAddress(), "Sarah Recruiter <recruiter@acme.com>",
+                "Re: Interview Invitation: Senior Platform Engineer",
+                "Thanks for confirming. Does Thursday at two still suit you?",
+                "<thread-only-02@acme.com>", "Tue, 27 Oct 2026 12:00:00 +0000",
+                "<thread-only-01@acme.com>", "<thread-only-01@acme.com>");
+        assertThat(deliverSigned(reply, "tok-to-02-" + UUID.randomUUID(), Instant.now().minus(Duration.ofMinutes(1)))
+                .getResponse().getStatus()).isEqualTo(200);
+
+        Map<String, Object> link = jdbc.queryForMap("""
+                select l.application_id, l.status, l.match_strength, l.rationale::text as rationale
+                from email_application_links l join emails e on e.id = l.email_id
+                where e.message_id = 'thread-only-02@acme.com' and e.profile_id = ?
+                """, cand.profileId());
+        assertThat(link.get("application_id")).isEqualTo(app);
+        assertThat(link.get("status")).isEqualTo("LINKED");
+        assertThat(link.get("match_strength")).isEqualTo("STRONG");
+        assertThat((String) link.get("rationale")).contains("THREAD_REPLY");
+
+        Integer employerMessages = jdbc.queryForObject(
+                "select count(*) from application_events where application_id = ? and type = 'EMPLOYER_MESSAGE_RECEIVED'",
+                Integer.class, app);
+        assertThat(employerMessages).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("Scenario 6: A thread id from another candidate's mail links nothing")
+    void scenario6_threadReferencesNeverCrossCandidates() throws Exception {
+        TestCandidate owner = createCandidate("cand-thread-owner@example.com", "Thread Owner");
+        TestCandidate other = createCandidate("cand-thread-other@example.com", "Thread Other");
+        String jobUrl = "https://initech.example/jobs/backend-lead";
+        UUID ownersApp = createApplicationWithJob(owner.profileId(), "Initech", "Backend Lead", jobUrl, "REQ-INIT-202");
+        createApplicationWithJob(other.profileId(), "Acme Corp", "Senior Platform Engineer",
+                "https://careers.acme.com/jobs/platform-eng-101", "REQ-ACME-101");
+
+        String ownersInvitation = buildCloudflarePayload(owner.emailAddress(), "Peter Recruiter <peter@initech.example>",
+                "Interview Invitation: Backend Lead",
+                "We would like to invite you to interview for Backend Lead at Initech (Req REQ-INIT-202, " + jobUrl + ").",
+                "<cross-thread-01@initech.example>", null, null, null);
+        assertThat(deliverSigned(ownersInvitation, "tok-ct-01-" + UUID.randomUUID(), Instant.now().minus(Duration.ofMinutes(2)))
+                .getResponse().getStatus()).isEqualTo(200);
+        Integer ownersEventsBefore = jdbc.queryForObject(
+                "select count(*) from application_events where application_id = ?", Integer.class, ownersApp);
+
+        // The other candidate receives a message claiming to continue the owner's thread.
+        String forgedReply = buildCloudflarePayload(other.emailAddress(), "Mallory <mallory@unrelated.example>",
+                "Re: Interview Invitation",
+                "Please confirm your availability.",
+                "<cross-thread-02@unrelated.example>", null,
+                "<cross-thread-01@initech.example>", "<cross-thread-01@initech.example>");
+        assertThat(deliverSigned(forgedReply, "tok-ct-02-" + UUID.randomUUID(), Instant.now().minus(Duration.ofMinutes(1)))
+                .getResponse().getStatus()).isEqualTo(200);
+
+        Map<String, Object> link = jdbc.queryForMap("""
+                select l.application_id, l.status, l.rationale::text as rationale
+                from email_application_links l join emails e on e.id = l.email_id
+                where e.message_id = 'cross-thread-02@unrelated.example' and e.profile_id = ?
+                """, other.profileId());
+        assertThat(link.get("application_id")).isNull();
+        assertThat((String) link.get("rationale")).doesNotContain("THREAD_REPLY");
+        assertThat(jdbc.queryForObject(
+                "select count(*) from application_events where application_id = ?", Integer.class, ownersApp))
+                .isEqualTo(ownersEventsBefore);
+    }
+
     private JsonNode json(MvcResult result) throws Exception {
         String body = result.getResponse().getContentAsString(StandardCharsets.UTF_8);
         return body.isEmpty() ? json.createObjectNode() : json.readTree(body);

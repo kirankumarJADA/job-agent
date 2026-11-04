@@ -23,17 +23,32 @@ import java.util.List;
  * @param spfResults        every provider SPF verdict header value, lower-cased
  * @param dkimResults       every provider DKIM verdict header value, lower-cased
  * @param spamFlags         every provider spam-flag header value, lower-cased
+ * @param threadReferences  normalised Message-Ids this message replies to: the
+ *                          In-Reply-To id first, then References newest first.
+ *                          Sender-supplied, so only ever a hint that the
+ *                          owner-scoped thread lookup can confirm.
  */
 public record InboundMailMessage(String providerId, String envelopeRecipient, String envelopeSender,
                                  String fromHeader, String fromAddress, String subject, String text,
                                  List<String> links, String messageId, String date,
-                                 List<String> spfResults, List<String> dkimResults, List<String> spamFlags) {
+                                 List<String> spfResults, List<String> dkimResults, List<String> spamFlags,
+                                 List<String> threadReferences) {
 
     public InboundMailMessage {
         links = List.copyOf(links);
         spfResults = List.copyOf(spfResults);
         dkimResults = List.copyOf(dkimResults);
         spamFlags = List.copyOf(spamFlags);
+        threadReferences = threadReferences == null ? List.of() : List.copyOf(threadReferences);
+    }
+
+    /** A message from a provider that does not report reply headers. */
+    public InboundMailMessage(String providerId, String envelopeRecipient, String envelopeSender,
+                              String fromHeader, String fromAddress, String subject, String text,
+                              List<String> links, String messageId, String date,
+                              List<String> spfResults, List<String> dkimResults, List<String> spamFlags) {
+        this(providerId, envelopeRecipient, envelopeSender, fromHeader, fromAddress, subject, text, links,
+                messageId, date, spfResults, dkimResults, spamFlags, List.of());
     }
 
     /** Domain of the From mailbox, or null. */

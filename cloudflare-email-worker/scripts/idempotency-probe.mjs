@@ -71,6 +71,8 @@ export function buildProbePayload({ recipient, messageId, mode, date, subject = 
     text: 'Synthetic delivery used to verify duplicate webhook handling. No action is needed.',
     html: '',
     messageId: `<${messageId}>`,
+    inReplyTo: '',
+    references: '',
     date,
     spf: '',
     dkim: '',

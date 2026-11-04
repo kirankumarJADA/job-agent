@@ -193,7 +193,8 @@ public class ManagedInboundService {
                             message.text(),
                             signedAt != null ? signedAt : now,
                             message.envelopeRecipient(),
-                            auth
+                            auth,
+                            message.threadReferences()
                     );
                     intel.ingestFromMailboxConnector(owner.profileId(), connectorMessage);
                 } catch (Exception e) {

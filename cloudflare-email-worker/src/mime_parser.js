@@ -9,6 +9,8 @@ export function parseMime(rawText) {
       subject: '',
       date: '',
       messageId: '',
+      inReplyTo: '',
+      references: '',
       text: '',
       html: '',
       spf: '',
@@ -28,6 +30,9 @@ export function parseMime(rawText) {
   const subject = getHeader(headers, 'subject');
   const date = getHeader(headers, 'date');
   const messageId = getHeader(headers, 'message-id');
+  // Reply headers let the backend attach a follow-up to its thread; it treats them as a hint only.
+  const inReplyTo = getHeader(headers, 'in-reply-to');
+  const references = getHeader(headers, 'references');
   const contentType = getHeader(headers, 'content-type') || 'text/plain';
 
   // Authentication verdict extraction
@@ -54,6 +59,8 @@ export function parseMime(rawText) {
     subject,
     date,
     messageId,
+    inReplyTo,
+    references,
     text,
     html,
     spf,
