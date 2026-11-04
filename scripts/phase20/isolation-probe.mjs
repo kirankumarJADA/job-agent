@@ -6,10 +6,11 @@
  *
  * Authenticates with the test candidate's Firebase ID token, read from
  * ROBIN_TEST_ID_TOKEN (never printed), and sends GET requests only. For every
- * foreign resource id the backend must answer 404 (or 403): owner-scoped
- * lookups treat an id the caller does not own exactly like a missing one.
- * Response bodies are never printed, so a failure cannot leak the other
- * candidate's data into a terminal or log.
+ * foreign resource id the backend must refuse: 404/403 (owner-scoped lookups
+ * treat an id the caller does not own exactly like a missing one), or, for a
+ * route that filters by owner, an empty collection. Any response containing a
+ * foreign id fails. Response bodies are never printed, so a failure cannot leak
+ * the other candidate's data into a terminal or log.
  *
  * Usage:
  *   node scripts/phase20/isolation-probe.mjs --expect-email <test candidate email>
