@@ -22,11 +22,23 @@ Meanwhile `WorkdayExecutionPlanService.java:29-83` — the actual implementation
 
 **Update 2026-11-03:** a real inbound email completed Cloudflare → Worker → Render → Postgres → UI for the first time — one message, encrypted, persisted, zero purged. The `APP_SECRETS_KEY`-missing state is resolved (new key generated and added, backend restarted). Encryption-key continuity is also resolved: a pre-provisioning count found zero rows in both `employer_credentials` and `managed_inbound_messages`, so no row can depend on a lost prior key. **Still open:** duplicate webhook redelivery/idempotency in production, email-to-application association, automatic OTP extraction, and the full recruiter-communication lifecycle — none of these are proven yet. See `ROBIN_PHASE20_VERIFICATION.md` §4.3.
 
-## P1 — `cloudflare-email-worker` has no CI coverage
+## P1 — Firebase revocation hardening is on `master` but not deployed (opened 2026-11-04)
 
-**Evidence:** `.github/workflows/ci.yml` has jobs for `backend`, `worker`, `frontend` only — no job runs `npm test --prefix cloudflare-email-worker`. Every "6/6 passed" claim for this package (including in PR #9's own description) was necessarily a local/manual run.
+**Evidence:** `a442f9b`/`484c5c5` (revocation-aware verification, session isolation) and `e3f19c4` (revocation-lookup fault classification, deleted-account session termination) change `backend/src/main`. Render's `/actuator/info` still reports `build.time` `2026-11-03T21:20:48.844Z`, which predates all three, and nine later pushes produced no new build — Render auto-deploy is evidently off. Production therefore still accepts revoked/disabled-account bearer tokens for as long as their signature is valid.
 
-**Impact:** a future change to the email Worker could silently break without CI catching it — the one component directly in the Phase 20 critical path is the one with no automated gate.
+**Fix:** operator triggers a manual Render deploy of current `master`, then confirms `deployment.commit` in `/actuator/info` (added by `5cd8238`) equals `origin/master`. Procedure: `ROBIN_PHASE20_VERIFICATION.md` §3.4.
+
+## P2 — Revocation is checked per bearer request only (opened 2026-11-04)
+
+**Evidence:** `FirebaseAuthenticationFilter` verifies with `checkRevoked=true` only when an `Authorization: Bearer` header is present. The SPA's `apiFetch` attaches one to every request, so normal traffic is checked; a request carrying only the session cookie is not, and stays valid until the in-memory session's idle timeout (Tomcat default, 30 minutes). Each checked request also costs one authenticated Identity Toolkit lookup — expect added per-request latency after the deploy above; measure it before deciding whether a short-TTL cache is warranted.
+
+## P2 — Receipts list answers a foreign application id with `200 {"items":[]}` (opened 2026-11-04)
+
+**Evidence:** `TrackController#receiptsList` → `ApplicationReceiptService.getAttempts` filters by `profile_id` and returns an empty list, whereas every other application-scoped GET answers 404. Not a leak (no foreign row is returned), but inconsistent; the isolation probe treats an empty owner-filtered list as a refusal.
+
+## Resolved — `cloudflare-email-worker` CI coverage
+
+`6c3a72a` added the `cloudflare-email-worker` job to `.github/workflows/ci.yml`; it has passed on every master run since (runs #63, #81–#88). `b2be7e0` adds a step in the same job for the Phase 20 operator-probe tests.
 
 **Fix:** add a fourth CI job mirroring the `frontend`/`worker` pattern (Node setup, `npm install`, `npm test`), ~10 lines.
 

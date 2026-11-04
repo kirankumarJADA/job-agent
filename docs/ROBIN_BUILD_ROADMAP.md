@@ -12,7 +12,7 @@ Evidence → Tsenta comparison → prioritisation → implementation → verific
 **Acceptance criteria (met):** `AtsCapabilities.summary()` for Workday now returns `SIGN_IN_READINESS_ONLY`, not `FORM_FILL_AVAILABLE`; `AtsCapabilityRegistryTest` and `AtsCapabilityControllerTest` updated and passing.
 **Candidate value:** a candidate opening a Workday job is now told the truth about what Robin will do for them. Committed, not yet pushed to `origin/master`.
 
-## Phase 20.2 — Add CI coverage for `cloudflare-email-worker`
+## Phase 20.2 — Add CI coverage for `cloudflare-email-worker` — **DONE, commit `6c3a72a`**
 **Why:** the one package in the Phase 20 critical path currently has zero CI gate.
 **Acceptance criteria:** new job in `.github/workflows/ci.yml` running `npm test --prefix cloudflare-email-worker`; green on the next PR.
 

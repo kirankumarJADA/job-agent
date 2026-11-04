@@ -1,8 +1,8 @@
 # ROBIN — Phase 20 Verification Report
 
-**Prepared:** 2026-11-03, updated 2026-11-04 with comprehensive recruiter communication lifecycle integration test evidence, CI verification, and production safety audit.  
-**Scope:** Managed-mail (Cloudflare) production readiness, encryption-key safety, Worker/backend reconciliation, email intelligence, application tracking, database cascade/trigger analysis, and recruiter communication lifecycle.  
-**Verdict:** IMPLEMENTATION COMPLETE. All automated test suites (147 unit tests, full `CloudflareManagedMailIT`, and end-to-end `CloudflareRecruiterLifecycleIT`) PASSED. First genuine inbound-mail production test PASSED (one message, encrypted, persisted, mailbox ACTIVE). Phase 20 remains **OPEN** until live production behaviors are formally verified: duplicate delivery idempotency, real application association, real employer OTP handling, and real recruiter communications (§4.3, §5, §6).
+**Prepared:** 2026-11-03, updated 2026-11-04 with recruiter-lifecycle integration evidence, CI verification and a production safety audit, then (22:16 UTC) with the Firebase revocation-hardening review, deployment-identity findings and operator probes.  
+**Scope:** Managed-mail (Cloudflare) production readiness, encryption-key safety, Worker/backend reconciliation, email intelligence, application tracking, database cascade/trigger analysis, recruiter communication lifecycle, and revocation-aware authentication.  
+**Verdict:** IMPLEMENTATION COMPLETE AND CI-VERIFIED (run #89 on `b2be7e0`: backend unit + ArchUnit + Testcontainers ITs, worker, frontend, email worker and probe tests all green). First genuine inbound-mail production test PASSED (one message, encrypted, persisted, mailbox ACTIVE). Phase 20 remains **OPEN**: production still runs the 2026-11-03 build without the Firebase revocation hardening (§3.3–§3.4), and live tenant isolation, duplicate-delivery idempotency, application association, employer OTP handling and recruiter communications are not yet verified in production (§5, §6).
 
 ---
 
@@ -89,18 +89,12 @@ No key has been generated, rotated, or changed by any automated session. The `AP
 
 ## 3. Worker / Backend Reconciliation, CI Pipeline & Deployment Identity
 
-### 3.1 Confirmed Git & CI State (2026-11-04)
+### 3.1 Confirmed Git & CI State (2026-11-04, 22:16 UTC)
 
-- **Target Branch**: `master`
-- **Latest Commit**: `d113f9787cb207b4e2b71e3eb185e26475f51958`
-- **Remote Sync**: `origin/master` matches local `master` with 0 ahead, 0 behind.
-- **GitHub Actions Check Runs (Commit `d113f97`, Run ID: `41885197541`)**:
-  - `cloudflare-email-worker` (Job ID: `126767674076`): completed, **success** (duration: 24s)
-  - `frontend` (Job ID: `126767673921`): completed, **success** (duration: 44s)
-  - `worker` (Job ID: `126767673408`): completed, **success** (duration: 56s)
-  - `backend` (Job ID: `126767674105`): completed, **success** (duration: 4m 55s)
-
-All four automated CI gates passed cleanly on the latest commit.
+- **Branch**: `master`. **Code head**: `b2be7e04260023c864a03c20d39fc05fb11b49d1` — pushed `484c5c5..b2be7e0`; local `HEAD`, `origin/master` and `git ls-remote` all matched after the push.
+- **CI run #89** (id `41922733784`) on `b2be7e0` — all four jobs **success**: `backend` (`mvn -B verify`: unit + ArchUnit + Testcontainers ITs, 22:09:34→22:15:53), `worker`, `frontend`, `cloudflare-email-worker` (including the new *Phase 20 operator probe tests* step).
+- **Earlier runs**: #88 on `484c5c5` — all four jobs success. #87 on `a442f9b` — `backend` failed in `mvn verify`; fixed by `484c5c5`. #85 on `d113f97` — all four success.
+- **Local runs (2026-11-04)**: backend `mvn -o test` — 1,435 tests, 0 failures, 0 errors, 1 skipped (160 classes); `cloudflare-email-worker` `npm test` — 15/15; `node --test scripts/phase20/*.test.mjs` — 8/8. Testcontainers ITs run only in CI (no Docker daemon locally).
 
 ### 3.2 The wrangler.toml Configuration — Reconciled & Pushed
 
@@ -137,8 +131,32 @@ Investigation of live backend at `https://job-agent-mwhu.onrender.com`:
     ```
   - **Why `git: {}` is Empty**: `backend/Dockerfile` builds the application container by copying only `pom.xml` and `src`, intentionally omitting the `.git` directory (`failOnNoGitDirectory=false` in `pom.xml:265`). Consequently, Spring Boot's `git-commit-id-plugin` cannot embed git properties into `app.jar` during Docker container creation.
   - **Build Provenance**: The build timestamp `2026-11-03T21:20:48.844Z` indicates the currently running container was built on Nov 3, immediately following the push of commit `dac5c4e` (committed at 2026-11-03 21:08:29 UTC).
-  - **Application Source Parity**: Between commit `dac5c4e` and current `master` (`c5f3626`), **no application production code in `backend/src/main` was modified**. Commits `6c3a72a`, `53e36e3`, `5bee725`, `7c882e8`, and `c5f3626` added CI workflows, integration test suites (`*IT.java` in `backend/src/test`), and documentation. Because `backend/Dockerfile` runs `mvn -q package -DskipTests`, the compiled binary of `backend/src/main` is logically identical.
-  - **Render Deployment State**: The push of documentation commit `c5f3626` did **NOT** trigger a rebuild or redeployment on Render (verified by `build.time` remaining `2026-11-03T21:20:48.844Z`). Render deployment ID and execution logs are held inside the Render dashboard.
+  - **Application Source Parity — no longer holds (corrected 2026-11-04)**: through `373e048` no commit after `dac5c4e` touched `backend/src/main`. Since then `a442f9b` and `484c5c5` (Firebase revocation hardening) and `e3f19c4`/`5cd8238` (this session) changed production code. **The running backend is therefore NOT the code on `master`**: it predates every Firebase revocation change.
+  - **Render Deployment State (re-checked 2026-11-04 21:48 UTC)**: `build.time` is still `2026-11-03T21:20:48.844Z` after nine further pushes to `master`, so Render auto-deploy is evidently off and every backend deploy is manual. Render deploy IDs and logs remain dashboard-only.
+
+### 3.4 Firebase Revocation Hardening — Review, Fixes and Deployment
+
+**Reviewed commits:** `a442f9b` (verify ID tokens with `checkRevoked=true`; classify revoked/disabled/expired; verify the bearer even when a session exists; invalidate a session belonging to a different user, or to a revoked/disabled account) and `484c5c5` (fixes two regressions `a442f9b` introduced: a second constructor that stopped Spring from instantiating `FirebaseAdminTokenVerifier` — CI run #87's backend job failed in `mvn verify` — and worker-token requests being routed into Firebase verification). CI run #88 on `484c5c5`: all four jobs passed.
+
+**Defects found and fixed in `e3f19c4`:**
+
+| Revocation-lookup outcome | Before `e3f19c4` | After |
+|---|---|---|
+| Quota exhausted (`RESOURCE_EXHAUSTED`), Google `INTERNAL` error | 401 as `INVALID_SIGNATURE`, DEBUG log only | `Unavailable` → 503 at session exchange, WARN log; an existing session is kept |
+| Service account refused (`PERMISSION_DENIED`, `UNAUTHENTICATED`), project config missing | 401 as `INVALID_SIGNATURE`, DEBUG log only — every login fails silently | `Unavailable` → 503, ERROR log naming the codes |
+| Account deleted in Firebase (`USER_NOT_FOUND`) | 401, but an existing session for that user survived | `ACCOUNT_DELETED`: request unauthenticated **and** session invalidated, like revoked/disabled |
+| Unrecognised code | 401, DEBUG log | 401 (still fail-closed), WARN log |
+
+The permission case matters for the first deploy specifically: `checkRevoked=true` makes verification depend on an authenticated `accounts:lookup` call that the old path never made, so a service account without Firebase Authentication read access would previously have signed every user out with no operator-visible signal.
+
+**Deployment implications (to watch after the deploy):** the SPA attaches `Authorization: Bearer` to every API call (`frontend/src/api/client.ts`), so every authenticated request now costs one Identity Toolkit lookup — expect added per-request latency. Cookie-only requests are not revocation-checked (gap register, P2).
+
+**Deployment verification procedure (operator — Render dashboard access required):**
+1. Render → `job-agent` backend service → **Manual Deploy → Deploy latest commit** (branch `master`).
+2. When the deploy is live: `curl -s https://job-agent-mwhu.onrender.com/actuator/info` — `deployment.commit` must equal `git rev-parse origin/master` (field added by `5cd8238`; absent means the old build is still serving).
+3. `curl -s https://job-agent-mwhu.onrender.com/actuator/health` — `status` and every component `UP`.
+4. Sign in to Robin in the browser and open Applications. Success confirms the service account can perform revocation lookups. If sign-in returns 503 *"Firebase Admin credentials could not complete token verification"*, grant the service account Firebase Authentication read access (the default `firebase-adminsdk` account has it) — do not revert the hardening.
+5. Optional cut-off check, on the **test** account only: while signed in as it, disable it in the Firebase console (Authentication → Users → ⋮ → Disable account), reload Robin, and confirm the next API request is refused and the session does not survive (`USER_DISABLED` path). Re-enable the account afterwards.
 
 ---
 
@@ -289,17 +307,18 @@ Analysis of Flyway migrations `V001` through `V051` and JPA/JDBC repositories re
 
 | Phase 20 Requirement | Automated Tests (Testcontainers) | Live Production Status |
 |---|---|---|
-| Managed mail configuration & credentials | ✅ 147 unit tests pass | ✅ Verified on Render (`APP_SECRETS_KEY` loaded, `ACTIVE` status) |
-| Cloudflare Worker HMAC signing & delivery | ✅ 6 worker tests pass | ✅ Verified live (Gmail → Cloudflare → Render delivered) |
-| Webhook idempotency & replay protection | ✅ Tested in `CloudflareManagedMailIT` | ❌ **NOT YET VERIFIED IN PRODUCTION** (Procedure in §6.1) |
+| Managed mail configuration & credentials | ✅ Managed-mail unit classes pass; full backend unit suite 1,435 tests, 0 failures (local run, 2026-11-04) | ✅ Verified on Render (`APP_SECRETS_KEY` loaded, `ACTIVE` status) |
+| Cloudflare Worker HMAC signing & delivery | ✅ 6 worker tests pass in CI | ✅ Verified live (Gmail → Cloudflare → Render delivered) |
+| Firebase revocation-aware authentication | ✅ `FirebaseAdminTokenVerifierTest` (29), `FirebaseAuthenticationFilterTest` (9), `FirebaseSessionExchangeTest` (16) | ❌ **NOT DEPLOYED** — production build predates `a442f9b` (§3.3); deploy and verify per §3.4 |
+| Webhook idempotency & replay protection | ✅ Tested in `CloudflareManagedMailIT`; probe contract tested in CI | ❌ **NOT YET VERIFIED IN PRODUCTION** (Procedure in §6.1) |
 | AES-GCM encryption at rest | ✅ Tested in `CloudflareManagedMailIT` | ✅ Verified in Supabase (`content_encrypted` populated) |
 | Email-to-application association | ✅ Tested in `CloudflareRecruiterLifecycleIT` | ❌ **NOT YET VERIFIED IN PRODUCTION** (Procedure in §6.2) |
 | Employer OTP extraction & handling | ✅ Tested in `ManagedMailVerificationProviderTest` | ❌ **NOT YET VERIFIED IN PRODUCTION** (Procedure in §6.3) |
 | Recruiter communication & timeline tracking | ✅ Tested in `CloudflareRecruiterLifecycleIT` | ❌ **NOT YET VERIFIED IN PRODUCTION** (Procedure in §6.4) |
-| Candidate multi-tenant isolation | ✅ Tested in `CloudflareRecruiterLifecycleIT` | ✅ Verified structurally by schema (`profile_id` foreign keys & triggers) |
-| CI Pipeline & Build gates | ✅ All 4 GitHub Actions checks green | ✅ Backend running healthy on Render |
+| Candidate multi-tenant isolation | ✅ Tested in `CloudflareRecruiterLifecycleIT` (scenario 3) | ❌ **NOT YET VERIFIED LIVE** — owner-scoped schema and queries are structural evidence only; authenticated check of the dedicated test candidate in §6.0 |
+| CI Pipeline & Build gates | ✅ All 4 jobs green on run #89 (`b2be7e0`) | ⚠️ Backend healthy on Render but serving the 2026-11-03 build, behind `master` (§3.3) |
 
-**Phase 20 Verdict**: IMPLEMENTATION COMPLETE. Automated test coverage is comprehensive and green across all four required communication lifecycle scenarios. Phase 20 remains **OPEN** until the operator authorizes and executes the live production verification procedures below.
+**Phase 20 Verdict**: IMPLEMENTATION COMPLETE. Automated coverage is green across all four communication-lifecycle scenarios and the revocation-aware authentication paths. Phase 20 remains **OPEN** until the operator runs, in order: the Render deploy and identity check (§3.4) → tenant isolation (§6.0) → duplicate-delivery idempotency (§6.1) → application association (§6.2) → recruiter lifecycle (§6.4). Employer OTP handling (§6.3) triggers a real employer verification email and needs separate explicit authorization; it may be scope-deferred instead, with the reason recorded here.
 
 ---
 
@@ -308,25 +327,45 @@ Analysis of Flyway migrations `V001` through `V051` and JPA/JDBC repositories re
 > [!IMPORTANT]
 > The following procedures are designed for production safety. No emails, webhooks, or employer portal interactions will be initiated without explicit operator authorization and without establishing a dedicated test identity.
 
+### 6.0 Authenticated Isolation Verification — Dedicated Test Candidate (run before §6.1)
+- **Prerequisite**: a dedicated test candidate — a separate Firebase account with its own Robin profile and reserved managed alias, **not** listed as an operator. Every probe in §6.1 targets this account's alias only.
+- **Objective**: confirm in production that the test candidate cannot read another candidate's resources, before any synthetic traffic is sent to its alias.
+- **Tool**: `scripts/phase20/isolation-probe.mjs` (tested in CI: `Phase 20 operator probe tests`). GET requests only; response bodies are never printed; it stops after `GET /auth/me` if the token belongs to any account other than `--expect-email`.
+- **Procedure**:
+  1. As the **real** candidate, note one application id (Applications page URL), and optionally a cover-letter id and a tailored-CV version id.
+  2. As the **test** candidate, in a separate browser profile, copy its Firebase ID token: DevTools → Application → IndexedDB → `firebaseLocalStorageDb` → `firebaseLocalStorage` → entry value → `stsTokenManager.accessToken` (valid about one hour). Keep it in your own shell only.
+  3. Run:
+     ```bash
+     export ROBIN_TEST_ID_TOKEN='<test candidate ID token>'
+     node scripts/phase20/isolation-probe.mjs --expect-email <test candidate email> \
+       --foreign-application <real candidate application id> \
+       [--foreign-cover-letter <id>] [--foreign-cv-version <id>]
+     ```
+- **Expected**: `Signed in as: <test candidate email>`; every application-scoped GET `PASS … -> 404` except `/receipts`, which answers `PASS … -> 200 (owner-filtered, empty)`; `/track/reviews` and `/managed-mail/messages` `PASS (no foreign id present)`; exit code `0`. The last line prints the test candidate's own alias for §6.1. Exit `1` = isolation failure (stop and report); exit `3` = inconclusive (e.g. expired token, 5xx).
+- **Production side effects**: none.
+
 ### 6.1 Direct Render Endpoint Duplicate Webhook Idempotency Verification
-- **Prerequisite**: A dedicated test candidate profile and active test alias MUST be established first (see safety report). Never use a real candidate's mailbox.
+- **Prerequisite**: §6.0 passed. Never target a real candidate's mailbox.
 - **Distinction**: Directly invokes the live Render backend endpoint with synthetic HMAC-signed payloads. Does not involve Cloudflare or send real emails.
-- **Objective**: Verify that re-sending an identical signed Cloudflare payload to the live Render endpoint is recognized as a duplicate and answered with HTTP 200 without creating duplicate database rows or polluting application timelines.
-- **Payload Safety Constraint**: The synthetic message MUST contain a generic subject (e.g. `Synthetic Idempotency Probe`) and unknown sender domain to ensure `EmailIntelligenceService` classifies it as `UNRELATED_OR_AMBIGUOUS` (`UNMATCHED`), preventing any link to candidate applications or creation of `application_events`.
+- **Tool**: `cloudflare-email-worker/scripts/idempotency-probe.mjs`. A CI-run parity test proves it signs byte-for-byte like the deployed Worker's handler. It reads `CLOUDFLARE_EMAIL_WORKER_SECRET` from the environment and never prints it, accepts only a reserved alias (`prefix+16-character token@mail.aplivenosi.com`), and is a dry run unless `--execute` is passed.
+- **Default mode `quarantined`**: the probe payload is spam-flagged, so `ManagedInboundService` still runs both idempotency gates (token primary key, `(address_id, message_id_sha256)` unique index) but keeps no content and never calls `EmailIntelligenceService` — no `emails`, link, notification, outbox or timeline row is created and the test candidate's review queue is untouched. `--mode full` exercises the full ingestion pipeline with the expected state and cleanup below.
 - **Exact Test Procedure**:
-  1. Generate a fresh timestamp $T$ and unique 64-hex token $K_1$.
-  2. Construct a synthetic JSON payload with normalized message ID `probe-20261104-01@test.robin.internal` and recipient matching the dedicated test managed address.
-  3. Compute HMAC-SHA256 signature using `CLOUDFLARE_EMAIL_WORKER_SECRET`.
-  4. Send HTTP POST to `https://job-agent-mwhu.onrender.com/api/v1/managed-mail/inbound/cloudflare`.
-  5. Immediately repeat the exact same request with identical headers, timestamp, token, body, and signature.
-  6. Send a third request with a fresh token $K_2$ but identical message ID `probe-20261104-01@test.robin.internal`.
-- **Expected Results**:
-  - Request 1: Returns HTTP `200 OK {"status":"stored"}`.
-  - Request 2: Returns HTTP `200 OK {"status":"duplicate"}`.
-  - Request 3: Returns HTTP `200 OK {"status":"duplicate"}`.
-- **Expected Database State**:
+  ```bash
+  cd cloudflare-email-worker
+  node scripts/idempotency-probe.mjs --recipient <test candidate alias>            # dry run: prints the plan
+  export CLOUDFLARE_EMAIL_WORKER_SECRET='<value from the Worker/Render secret store>'
+  node scripts/idempotency-probe.mjs --recipient <test candidate alias> --execute
+  ```
+- **Expected Results** (printed as PASS/FAIL per request; exit `0` only if all match):
+  - Request 1, first delivery: `200 {"status":"stored"}`.
+  - Request 2, byte-identical repeat: `200 {"status":"duplicate"}`.
+  - Request 3, same Message-ID with a fresh token: `200 {"status":"duplicate"}`.
+  - Request 4, first token replayed with an altered, validly signed payload: `406 {"status":"rejected"}`.
+  - Request 5, tampered signature: `401 {"status":"unauthenticated"}`.
+- **Database check**: the probe prints read-only verification SQL with the exact token and Message-ID digests. Quarantined mode expects 2 token rows, 1 `managed_inbound_messages` row (`spam_flagged = true`, no content), 0 `emails` rows; an optional exact-match cleanup is printed with it. Requests 1 and 3 also advance `last_inbound_at` on the existing `managed_mail_domains` row for `mail.aplivenosi.com` (no new row).
+- **Expected Database State (`--mode full`)**:
   - `managed_mail_webhook_tokens`: exactly 2 rows inserted ($K_1$ and $K_2$).
-  - `managed_inbound_messages`: exactly 1 row inserted for `probe-20261104-01@test.robin.internal`.
+  - `managed_inbound_messages`: exactly 1 row inserted for the probe's Message-ID.
   - `emails`: exactly 1 row inserted.
   - `email_application_links`: exactly 1 row inserted with status `UNMATCHED`.
   - `application_events`: **0 rows inserted** (no application was matched).
@@ -338,19 +377,19 @@ Analysis of Flyway migrations `V001` through `V051` and JPA/JDBC repositories re
   SELECT token_sha256, provider_id, signed_at, payload_sha256
   FROM managed_mail_webhook_tokens
   WHERE token_sha256 IN (
-      encode(sha256('<raw_token_K1>'::bytea), 'hex'),
-      encode(sha256('<raw_token_K2>'::bytea), 'hex')
+      '<token digest 1 printed by the probe>',
+      '<token digest 2 printed by the probe>'
   );
 
   -- B. Find inbound vault row by normalized message_id_sha256:
   SELECT id, profile_id, address_id, message_id_sha256, sender_domain, subject_redacted, received_at
   FROM managed_inbound_messages
-  WHERE message_id_sha256 = encode(sha256('probe-20261104-01@test.robin.internal'::bytea), 'hex');
+  WHERE message_id_sha256 = '<Message-ID digest printed by the probe>';
 
   -- C. Find normalized email row:
   SELECT id, profile_id, message_id, subject, from_address, classification, application_id
   FROM emails
-  WHERE message_id = 'probe-20261104-01@test.robin.internal';
+  WHERE message_id = '<Message-ID printed by the probe>';
 
   -- D. Find associated link row using email_id from step C:
   SELECT id, profile_id, email_id, application_id, status, match_strength, inferred_category
@@ -385,16 +424,16 @@ Analysis of Flyway migrations `V001` through `V051` and JPA/JDBC repositories re
   -- 5. Delete webhook tokens by exact PK:
   DELETE FROM managed_mail_webhook_tokens
   WHERE token_sha256 IN (
-      encode(sha256('<raw_token_K1>'::bytea), 'hex'),
-      encode(sha256('<raw_token_K2>'::bytea), 'hex')
+      '<token digest 1 printed by the probe>',
+      '<token digest 2 printed by the probe>'
   );
   ```
 
 ### 6.2 Correct Application Association in Live Production Workflow
 - **Objective**: Verify that an inbound message quoting an active candidate application's requisition ID or job URL is linked to that application in the live database.
 - **Exact Test Procedure**:
-  1. Identify an existing active test job application for the operator's candidate profile with a known job URL and requisition number.
-  2. Send an email from the operator's personal email to the candidate's active Robin managed address quoting that exact job URL and requisition ID.
+  1. As the **dedicated test candidate** (§6.0), create or pick one test application with a known job URL and requisition number. Never use the real candidate's profile: a linked message writes append-only `application_events` rows (§4.4).
+  2. Send an email from the operator's personal email to the test candidate's managed alias quoting that exact job URL and requisition ID.
   3. Inspect Robin Applications dashboard and query `email_application_links`.
 - **Expected Result**:
   - Message appears in Robin under the specific application.
@@ -421,7 +460,7 @@ Analysis of Flyway migrations `V001` through `V051` and JPA/JDBC repositories re
 ### 6.4 Real Recruiter Communication Lifecycle
 - **Objective**: Verify that a multi-message thread from a recruiter is displayed in Robin's UI, tracks communication counts, and allows manual candidate confirmation of stage transitions.
 - **Exact Test Procedure**:
-  1. Send an email formatted as an interview invitation from an external mailbox to the candidate's managed address quoting a test application's details.
+  1. Send an email formatted as an interview invitation from an external mailbox to the **test candidate's** managed alias, quoting the details of the test application from §6.2.
   2. Follow up with a second reply message.
   3. Confirm the suggested interview stage in Robin's Track UI.
 - **Expected Result**:
@@ -437,4 +476,4 @@ Analysis of Flyway migrations `V001` through `V051` and JPA/JDBC repositories re
 - **Objective**: Confirm that Cloudflare Worker retries on backend 5xx errors and terminally halts on 406 rejections.
 - **Procedure (Simulated / Staging)**:
   - Worker automated suite (`npm test` in `cloudflare-email-worker`) executes 6 mock scenarios verifying that `throw new Error()` is executed on non-200/non-406 responses and clean `return` is executed on 406 rejections.
-  - Live production verification of Worker retry requires temporarily withholding backend 200 responses, which is **not recommended in production** due to potential delivery delays for real emails. Worker unit tests provide 100% code branch coverage of this mechanism.
+  - Live production verification of Worker retry requires temporarily withholding backend 200 responses, which is **not recommended in production** due to potential delivery delays for real emails. Measured 2026-11-04 (`node --test --experimental-test-coverage`): every line of the response-handling block (200 → return, 406 → `setReject` + return, anything else → throw) executes under the worker tests; `src/index.js` overall was 91.3% lines / 77.3% branches with the post-read size check (lines 37–42) uncovered; a test added for an under-reported `rawSize` raises it to 96.0% / 81.8%, leaving only the random-token fallback (lines 122–126, unused wherever `crypto.randomUUID` exists) uncovered.
