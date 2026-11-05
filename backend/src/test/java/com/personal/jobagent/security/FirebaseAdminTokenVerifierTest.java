@@ -457,6 +457,16 @@ class FirebaseAdminTokenVerifierTest {
         assertThat(thrown.getMessage()).contains("unavailable");
     }
 
+    @Test
+    void theRealSdkRejectsAGarbageTokenAsInvalidWithoutContactingGoogle() {
+        FirebaseAdminTokenVerifier verifier = verifier(PROJECT_ID, CLIENT_EMAIL, SYNTHETIC_PEM);
+
+        Throwable thrown = catchThrowable(() -> verifier.verifyIdToken("not-a-real-firebase-id-token"));
+
+        assertThat(thrown).isInstanceOf(FirebaseTokenVerifier.InvalidToken.class);
+        assertThat(((FirebaseTokenVerifier.InvalidToken) thrown).isRevokedOrDisabled()).isFalse();
+    }
+
     // ── 8. Classification of revocation-lookup failures ────────────────────
 
     @Test
