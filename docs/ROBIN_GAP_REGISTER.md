@@ -22,7 +22,26 @@ Meanwhile `WorkdayExecutionPlanService.java:29-83` — the actual implementation
 
 **Update 2026-11-03:** a real inbound email completed Cloudflare → Worker → Render → Postgres → UI for the first time — one message, encrypted, persisted, zero purged. The `APP_SECRETS_KEY`-missing state is resolved (new key generated and added, backend restarted). Encryption-key continuity is also resolved: a pre-provisioning count found zero rows in both `employer_credentials` and `managed_inbound_messages`, so no row can depend on a lost prior key. **Still open:** duplicate webhook redelivery/idempotency in production, email-to-application association, automatic OTP extraction, and the full recruiter-communication lifecycle — none of these are proven yet. See `ROBIN_PHASE20_VERIFICATION.md` §4.3.
 
-## P1 — Firebase revocation hardening is on `master` but not deployed (opened 2026-11-04)
+## P0 — Production database is rejecting writes (opened 2026-11-05 00:57 UTC; root cause not yet confirmed)
+
+**Evidence (public `/actuator/prometheus` counters since the 00:22 UTC deploy; no logs available to this review):**
+- `POST /api/v1/auth/firebase/session`: 500 `UncategorizedSQLException` on all 5 attempts — two invalid-token probes (whose only write is the audit-row insert) and three of the operator's real page loads. The SPA swallows this failure (`AuthContext` falls back to the bearer token), so the UI looks healthy.
+- `POST /api/v1/automation/plans/claim-next` (worker poll; a `SELECT … FOR UPDATE SKIP LOCKED` plus one `UPDATE`): 204 ×52 early after the deploy, then 500 `UncategorizedSQLException` ×128; between 00:55:51 and 00:57:08 UTC it failed 7 times and succeeded 0 times.
+- Every GET observed returns 200; `/actuator/health` (db `UP`) only proves connectivity.
+
+**Impact while it lasts:** new sign-ups cannot be provisioned (only the exchange creates accounts); the automation worker cannot claim plans; inbound managed mail cannot be stored — the webhook's first statement is an insert, so it answers 503 and Cloudflare retries until its retry window ends; any user write in the UI fails.
+
+**Leading hypothesis (unconfirmed):** Postgres in read-only mode — Supabase enforces this when a project exceeds its storage quota — which raises SQLSTATE `25006`, a class Spring cannot categorise. It fits reads succeeding, both unrelated write paths failing, and `claim-next` succeeding only before a switch point. **Confirm with:** the Render log line for `UncategorizedSQLException` (it names the SQL state and Postgres message), and in the Supabase SQL editor (read-only): `show default_transaction_read_only;` and `select pg_size_pretty(pg_database_size(current_database()));`.
+
+## P2 — Errors on public endpoints reach anonymous callers as 401 (opened 2026-11-05)
+
+**Evidence:** `GET /actuator/does-not-exist` answers 401 `"instance":"/error"`, and the failing session exchange above answered anonymous callers 401 *"Authentication is required"* instead of 500: the error dispatch to `/error` is not permitted, so any 4xx/5xx raised inside a `permitAll` endpoint is replaced by the entry point's 401. It hid this incident from an unauthenticated probe (an authenticated browser saw the real 500). Permitting the `ERROR` dispatch would make failures legible but would also let anonymous callers tell missing paths (404) from protected ones (401) — a deliberate trade-off to decide, not a one-line fix.
+
+## Resolved — Firebase revocation hardening deployed (2026-11-05 00:22 UTC, `f3204f0`)
+
+Render now serves `f3204f0` (`/actuator/info` `deployment.commit`); bearer-authenticated requests work on the fresh JVM, so revocation lookups succeed with the production service account. The session-exchange failure is tracked under the P0 above.
+
+## Resolved (was P1) — Firebase revocation hardening was on `master` but not deployed (opened 2026-11-04)
 
 **Evidence:** `a442f9b`/`484c5c5` (revocation-aware verification, session isolation) and `e3f19c4` (revocation-lookup fault classification, deleted-account session termination) change `backend/src/main`. Render's `/actuator/info` still reports `build.time` `2026-11-03T21:20:48.844Z`, which predates all three, and nine later pushes produced no new build — Render auto-deploy is evidently off. Production therefore still accepts revoked/disabled-account bearer tokens for as long as their signature is valid.
 

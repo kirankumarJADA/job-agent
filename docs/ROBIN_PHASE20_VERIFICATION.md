@@ -151,6 +151,8 @@ The permission case matters for the first deploy specifically: `checkRevoked=tru
 
 **Deployment implications (to watch after the deploy):** the SPA attaches `Authorization: Bearer` to every API call (`frontend/src/api/client.ts`), so every authenticated request now costs one Identity Toolkit lookup — expect added per-request latency. Cookie-only requests are not revocation-checked (gap register, P2).
 
+**Render deploy — verified 2026-11-05 00:41–00:57 UTC.** `/actuator/info` reports `deployment.commit` `f3204f0e79b32d244d6bd9de86d13099f5dba044` (= `origin/master`, branch `master`), `build.time` `2026-11-05T00:22:34.066Z`; `/actuator/health` `UP` (db, redis, disk, liveness, readiness). Every Firebase-hardening commit (`a442f9b`, `484c5c5`, `e3f19c4`) and `131823a` are ancestors of the deployed SHA. The operator's real browser session loaded Applications, managed-mail status and recent messages through bearer-authenticated requests on the fresh JVM (no server session survives a redeploy), so the `checkRevoked=true` lookup works with the production service account. **But the session exchange itself fails** — see the P0 below and `ROBIN_GAP_REGISTER.md`: `POST /api/v1/auth/firebase/session` answered 500 `UncategorizedSQLException` on every attempt (5/5, including the operator's page loads), which the SPA swallows.
+
 **Deployment verification procedure (operator — Render dashboard and Wrangler access required):**
 1. Render → `job-agent` backend service → **Manual Deploy → Deploy latest commit** (branch `master`).
 2. When the deploy is live: `curl -s https://job-agent-mwhu.onrender.com/actuator/info` — `deployment.commit` must equal `git rev-parse origin/master` (field added by `5cd8238`; absent means the old build is still serving).
@@ -313,7 +315,7 @@ Analysis of Flyway migrations `V001` through `V051` and JPA/JDBC repositories re
 |---|---|---|
 | Managed mail configuration & credentials | ✅ Managed-mail unit classes pass; full backend unit suite 1,435 tests, 0 failures (local run, 2026-11-04) | ✅ Verified on Render (`APP_SECRETS_KEY` loaded, `ACTIVE` status) |
 | Cloudflare Worker HMAC signing & delivery | ✅ 6 worker tests pass in CI | ✅ Verified live (Gmail → Cloudflare → Render delivered) |
-| Firebase revocation-aware authentication | ✅ `FirebaseAdminTokenVerifierTest` (29), `FirebaseAuthenticationFilterTest` (9), `FirebaseSessionExchangeTest` (16) | ❌ **NOT DEPLOYED** — production build predates `a442f9b` (§3.3); deploy and verify per §3.4 |
+| Firebase revocation-aware authentication | ✅ `FirebaseAdminTokenVerifierTest` (30), `FirebaseAuthenticationFilterTest` (9), `FirebaseSessionExchangeTest` (16) | ✅ **Deployed** `f3204f0` (2026-11-05 00:22 UTC); bearer path verified live with a real session. ❌ Session exchange failing on a database write — P0 in the gap register |
 | Webhook idempotency & replay protection | ✅ Tested in `CloudflareManagedMailIT`; probe contract tested in CI | ❌ **NOT YET VERIFIED IN PRODUCTION** (Procedure in §6.1) |
 | AES-GCM encryption at rest | ✅ Tested in `CloudflareManagedMailIT` | ✅ Verified in Supabase (`content_encrypted` populated) |
 | Email-to-application association | ✅ Tested in `CloudflareRecruiterLifecycleIT` | ❌ **NOT YET VERIFIED IN PRODUCTION** (Procedure in §6.2) |
