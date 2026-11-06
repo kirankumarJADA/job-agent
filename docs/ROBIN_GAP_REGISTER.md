@@ -22,7 +22,7 @@ Meanwhile `WorkdayExecutionPlanService.java:29-83` — the actual implementation
 
 **Update 2026-11-03:** a real inbound email completed Cloudflare → Worker → Render → Postgres → UI for the first time — one message, encrypted, persisted, zero purged. The `APP_SECRETS_KEY`-missing state is resolved (new key generated and added, backend restarted). Encryption-key continuity is also resolved: a pre-provisioning count found zero rows in both `employer_credentials` and `managed_inbound_messages`, so no row can depend on a lost prior key. **Still open:** duplicate webhook redelivery/idempotency in production, email-to-application association, automatic OTP extraction, and the full recruiter-communication lifecycle — none of these are proven yet. See `ROBIN_PHASE20_VERIFICATION.md` §4.3.
 
-## P0 — Production database is rejecting writes (opened 2026-11-05 00:57 UTC; root cause not yet confirmed)
+## P0 — Production database is rejecting writes (opened 2026-11-05 00:57 UTC; root cause confirmed 2026-11-06)
 
 **Evidence (public `/actuator/prometheus` counters since the 00:22 UTC deploy; no logs available to this review):**
 - `POST /api/v1/auth/firebase/session`: 500 `UncategorizedSQLException` on all 5 attempts — two invalid-token probes (whose only write is the audit-row insert) and three of the operator's real page loads. The SPA swallows this failure (`AuthContext` falls back to the bearer token), so the UI looks healthy.
@@ -31,7 +31,15 @@ Meanwhile `WorkdayExecutionPlanService.java:29-83` — the actual implementation
 
 **Impact while it lasts:** new sign-ups cannot be provisioned (only the exchange creates accounts); the automation worker cannot claim plans; inbound managed mail cannot be stored — the webhook's first statement is an insert, so it answers 503 and Cloudflare retries until its retry window ends; any user write in the UI fails.
 
-**Leading hypothesis (unconfirmed):** Postgres in read-only mode — Supabase enforces this when a project exceeds its storage quota — which raises SQLSTATE `25006`, a class Spring cannot categorise. It fits reads succeeding, both unrelated write paths failing, and `claim-next` succeeding only before a switch point. **Confirm with:** the Render log line for `UncategorizedSQLException` (it names the SQL state and Postgres message), and in the Supabase SQL editor (read-only): `show default_transaction_read_only;` and `select pg_size_pretty(pg_database_size(current_database()));`.
+**Root cause (confirmed 2026-11-06): Supabase Free-plan read-only mode.**
+
+- The project's disk is fixed at 2 GB.
+- Supabase switches the database to read-only at 95 % disk use and switches it back automatically below 95 %. Read-only queries on 6 Nov returned `default_transaction_read_only = on` with source `configuration file`.
+- Writes therefore succeed only in short windows. In between they fail, which per Supabase's docs raises SQLSTATE `25006`, a class Spring cannot categorise.
+- The disk filled after the discovery surge that began on 2 Nov: about 60,000 jobs and about 774,000 outbox rows.
+- The Render log line itself has not been read.
+
+The organisation's grace period ends on 12 Nov 2026. The evidence and the backup-first migration plan are in `ROBIN_DB_MIGRATION_PHASE2_PLAN.md` §0–§1.
 
 ## P2 — Errors on public endpoints reach anonymous callers as 401 (opened 2026-11-05)
 

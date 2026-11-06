@@ -1,0 +1,527 @@
+# ROBIN — Database migration, Phase 2: backup-first plan
+
+**Status: PLANNING.** No backup exists yet. Nothing in this document has been executed against production except the read-only `SELECT`s listed in §1, with their UTC times. Migration readiness is **not** claimed. It cannot be claimed until a backup has been restored into an isolated PostgreSQL 17 instance and verified (Stage C).
+
+**Prepared:** 2026-11-06. Sources: the Supabase SQL editor (read-only catalog and aggregate queries as `postgres`), the Supabase usage page, source inspection, and vendor documentation fetched the same day. This repository is public, so identifiers that would locate the production project are deliberately left out: the project ref, organisation id, pooler host, user names and connection strings.
+
+Stages are planned separately and will be implemented and approved separately:
+
+- **A.** Backup preparation (§2)
+- **B.** Backup execution and verification (§3)
+- **C.** Isolated restoration test (§4)
+- **D.** Oracle infrastructure planning (§5)
+- **E.** Cutover and rollback planning (§6)
+
+## 0. Why the backup comes first
+
+| Fact | Evidence |
+|---|---|
+| The organisation's grace period ends on **12 Nov 2026**. | Usage-page notice, 6 Nov: *"Your organization went over its quota in the previous billing cycle (Egress Exceeded). You can continue with your projects until your grace period ends on 12 Nov, 2026 … If restrictions are applied, requests to your project will return a 402 status code."* |
+| It is undocumented whether direct Postgres connections survive the restriction. | The Supabase billing and cost-control docs (fetched 6 Nov) don't say. **Planning assumption:** after 12 Nov the database may be unreachable. |
+| The organisation stays over quota whatever happens to egress. | Current cycle (18 Oct–18 Nov): database size 1.616 / 0.5 GB (323 %); egress 3.50 / 5 GB (70 %). |
+| The disk is the immediate hazard. | Supabase docs (database size page): the Free-plan disk is fixed at 2 GB and *"does not autoscale"*. *"When disk usage reaches 95%, Supabase puts your database into read-only mode."* Read-only mode is *"turned off automatically"* below 95 %. *"If the disk becomes full, Postgres shuts down."* |
+| The remaining headroom is small. | An earlier analytic query in this phase failed with SQLSTATE 53100 `No space left on device` while writing temp files. Since the 2 Nov restart the server has written 23 temp files totalling 249 MiB (`pg_stat_database`). |
+
+**Target:** Stages A, B and C complete by **9 Nov 2026**, three days before the grace period ends.
+
+## 1. Evidence gathered (completed investigations)
+
+All queries were single `SELECT` statements. Before each run, a check confirmed the statement was unchanged and contained no write keywords. On the large tables the queries used only `count`/`sum` aggregates or partial-index lookups. Nothing used `DISTINCT`, joins over large tables, or sorts that could spill to disk.
+
+### 1.1 Production write state: P0 root cause confirmed
+
+Two catalog-only samples were taken on 6 Nov at 13:38:35 and 13:45:50 UTC.
+
+- `default_transaction_read_only = on`, with source `configuration file`.
+  - `pg_conf_load_time()` returned 13:31:17.656 UTC.
+  - The only role-level override found is Supabase's own `supabase_read_only_user`.
+- The newest outbox row was created at 13:31:17.445 UTC, 0.2 s before that configuration reload.
+- Between the two samples, no row was inserted, updated or deleted anywhere: the `pg_stat_database` tuple counters did not change.
+- Between the samples there were +6,667 committed transactions, all reads.
+- There were also **+5,036 rolled-back transactions, about 11.6 per second**. The running backend keeps attempting writes and failing.
+- Supabase documents that read-only mode switches itself off below 95 % disk use, and that *"background jobs and scheduled tasks resume writes automatically"*. That explains the pattern we see: writes succeed in windows, then read-only mode returns.
+  - Pending `job.discovered` events rose from 770,720 (about 13:11) to 771,389 (about 13:27).
+  - The dispatcher also moved its head forward: the oldest pending event changed from one created on 2 Nov at 18:45:50 to one created at 18:46:02. Then the window closed at 13:31:17.
+  - 60,488 of the still-pending events were created on 6 Nov.
+- **Conclusion:** the P0 *"production database is rejecting writes"* is caused by Supabase Free-plan read-only mode. The 2 GB disk sits at the 95 % threshold. Phase 1 had already confirmed `default_transaction_read_only = on`; the toggling is new.
+- What filled the disk: the database restarted at 2 Nov 18:07:09 UTC. Since then the cumulative counters show:
+  - 60,113 job inserts and 716,083 job updates;
+  - 774,110 outbox inserts;
+  - 4,900 consumed-event inserts.
+- Table data (heap plus TOAST) and index sizes for the largest tables:
+
+  | Table | Table data | Indexes |
+  |---|---:|---:|
+  | jobs | 545.0 MB | 107.4 MB |
+  | outbox_events | 464.8 MB | 73.2 MB |
+  | consumed_events | 137.8 MB | 105.7 MB |
+  | job_source_observations | 32.3 MB | 57.4 MB |
+  | job_identity_keys | 22.7 MB | 24.9 MB |
+
+  Every other table is under 7 MB. `pg_database_size` = 1,600,629,907 bytes.
+
+### 1.2 Egress, the budget for the dump
+
+The usage page shows every byte as *Shared Pooler Egress*, which is the backend reaching the database through Supavisor.
+
+| Day | Egress | Still-pending outbox rows created that day | Database state |
+|---|---:|---:|---|
+| 2 Nov | 76.8 MB | 74,210 | restarted 18:07 |
+| 3 Nov | 379.4 MB | 318,690 | mostly writable |
+| 4 Nov | 408.1 MB | 316,160 | mostly writable |
+| 5 Nov | 1.82 GB | 1,864 | mostly read-only |
+| 6 Nov (to about 13:00) | 608.8 MB | 60,488 | mixed |
+
+A read-only day costs about 4.5 times the egress of a writable day, because retry loops re-read their inputs on every cycle. For example, the outbox dispatcher re-reads a 50-row batch every 2 s and fails on the first event.
+
+The dump's own egress is **estimated** at 1.0–1.6 GB:
+
+- About 1.21 GB of table data sits on disk.
+- Compressed TOAST values travel uncompressed.
+- The generated column `jobs.search_vector` is not dumped.
+
+About 1.5 GB of allowance remains, and the backend alone uses 0.4–1.8 GB a day. So this cycle will pass 5 GB whether or not we take a backup.
+
+The Free plan is not billed for overage, and database size alone already keeps the organisation over quota. **The backup is not to be delayed to save egress.** It should still succeed on the first attempt, which is why Stage A includes a full dry run.
+
+### 1.3 Backup scope (constraint 1)
+
+Catalog pre-flight, 6 Nov 13:52:51 UTC:
+
+- **Schemas with tables:**
+
+  | Schema | Tables | Size |
+  |---|---:|---:|
+  | public | 70 | 1.21 GB |
+  | auth | 27 | 213 KB |
+  | storage | 8 | 98 KB |
+  | realtime | 3 | 16 KB |
+  | vault | 1 | 8 KB |
+
+- **Readability:** `postgres` can read every table and all 3 sequences; none is unreadable.
+- **Blockers:** there are 0 large objects, 0 replication slots, 0 prepared transactions, and 0 transactions older than 5 minutes.
+- **No application data outside `public`:**
+  - `auth.users` = 0;
+  - `storage.objects` = 0 and `storage.buckets` = 0;
+  - `vault.secrets` = 0, so no Supabase Vault root key is needed to use the backup.
+- **Extensions:**
+  - `citext` 1.6 in `public`;
+  - `pgcrypto` 1.3, `uuid-ossp` 1.1 and `pg_stat_statements` 1.11 in `extensions`;
+  - `supabase_vault` 0.3.1 in `vault`;
+  - `plpgsql`.
+- **Supabase-specific objects:** one publication (`supabase_realtime`) and seven Supabase event triggers.
+- **Ownership:** `postgres` owns every relation in `public`.
+- **Defaults:** no column default in `public` references the `extensions` schema.
+- **Generated columns:** the only one is `jobs.search_vector`.
+- **pgcrypto at runtime:** none. Only migration V027 used `digest()`, in a one-off backfill. `gen_random_uuid()` is part of PostgreSQL core.
+
+**Decision:**
+
+- Dump the **whole database**, which is the complete backup.
+- Restore-test the application scope (`public`) into vanilla PostgreSQL 17.
+- Prove that the data blocks of the Supabase-internal schemas are readable.
+
+### 1.4 RLS enforcement for the production application role (constraint 8)
+
+Catalog-only queries ran at about 13:24 UTC on 6 Nov. Nothing was changed.
+
+- RLS is enabled on all 70 tables in `public`.
+  - 0 tables use `FORCE ROW LEVEL SECURITY`.
+  - 0 policies exist.
+  - All 70 tables are owned by `postgres`.
+- The `postgres` role has `rolsuper = false` and `rolbypassrls = true`. `row_security_active('public.users')` returns `false` for `postgres`.
+- The backend connects as `postgres` through Supavisor, holding 10 sessions.
+- **Conclusion: RLS is enabled but not enforced for the production application role, for two independent reasons:**
+  - `postgres` owns the tables, and owners bypass RLS that is not forced.
+  - `postgres` has `BYPASSRLS`.
+
+  With no policies, RLS today only denies Supabase's Data API roles (`anon` and `authenticated`, via the PostgREST session seen in `pg_stat_activity`). Tenant isolation in Robin is enforced by owner-scoped application SQL, not by RLS.
+- **For the backup:** pg_dump sets `row_security = off` and throws an error if its role cannot bypass RLS (PostgreSQL docs, `--enable-row-security`). `postgres` bypasses RLS, so every row is dumped.
+- **For the target:** `robin_app` will own every restored object. Owners bypass RLS, there is no `FORCE`, and no `BYPASSRLS` grant is needed. The effective behaviour is identical, and RLS stays enabled. The Oracle backup job must run as the owner or as a role with `BYPASSRLS`. **RLS is not disabled anywhere in this plan.**
+
+### 1.5 The pending outbox events (constraint 7)
+
+These are read-only aggregates from 13:25–13:30 UTC on 6 Nov. Heavier analysis is deferred to the restored copy (§4).
+
+- **Count:** 771,412 pending. Phase 1 counted 770,720 pending `job.discovered` events at about 13:11. The count grew during the writable window that ended at 13:31:17.
+
+  | Event type | Pending |
+  |---|---:|
+  | `job.discovered` | 771,389 |
+  | `job.matched` | 11 |
+  | `verification.completed` | 11 |
+  | `signup.completed` | 1 |
+
+  The `job.discovered` events break down as TOUCHED 656,694, UPDATED 56,355 and INSERTED 58,340.
+- **Age:** the oldest pending event was created on 2 Nov at 18:46:02 UTC (sequence 898,346). The newest was created on 6 Nov at 13:31:17 UTC (sequence 1,670,005). The per-day creation counts are in §1.2.
+- **Status:**
+  - Every pending row has `attempt_count = 0` and no `last_error`, so none reached the DLQ (`MAX_ATTEMPTS = 5`).
+  - As of about 13:27, 898,295 events had been published. They were created between 23 Sep and 2 Nov 18:45, and the latest `published_at` was 6 Nov 07:00. A few more were published before 13:31:17, because the head moved (§1.1).
+  - Consumption: `notification-fanout` 898,295 and `application-pipeline` 898,264. `application-pipeline` subscribes only to `job.*` events, which accounts for the gap.
+- **Retries: `attempt_count = 0` does not mean the events were never tried.**
+  - `OutboxProcessor` records a failure with an `UPDATE` in its `catch` block.
+  - In read-only mode that `UPDATE` fails too. The exception escapes `dispatchPending`, and the same head event is retried 2 s later with no trace left.
+  - So the head event has most likely been attempted thousands of times without a record.
+- **Throughput:**
+  - Since the 2 Nov restart there have been 774,110 outbox inserts but only 2,450 outbox updates and 4,900 consumed-event inserts. That means at most about 2,450 events were dispatched, each to both consumers.
+  - 4,900 = 2 × 2,450, which is consistent with no pending event having been half-consumed.
+  - On writable days, events were created at about 317,000 a day.
+  - **Hypothesis, to be checked on the restored copy:** every `@Scheduled` job shares Spring's default scheduler, which has a single thread because no pool size is configured. A long discovery sweep would therefore block the 2-second dispatcher.
+- **Idempotency (from the code):**
+  - `InProcessEventPublisher` skips any consumer that has already consumed an event, and records consumption with `ON CONFLICT DO NOTHING`.
+  - Handler writes are idempotent:
+    - `applications`: `ON CONFLICT (profile_id, job_id) DO NOTHING` for live statuses;
+    - `job_matches`: upsert;
+    - `application_decisions`: `ON CONFLICT`;
+    - `skill_similarity_cache`: upsert;
+    - notifications: `dedup_key`.
+  - `onJobIngested` ignores the event's action and re-scores the job's *current* state. For any one job, only its newest pending `job.discovered` event matters. The 656,694 TOUCHED events are re-observations of jobs that had not changed.
+- **Side effects of a replay:**
+  - Notifications are in-app only; the notifications package has no e-mail or push channel.
+  - `job.discovered` notifications are unowned and deduplicated per job.
+  - However, re-scoring can emit `job.matched`. That leads to application decisions, which can create applications and automation plans.
+  - **Before any resume, every profile's autonomy policy must be checked on the restored copy. No employer is contacted without explicit approval.**
+- **Resume options.** The decision comes later. No data changes without approval, and nothing is changed on Supabase.
+  - **R1, replay in order.** Correct, but it means about 771,000 re-scorings. These include LLM skill-similarity calls for pairs not yet cached. At the observed throughput this takes days to weeks.
+  - **R2, coalesced replay.** Process the 23 events that are not `job.discovered` first. Then process only the newest `job.discovered` event per job: at most about 61,000, with the exact number taken from the restored copy. Superseded events are marked published with an audit marker. **Rows are kept, not deleted.**
+  - **R3, hold.** Keep dispatch paused on the new database until the emission volume and the scheduler issue are fixed, then run R2.
+  - **Recommendation: R3, then R2.** Today, starting the backend against *any* database resumes dispatch at once: `fixedDelay` runs at startup and there is no dispatch switch. A dispatch kill switch is therefore a cutover prerequisite (§6).
+- **What "preserve all pending events" means in this plan:**
+  - Every row pending at the dump snapshot is in the archive.
+  - It is restored unchanged, then counted and fingerprinted against the source at the same snapshot.
+  - Nothing is deleted or marked.
+
+### 1.6 Local tooling (input to Stage A)
+
+- **PostgreSQL client tools:** versions 15 and 18 are installed. Neither is usable:
+  - pg_dump 15 cannot dump a 17 server.
+  - The output of pg_dump 18 is *"not guaranteed"* to load into 17 (PostgreSQL docs).
+  - **pg_dump 17 is required.**
+- **Docker Desktop** is installed but stopped. The image `postgres:17.11-bookworm` provides pg_dump and pg_restore 17.11 and the isolated PostgreSQL 17 server, all in one image.
+- **Other tools:** gpg 2.4.5 (Git Bash) and OpenSSL 3.2.3. C: has 72 GB free. The machine has 15.2 GB of RAM, of which 2 GB was free at the time of the check.
+- **Storage hazards:**
+  - Documents and Desktop are redirected to OneDrive.
+  - C: reports no BitLocker protection.
+  - **Plaintext backup data therefore stays in RAM (container `tmpfs`) and never lands on the host disk.**
+
+### 1.7 PostgreSQL 17 on ARM64, Oracle resources and CI (constraint 9)
+
+- **PostgreSQL 17:** current minor 17.11, supported until 8 Nov 2029 (postgresql.org/support/versioning).
+- **Docker official image:** the tags `17.11-bookworm` and `17.11` (trixie) list `arm64v8` as well as `amd64` (docker-library/official-images).
+- **PGDG apt:**
+  - The `noble-pgdg` Release file (dated 5 Nov 2026) lists `amd64 arm64 ppc64el`.
+  - The package pool contains `postgresql-17_17.11-1.pgdg24.04+2_arm64.deb` (13 Aug 2026).
+  - The contrib extensions Robin needs (`citext`, `pgcrypto`) ship with the server package.
+- **GitHub Actions:** hosted `ubuntu-24.04-arm` runners are *"free and unlimited on public repositories"*, and this repository is public.
+- **Oracle Always Free** (docs fetched 6 Nov):
+  - **Compute:** A1 gets 1,500 OCPU-hours and 9,000 GB-hours a month, which is *"2 OCPUs and 12 GB of memory"* for Always Free tenancies.
+  - **Storage:** 200 GB of block storage (boot and block volumes combined) and 5 volume backups.
+  - **Object Storage:** 20 GB (Always Free-only accounts) and 50,000 requests a month.
+  - **Region:** Always Free compute must be created in the home region.
+  - **Idle reclamation:** an instance can be reclaimed when, over 7 days, CPU p95, network and (on A1) memory are all below 20 %. The page doesn't say whether Pay As You Go accounts are exempt.
+  - **Capacity:** "Out of host capacity" errors are possible: retry, try another availability domain, or upgrade to Pay As You Go.
+- **CI today:**
+  - 40 Testcontainers integration tests pin `postgres:16`.
+  - `infra/docker-compose.yml` uses `postgres:16`.
+  - CI runs on `ubuntu-latest` (x86_64) while production runs 17.6. See §7.
+
+## 2. Stage A: backup preparation (no production access)
+
+Deliverables:
+
+- **A1. Tooling.**
+  - Start Docker Desktop.
+  - Pull `postgres:17.11-bookworm` and record its digest.
+  - Confirm `pg_dump --version` reports 17.11.
+- **A2. Location.** Create `C:\RobinBackups\`. It is outside the repository and outside OneDrive. It will hold only encrypted files and a manifest that contains no personal data.
+- **A3. Scripts** in `scripts/db-migration/`. They contain no secrets and are reviewed, committed and pushed. They run in Git Bash because its pipes are binary-safe.
+  - **`backup-supabase.sh`:**
+    1. Start a disposable `postgres:17.11` container with a RAM-only `tmpfs` at `/dump`.
+    2. Prompt for the connection details and password *inside the container*. The password is never placed in a file, an environment variable or the shell history on the host.
+    3. Open a `REPEATABLE READ READ ONLY` session and call `pg_export_snapshot()`.
+    4. Run `pg_dump --format=custom --snapshot=<id> --verbose` into the `tmpfs`.
+    5. In that same snapshot, compute exact row counts and fingerprints for every table.
+    6. Run `pg_restore --list` and the TOC checks.
+    7. Record the plaintext SHA-256.
+    8. Stream the archive out through `gpg --symmetric --cipher-algo AES256 --no-symkey-cache --compress-algo none`.
+    9. Decrypt it once more to compare SHA-256s.
+    10. Remove the container, which also wipes the `tmpfs`.
+  - **`restore-test.sh`:** runs Stage C (§4).
+  - **`table-fingerprints.sql`:** per table, computes `count(*)` and `sum` of the first 60 bits of `md5((to_jsonb(t) - 'search_vector')::text)`.
+    - The sum does not depend on row order, so no sort is needed and there is no temp-file risk on the source.
+    - The session time zone is set to UTC, and the generated column is excluded.
+- **A4. Dry run.**
+  - Run A3's full pipeline end to end against a local PostgreSQL 17 database migrated by Flyway (V001–V051) and filled with synthetic rows.
+  - This proves the dump, encryption, verification, restore and fingerprint comparison work before production is touched. It matters because a failed real run costs about 1–1.6 GB of egress.
+- **A5. Connection details (user).**
+  - Copy the **Session pooler** host and user from the dashboard (Connect → Session pooler). Supabase recommends the session pooler for dumps when IPv6 is unavailable.
+  - Optionally download Supabase's CA certificate so the dump can use `sslmode=verify-full` instead of `require`.
+- **A6. Passphrase (user).**
+  - Generate it in your password manager.
+  - Type it only into gpg's prompt. It is never shared with me.
+
+Exit criteria:
+
+- The dry run passes, with counts and fingerprints equal before and after restore.
+- The image digest is recorded.
+- Approvals 1–3 in §8 have been given.
+
+## 3. Stage B: backup execution and verification (one read-only pg_dump, run by you)
+
+- **B1. Pre-flight (read-only, catalog only):**
+  - read-only state;
+  - client sessions;
+  - no transactions older than 5 minutes;
+  - outbox sequence value;
+  - a free pooler slot: the backend holds 10 Supavisor sessions, and the dump needs 2.
+- **B2. Run `backup-supabase.sh` (you):**
+  - You type the database password at its prompt.
+  - You type the encryption passphrase at gpg's prompt.
+  - Expect a run of tens of minutes. The time is set by pooler throughput.
+- **B3. Verification. Every item below is a pass/fail gate:**
+  1. pg_dump exits with code 0, and its log contains no `error`.
+  2. `pg_restore --list` succeeds on the plaintext in `tmpfs`, and the TOC is complete for `public`:
+     - `TABLE DATA` for all 70 tables;
+     - `SEQUENCE SET` for the outbox sequence;
+     - the 12 triggers;
+     - the view `provider_cost_summary`;
+     - index and constraint entries covering the 175 indexes;
+     - `ROW SECURITY` entries for all 70 tables.
+
+     The entries for the Supabase-internal schemas are listed and counted in the manifest.
+  3. Row counts and fingerprints for every table come from **the dump's own snapshot**. These are the reference values for Stage C.
+  4. Outbox totals at the snapshot are recorded, and published plus pending must equal the total row count.
+     - Pending is expected to be at least 770,720 `job.discovered` (Phase 1) plus the 23 other events.
+     - Any shortfall must be matched by events published during a writable window, never by missing rows.
+  5. Both SHA-256 values are recorded: plaintext and `.gpg`. A decrypt round trip reproduces the plaintext SHA-256.
+  6. `flyway_schema_history` has 52 rows (the baseline plus V001–V051), and all are `success = true`.
+- **B4. Manifest.** Written next to the encrypted file. It holds:
+  - times and versions;
+  - the image digest;
+  - sizes and SHA-256 values;
+  - TOC counts;
+  - per-table counts and fingerprints;
+  - outbox numbers;
+  - egress before and after the dump, read from the usage page, which refreshes about hourly.
+
+  It contains no credentials and no personal data.
+- **B5. Offsite copy.** Make a second copy of the **encrypted** file in a place you choose.
+- **B6. Not part of B:**
+  - no changes to production;
+  - no pausing of production work;
+  - no Supabase settings changed.
+
+Exit criteria: every check in B3 passes. **Even then the backup is "taken", not "verified"**; it is only verified once Stage C passes.
+
+## 4. Stage C: isolated restoration test
+
+- **C1. Instance.**
+  - A separate `postgres:17.11-bookworm` container, bound to `127.0.0.1` only.
+  - It has a random local password and is not on any shared network.
+  - `PGDATA` goes on `tmpfs` if about 3 GB of RAM is free. The fallback is a throwaway Docker volume. In that case the data rests unencrypted inside the Docker disk until teardown, because C: has no BitLocker.
+- **C2. Load the archive.** The `.gpg` file is decrypted as a stream into the container's `tmpfs`; it is never written to the host disk.
+- **C3. Prepare the target in the shape planned for Oracle.**
+  - Create the role `robin_app` with `LOGIN NOSUPERUSER NOBYPASSRLS`.
+  - Create the database `robin_restore`, owned by `robin_app`.
+  - Create the extensions `citext` and `pgcrypto`.
+- **C4. Restore.**
+  - `pg_restore --no-owner --no-privileges --exit-on-error` runs as `robin_app`, using a TOC list filtered to the `public` schema.
+  - Supabase-only entries are excluded by name, and the excluded list is written to the report:
+    - event triggers and their helper functions;
+    - the `supabase_realtime` publication;
+    - all `EXTENSION` entries (`citext` and `pgcrypto` are created beforehand; `supabase_vault`, `uuid-ossp` and `pg_stat_statements` are not needed);
+    - default ACLs for Supabase roles.
+- **C5. Prove the Supabase-internal schemas are readable.**
+  - Run `pg_restore --data-only -n auth -n storage -n realtime -n vault -f /dev/null`; it must exit with code 0.
+  - The `COPY` row counts per table must match the manifest.
+- **C6. Verification. Every item is a gate:**
+  1. **Inventory equals the source:**
+     - 70 tables, including `flyway_schema_history`;
+     - 175 indexes;
+     - the `outbox_events` sequence, at the snapshot's value;
+     - 1 view;
+     - 12 triggers;
+     - the Robin functions;
+     - `citext`.
+  2. **Constraints:** all are present, and there are 0 rows in `pg_constraint` with `convalidated = false`.
+  3. **Data:** exact row counts and fingerprints for every table equal the manifest from B3, including all pending outbox rows.
+  4. **Flyway:**
+     - `validate` passes against the restored database with the repository's migrations.
+     - 52 applied, 0 pending, 0 checksum mismatches.
+     - This is run through an integration test gated by an environment variable, with the application's exact Flyway configuration. It is **not** done by starting the backend, which would start schedulers and outbound integrations against real user data.
+  5. **RLS:**
+     - 70/70 tables have RLS enabled, 0 forced, 0 policies.
+     - As `robin_app` (the owner), every row is visible.
+     - As a non-owner role without `BYPASSRLS`, 0 rows are visible. This proves RLS is preserved and inert for the owner, exactly as today.
+- **C7. Outbox analysis**, where heavier queries are safe:
+  - pending events by type and action;
+  - **distinct jobs** among pending events, which sizes R2;
+  - partially consumed events;
+  - hourly `created_at` and `published_at`, which show the writable windows and the dispatch rate;
+  - the autonomy and auto-apply settings for each profile.
+- **C8. Teardown.**
+  - `docker rm -f -v`.
+  - Confirm `C:\RobinBackups\` holds only `.gpg` files and the manifest.
+  - Write a report containing no personal data.
+
+Exit criteria: every check in C6 passes. **Only then is the backup "verified".** Migration readiness additionally requires Stages D and E.
+
+## 5. Stage D: Oracle infrastructure planning (planning only, nothing provisioned)
+
+- **Target:** PostgreSQL **17**, on the current 17.x minor (17.11 today). It is the same major version as the source, so restoring a dump stays within one major version.
+  - Runs on Ubuntu 24.04 LTS (aarch64) with PGDG packages; arm64 builds are verified in §1.7.
+  - The alternative is the official Docker image (`arm64v8`). Native packages are recommended for the database server: a systemd service, minor updates through apt, and no container layer.
+  - Locale `en_US.UTF-8`, the same as the source, so text ordering is the same.
+- **Compute:** `VM.Standard.A1.Flex` with 2 OCPU and 12 GB, which is the whole Always Free A1 allowance. The current source is a Supabase NANO instance, so this is ample.
+- **Storage** (150 GB of the free 200 GB):
+
+  | Volume | Size |
+  |---|---:|
+  | Boot volume | 50 GB |
+  | Block volume for `PGDATA` and WAL | 100 GB |
+
+  Today's database is 1.6 GB including indexes. At today's discovery behaviour the outbox alone grows by about 100 MB a day (estimated at about 336 bytes per row on disk). The size fits the volume, but the growth has to be handled: stop emitting a `job.discovered` event for unchanged jobs, and keep published outbox and consumed-event rows only for a set retention period. Both are separate, later changes.
+- **Starting configuration:**
+  - `shared_buffers=3GB`;
+  - `effective_cache_size=8GB`;
+  - `work_mem=16MB`;
+  - `maintenance_work_mem=512MB`;
+  - `max_connections=40` (HikariCP uses 10);
+  - `wal_compression=zstd`;
+  - `password_encryption=scram-sha-256`;
+  - `ssl=on`;
+  - `idle_in_transaction_session_timeout=10min`;
+  - `log_min_duration_statement=1000`;
+  - `pg_stat_statements`.
+- **Network and security:**
+  - A VCN security list allows Postgres only from Render's published outbound ranges for the service's region. Those ranges are shared by everything Render runs in that region, so the allowlist is necessary but not sufficient.
+  - SSH is allowed only from the admin's IP, or through OCI Bastion.
+  - The host firewall must also allow the Postgres port, because Oracle's Ubuntu images ship restrictive iptables rules.
+  - `pg_hba` permits only `hostssl robin robin_app <render ranges> scram-sha-256`. There is no remote superuser login.
+  - TLS uses a server certificate, and the JDBC client uses `sslmode=verify-full`.
+- **Roles:**
+  - `robin_app` owns all objects; it has no `SUPERUSER` and no `BYPASSRLS` (see §1.4).
+  - Backups run as the owner, or as a role granted `BYPASSRLS` by the VM's own superuser.
+- **Backups on Oracle, from the first day:**
+  - Nightly pg_dump, encrypted to a **public key** so the VM can never decrypt its own backups, stored in a private OCI Object Storage bucket with 7–14 days' retention, within the free tier.
+  - Weekly block-volume backups, using the 5 free ones.
+  - A restore test every month, following the Stage C procedure.
+  - Optionally, WAL archiving for point-in-time recovery, checked against the limit of 50,000 requests a month.
+- **Monitoring:**
+  - OCI metrics for CPU, memory and network, including the reclamation thresholds;
+  - an alert at 70 % disk;
+  - the Postgres log;
+  - the backend's `/actuator/health`.
+- **Risks to settle before provisioning:**
+  - **Idle reclamation.** It is unknown whether memory held by Postgres counts as "used" in OCI's memory metric. Watch the metric in week 1. Upgrading to Pay As You Go keeps Always Free resources free (Oracle docs), but its exemption from reclamation is not documented.
+  - **A1 capacity** in the home region.
+  - **Latency** from the Render region to the Oracle home region.
+
+## 6. Stage E: cutover and rollback planning
+
+**Prerequisites:**
+
+- Stage C has passed.
+- Stage D is provisioned and hardened, and a rehearsal restore has been verified **on the Oracle instance**: the Stage C checks on ARM64 PostgreSQL 17, plus latency measured from Render.
+- The backend can start with **dispatch paused**. This is a small code change: a property such as `app.events.dispatch-enabled`, checked inside `dispatchPending`.
+- Discovery can be paused with the existing `app.discovery.scheduler-enabled`.
+- The outbox resume policy has been decided.
+- The autonomy policies have been checked.
+
+**Freeze and final copy** (separate approval, production change):
+
+1. Stop all writers: suspend the backend and worker services on Render.
+2. Confirm the source is quiet: the `pg_stat_database` tuple counters stay unchanged for 5 minutes.
+3. Take a **final dump** with the Stage B procedure.
+4. Restore it to Oracle as `robin_app` and verify it with the Stage C checks.
+5. Run `ANALYZE`.
+
+The final dump costs another 1.0–1.6 GB of egress, and it may be impossible after 12 Nov. If cutover cannot happen before then, the Stage B archive becomes the migration source. Writes made on Supabase after Stage B would then be lost; they are quantified from the source if it is still readable. **This is your decision when the time comes.** Options:
+
+- cut over before 12 Nov;
+- accept the Stage B data as final;
+- move to a paid Supabase plan as a bridge. Supabase's docs say an upgrade gives a disk of at least 8 GB, which ends read-only mode.
+
+**Switch:**
+
+1. Change the three `SPRING_DATASOURCE_*` variables on Render (approval needed then).
+2. Deploy with dispatch and discovery paused.
+3. Check `/actuator/health` and `/actuator/info`.
+4. Smoke-test the write paths:
+   - the sign-in session exchange;
+   - the worker's `claim-next`;
+   - the managed-mail webhook, using the Phase 20 probes (`ROBIN_PHASE20_VERIFICATION.md` §6.0–§6.4).
+5. Resume the worker.
+6. Then resume outbox processing according to the approved policy.
+7. Then resume discovery, once the emission fix has landed.
+
+**Rollback:**
+
+- **Before real traffic writes to Oracle:** point the datasource variables back at Supabase and redeploy. Supabase is untouched, so no data is lost, although the app returns to its present half-read-only state.
+- **After Oracle has taken writes:** Supabase is not a viable write target, because it is read-only and soon restricted. Failures are fixed forward on Oracle, or Oracle is restored from its own backups.
+- Supabase and the encrypted archives remain the **immutable reference copy** for data recovery.
+- **Triggers for rollback:**
+  - health checks failing for more than 15 minutes;
+  - any count or fingerprint mismatch;
+  - authentication failures;
+  - p95 latency regressing badly against the rehearsal baseline.
+- **Supabase is kept intact:** no deletion, no configuration changes, no data changes. It may be paused or restricted by Supabase itself. From 12 Nov the **encrypted archives are the dependable rollback source**.
+
+## 7. Aligning CI with PostgreSQL 17 (separate change, needs approval)
+
+1. Add one test constant, for example `TestPostgres.IMAGE`.
+   - It reads the system property `robin.test.postgres-image` and defaults to `postgres:17.11-bookworm`.
+   - It replaces the 40 literals `new PostgreSQLContainer<>("postgres:16")`, a mechanical change.
+2. Change `infra/docker-compose.yml` to use `postgres:17.11-bookworm`.
+3. Pin the minor version in that one place, and bump it together with the Oracle server's PGDG package.
+4. Add a CI job on `ubuntu-24.04-arm` that runs the backend integration tests, or at least the migration-focused ones, against the `arm64v8` image.
+5. Add a dump/restore round-trip integration test:
+   1. Migrate an empty PostgreSQL 17 database.
+   2. Dump it with pg_dump 17.
+   3. `pg_restore` it with Stage C's flags into a second database owned by a non-superuser.
+   4. Run Flyway `validate`.
+
+   This guards the restore procedure without using any production data.
+6. Spring Boot 3.3.4 manages Flyway 10.10.0, which is older than PostgreSQL 17. Production already runs it against 17.6. Upgrading Flyway or Spring Boot is a separate change.
+
+Exit criteria: CI passes on x86_64 and on arm64 against PostgreSQL 17.11.
+
+## 8. Approvals needed
+
+**Now, to start Stage A:**
+
+1. Start Docker Desktop and pull the official image `postgres:17.11-bookworm`, a download of about 150 MB.
+2. Create `C:\RobinBackups\`, outside the repository and OneDrive, or name another location.
+3. Write the Stage A scripts (§2 A3) in `scripts/db-migration/`, dry-run them on synthetic data (A4), then commit and push.
+
+**For Stage B:**
+
+4. You run the backup script and type the database password, and later the gpg passphrase, at the prompts. I never see either.
+5. I run read-only catalog checks in the SQL editor before and after the dump, as was done today.
+6. Choose an offsite location for the encrypted copy.
+
+**Later, as separate decisions:**
+
+7. The outbox resume policy (R1, R2 or R3, §1.5), decided after Stage C's analysis.
+8. **Pausing production background work.** This is a production change and has **not** been done. It would stop:
+   - about 11.6 failed write transactions a second;
+   - 0.4–1.8 GB of egress a day;
+   - writes landing at the full-disk edge.
+
+   The options are suspending the Render services, or setting the existing property `app.discovery.scheduler-enabled=false` through a Render environment variable. Pausing the outbox dispatcher needs the code change in §6.
+9. **Stage D:** the Oracle tenancy and its home region, the Render service region, a Pay As You Go decision, and then approval to provision.
+10. **Stage E:** the dispatch kill switch, the freeze window, the datasource change and the cutover.
+11. **CI alignment** (§7).
+12. **Optional, billing:** changing the Supabase plan. This is your call and is not required by this plan.
+
+## 9. What is not done and not claimed
+
+- There is no backup yet, and nothing has been restored.
+- **No migration readiness is claimed.**
+- Oracle has not been provisioned.
+- Render environment variables are unchanged.
+- Supabase configuration, permissions and data are unchanged.
+- Outbox processing has been neither paused nor resumed, and no row has been modified.
+- Phase 20 remains **open**. Its live probes stay blocked until production writes are reliable.
+
+**PHASE 2 STATUS: PLANNING**
