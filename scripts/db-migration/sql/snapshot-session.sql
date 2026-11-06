@@ -51,6 +51,7 @@ SELECT 'outbox_newest_pending', coalesce((SELECT created_at::text FROM public.ou
         WHERE published_at IS NULL ORDER BY sequence_id DESC LIMIT 1), '');
 \endif
 
+\echo 'snapshot exported; fingerprinting every table (one sequential read of each, no writes)'
 \o /dump/source-fingerprints.txt
 \i /work/table-fingerprints.sql
 

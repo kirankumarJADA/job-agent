@@ -152,6 +152,8 @@ The test restores schema `public` as `robin_app`, a role with `NOSUPERUSER NOBYP
 
 The report goes to `<run>\restore-test-<UTC time>\`. It includes `outbox-analysis.txt`, which feeds the resume decision.
 
+**Memory:** a production-size restore keeps the data directory and the decrypted archive in RAM. Allow roughly 5 GB of free memory for Docker, and close large applications first. `-DataTmpfsGb` sets the cap on the data directory (6 GB by default).
+
 ## Troubleshooting
 
 - **Docker Desktop fails with "dockerInference … cannot be accessed by the system".**

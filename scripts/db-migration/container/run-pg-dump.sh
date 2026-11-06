@@ -13,11 +13,14 @@ if [[ -z "$snap" ]]; then
 fi
 
 started=$(date -u +%FT%TZ)
+echo "pg_dump started at $started; one line per table follows"
+# The verbose log goes to pg_dump.log and, for progress, to stderr.
 pg_dump --format=custom --compress=gzip:6 --snapshot="$snap" \
         --lock-wait-timeout=120s --no-password --verbose \
-        --file=/dump/robin.dump 2> /dump/pg_dump.log
+        --file=/dump/robin.dump 2> >(tee /dump/pg_dump.log >&2)
 rc=$?
 finished=$(date -u +%FT%TZ)
+echo "pg_dump finished at $finished with exit code $rc"
 
 printf '%s\n' "$rc" > /dump/pg_dump.status
 printf 'pg_dump_started|%s\npg_dump_finished|%s\npg_dump_exit|%s\n' \

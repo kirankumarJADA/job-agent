@@ -93,8 +93,10 @@ log "default_transaction_read_only=$ro"
 # ── 3. one snapshot: facts, fingerprints, inventory, then pg_dump ─────
 log "opening the snapshot session (fingerprints read every table once, then pg_dump runs)"
 set +e
-psql -X -q -At -F '|' -v ON_ERROR_STOP=1 -f "$WORK/snapshot-session.sql" >> "$LOG" 2>&1
-session_rc=$?
+# Progress (the session's \echo lines and pg_dump's per-table verbose lines)
+# is shown on the terminal and kept in backup.log.
+psql -X -q -At -F '|' -v ON_ERROR_STOP=1 -f "$WORK/snapshot-session.sql" 2>&1 | tee -a "$LOG" >&2
+session_rc=${PIPESTATUS[0]}
 set -e
 [[ -s $DUMP/pg_dump.status ]] || abort pg_dump "pg_dump never ran (snapshot session exited with $session_rc; see backup.log)"
 dump_rc=$(cat "$DUMP/pg_dump.status")
