@@ -1,6 +1,6 @@
 # ROBIN — Database migration, Phase 2: backup-first plan
 
-**Status: PLANNING.** No backup exists yet. Nothing in this document has been executed against production except the read-only `SELECT`s listed in §1, with their UTC times. Migration readiness is **not** claimed. It cannot be claimed until a backup has been restored into an isolated PostgreSQL 17 instance and verified (Stage C).
+**Status: PLANNING.** Stage A is complete: the backup and restore-test tooling is built, and it passed a dry run on synthetic data on 6 Nov (§2). **No production backup exists yet.** Nothing in this document has been executed against production except the read-only `SELECT`s listed in §1, with their UTC times. Migration readiness is **not** claimed. It cannot be claimed until a backup has been restored into an isolated PostgreSQL 17 instance and verified (Stage C).
 
 **Prepared:** 2026-11-06. Sources: the Supabase SQL editor (read-only catalog and aggregate queries as `postgres`), the Supabase usage page, source inspection, and vendor documentation fetched the same day. This repository is public, so identifiers that would locate the production project are deliberately left out: the project ref, organisation id, pooler host, user names and connection strings.
 
@@ -225,9 +225,88 @@ These are read-only aggregates from 13:25–13:30 UTC on 6 Nov. Heavier analysis
   - `infra/docker-compose.yml` uses `postgres:16`.
   - CI runs on `ubuntu-latest` (x86_64) while production runs 17.6. See §7.
 
-## 2. Stage A: backup preparation (no production access)
+## 2. Stage A: backup preparation (complete, 6 Nov 2026)
 
-Deliverables:
+### Result
+
+No production system was contacted in Stage A. The tooling is in `scripts/db-migration/` (commit `ea17205`), and its README explains how to use it.
+
+- **A1. Tooling.**
+  - The Docker engine is 29.0.1.
+  - The image is `postgres:17.11-bookworm`, id `sha256:665dc7b37ac52a17e298511414c21d23ffa4e6a6ef6225b3e5d59c7afb35e994`. It contains pg_dump, pg_restore, psql and postgres 17.11, plus gpg 2.2.40. The scripts refuse any other image id.
+  - Docker Desktop first failed to start because of a stale socket left from its 3 Nov session. I moved the folder aside to `%LOCALAPPDATA%\Docker\run.stale-20261103`; nothing was deleted.
+- **A2. Location.**
+  - `C:\RobinBackups` exists.
+  - The scripts refuse any folder inside OneDrive or inside the repository.
+  - Dry-run output goes to `C:\RobinBackups\dryrun\`.
+- **A3. Scripts.** The implementation refines the design below: the orchestration is in Windows PowerShell 5.1, and every PostgreSQL and gpg step runs inside the pinned container. As a result, no binary data crosses a host pipe and encryption happens inside the container.
+  - **Backup:** `backup-supabase.ps1` with `container/backup.sh` and `sql/snapshot-session.sql`. This is the Stage B procedure in §3:
+    - one read-only snapshot covers the source facts, the fingerprints, the inventory and `pg_dump --snapshot`;
+    - the plaintext exists only in the container's `tmpfs`;
+    - gpg encrypts with AES-256 inside the container;
+    - the gates in §3 run;
+    - only the encrypted copy and the metadata reach the run folder.
+  - **Restore test:** `restore-test.ps1` with `container/restore.sh`. This is the Stage C procedure in §4.
+  - **SQL:** `sql/table-fingerprints.sql`, `sql/inventory.sql` and `sql/outbox-analysis.sql`.
+  - **Flyway harness:** `ExternalDatabaseFlywayIT`, a backend test that is disabled unless `-Drobin.flyway.external.url` is set. It runs Flyway with the application's configuration.
+    - `validate` is used for Stage C.
+    - `migrate` is used only for the dry-run source, and needs a loopback URL, the marker comment and an explicit opt-in.
+- **A4. Dry run.** `dry-run.ps1` ran on 6 Nov from 14:51 to 14:53 UTC (131 s).
+  - The synthetic source has the same shape as production:
+    - `postgres` is not a superuser but has `BYPASSRLS`;
+    - `citext` is in `public`, and the other extensions are in `extensions`;
+    - the `auth`, `storage`, `realtime` and `vault` schemas exist;
+    - the `supabase_realtime` publication exists;
+    - Supabase's `ensure_rls` event trigger is installed.
+  - The application's own guarded Flyway strategy migrated it: a baseline at version 0, then V001–V051, giving 52 history rows as in production.
+  - It then received 2,500 synthetic jobs and 60,023 outbox events, of which 30,023 were pending.
+
+**Dry-run results.** The evidence is in `C:\RobinBackups\dryrun\20261106T145234Z-dryrun\`.
+
+| Stage | Checks |
+|---|---|
+| B (backup) | 14/14 PASS |
+| C (restore) | 13/13 PASS |
+
+What Stage B confirmed:
+
+- The server is 17.11. pg_dump exited with 0 and its log is clean.
+- 77 tables were fingerprinted in the dump's snapshot.
+- The archive's table of contents for `public` matches the production inventory: 70 table-data entries, 70 row-security entries, 12 triggers, 1 view, 1 sequence and 175 indexes.
+- Archive rows equal snapshot rows for all 77 tables.
+- The decryption round trip and the SHA-256 of the copy on this machine both match.
+
+What Stage C confirmed:
+
+- The restore ran as `robin_app` in one transaction, with no warnings.
+- All 21 inventory keys are equal, and no constraint is `NOT VALID`.
+- 70 tables with 122,614 rows have equal fingerprints.
+- The data outside `public` is readable (130 rows).
+- RLS behaves as planned: the owner sees all 60,023 outbox rows, and a role without `BYPASSRLS` sees none.
+- All 30,023 pending events are preserved.
+- Flyway validate passed: 52 validated, 0 pending, 0 failed.
+
+**Findings carried forward:**
+
+- Flyway 10.10.0 logs *"PostgreSQL 17.11 is newer than this version of Flyway … The latest supported version of PostgreSQL is 16."* Validation still succeeds. Upgrading Flyway remains a separate change (§7).
+- The restore test creates `pgcrypto` in `public`, whereas production has it in `extensions`. The application does not call pgcrypto at runtime (§1.3). Its placement on Oracle is decided in Stage D.
+- The dry run could not exercise:
+  - TLS to the pooler;
+  - the pooler's session limit and idle timeouts;
+  - the interactive prompts;
+  - the production data volume.
+
+  The checks run at run time cover them, and the README lists what to do if they fail.
+
+**Exit criteria met:**
+
+- The dry run passed, with counts and fingerprints equal before and after the restore.
+- The image id is recorded.
+- Approvals 1–3 were given on 6 Nov.
+
+### Planned deliverables
+
+Kept for reference. The implementation refined A3, as described above.
 
 - **A1. Tooling.**
   - Start Docker Desktop.
@@ -274,9 +353,9 @@ Exit criteria:
   - no transactions older than 5 minutes;
   - outbox sequence value;
   - a free pooler slot: the backend holds 10 Supavisor sessions, and the dump needs 2.
-- **B2. Run `backup-supabase.sh` (you):**
-  - You type the database password at its prompt.
-  - You type the encryption passphrase at gpg's prompt.
+- **B2. Run `backup-supabase.ps1` (you).** The exact command is in `scripts/db-migration/README.md`.
+  - You type the database password at its prompt inside the container.
+  - After the dump, you type the encryption passphrase twice at the same kind of prompt.
   - Expect a run of tens of minutes. The time is set by pooler throughput.
 - **B3. Verification. Every item below is a pass/fail gate:**
   1. pg_dump exits with code 0, and its log contains no `error`.
@@ -488,7 +567,7 @@ Exit criteria: CI passes on x86_64 and on arm64 against PostgreSQL 17.11.
 
 ## 8. Approvals needed
 
-**Now, to start Stage A:**
+**Now, to start Stage A** (given on 6 Nov, and done; see §2):
 
 1. Start Docker Desktop and pull the official image `postgres:17.11-bookworm`, a download of about 150 MB.
 2. Create `C:\RobinBackups\`, outside the repository and OneDrive, or name another location.
@@ -516,7 +595,8 @@ Exit criteria: CI passes on x86_64 and on arm64 against PostgreSQL 17.11.
 
 ## 9. What is not done and not claimed
 
-- There is no backup yet, and nothing has been restored.
+- The Stage A tooling exists and passed a dry run on synthetic data. It has not been run against production.
+- There is no production backup yet, and no production data has been restored.
 - **No migration readiness is claimed.**
 - Oracle has not been provisioned.
 - Render environment variables are unchanged.
