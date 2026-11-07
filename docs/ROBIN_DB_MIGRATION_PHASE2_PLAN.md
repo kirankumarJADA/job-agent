@@ -1,6 +1,8 @@
 # ROBIN — Database migration, Phase 2: backup-first plan
 
-**Status: PLANNING.** Stage A is complete: the backup and restore-test tooling is built, and it passed a dry run on synthetic data on 6 Nov (§2). **No production backup exists yet.** Nothing in this document has been executed against production except the read-only `SELECT`s listed in §1, with their UTC times. Migration readiness is **not** claimed. It cannot be claimed until a backup has been restored into an isolated PostgreSQL 17 instance and verified (Stage C).
+**Status: PLANNING.** Stage A is complete: the backup and restore-test tooling is built, and it passed a dry run on synthetic data on 6 Nov (§2). **No production backup exists yet.**
+
+**Revised on 7 Nov 2026 (§10).** Supabase will not be upgraded, the target is PostgreSQL 17 on Oracle Cloud, planned downtime is acceptable, and the egress quota must not be exceeded. Where §10 differs from §0–§9, §10 applies. The earlier sections are kept unchanged as the record. Nothing in this document has been executed against production except the read-only `SELECT`s listed in §1, with their UTC times. Migration readiness is **not** claimed. It cannot be claimed until a backup has been restored into an isolated PostgreSQL 17 instance and verified (Stage C).
 
 **Prepared:** 2026-11-06. Sources: the Supabase SQL editor (read-only catalog and aggregate queries as `postgres`), the Supabase usage page, source inspection, and vendor documentation fetched the same day. This repository is public, so identifiers that would locate the production project are deliberately left out: the project ref, organisation id, pooler host, user names and connection strings.
 
@@ -603,5 +605,272 @@ Exit criteria: CI passes on x86_64 and on arm64 against PostgreSQL 17.11.
 - Supabase configuration, permissions and data are unchanged.
 - Outbox processing has been neither paused nor resumed, and no row has been modified.
 - Phase 20 remains **open**. Its live probes stay blocked until production writes are reliable.
+
+## 10. Revision, 7 Nov 2026: Oracle without a Supabase upgrade
+
+### 10.1 Decisions (yours, 7 Nov)
+
+- Supabase is **not** upgraded. The target is PostgreSQL 17 on Oracle Cloud.
+- The project has no active users, so **planned downtime is acceptable**.
+- The egress quota is **not** to be exceeded intentionally.
+- The full backup is not skipped.
+- Supabase stays intact (no deletion, no data or settings changes) until the Oracle migration is fully verified.
+- No cutover yet.
+
+This replaces §1.2's *"the backup is not to be delayed to save egress"* and §6's paid-plan bridge option.
+
+### 10.2 Facts at 16:02 UTC on 7 Nov
+
+**Usage page** (cycle 18 Oct–18 Nov; the grace period ends 12 Nov):
+
+| Item | Used | Limit | |
+|---|---:|---:|---:|
+| Egress | 4.197 GB | 5 GB | 84 % |
+| Log ingestion | 0.925 GB | 1 GB | 93 % |
+| Database size | 1.616 GB | 0.5 GB | 323 % |
+| Cached egress | 0 | 5 GB | 0 % |
+
+**Background use, with no backup running:**
+
+- About 27 MB an hour of egress (3.829 GB at 02:22, 4.171 at 14:41, 4.197 at 16:02).
+- About 16 MB an hour of log ingestion.
+- Both come from the backend's retry loops against the read-only database (§1.1 and §1.2).
+- **If nothing changes:**
+  - log ingestion passes 1 GB at about 21:00 UTC on 7 Nov;
+  - egress passes 5 GB at about 22:00 UTC on 8 Nov.
+
+**Supabase billing FAQ** (fetched 7 Nov):
+
+- Restrictions *"due to usage limits are lifted once your quota refills at the start of the next billing cycle"*, possibly after *"a short delay"*.
+- After the grace period, an organisation that exceeds again receives no new grace period.
+- Restrictions can include pausing projects, read-only databases and *"a 402 status code for all API requests"*.
+- The FAQ still does not say whether Postgres connections are affected. §0's planning assumption stands: **from 12 Nov the database may be unreachable**, and database size alone keeps the organisation over quota.
+
+### 10.3 Why one complete backup cannot be taken before 12 Nov within the allowance
+
+- **The complete dump needs about 1.07 GB of egress (0.95–1.25 GB):**
+  - 1.008 GB of table data, sampled read-only as `pg_dump` sends it;
+  - row framing about 0.018 GB;
+  - catalogue queries 0.01–0.02 GB;
+  - TLS and TCP up to about 0.03 GB.
+- **At most 0.803 GB is left** in this cycle.
+- **No route reduces the transfer without losing data:**
+  - `pg_dump`'s compression happens on this machine, after the transfer;
+  - the PostgreSQL protocol and TLS 1.3 carry no compression;
+  - every connection out of Supabase is metered as egress;
+  - Supabase's own Free-plan export (`supabase db dump`) is the same transfer, written in plaintext.
+- **Measured locally on 7 Nov** (dry run, synthetic data): the container received 51.8 MB for a 6.6 MB compressed archive. Egress follows the uncompressed data, not the archive size.
+
+### 10.4 Revised sequence
+
+| Step | When | What | Egress | Approval |
+|---|---|---|---:|---|
+| R1 | now | **Suspend the Render backend service.** It is Robin's only Render service: no worker service or cron job is deployed (dashboard, 7 Nov). This stops the retry loops, and with them about 27 MB an hour of egress, about 16 MB an hour of logs and the failed writes. The database is unchanged: it is already read-only. | 0 | yes |
+| R2 | after R1, before 12 Nov | **Window 1: partial backup.** The reviewed Stage B procedure, with `-DeferTableData public.outbox_events` and `-EgressCapMB` set to the fresh remaining allowance minus 60 MB. Every other table's rows are in it; `outbox_events` keeps its definition, sequence value, counts and fingerprint. | about 0.53 GB (0.47–0.62), never above the cap | yes; you run it |
+| R3 | after R2 | **Restore test of Window 1** (Stage C, local) and a rehearsal into the Oracle-shaped server. | 0 | no; local only |
+| R4 | when you decide | **Oracle VM:** provision with `oracle/provision-postgres17.sh` (§10.8), then rehearse the Window 1 restore on it through an SSH tunnel. | 0 (Oracle ingress is free) | yes |
+| R5 | from 18 Nov, after a fresh usage reading | **Window 2: complete backup** with the unchanged reviewed procedure and a cap of about 1,600 MB of the new 5 GB. `verify-backup.ps1 -CompareWith <Window 1>` must show every table's count and fingerprint unchanged. | about 1.07 GB | yes; you run it |
+| R6 | after R5 | Stage C on Window 2, then restore Window 2 into `robin` on Oracle and verify. | 0 | yes |
+| R7 | later | Cutover (§10.6 and §10.7). Supabase stays untouched. | 0 | yes |
+
+**Notes on the sequence:**
+
+- **Window 1 is insurance, not the complete backup.** Window 2 is the complete backup.
+- **The database is frozen**, because it is read-only and has no writers once R1 is done. So Window 2 must equal Window 1, plus the outbox rows; `-CompareWith` proves it.
+- **If Supabase is unreachable from 12 Nov and stays so after 18 Nov,** Window 1 becomes the migration source. It would lack the 1,597,314 outbox rows:
+  - 898,295 published events, which are history;
+  - 771,389 pending `job.discovered` events, which re-scoring the jobs can supersede (§1.5 R2);
+  - **23 other pending events** (11 `job.matched`, 11 `verification.completed`, 1 `signup.completed`), which would be lost.
+
+  That would be your decision then. You could also ask Supabase support whether the grace period can be extended while you export and migrate; this plan does not rely on it.
+- **Inactivity pausing:** with no traffic, Supabase may pause the Free project for inactivity before 18 Nov. Restoring it from the dashboard does not change its data; it would be a separate decision.
+
+**Egress budget for this cycle, if R1 happens by about 18:00 UTC:**
+
+| | GB |
+|---|---:|
+| Used at 16:02 | 4.197 |
+| Background until R1 | about 0.05 |
+| Window 1 | about 0.53 (at most the cap) |
+| **Expected total** | **about 4.78 of 5** |
+
+### 10.5 Tooling changes in this revision (tested 7 Nov)
+
+**`backup-supabase.ps1` and `container/backup.sh`:**
+
+- `-EgressCapMB` is mandatory in live mode. A watchdog inside the container samples the bytes received every 0.1 s, from before the first connection. Past the cap it stops `pg_dump` and `psql`, and the run fails. The measured transfer is recorded in the manifest as `network_rx_bytes`.
+- `-DeferTableData` produces a partial backup, which is labelled PARTIAL everywhere.
+- The host and user prompts reject `@`, URLs, ports and paths, and ask again. The first live attempt on 7 Nov failed on a leading `@`.
+
+**Other scripts:**
+
+- `container/restore.sh` and `restore-test.ps1`:
+  - partial archives (the deferred tables must restore empty);
+  - a remote target, prepared by the provisioning script and reached over TLS `verify-full` as `robin_app`; an empty target is required.
+- `verify-backup.ps1`: the independent post-run verifier, with `-CompareWith`.
+- `oracle/provision-postgres17.sh` and `oracle/test-oracle-local.ps1`.
+
+**Default behaviour is unchanged:** no deferral, and the restore target is local.
+
+| Test (synthetic, 7 Nov) | Result |
+|---|---|
+| Complete, cap 500 MB (final code) | backup 15/15 PASS (51.8 MB received), restore 13/13 PASS including Flyway validate |
+| Partial (`outbox_events` deferred), cap 500 MB (final code) | backup 16/16 PASS (35.2 MB received; TOC 69 table-data entries; outbox sequence value kept), restore 11 PASS + 2 NOTE including Flyway validate; `verify-backup.ps1` 24 PASS, 0 FAIL |
+| Cap 20 MB | stopped with `FAIL egress_cap`: no archive, no container left. Overshoot on the local network: 46 MB at 0.5 s sampling, 35 MB at 0.1 s (final code). Over the internet, throughput and so overshoot are far lower; the README still requires a margin of at least 60 MB. |
+| `verify-backup.ps1 -CompareWith`, two different synthetic sources | `same_data_as_other_run` FAIL as it must (12 tables differ) |
+| Oracle-shaped rehearsal | PASS (§10.12) |
+
+### 10.6 Render variables at cutover (names only; values never in this repository)
+
+| Variable | Change |
+|---|---|
+| `SPRING_DATASOURCE_URL` | `jdbc:postgresql://<Oracle host>:5432/robin?sslmode=verify-full&sslrootcert=/etc/secrets/robin-pg-ca.crt` |
+| `SPRING_DATASOURCE_USERNAME` | `robin_app` |
+| `SPRING_DATASOURCE_PASSWORD` | `robin_app`'s password (password manager) |
+| Secret file `robin-pg-ca.crt` (new) | the provisioning script's `/etc/robin/robin-pg-ca.crt`; public, but mounted as a Render secret file |
+| `SPRING_APPLICATION_JSON` (temporary) | `{"app":{"discovery":{"scheduler-enabled":false,"identity-backfill-enabled":false}}}` for the first start, removed when discovery resumes |
+
+**Unchanged:**
+
+- `SPRING_PROFILES_ACTIVE`;
+- the Redis, Firebase and CORS variables;
+- `WORKER_EVENT_TOKEN`;
+- the invite-code, LLM and managed-mail variables;
+- the worker's `WORKER_*` URLs, which point at the backend, not the database;
+- the frontend's `VITE_*`.
+
+**Rollback:** record the current three `SPRING_DATASOURCE_*` values in the password manager before changing them.
+
+### 10.7 Background work that must be paused
+
+| Component | Writes | Switch today |
+|---|---|---|
+| `OutboxProcessor.dispatchPending`, every 2 s; also runs immediately at startup | publishes events, marks rows published, re-scores jobs, can create applications | **none**: needs the dispatch kill switch (§6), a code change |
+| `OutboxProcessor.reconcileDlq`, every 5 min | DLQ notifications | none (same switch) |
+| `DiscoveryScheduler.runDueSources`, every 60 s | discovery runs, jobs, outbox events | `app.discovery.scheduler-enabled` |
+| `JobDiscoveryService.scheduledDiscoveryMaintenance`, hourly | archives jobs not seen for 30 days (they will age while discovery is paused) | **none** (proposed in the same code change) |
+| `JobIdentityBackfill`, at startup | identity keys for up to 10,000 jobs | `app.discovery.identity-backfill-enabled` |
+| `AutomationRecoveryScheduler`, every 60 s | resets stale RUNNING plans | none; low risk |
+| `ManagedMailRetentionJob`, every 10 min | deletes expired managed-mail content (retention) | none; keep it running |
+| Render worker service (`worker/`) | none directly; it would call the backend (`claim-next`, events) | **not deployed**: Robin has one Render service, the backend (Docker, Frankfurt region; dashboard checked 7 Nov) |
+| Render cron jobs | — | none in any of your Render workspaces |
+| Anything outside Render that calls the backend (uptime monitors) | none known in this repository | check before cutover |
+
+### 10.8 Oracle PostgreSQL 17: preparation
+
+`scripts/db-migration/oracle/provision-postgres17.sh` implements §5 for a fresh Ubuntu 24.04 VM:
+
+- PGDG `postgresql-17`, after checking the signing-key fingerprint;
+- the cluster on the block volume (UTF-8, `en_US.UTF-8`, data checksums);
+- the §5 configuration;
+- a private CA and a server certificate;
+- `pg_hba`: TLS + SCRAM only, `robin_app` only, Render's ranges only, everything else rejected;
+- `robin_app` (`NOSUPERUSER NOBYPASSRLS`) owns `robin` and `robin_restore` (rehearsals, loopback only);
+- the host firewall opened for the same ranges.
+
+The password is set at psql's `\password` prompt.
+
+**Local test, 7 Nov:** passed (§10.12).
+
+**Still required before provisioning (§8, item 9):**
+
+- the tenancy and home region. The backend runs in Render's Frankfurt region, so a home region near Frankfurt keeps latency low; Always Free compute must be in the home region (§1.7);
+- Render's published outbound ranges for Frankfurt (the `--allow` list);
+- a decision on Pay As You Go;
+- a `/srv/pgdata` block volume;
+- the VCN security list;
+- your approval.
+
+**Nightly encrypted backups on the VM** (§5) are written but not yet scripted. They are a prerequisite for cutover, not for provisioning.
+
+### 10.9 Health checks, application tests and rollback
+
+**Before cutover:**
+
+1. Window 2 passes `verify-backup.ps1`, including `-CompareWith` against Window 1.
+2. Stage C passes locally and on the Oracle VM (`restore-test.ps1 -Target remote`).
+3. Flyway validate passes over JDBC with `verify-full` (the local rehearsal does this).
+4. The backend integration tests pass on PostgreSQL 17 (§7).
+5. The dispatch kill switch is merged.
+
+**At cutover:**
+
+1. The backend is suspended (already done in R1).
+2. Restore Window 2 into `robin` on Oracle and verify it.
+3. Change the §10.6 variables.
+4. Deploy with dispatch and discovery paused.
+5. Check `/api/v1/system/health` (Render's health check), `/actuator/health` (components: database, Redis) and `/actuator/info` (build).
+6. Confirm that the Flyway log reports the schema up to date at version 051.
+7. On Oracle, `pg_stat_ssl` shows TLS for every backend connection, and the connection count is at most HikariCP's 10.
+8. Before any write, row counts equal the Window 2 manifest.
+9. Run the smoke tests in `DEPLOYMENT.md` §6 and the Phase 20 probes.
+10. Resume outbox dispatch under the approved policy (R3, then R2), then discovery. The worker service, when it is deployed, points at the backend and needs no database change.
+
+**Rollback:**
+
+- **Before Oracle takes writes:** restore the three recorded `SPRING_DATASOURCE_*` values and redeploy. Supabase is untouched, though it may be read-only or restricted.
+- **After Oracle takes writes:** fix forward, or restore Oracle from its own backups.
+- **In every case,** the encrypted archives and the untouched Supabase project are the reference copies.
+- **Triggers:** as in §6.
+
+### 10.10 Risks
+
+| Risk | Mitigation |
+|---|---|
+| Supabase unreachable from 12 Nov, and still restricted after 18 Nov | Window 1 before 12 Nov; the outbox consequences are stated in §10.4 |
+| An interrupted Window 1 run spends allowance | the cap; the B1 pre-flight; about 3 GB of free RAM; no sleep, lid open; a passphrase of at least 16 characters saved first |
+| Overshoot past the cap | 0.1 s sampling and a margin of at least 60 MB |
+| The usage page lags by up to an hour | read it at least 1 h after R1, and include the margin |
+| Inactivity pause before 18 Nov | restore it from the dashboard if needed (separate decision) |
+| A lost passphrase makes an archive unrecoverable | password manager plus a second copy; an offsite copy of each `.gpg` |
+| The first start on Oracle replays 771k events | the dispatch kill switch is a cutover prerequisite (§6) |
+| Oracle reclaims an idle instance or lacks A1 capacity | §5 risks; watch the metrics in week 1 |
+
+### 10.11 Not done and not claimed (7 Nov)
+
+- No production backup exists. R1–R7 have not started.
+- Render, Supabase and Oracle are unchanged, and no production data was read except the counts in §10.2.
+- The tooling changes are tested on synthetic data only.
+
+### 10.12 Oracle-shaped rehearsal, 7 Nov: PASS
+
+The run was `dry-run.ps1 -EgressCapMB 500 -DeferTableData public.outbox_events -OracleRehearsal`, on synthetic data, from 16:30 to 16:34 UTC.
+
+**Provisioning.** `provision-postgres17.sh` ran in a fresh `ubuntu:24.04` container (amd64):
+
+- PostgreSQL 17.11 (PGDG `17.11-1.pgdg24.04+2`), after the signing-key fingerprint check;
+- `ssl=on` and `password_encryption=scram-sha-256`;
+- `robin_app` with superuser, bypassrls and createdb all false;
+- `citext` 1.6 and `pgcrypto` 1.3 in `public`, and `pg_stat_statements` 1.11 in `extensions`.
+
+**Access rules,** tested from another container:
+
+| Attempt | Result |
+|---|---|
+| `robin_app` to `robin` with `verify-full` | connected, TLS 1.3 |
+| the same without TLS | refused by `pg_hba` ("no encryption") |
+| `postgres` over the network | refused |
+| `robin_app` to database `postgres` | refused |
+| a host name that is not in the certificate | refused by `verify-full` |
+
+**Remote restore** (`restore-test.ps1 -Target remote`): the archive was decrypted in the client container's `tmpfs` and restored into `robin` over TLS `verify-full` as `robin_app`, in one transaction. The target was verified as owned by `robin_app` and empty before the restore.
+
+- All 21 inventory keys are equal, and 0 constraints are `NOT VALID`.
+- Counts and fingerprints are equal for 70 tables (62,591 rows), with the deferred table restored empty.
+- The archive's row counts are identical to the backup-time counts.
+- The data outside `public` is readable.
+- RLS is enabled on 70/70 tables, 0 are forced, and the owner sees all rows.
+- **Flyway validate, over JDBC with `sslmode=verify-full`** (the backend's own connection path): 52 history rows, 0 pending, 0 invalid.
+
+**Not exercised locally:**
+
+- the OCI security list;
+- Oracle's iptables rules (step 8 is skipped in container mode);
+- systemd;
+- ARM64;
+- the block volume;
+- latency from Render.
+
+These are part of R4 on the real VM.
 
 **PHASE 2 STATUS: PLANNING**

@@ -119,10 +119,14 @@ function Invoke-FlywayHarness {
     $ErrorActionPreference = 'Continue'
     $pom = (Resolve-Path (Join-Path $PSScriptRoot '..\..\backend\pom.xml')).ProviderPath
     if (Test-Path $ReportFile) { Remove-Item -LiteralPath $ReportFile }
+    # mvn is a batch file on Windows: cmd.exe would split an unquoted URL at
+    # "&" (for example ?sslmode=verify-full&sslrootcert=...), so quote it.
+    $urlArg = "-Drobin.flyway.external.url=$JdbcUrl"
+    if ($JdbcUrl.Contains('&')) { $urlArg = '"' + $urlArg + '"' }
     $mvnArgs = @('-f', $pom, '-B', '-q',
         '-Dtest=none', '-Dsurefire.failIfNoSpecifiedTests=false',
         '-Dit.test=ExternalDatabaseFlywayIT', '-Dfailsafe.failIfNoSpecifiedTests=false',
-        "-Drobin.flyway.external.url=$JdbcUrl",
+        $urlArg,
         "-Drobin.flyway.external.user=$User",
         "-Drobin.flyway.external.password=$Password",
         "-Drobin.flyway.external.action=$Action",

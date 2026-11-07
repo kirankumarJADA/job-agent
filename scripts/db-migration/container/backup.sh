@@ -30,7 +30,11 @@ pass() { printf 'PASS|%s|%s\n' "$1" "${2:-}" >> "$CHECKS"; log "PASS $1 ${2:-}";
 fail() { printf 'FAIL|%s|%s\n' "$1" "${2:-}" >> "$CHECKS"; log "FAIL $1 ${2:-}"; FAILED=1; }
 note() { printf 'NOTE|%s|%s\n' "$1" "${2:-}" >> "$CHECKS"; log "NOTE $1 ${2:-}"; }
 cleanup_secrets() { rm -f "$DUMP/.pgpass" "$DUMP/.passphrase"; }
-trap cleanup_secrets EXIT
+WATCHDOG=
+stop_watchdog() {
+  if [[ -n $WATCHDOG ]]; then kill "$WATCHDOG" 2>/dev/null || true; wait "$WATCHDOG" 2>/dev/null || true; WATCHDOG=; fi
+}
+trap 'cleanup_secrets; stop_watchdog' EXIT
 abort() { fail "$1" "${2:-}"; log "backup aborted"; exit 1; }
 
 MODE=${ROBIN_MODE:-}
@@ -50,6 +54,77 @@ if [[ $MODE == live && $PGSSLMODE == disable ]]; then
   exit 2
 fi
 
+# Scope and egress controls, set by backup-supabase.ps1:
+#   ROBIN_DEFER_TABLE_DATA  comma-separated schema.table names whose ROWS are
+#                           left out of this archive. Their definitions, and
+#                           their counts and fingerprints in the snapshot, are
+#                           still recorded. Empty (the default) = complete.
+#   ROBIN_EGRESS_CAP_BYTES  stop pg_dump and psql once this container has
+#                           received more than this many bytes, counted on all
+#                           its network interfaces from before the first
+#                           connection. 0 = no cap. Live mode requires a cap.
+DEFER=${ROBIN_DEFER_TABLE_DATA:-}
+CAP=${ROBIN_EGRESS_CAP_BYTES:-0}
+[[ $CAP =~ ^[0-9]+$ ]] || { echo "ROBIN_EGRESS_CAP_BYTES must be a whole number of bytes" >&2; exit 2; }
+if [[ $MODE == live ]] && (( CAP == 0 )); then
+  echo "refusing to run: live mode needs an egress cap (ROBIN_EGRESS_CAP_BYTES)" >&2
+  exit 2
+fi
+deferred=()
+if [[ -n $DEFER ]]; then
+  IFS=',' read -r -a deferred <<< "$DEFER"
+  for t in "${deferred[@]}"; do
+    [[ $t =~ ^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$ ]] || { echo "invalid table name in ROBIN_DEFER_TABLE_DATA: $t" >&2; exit 2; }
+  done
+fi
+printf '%s\n' "${deferred[@]}" | sed '/^$/d' > "$OUT/deferred-table-data.txt"
+
+net_ifaces() { # network interfaces of this container, loopback excluded
+  local f
+  for f in /sys/class/net/*/statistics/rx_bytes; do
+    [[ -r $f && $f != /sys/class/net/lo/* ]] && printf '%s\n' "$f"
+  done
+  return 0
+}
+net_rx() { # bytes received by this container on every interface except loopback
+  local total=0 f v
+  while IFS= read -r f; do
+    v=$(< "$f") || v=0
+    total=$(( total + v ))
+  done < <(net_ifaces)
+  printf '%s' "$total"
+}
+mb() { printf '%s' "$(( $1 / 1000000 ))"; } # decimal MB, the unit of the Supabase usage page
+
+start_watchdog() { # every 0.1 s: enforce the cap; every 30 s: report what was received
+  # The cap is checked between samples, so data already in flight when it is
+  # crossed still arrives (on a fast local network the 20 MB test cap was
+  # overshot to 46 MB). Set the cap with a margin: see the README.
+  (
+    set +e
+    last=0
+    while :; do
+      used=$(( $(net_rx) - RX0 ))
+      printf '%(%s)T\n' -1 > "$DUMP/watchdog.beat"
+      if (( CAP > 0 && used > CAP )); then
+        printf '%s\n' "$used" > "$DUMP/egress-cap.hit"
+        for p in /proc/[0-9]*; do [[ $(cat "$p/comm" 2>/dev/null) == pg_dump ]] && kill -TERM "${p#/proc/}" 2>/dev/null; done
+        for p in /proc/[0-9]*; do [[ $(cat "$p/comm" 2>/dev/null) == psql ]] && kill -TERM "${p#/proc/}" 2>/dev/null; done
+        log "EGRESS CAP REACHED: $(mb "$used") MB received, cap $(mb "$CAP") MB; pg_dump and psql were stopped"
+        exit 0
+      fi
+      printf -v now '%(%s)T' -1
+      if (( now - last >= 30 )); then
+        if (( CAP > 0 )); then log "network: $(mb "$used") MB received so far (cap $(mb "$CAP") MB)"
+        else log "network: $(mb "$used") MB received so far (no cap)"; fi
+        last=$now
+      fi
+      sleep 0.1
+    done
+  ) &
+  WATCHDOG=$!
+}
+
 write_pgpass() {
   local esc=${1//\\/\\\\}
   esc=${esc//:/\\:}
@@ -67,6 +142,12 @@ read_secret() { # $1 = prompt; prints the value on stdout
 
 log "Robin backup ($MODE): $(pg_dump --version); $(gpg --version | head -n 1)"
 log "target: port $PGPORT, database $PGDATABASE, sslmode $PGSSLMODE (host and user are not logged)"
+if (( ${#deferred[@]} > 0 )); then
+  log "scope: PARTIAL - the rows of ${DEFER//,/, } are left out (definitions, counts and fingerprints are kept)"
+else
+  log "scope: complete (every table's rows)"
+fi
+if (( CAP > 0 )); then log "egress cap: $(mb "$CAP") MB received by this container"; else log "egress cap: none"; fi
 
 # ── 1. secrets, in tmpfs only ─────────────────────────────────────────
 if [[ $MODE == live ]]; then
@@ -84,6 +165,16 @@ fi
 export PGPASSFILE="$DUMP/.pgpass" PGAPPNAME=robin-backup PGCONNECT_TIMEOUT=20
 
 # ── 2. connect and check the server major version ─────────────────────
+# Everything this container receives from here on counts against the cap.
+# A cap that cannot be measured is refused rather than silently ignored.
+if [[ -z $(net_ifaces) ]]; then
+  if (( CAP > 0 )); then abort egress_meter "cannot read this container's network counters, so the cap could not be enforced"; fi
+  note egress_meter "network counters unavailable; transfer not measured"
+fi
+RX0=$(net_rx)
+start_watchdog
+for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -s $DUMP/watchdog.beat ]] && break; sleep 0.5; done
+if (( CAP > 0 )) && [[ ! -s $DUMP/watchdog.beat ]]; then abort egress_meter "the egress watchdog did not start"; fi
 info=$(psql -X -q -At -F '|' -c "select current_setting('server_version_num'), current_setting('default_transaction_read_only')") \
   || abort connect "psql could not connect (check host, user, password, sslmode)"
 IFS='|' read -r vnum ro <<< "$info"
@@ -98,6 +189,17 @@ set +e
 psql -X -q -At -F '|' -v ON_ERROR_STOP=1 -f "$WORK/snapshot-session.sql" 2>&1 | tee -a "$LOG" >&2
 session_rc=${PIPESTATUS[0]}
 set -e
+# The network part of the run is over: stop the watchdog, then measure.
+stop_watchdog
+rx_used=$(( $(net_rx) - RX0 ))
+if [[ -s $DUMP/egress-cap.hit ]]; then
+  abort egress_cap "stopped after $(mb "$rx_used") MB received (cap $(mb "$CAP") MB); nothing was encrypted or copied out"
+fi
+if (( CAP > 0 )); then
+  pass egress_within_cap "$(mb "$rx_used") MB received ($rx_used bytes), cap $(mb "$CAP") MB"
+else
+  note network_received "$(mb "$rx_used") MB received ($rx_used bytes), no cap"
+fi
 [[ -s $DUMP/pg_dump.status ]] || abort pg_dump "pg_dump never ran (snapshot session exited with $session_rc; see backup.log)"
 dump_rc=$(cat "$DUMP/pg_dump.status")
 if [[ $dump_rc == 0 ]]; then pass pg_dump_exit "exit 0"; else abort pg_dump_exit "exit $dump_rc (see pg_dump.log)"; fi
@@ -129,7 +231,9 @@ toc_count() { grep -cE "^[0-9]+; [0-9]+ [0-9]+ $1 public " "$OUT/toc.txt" || tru
 check_toc() { # $1 = check name, $2 = TOC count, $3 = expected
   if [[ $2 == "$3" ]]; then pass "$1" "$2"; else fail "$1" "archive has $2, snapshot inventory has $3"; fi
 }
-check_toc toc_table_data_public "$(toc_count 'TABLE DATA')" "$(inv tables)"
+deferred_public=0
+for t in "${deferred[@]}"; do [[ $t == public.* ]] && deferred_public=$(( deferred_public + 1 )); done
+check_toc toc_table_data_public "$(toc_count 'TABLE DATA')" "$(( $(inv tables) - deferred_public ))"
 check_toc toc_row_security_public "$(toc_count 'ROW SECURITY')" "$(inv rls_enabled_tables)"
 check_toc toc_triggers_public "$(toc_count 'TRIGGER')" "$(inv triggers)"
 check_toc toc_views_public "$(toc_count 'VIEW')" "$(inv views)"
@@ -139,10 +243,14 @@ check_toc toc_indexes_public "$(( $(toc_count 'INDEX') + $(toc_count 'CONSTRAINT
 # ── 5. every snapshot row is in the archive ───────────────────────────
 pg_restore --data-only --file=- "$DUMP/robin.dump" | awk -f "$WORK/copy-counts.awk" > "$OUT/archive-counts.txt" \
   || abort archive_counts "could not read the archive's table data"
-cmp_result=$(awk -F'|' -v out="$OUT/count-comparison.txt" '
+cmp_result=$(awk -F'|' -v out="$OUT/count-comparison.txt" -v deferred="$DEFER" '
+  BEGIN { n = split(deferred, d, ","); for (i = 1; i <= n; i++) if (d[i] != "") dfr[d[i]] = 1 }
   FNR == NR { arch[$1] = $2; next }
   { seen[$1] = 1
-    if ($1 in arch) {
+    if ($1 in dfr) {
+      if ($1 in arch) { bad++; print "DEFERRED_BUT_IN_ARCHIVE|" $1 "|snapshot=" $2 "|archive=" arch[$1] > out }
+      else { dfd++; dfrows += $2; print "DEFERRED|" $1 "|snapshot=" $2 > out }
+    } else if ($1 in arch) {
       if (arch[$1] == $2) ok++
       else { bad++; print "MISMATCH|" $1 "|snapshot=" $2 "|archive=" arch[$1] > out }
     } else if ($4 == "t") {
@@ -151,9 +259,9 @@ cmp_result=$(awk -F'|' -v out="$OUT/count-comparison.txt" '
   }
   END {
     for (a in arch) if (!(a in seen)) { bad++; print "UNEXPECTED_IN_ARCHIVE|" a "|archive=" arch[a] > out }
-    printf "%d|%d|%d\n", ok + 0, bad + 0, ext + 0
+    printf "%d|%d|%d|%d|%d\n", ok + 0, bad + 0, ext + 0, dfd + 0, dfrows + 0
   }' "$OUT/archive-counts.txt" "$DUMP/source-fingerprints.txt")
-IFS='|' read -r cmp_ok cmp_bad cmp_ext <<< "$cmp_result"
+IFS='|' read -r cmp_ok cmp_bad cmp_ext cmp_dfd cmp_dfrows <<< "$cmp_result"
 touch "$OUT/count-comparison.txt"
 if [[ $cmp_bad == 0 && $cmp_ok -gt 0 ]]; then
   pass archive_row_counts "$cmp_ok tables: archive rows equal snapshot rows"
@@ -161,6 +269,13 @@ else
   fail archive_row_counts "$cmp_bad table(s) differ (see count-comparison.txt)"
 fi
 [[ $cmp_ext == 0 ]] || note extension_tables "$cmp_ext extension-owned table(s) are not dumped as data (see count-comparison.txt)"
+if (( ${#deferred[@]} > 0 )); then
+  if [[ $cmp_dfd == "${#deferred[@]}" ]]; then
+    pass deferred_table_data "rows of $cmp_dfd table(s) left out as requested ($cmp_dfrows rows at the snapshot): ${DEFER//,/, }"
+  else
+    fail deferred_table_data "$cmp_dfd of ${#deferred[@]} deferred table(s) were found in the snapshot and left out of the archive"
+  fi
+fi
 
 # ── 6. hash, encrypt (AES-256), prove decryption ──────────────────────
 plain_sha=$(sha256sum "$DUMP/robin.dump" | cut -d' ' -f1)
@@ -196,11 +311,17 @@ cp "$DUMP/robin.dump.gpg" "$OUT/robin.dump.gpg"
 for f in source-facts.txt source-fingerprints.txt source-inventory.txt pg_dump.log pg_dump.timing; do
   cp "$DUMP/$f" "$OUT/$f"
 done
+if (( ${#deferred[@]} > 0 )); then scope=partial; else scope=complete; fi
 
 # ── 7. manifest (no host, user, credentials or row data) ──────────────
 {
   echo "format|robin-backup-manifest-v1"
   echo "mode|$MODE"
+  echo "scope|$scope"
+  echo "deferred_table_data|$DEFER"
+  echo "deferred_rows|${cmp_dfrows:-0}"
+  echo "network_rx_bytes|$rx_used"
+  echo "egress_cap_bytes|$CAP"
   echo "written_utc|$(date -u +%FT%TZ)"
   echo "image|${ROBIN_IMAGE:-unknown}"
   echo "image_id|${ROBIN_IMAGE_DIGEST:-unknown}"
@@ -229,4 +350,8 @@ if (( FAILED )); then
   log "BACKUP FAILED: $(grep -c '^FAIL' "$CHECKS") check(s) failed; see checks.txt"
   exit 1
 fi
-log "BACKUP OK: $(grep -c '^PASS' "$CHECKS") checks passed; encrypted archive $enc_bytes bytes"
+if [[ $scope == partial ]]; then
+  log "PARTIAL BACKUP OK: $(grep -c '^PASS' "$CHECKS") checks passed; encrypted archive $enc_bytes bytes; rows of ${DEFER//,/, } are NOT in it (this is not the complete backup)"
+else
+  log "BACKUP OK: $(grep -c '^PASS' "$CHECKS") checks passed; encrypted archive $enc_bytes bytes"
+fi

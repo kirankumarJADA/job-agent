@@ -25,7 +25,13 @@ param(
     [int] $RestorePort = 55439,
     [int] $JobCount = 2500,
     [int] $EventCount = 60000,
-    [switch] $KeepSource
+    [switch] $KeepSource,
+    # Passed through to backup-supabase.ps1 to rehearse a capped or partial run.
+    [int] $EgressCapMB = 0,
+    [string] $DeferTableData = '',
+    # Also provision an Oracle-shaped PostgreSQL 17 (oracle/provision-postgres17.sh
+    # in ubuntu:24.04) and restore this dry run's backup into it over TLS.
+    [switch] $OracleRehearsal
 )
 
 Set-StrictMode -Version Latest
@@ -71,7 +77,7 @@ try {
 
     $backupOut = & (Join-Path $PSScriptRoot 'backup-supabase.ps1') -Mode dryrun -PgHost $src -PgPort 5432 `
         -PgUser 'postgres' -SslMode disable -Network $net -DryRunPgPassword $pgPw -DryRunPassphrase $passphrase `
-        -BackupRoot $BackupRoot
+        -BackupRoot $BackupRoot -EgressCapMB $EgressCapMB -DeferTableData $DeferTableData
     $backup = @($backupOut) | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties['RunDir'] } | Select-Object -Last 1
     if (-not $backup) { throw 'backup-supabase.ps1 returned no result' }
     if (-not $backup.Passed) { throw "Backup checks failed; see $($backup.RunDir)" }
@@ -80,7 +86,14 @@ try {
         -HostPort $RestorePort -DryRunPassphrase $passphrase
     $restore = @($restoreOut) | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties['ReportDir'] } | Select-Object -Last 1
     if (-not $restore) { throw 'restore-test.ps1 returned no result' }
-    if ($restore.Passed) { $verdict = 'PASSED' }
+    $oracleOk = $true
+    if ($OracleRehearsal -and $restore.Passed) {
+        $oracleOut = & (Join-Path $PSScriptRoot 'oracle\test-oracle-local.ps1') -RunDir $backup.RunDir -DryRunPassphrase $passphrase
+        $oracle = @($oracleOut) | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties['ReportDir'] } | Select-Object -Last 1
+        $oracleOk = [bool]($oracle -and $oracle.Passed)
+        if ($oracle) { Write-Step "oracle:  $($oracle.ReportDir)" }
+    }
+    if ($restore.Passed -and $oracleOk) { $verdict = 'PASSED' }
     Write-Step "backup:  $($backup.RunDir)"
     Write-Step "restore: $($restore.ReportDir)"
 } finally {

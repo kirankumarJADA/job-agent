@@ -19,9 +19,21 @@
   READ ONLY transaction exports a snapshot, fingerprints every table in it and
   holds it while pg_dump --snapshot copies the same state.
 
+  Live mode requires -EgressCapMB: the run stops pg_dump and psql as soon as
+  the container has received that many MB (decimal, the unit of the Supabase
+  usage page), so a backup can never take more than the allowance you set.
+
+  -DeferTableData leaves the ROWS of the named tables out of the archive (a
+  PARTIAL backup). Their definitions, and their row counts and fingerprints at
+  the snapshot, are still recorded, so a later complete backup can prove they
+  did not change. A partial backup never replaces the complete one.
+
+.EXAMPLE
+  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\db-migration\backup-supabase.ps1 -EgressCapMB 1500
+
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\db-migration\backup-supabase.ps1 `
-    -PgHost <session pooler host> -PgUser <session pooler user>
+    -EgressCapMB 680 -DeferTableData public.outbox_events
 #>
 [CmdletBinding()]
 param(
@@ -37,41 +49,90 @@ param(
     [string] $ExpectedImageId = 'sha256:665dc7b37ac52a17e298511414c21d23ffa4e6a6ef6225b3e5d59c7afb35e994',
     [string] $Network,
     [string] $DryRunPgPassword,
-    [string] $DryRunPassphrase
+    [string] $DryRunPassphrase,
+    [int] $EgressCapMB = 0,
+    [string] $DeferTableData = ''
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 
+# Only a bare host name and user name are accepted. A value pasted with "@",
+# "postgresql://", ":5432" or "/postgres" is rejected and asked for again,
+# never silently changed (the first live attempt failed on a leading "@").
+function Test-PoolerHost([string] $Value) {
+    if (-not $Value) { return 'The host is empty.' }
+    if ($Value -match '[@/:\s]') {
+        return 'Enter only the host name: the part of the connection string after "@" and before ":5432" (no "@", "postgresql://", ":5432" or "/postgres").'
+    }
+    if ($Value -notmatch '^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$') { return 'That is not a valid host name.' }
+    if ($Value -notmatch '\.pooler\.supabase\.com$') { return 'That is not a session pooler host: it should end in .pooler.supabase.com.' }
+    $null
+}
+function Test-PoolerUser([string] $Value) {
+    if (-not $Value) { return 'The user is empty.' }
+    if ($Value -match '[@/:\s]') {
+        return 'Enter only the user name: the part of the connection string between "postgresql://" and the next ":" (never the password).'
+    }
+    if ($Value -notmatch '^[a-z_][a-z0-9_]*\.[a-z0-9]+$') { return 'The session pooler user has the form <role>.<project ref>, as shown in Connect > Session pooler.' }
+    $null
+}
+function Read-Checked([string] $Prompt, [string] $Check) {
+    while ($true) {
+        $value = ([string](Read-Host $Prompt)).Trim()
+        $problem = & $Check $value
+        if (-not $problem) { return $value }
+        Write-Host "  $problem Try again, or press Ctrl+C to stop." -ForegroundColor Yellow
+    }
+}
+
+$deferred = @($DeferTableData -split ',' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
+foreach ($t in $deferred) {
+    if ($t -notmatch '^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$') { throw "-DeferTableData: '$t' is not a schema.table name." }
+}
+if ($EgressCapMB -lt 0) { throw '-EgressCapMB cannot be negative.' }
+
 if ($Mode -eq 'live') {
     if ($SslMode -eq 'disable') { throw 'Live mode requires TLS: use -SslMode require or verify-full.' }
     if ($DryRunPgPassword -or $DryRunPassphrase) { throw 'Dry-run secrets must not be passed in live mode.' }
-    if (-not $PgHost) { $PgHost = Read-Host 'Session pooler host (Supabase dashboard > Connect > Session pooler)' }
-    if (-not $PgUser) { $PgUser = Read-Host 'Session pooler user' }
+    if ($EgressCapMB -le 0) {
+        throw 'Live mode needs -EgressCapMB: the remaining egress on the Supabase usage page, in MB, minus a safety margin.'
+    }
+    if ($PgHost) { $problem = Test-PoolerHost $PgHost.Trim().ToLowerInvariant(); if ($problem) { throw "-PgHost: $problem" } }
+    else { $PgHost = Read-Checked 'Session pooler host (Supabase dashboard > Connect > Session pooler)' 'Test-PoolerHost' }
+    $PgHost = $PgHost.Trim().ToLowerInvariant()
+    if ($PgUser) { $problem = Test-PoolerUser $PgUser.Trim(); if ($problem) { throw "-PgUser: $problem" } }
+    else { $PgUser = Read-Checked 'Session pooler user' 'Test-PoolerUser' }
+    $PgUser = $PgUser.Trim()
 } else {
     if (-not ($Network -and $DryRunPgPassword -and $DryRunPassphrase)) {
         throw 'Dry-run mode needs -Network, -DryRunPgPassword and -DryRunPassphrase (dry-run.ps1 supplies them).'
     }
 }
 if (-not $PgHost -or -not $PgUser) { throw 'Host and user are required.' }
+$scope = if ($deferred.Count -gt 0) { 'partial' } else { 'complete' }
 
 Assert-DockerReady
 $imageId = Assert-Image -Image $Image -ExpectedId $ExpectedImageId
 Assert-BackupRoot -Path $BackupRoot
 
 $stamp = Get-UtcStamp
-$runDir = Join-Path $BackupRoot "$stamp-$Mode"
+$runDir = Join-Path $BackupRoot ("$stamp-$Mode" + $(if ($scope -eq 'partial') { '-partial' } else { '' }))
 New-Item -ItemType Directory -Path $runDir | Out-Null
 $name = "robin-backup-$($stamp.ToLowerInvariant())"
 Write-Step "run directory: $runDir"
 Write-Step "container: $name (plaintext only in its RAM-backed /dump)"
+if ($scope -eq 'partial') { Write-Step ("PARTIAL backup: the rows of {0} are left out (not the complete backup)" -f ($deferred -join ', ')) }
+if ($EgressCapMB -gt 0) { Write-Step "egress cap: $EgressCapMB MB received by the container, then pg_dump and psql are stopped" }
 
 $runArgs = @('run', '-d', '--name', $name,
     '--tmpfs', '/dump:rw,size=4g,mode=0700',
     '-e', "PGHOST=$PgHost", '-e', "PGPORT=$PgPort", '-e', "PGUSER=$PgUser",
     '-e', "PGDATABASE=$PgDatabase", '-e', "PGSSLMODE=$SslMode",
-    '-e', "ROBIN_MODE=$Mode", '-e', "ROBIN_IMAGE=$Image", '-e', "ROBIN_IMAGE_DIGEST=$imageId")
+    '-e', "ROBIN_MODE=$Mode", '-e', "ROBIN_IMAGE=$Image", '-e', "ROBIN_IMAGE_DIGEST=$imageId",
+    '-e', ('ROBIN_EGRESS_CAP_BYTES=' + ([int64]$EgressCapMB * 1000000)),
+    '-e', ('ROBIN_DEFER_TABLE_DATA=' + ($deferred -join ',')))
 if ($Network) { $runArgs += @('--network', $Network) }
 if ($SslRootCert) { $runArgs += @('-e', 'PGSSLROOTCERT=/work/root.crt') }
 $runArgs += @($Image, 'sleep', 'infinity')
@@ -114,6 +175,7 @@ $plaintextLeft = @(Get-ChildItem -Path $runDir -File | Where-Object { $_.Name -e
 if ($plaintextLeft.Count -gt 0) { throw "Unexpected plaintext archive in $runDir" }
 
 $passed = ($backupExit -eq 0) -and $hostOk
-Write-Summary -RunDir $runDir -ChecksFile (Join-Path $runDir 'checks.txt') -Passed $passed -What 'BACKUP'
-[pscustomobject]@{ RunDir = $runDir; Passed = $passed }
+$what = if ($scope -eq 'partial') { 'PARTIAL BACKUP' } else { 'BACKUP' }
+Write-Summary -RunDir $runDir -ChecksFile (Join-Path $runDir 'checks.txt') -Passed $passed -What $what
+[pscustomobject]@{ RunDir = $runDir; Passed = $passed; Scope = $scope }
 if (-not $passed) { exit 1 }
