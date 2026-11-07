@@ -828,8 +828,8 @@ The password is set at psql's `\password` prompt.
 
 ### 10.11 Not done and not claimed (7 Nov)
 
-- No production backup exists. R1–R7 have not started.
-- Render, Supabase and Oracle are unchanged, and no production data was read except the counts in §10.2.
+- No production backup exists. R2–R7 have not started (R1 is recorded in §10.13).
+- Supabase and Oracle are unchanged, and no production data was read except the counts in §10.2 and §10.13.
 - The tooling changes are tested on synthetic data only.
 
 ### 10.12 Oracle-shaped rehearsal, 7 Nov: PASS
@@ -872,5 +872,22 @@ The run was `dry-run.ps1 -EgressCapMB 500 -DeferTableData public.outbox_events -
 - latency from Render.
 
 These are part of R4 on the real VM.
+
+### 10.13 Progress
+
+**R1 done, 7 Nov at about 16:51 UTC (your approval; done in the Render dashboard).**
+
+The backend web service was suspended. It is Robin's only Render service. Render shows *"Suspended by you"*, and **Resume Web Service** undoes it.
+
+Read-only checks before and after, in the SQL editor (`pg_stat_database` and `pg_stat_activity`):
+
+| Window | Failed (rolled-back) transactions | Commits | Rows changed | Backend's pooler sessions |
+|---|---:|---:|---:|---:|
+| Before: 16:48:25–16:49:10 (44 s) | 427 (9.6/s) | 601 | 0 | 10 |
+| After: 16:52:53–16:53:42 (49 s) | **0** | 28 (Supabase's own services) | 0 | **0** |
+
+- `default_transaction_read_only` is still `on`.
+- The database has no `pg_cron` extension and no `cron.job` table, so no scheduled job runs inside it. Only Supabase's idle launcher process is present.
+- The usage page refreshes about hourly. Its egress and log figures should now stop rising. The cap for R2 is to be set from a reading taken at least one hour after R1.
 
 **PHASE 2 STATUS: PLANNING**
