@@ -47,7 +47,24 @@ echo "pg_dump started at $started; one line per table follows"
 # The verbose log goes to pg_dump.log and, for progress, to stderr.
 pg_dump --format=custom --compress=gzip:6 --snapshot="$snap" \
         --lock-wait-timeout=120s --no-password --verbose "${extra[@]}" \
-        --file=/dump/robin.dump 2> >(tee /dump/pg_dump.log >&2)
+        --file=/dump/robin.dump 2> >(tee /dump/pg_dump.log >&2) &
+pid=$!
+# Dead man's switch: with a cap, pg_dump may only run while the egress
+# watchdog is alive. If its heartbeat goes stale for more than 5 seconds,
+# pg_dump is stopped and backup.sh fails the run (egress_meter).
+if (( ${ROBIN_EGRESS_CAP_BYTES:-0} > 0 )); then
+  while kill -0 "$pid" 2>/dev/null; do
+    beat=$(cat /dump/watchdog.beat 2>/dev/null || echo 0)
+    if (( $(date +%s) - beat > 5 )); then
+      echo "run-pg-dump: the egress watchdog stopped; stopping pg_dump" >&2
+      date -u +%FT%TZ > /dump/watchdog.lost
+      kill -TERM "$pid" 2>/dev/null
+      break
+    fi
+    sleep 1
+  done
+fi
+wait "$pid"
 rc=$?
 finished=$(date -u +%FT%TZ)
 echo "pg_dump finished at $finished with exit code $rc"

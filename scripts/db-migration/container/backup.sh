@@ -192,16 +192,26 @@ set -e
 # The network part of the run is over: stop the watchdog, then measure.
 stop_watchdog
 rx_used=$(( $(net_rx) - RX0 ))
-if [[ -s $DUMP/egress-cap.hit ]]; then
+dump_rc=$(cat "$DUMP/pg_dump.status" 2>/dev/null || echo none)
+if [[ -s $DUMP/watchdog.lost ]]; then
+  abort egress_meter "the egress watchdog stopped during the dump, so pg_dump was stopped after $(mb "$rx_used") MB; nothing was encrypted or copied out"
+fi
+# The cap stops the transfer. An archive is kept only if pg_dump had already
+# finished by itself when the cap was crossed (the last bytes of the session
+# can arrive after pg_dump exits); otherwise nothing is kept.
+if [[ -s $DUMP/egress-cap.hit && $dump_rc != 0 ]]; then
   abort egress_cap "stopped after $(mb "$rx_used") MB received (cap $(mb "$CAP") MB); nothing was encrypted or copied out"
 fi
 if (( CAP > 0 )); then
-  pass egress_within_cap "$(mb "$rx_used") MB received ($rx_used bytes), cap $(mb "$CAP") MB"
+  if (( rx_used <= CAP )); then
+    pass egress_within_cap "$(mb "$rx_used") MB received ($rx_used bytes), cap $(mb "$CAP") MB"
+  else
+    note egress_over_cap "$(mb "$rx_used") MB received ($rx_used bytes), $(( (rx_used - CAP) / 1000000 )) MB over the cap of $(mb "$CAP") MB, after pg_dump had finished; the archive is complete"
+  fi
 else
   note network_received "$(mb "$rx_used") MB received ($rx_used bytes), no cap"
 fi
 [[ -s $DUMP/pg_dump.status ]] || abort pg_dump "pg_dump never ran (snapshot session exited with $session_rc; see backup.log)"
-dump_rc=$(cat "$DUMP/pg_dump.status")
 if [[ $dump_rc == 0 ]]; then pass pg_dump_exit "exit 0"; else abort pg_dump_exit "exit $dump_rc (see pg_dump.log)"; fi
 if [[ $session_rc == 0 ]]; then
   pass snapshot_session "facts, fingerprints, inventory and pg_dump used one snapshot"

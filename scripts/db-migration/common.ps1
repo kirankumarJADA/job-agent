@@ -32,6 +32,17 @@ function Remove-Container([string] $Name) {
     & docker rm -f -v $Name 2>$null | Out-Null
 }
 
+function Assert-NoLeftoverContainer([string] $Prefix) {
+    # A container left behind by an interrupted run (window closed, crash) can
+    # still hold unencrypted data in its RAM-backed tmpfs. Never start a new
+    # run next to one: name it and say how to remove it.
+    $ErrorActionPreference = 'Continue'
+    $left = @(& docker ps -a --filter "name=^/$Prefix" --format '{{.Names}}' 2>$null | Where-Object { $_ })
+    if ($left.Count -gt 0) {
+        throw ("A container from an earlier, interrupted run still exists and may hold unencrypted data in RAM: {0}. Remove it first with: docker rm -f -v {0}" -f ($left -join ' '))
+    }
+}
+
 function Remove-DockerNetwork([string] $Name) {
     $ErrorActionPreference = 'Continue'
     & docker network rm $Name 2>$null | Out-Null

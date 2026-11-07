@@ -21,7 +21,14 @@ They run on Windows PowerShell 5.1 or later, and every PostgreSQL tool runs insi
 - **No personal data in outputs.** Metadata files hold counts, SHA-256 values, fingerprints (hash sums) and object names. The manifest leaves out the host and user names.
 - **Pinned image.** The scripts refuse to run any `postgres:17.11-bookworm` whose image id is not the reviewed `sha256:665dc7b3…` (override with `-ExpectedImageId`).
 - **Safe folders only.** The backup folder must be outside OneDrive and outside this repository. Nothing here commits or uploads anything.
-- **Egress cap (live mode).** `backup-supabase.ps1` refuses a live run without `-EgressCapMB`. Inside the container a watchdog counts every byte received on the container's network interfaces from before the first connection. When the count passes the cap, it stops `pg_dump` and `psql`, and the run fails with `FAIL|egress_cap`. Nothing is encrypted or copied out, and the plaintext disappears with the container. The measured transfer is recorded in the manifest as `network_rx_bytes`.
+- **Egress cap (live mode).** `backup-supabase.ps1` refuses a live run without `-EgressCapMB`.
+  - Inside the container, a watchdog counts every byte received on the container's network interfaces, from before the first connection, sampling every 0.1 s.
+  - When the count passes the cap, it stops `pg_dump` and `psql`, and the run fails with `FAIL|egress_cap`. Nothing is encrypted or copied out, and the plaintext disappears with the container.
+  - `pg_dump` runs only while the watchdog's heartbeat is fresh. A heartbeat older than 5 s stops `pg_dump`, and the run fails with `FAIL|egress_meter`.
+  - The measured transfer is recorded in the manifest as `network_rx_bytes`. If the last bytes of the session arrive after `pg_dump` has finished and push the total past the cap, the complete archive is kept and the overshoot is reported as `NOTE|egress_over_cap`.
+- **Interrupted runs.**
+  - The backup container's only process ends after 4 hours, and `--rm` then deletes the container and its `tmpfs`. Plaintext can therefore never outlive an interrupted run (window closed, crash) by more than that. Normally the script removes the container at once.
+  - A new backup or restore refuses to start while a `robin-backup-*` or `robin-restore-*` container from an earlier run still exists, and prints the command to remove it.
 
 ## Requirements
 
@@ -246,3 +253,8 @@ To test the script locally first: `dry-run.ps1 -OracleRehearsal`.
 - **"live mode needs an interactive terminal".** Run the command from Windows Terminal or a PowerShell window, not from a non-interactive runner.
 - **"Port … is already in use".** Pass `-HostPort` to `restore-test.ps1`, or `-SourcePort` / `-RestorePort` to `dry-run.ps1`.
 - **`FAIL|egress_cap`.** The cap stopped the run before it could finish. Nothing was kept. Do not simply raise the cap: re-read the usage page, and see the plan (§10) for what may be spent in which billing cycle.
+- **`FAIL|egress_meter`.** The watchdog could not count the container's traffic, or it stopped during the dump. The cap could not be guaranteed, so the run was stopped and nothing was kept.
+- **The window was closed, or the machine crashed or slept, during a run.**
+  - The container may still hold unencrypted data in RAM. List it with `docker ps -a --filter name=robin-`, then remove it with `docker rm -f -v <name>`.
+  - It also removes itself within 4 hours, and the next run refuses to start until it is gone.
+  - Re-read the usage page before any new attempt: the interrupted transfer still counted.

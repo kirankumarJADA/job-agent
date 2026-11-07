@@ -82,6 +82,7 @@ foreach ($f in $inputs) {
     if (-not (Test-Path -LiteralPath (Join-Path $RunDir $f))) { throw "Missing $f in $RunDir" }
 }
 Assert-DockerReady
+Assert-NoLeftoverContainer 'robin-restore-'
 $imageId = Assert-Image -Image $Image -ExpectedId $ExpectedImageId
 if ($Target -eq 'local' -and (Get-NetTCPConnection -LocalPort $HostPort -State Listen -ErrorAction SilentlyContinue)) {
     throw "Port $HostPort is already in use on this machine; pass -HostPort."
@@ -114,7 +115,9 @@ if ($Target -eq 'local') {
         '-e', 'PGSSLROOTCERT=/in/ca.crt')
     if ($TargetHostAddr) { $runArgs += @('--add-host', 'host.docker.internal:host-gateway', '-e', "ROBIN_TARGET_HOSTADDR=$TargetHostAddr") }
     if ($Network) { $runArgs += @('--network', $Network) }
-    $runArgs += @('--entrypoint', 'sleep', $Image, 'infinity')
+    # As for the backup container: it ends by itself after 4 hours if an
+    # interrupted run never reaches the finally block.
+    $runArgs += @('--rm', '--entrypoint', 'sleep', $Image, '14400')
 }
 
 $restoreExit = 1

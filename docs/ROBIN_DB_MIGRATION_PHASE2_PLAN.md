@@ -712,6 +712,35 @@ This replaces §1.2's *"the backup is not to be delayed to save egress"* and §6
 
 **Default behaviour is unchanged:** no deferral, and the restore target is local.
 
+**Review before R2 (7 Nov, 17:00–17:30 UTC).** Four gaps were found and fixed:
+
+1. **Cap enforcement depended on a watchdog whose liveness was checked only when `pg_dump` started.** `pg_dump` now runs under a dead man's switch: a heartbeat older than 5 s stops it (`FAIL egress_meter`). Tested with a fake `pg_dump`: the heartbeat stopped at 3 s, and the dump was stopped at 9 s with `watchdog.lost` recorded.
+2. **`egress_within_cap` reported PASS without comparing the final total with the cap.** Now:
+   - it passes only at or under the cap;
+   - if the last session bytes arrive after `pg_dump` has finished and cross the cap, the complete archive is kept with `NOTE egress_over_cap`;
+   - if `pg_dump` itself was stopped, nothing is kept.
+3. **An interrupted run (window closed, crash) could leave the container, and plaintext in its RAM, indefinitely.** Now:
+   - the container ends itself after 4 hours (`--rm`, `sleep 14400`);
+   - a new backup or restore refuses to start next to a leftover container. Tested: exit 1, the removal command printed, no run folder created.
+4. **`verify-backup.ps1` relied on the backup's own comparison file, and ignored "deferred" lines even in a run claiming to be complete.** It now recomputes every table's archive rows against the snapshot itself. Tested:
+
+   | Case | Result |
+   |---|---|
+   | real partial run | PASS, labelled PARTIAL |
+   | real complete run | PASS |
+   | run stopped by the cap | stops: no archive |
+   | partial run with its deferred list deleted | 4 FAIL |
+   | partial run forged as complete | 3 FAIL |
+   | complete run with a table missing from the archive while its own checks said PASS | FAIL |
+   | truncated encrypted file | FAIL |
+
+**Regression on the reviewed code (17:06–17:12 UTC):**
+
+- Partial plus Oracle-shaped rehearsal: PASS. The verifier gave 25 PASS (PARTIAL), with 35.2 MB received.
+- Complete: PASS. The verifier gave 24 PASS, with 51.8 MB received.
+- 20 MB cap: stopped at 32 MB with nothing kept.
+- No containers were left behind.
+
 | Test (synthetic, 7 Nov) | Result |
 |---|---|
 | Complete, cap 500 MB (final code) | backup 15/15 PASS (51.8 MB received), restore 13/13 PASS including Flyway validate |

@@ -114,6 +114,7 @@ if (-not $PgHost -or -not $PgUser) { throw 'Host and user are required.' }
 $scope = if ($deferred.Count -gt 0) { 'partial' } else { 'complete' }
 
 Assert-DockerReady
+Assert-NoLeftoverContainer 'robin-backup-'
 $imageId = Assert-Image -Image $Image -ExpectedId $ExpectedImageId
 Assert-BackupRoot -Path $BackupRoot
 
@@ -135,7 +136,11 @@ $runArgs = @('run', '-d', '--name', $name,
     '-e', ('ROBIN_DEFER_TABLE_DATA=' + ($deferred -join ',')))
 if ($Network) { $runArgs += @('--network', $Network) }
 if ($SslRootCert) { $runArgs += @('-e', 'PGSSLROOTCERT=/work/root.crt') }
-$runArgs += @($Image, 'sleep', 'infinity')
+# Safety net for an interrupted run (window closed, crash): the container's
+# only process ends after 4 hours, and --rm then deletes the container and
+# its tmpfs, so plaintext can never outlive the run by more than that. The
+# finally block below normally removes it at once.
+$runArgs += @('--rm', $Image, 'sleep', '14400')
 
 $backupExit = 1
 try {

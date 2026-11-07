@@ -140,17 +140,44 @@ foreach ($k in $tocExpected.Keys) {
     Check (($line -like 'PASS|*') -and ($val -eq $tocExpected[$k])) $k "archive $val, plan expects $($tocExpected[$k])"
 }
 
-# 7. every snapshot row is in the archive, except the deliberately deferred tables
+# 7. every snapshot row is in the archive, except the deliberately deferred
+#    tables. Recomputed here from archive-counts.txt (rows per table in the
+#    archive) and source-fingerprints.txt (rows per table in the snapshot),
+#    independently of the backup's own count-comparison.txt.
+$snap = @{}; $extTables = @{}
+foreach ($l in @(Get-Content -LiteralPath (Join-Path $RunDir 'source-fingerprints.txt'))) {
+    $p = $l -split '\|'
+    if ($p.Count -ge 4) { $snap[$p[0]] = [long]$p[1]; if ($p[3] -eq 't') { $extTables[$p[0]] = $true } }
+}
+$arch = @{}
+foreach ($l in @(Get-Content -LiteralPath (Join-Path $RunDir 'archive-counts.txt'))) {
+    $p = $l -split '\|'
+    if ($p.Count -ge 2) { $arch[$p[0]] = [long]$p[1] }
+}
+$problems = New-Object 'System.Collections.Generic.List[string]'
+$okTables = 0; $leftOut = New-Object 'System.Collections.Generic.List[string]'; $leftOutRows = [long]0
+foreach ($t in $snap.Keys) {
+    if ($deferred -contains $t) {
+        if ($arch.ContainsKey($t)) { $problems.Add("deferred $t is in the archive") } else { $leftOut.Add($t); $leftOutRows += $snap[$t] }
+    } elseif ($arch.ContainsKey($t)) {
+        if ($arch[$t] -eq $snap[$t]) { $okTables++ } else { $problems.Add("$t snapshot $($snap[$t]), archive $($arch[$t])") }
+    } elseif (-not $extTables.ContainsKey($t)) {
+        $problems.Add("$t ($($snap[$t]) rows) is missing from the archive")
+    }
+}
+foreach ($t in $arch.Keys) { if (-not $snap.ContainsKey($t)) { $problems.Add("$t is in the archive but not in the snapshot") } }
+foreach ($t in $deferred) { if (-not $snap.ContainsKey($t)) { $problems.Add("deferred $t is not a table in the snapshot") } }
+Check (($problems.Count -eq 0) -and ($okTables -gt 0)) 'row_counts' $(if ($problems.Count) { "$($problems.Count) problem(s), first: $($problems[0])" } else { "$okTables tables: archive rows equal snapshot rows (recomputed); $($snap.Count) tables, $($m['rows_fingerprinted']) rows fingerprinted" })
+# The backup's own comparison file must agree, and must not mark anything as
+# deferred in a run that claims to be complete.
 $cmpAll = @(Get-Content -LiteralPath (Join-Path $RunDir 'count-comparison.txt') | Where-Object { $_ })
-$cmp = @($cmpAll | Where-Object { ($_ -notlike 'EXTENSION_TABLE_NOT_IN_ARCHIVE|*') -and ($_ -notlike 'DEFERRED|*') })
-$arc = [string]($lines | Where-Object { $_ -like '*|archive_row_counts|*' } | Select-Object -First 1)
-Check (($arc -like 'PASS|*') -and ($cmp.Count -eq 0)) 'row_counts' ("{0}; {1} tables, {2} rows fingerprinted" -f $(if ($arc) { ($arc -split '\|', 3)[2] } else { 'not recorded' }), $m['tables_fingerprinted'], $m['rows_fingerprinted'])
+$badCmp = @($cmpAll | Where-Object { ($_ -notlike 'EXTENSION_TABLE_NOT_IN_ARCHIVE|*') -and (($scope -eq 'complete') -or ($_ -notlike 'DEFERRED|*')) })
+Check ($badCmp.Count -eq 0) 'count_comparison_file' $(if ($badCmp.Count) { "$($badCmp.Count) line(s) flag a difference, first: $($badCmp[0])" } else { "no differences flagged$(if ($scope -eq 'partial') { ' apart from the deferred table(s)' })" })
 if ($scope -eq 'partial') {
-    $dlines = @($cmpAll | Where-Object { $_ -like 'DEFERRED|*' })
-    $dnames = @($dlines | ForEach-Object { ($_ -split '\|')[1] } | Sort-Object)
-    $same = (($dnames -join ',') -eq (@($deferred | Sort-Object) -join ','))
-    $drows = [long](@($dlines | ForEach-Object { [long](($_ -split '\|')[2] -replace '^snapshot=', '') }) | Measure-Object -Sum).Sum
-    Check ($same -and ([string]$drows -eq $m['deferred_rows'])) 'deferred_tables' "left out of the archive: $($dnames -join ', ') ($drows rows at the snapshot, manifest $($m['deferred_rows']))"
+    $same = ((@($leftOut | Sort-Object) -join ',') -eq (@($deferred | Sort-Object) -join ','))
+    Check ($same -and ([string]$leftOutRows -eq $m['deferred_rows'])) 'deferred_tables' "left out of the archive: $(@($leftOut) -join ', ') ($leftOutRows rows at the snapshot, manifest $($m['deferred_rows']))"
+} elseif ($leftOut.Count -gt 0) {
+    Fail 'deferred_tables' "the run claims to be complete, but $($leftOut -join ', ') is not in the archive"
 }
 
 # 8. outbox (B3.4) and its sequence: snapshot facts, recorded for partial runs too
@@ -181,7 +208,11 @@ Check ($facts['default_transaction_read_only'] -eq $exp.ReadOnly) 'source_read_o
 if ($m.ContainsKey('network_rx_bytes')) {
     $rx = [long]$m['network_rx_bytes']; $cap = [long]$m['egress_cap_bytes']
     $txt = "{0:N1} MB received by the backup container{1}" -f ($rx / 1e6), $(if ($cap -gt 0) { ", cap {0:N0} MB" -f ($cap / 1e6) } else { ', no cap' })
-    Check (($cap -eq 0) -or ($rx -le $cap)) 'transfer_within_cap' $txt
+    # Over the cap can only mean bytes that arrived after pg_dump had finished
+    # (backup.sh stops the run otherwise); it is reported, not hidden.
+    if (($cap -eq 0) -or ($rx -le $cap)) { Pass 'transfer_within_cap' $txt } else { Warn 'transfer_over_cap' ("$txt; {0:N1} MB over the cap" -f (($rx - $cap) / 1e6)) }
+} elseif ($m.ContainsKey('scope')) {
+    Fail 'transfer_measured' 'the manifest of a capped-era run has no network_rx_bytes'
 }
 
 # 12. nothing left behind in Docker
