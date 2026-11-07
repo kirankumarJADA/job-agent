@@ -919,4 +919,17 @@ Read-only checks before and after, in the SQL editor (`pg_stat_database` and `pg
 - The database has no `pg_cron` extension and no `cron.job` table, so no scheduled job runs inside it. Only Supabase's idle launcher process is present.
 - The usage page refreshes about hourly. Its egress and log figures should now stop rising. The cap for R2 is to be set from a reading taken at least one hour after R1.
 
+**R2 preparation, 7 Nov at about 17:57 UTC. Not executed. Two checks did not pass.**
+
+| Check | Result |
+|---|---|
+| Render backend | still suspended (dashboard 17:14; 0 pooler connections at 17:57) |
+| Egress (usage page, 17:56) | 4.247 / 5 GB, so **753 MB left**. Proposed cap **690 MB** (753 − 60, rounded down). Expected R2 transfer about 530 MB (470–620), so R2 fits under the cap. |
+| Log ingestion | 0.969 / 1 GB, 31 MB left. The backup adds well under 1 MB: `log_statement=ddl`; slow-statement, connection and pgaudit logging are off; `auto_explain` logs only statements over 10 s. |
+| Database | PostgreSQL 17.6; no open transactions; outbox sequence 1,670,005 and size 1,600,629,907 bytes, both unchanged; **no rows changed since at least 16:48**. |
+| **Read-only mode** | **off since 17:00:38 UTC.** Supabase reloaded its configuration with `default_transaction_read_only = off` (`pg_conf_load_time`; source: configuration file), as its docs describe once disk use falls below 95 %. Nobody here changed it. The database is writable but idle: there are no writers. |
+| **Laptop RAM** | **0.50 GB free at 17:58** (1.88 GB at 17:13), with memory compression active. The plaintext stays in RAM, so it would risk being paged to the unencrypted disk. Target: at least 2.5 GB free before R2. |
+| Disk, Docker, image | C: 69.6 GB free; engine 29.0.1; image id as reviewed; no leftover containers |
+| Partial scope (dry-run archives) | exactly one table-of-contents difference from the complete archive: `TABLE DATA public outbox_events`. Its table, key, default, RLS, sequence and sequence value, and grants are kept, and its snapshot counts and fingerprint are recorded. |
+
 **PHASE 2 STATUS: PLANNING**
