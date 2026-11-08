@@ -912,7 +912,7 @@ The password is set at psql's `\password` prompt.
 
 ### 10.11 Not done and not claimed (7 Nov)
 
-- No production backup exists. R2–R7 have not started (R1 is recorded in §10.13).
+- No production backup exists. R2–R7 have not started (R1 is recorded in §10.13). *Update, 8 Nov: the partial backup R2 exists and is verified (§10.13); R3–R7 have not started.*
 - Supabase and Oracle are unchanged, and no production data was read except the counts in §10.2 and §10.13.
 - The tooling changes are tested on synthetic data only.
 
@@ -1022,5 +1022,72 @@ Read-only checks before and after, in the SQL editor (`pg_stat_database` and `pg
 - 4.247 / 5 GB used, unchanged since 7 Nov 17:56. Log ingestion is 0.969 / 1 GB, also unchanged.
 - 753 MB remain, so the cap is **690 MB**: 60 MB of margin, rounded down.
 - Expected transfer: about 530 MB (470–620).
+
+**R2 done, 8 Nov 2026, 15:54–16:23 UTC (your approval). Partial backup taken and verified; not yet restore-tested.**
+
+Run folder: `C:\RobinBackups\20261108T155443Z-live-partial` (on the laptop only, not in this repository).
+
+*Before the run (15:09–15:51 UTC).*
+
+- RAM. The laptop restarted at 15:09. Afterwards:
+  - with your approval, WhatsApp was closed;
+  - background Edge and OneDrive were shut down again;
+  - the local dev containers stayed stopped;
+  - Chrome was closed for the run.
+  - Available RAM read 3.59 and 3.76 GB (15:43–15:44), then 3.75 and 4.15 GB (15:51). The pre-launch check passed: the scripts are byte-identical to the tested `c25cfac`, plus the image, the swap guard, no leftover container, disk and the charger.
+- Egress: 4.247 / 5 GB, so the cap stayed at 690 MB.
+- Render backend: suspended.
+- Production: no open transactions; Robin's `public` rows unchanged since 7 Nov. Supabase's own Storage API reconnected at about 15:34 and updated its own `storage.migrations` rows. That table is Supabase-owned, and it changed before the snapshot.
+
+*The run.*
+
+| Step (UTC) | Result |
+|---|---|
+| 15:54:45 | `plaintext_in_ram` PASS; database password entered in the container |
+| 15:56:41 | one `REPEATABLE READ, READ ONLY` snapshot; 110 tables fingerprinted |
+| 15:59:14–16:00:40 | `pg_dump` in that snapshot: **628.9 MB received** (cap 690 MB), exit 0 |
+| 16:00–16:23 | archive checks, passphrase entered twice, AES-256 encryption, decryption round trip |
+| 16:22:57 | `PARTIAL BACKUP OK`: 17/17 backup checks PASS, 0 NOTE |
+
+*Independent verification (16:27–16:41 UTC).*
+
+- **Verifier.** `verify-backup.ps1 -AcceptWritableSource` gave 24 PASS, 0 FAIL, 2 WARN. Without the switch, `source_read_only` is the only FAIL. The two WARNs:
+  - `source_read_only`: the database was writable but idle, and the archive is one snapshot.
+  - `outbox_pending_known`: the plan's 771,412 was counted at about 13:27 on 6 Nov. The database stayed writable until 13:31:17, so the final 771,659 includes the last four minutes. The newest pending event is from 13:31:17, and the sequence matches.
+- **Encrypted archive.** `robin.dump.gpg` is 141,897,821 bytes, SHA-256 `c56297ff5c50919e79d3ae3d95b8c732c64cad2e584fa707f385bc447d7272cd`. That hash was recomputed with `sha256sum` and `certutil` and matches the `.sha256` file, the manifest and the host check.
+- **Encryption.** The header shows AES-256, an iterated and salted SHA-512 key derivation (65,011,712) and integrity protection.
+- **Passphrase.** You typed the passphrase you kept at a hidden prompt, in a container with no network and no swap.
+  - gpg accepted it, and its integrity check passed.
+  - The decrypted stream starts with `PGDMP`.
+  - Its SHA-256 `0f0d05a7…a11ac` equals the one recorded before encryption.
+  - Nothing decrypted was stored.
+- **Scope.**
+  - The snapshot has 110 tables, and the archive has 109 table-data entries. The only table without one is `public.outbox_events`.
+  - Its table, grants, sequence, sequence value, default, primary key and row security are all in the archive.
+  - All 109 dumped tables have exactly their snapshot row counts (3,749,966 rows fingerprinted).
+  - The table-of-contents counts for `public` match the plan: 69, 70, 12, 1, 1, 175. Flyway history: 52 rows, latest 051.
+- **Deferred rows.** 1,670,004 rows of `public.outbox_events` are recorded with a content fingerprint for the R5 comparison. The figure matches the manifest and the comparison file, and the archive holds 0 rows of the table.
+  - 898,345 are published and 771,659 pending: `job.discovered` 771,636, `job.matched` 11, `verification.completed` 11, `signup.completed` 1.
+  - The sequence last value is 1,670,005.
+- **Cleanup.**
+  - No backup container is left, and no Docker volume was created.
+  - No file in any live run folder is a plaintext archive.
+  - The Docker VM's swap shows 0 used.
+
+*After the run (16:41 UTC), read-only.*
+
+- The next transaction id is unchanged since 15:35, so nothing wrote anything during or after the backup.
+- No session is active or in a transaction, no backup session remains, and there are 0 pooler connections.
+- Rows, outbox sequence and size are unchanged. Rollbacks rose by one: that is `pg_dump` ending its read-only transaction by disconnecting.
+- Render backend: "Suspended by you".
+- The usage page had not refreshed yet (still 4.247 GB). Expected after the refresh: about 4.88 / 5 GB, so roughly 120 MB of egress is left until the 18 Nov reset.
+
+*Still open.*
+
+- R2 is partial: the `outbox_events` rows exist only in the source until R5.
+- No restore test (R3) and no offsite copy (B5) yet.
+- Supabase-owned tables such as `storage.migrations` can change whenever Supabase's services start. R5's `-CompareWith` should be judged on Robin's `public` tables, and differences in Supabase-owned tables explained.
+- The restore containers still lack the swap guard.
+- The dev containers, OneDrive and WhatsApp are still to be restarted.
 
 **PHASE 2 STATUS: PLANNING**
