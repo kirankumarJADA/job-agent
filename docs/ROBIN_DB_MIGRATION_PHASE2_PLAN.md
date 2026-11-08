@@ -749,6 +749,61 @@ This replaces §1.2's *"the backup is not to be delayed to save egress"* and §6
 | `verify-backup.ps1 -CompareWith`, two different synthetic sources | `same_data_as_other_run` FAIL as it must (12 tables differ) |
 | Oracle-shaped rehearsal | PASS (§10.12) |
 
+**Second review before R2 (8 Nov, 04:13–04:45 UTC; commit `c25cfac`).** One gap was found and fixed:
+
+- **The plaintext could reach the Docker VM's swap disk.** The VM has a 2 GB swap partition (swappiness 60). The backup container ran with no swap limit (`memory.swap.max = max`), so under memory pressure its `tmpfs`, and the memory of `pg_dump`, `psql` and `gpg`, could have been swapped out to that disk. Now:
+  - the container runs with `--memory 5g --memory-swap 5g`, which gives it `memory.swap.max = 0` (cgroup v2);
+  - `backup.sh` first checks that `/dump` is a `tmpfs` and that `memory.swap.max` is 0 (`plaintext_in_ram`). Otherwise it stops before it asks for any secret or connects;
+  - `verify-backup.ps1` requires that check.
+- **Writable source, made an explicit decision.** A live run whose source was not read-only still fails `source_read_only`. `-AcceptWritableSource` turns that into a WARN.
+- **Still open:**
+  - Windows can page any process's memory, the Docker VM's included, to `C:\pagefile.sys`, and drive C: is not BitLocker-protected. The mitigation is about 3 GB of available RAM during the run.
+  - The restore containers (Stage C) do not have the swap guard yet.
+
+| Test (synthetic, 8 Nov, on `c25cfac`) | Result |
+|---|---|
+| Partial (`outbox_events` deferred), cap 500 MB, plus the Oracle-shaped rehearsal | PASS: backup 17/17 including `plaintext_in_ram`; 35 MB received; 60,023 rows deferred; 69 table-data entries |
+| Complete, cap 500 MB | PASS |
+| Cap 20 MB | stopped with `FAIL egress_cap` at 29 MB: no archive, no plaintext on the host |
+| Swap guard: the container as it was started before (`tmpfs`, swappable) | refused with `FAIL plaintext_in_ram`; nothing written to `/dump` |
+| Swap guard: `/dump` on the container disk | refused with `FAIL plaintext_in_ram` (overlayfs) |
+| Capped run without network counters | refused with `FAIL egress_meter`: no archive, no container left |
+| Dead man's switch (fake `pg_dump`) | stopped at 9 s, exit 143, `watchdog.lost` recorded |
+| Interrupted run (the harness killed mid-dump, as closing the window would) | see below |
+| Verifier | 14 cases, see below |
+| Files | the 12 scripts were byte-identical before and after the tests (SHA-256 recorded) |
+
+The interrupted run:
+
+- The container stays: `AutoRemove=true`, `sleep 14400`, `/dump` on `tmpfs`, `memory.swap.max` 0, 0 bytes swapped.
+- Its disk (8,010 files) holds no pg_dump archive. The same scan finds `/dump/robin.dump` (positive control).
+- The host run folder holds 0 files.
+- The next backup refuses to start. `docker rm -f -v` removes the container, and `--rm` deletes a container once its sleep ends.
+
+The 14 verifier cases:
+
+| Case | Result |
+|---|---|
+| real partial run | 25 PASS, labelled PARTIAL |
+| real complete run | 24 PASS |
+| run stopped by the cap | stops: no archive |
+| deferred list deleted | 4 FAIL |
+| partial run forged as complete | 3 FAIL |
+| a table missing from the archive while the run's own checks said PASS | FAIL `row_counts` |
+| truncated `.gpg` | FAIL `sha256` |
+| no `plaintext_in_ram` proof | FAIL |
+| a file with the `PGDMP` signature in the folder | FAIL `no_plaintext_archive` |
+| failed decryption round trip | 3 FAIL |
+| AES-128 header | FAIL `encryption_header` |
+| writable source | FAIL; WARN only with `-AcceptWritableSource` |
+| `-CompareWith`, same snapshot | PASS |
+| `-CompareWith`, different source | FAIL |
+
+Two assertions in the test harness itself were wrong and were corrected:
+
+- a `-like` pattern containing `[ ]` (the interrupted-run test, rerun 8/8 PASS);
+- a watcher that missed one in-container view because the container had already gone. That run's own `plaintext_in_ram` PASS and `docker inspect` cover it.
+
 ### 10.6 Render variables at cutover (names only; values never in this repository)
 
 | Variable | Change |
@@ -931,5 +986,41 @@ Read-only checks before and after, in the SQL editor (`pg_stat_database` and `pg
 | **Laptop RAM** | **0.50 GB free at 17:58** (1.88 GB at 17:13), with memory compression active. The plaintext stays in RAM, so it would risk being paged to the unencrypted disk. Target: at least 2.5 GB free before R2. |
 | Disk, Docker, image | C: 69.6 GB free; engine 29.0.1; image id as reviewed; no leftover containers |
 | Partial scope (dry-run archives) | exactly one table-of-contents difference from the complete archive: `TABLE DATA public outbox_events`. Its table, key, default, RLS, sequence and sequence value, and grants are kept, and its snapshot counts and fingerprint are recorded. |
+
+**R2 blockers, 8 Nov, 04:13–04:45 UTC. R2 not executed.**
+
+| Blocker | Evidence | Status |
+|---|---|---|
+| Verifier | the 14 cases in §10.5 | resolved |
+| Laptop RAM | see below | **open: needs 3 GB available** |
+| Production writers | see below | resolved: no writers |
+| Render backend | "Suspended by you" at 04:35 | unchanged |
+| Egress | see below | resolved |
+| Scripts | `c25cfac`. The R2 files are byte-identical to the tested copies. Plaintext stays only in a `tmpfs` that cannot swap, and is removed with the container on success or failure, or within 4 h of an interrupted run. | resolved |
+
+**Laptop RAM.**
+
+- 1.49 GB was available at 04:13.
+- Three steps were taken:
+  - the six idle local dev containers were stopped (`docker stop`, data kept);
+  - OneDrive was shut down;
+  - the Docker VM's clean page cache was dropped.
+- Committed memory fell by about 2.5 GB, and the page file from 4.3 to 3.0 GB. Available RAM stayed at 1.5 GB (04:45).
+- The rest is used by Chrome (3.2 GB) and applications that may hold unsaved work. Closing those is the owner's decision.
+
+**Production writers.** Two read-only readings, at 04:22:35 and 04:44:44 UTC, single `SELECT` statements in the SQL editor:
+
+- The next transaction id was 7,197,259 both times. No transaction wrote anything in between.
+- No other session was active, in a transaction, or holding a transaction id. There were no prepared transactions and 0 pooler connections.
+- Rows changed (3,500,858) and rollbacks (1,696,082) are unchanged since 7 Nov 16:48–16:53.
+- The outbox sequence (1,670,005) and the database size (1,600,629,907 bytes) are unchanged.
+- Read-only mode is `off`. There has been no configuration reload since 7 Nov 17:00:38 and no restart since 2 Nov.
+- Commits rise by about 0.84/s. These are read-only transactions of Supabase's own services.
+
+**Egress** (04:34 UTC):
+
+- 4.247 / 5 GB used, unchanged since 7 Nov 17:56. Log ingestion is 0.969 / 1 GB, also unchanged.
+- 753 MB remain, so the cap is **690 MB**: 60 MB of margin, rounded down.
+- Expected transfer: about 530 MB (470–620).
 
 **PHASE 2 STATUS: PLANNING**
