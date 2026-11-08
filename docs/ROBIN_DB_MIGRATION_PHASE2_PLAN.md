@@ -1409,4 +1409,192 @@ With R2 plus E1 and E3 verified against R2's whole-table fingerprints, and E1's 
 | A1 capacity, or idle reclamation | another availability domain, then PAYG (your decision); metrics in week 1 |
 | A forgotten passphrase | E1 and E3 refuse any passphrase that does not open R2 |
 
+### 10.15 Fast-track execution, 8–9 Nov
+
+#### E1 done, 8 Nov 23:10–23:17 UTC: OUTBOX EXPORT OK
+
+You ran it and typed the secrets. Run folder: `C:\RobinBackups\20261108T231043Z-live-outbox-pending`.
+
+| Check | Result |
+|---|---|
+| Passphrase | it opens the R2 archive: one passphrase for both |
+| Source | PostgreSQL 17.6; one REPEATABLE READ, READ ONLY transaction; no temp files on the source |
+| Every table against R2 | **all 110 tables equal R2's row count and fingerprint**, so nothing changed since R2 |
+| Part A1 | the **23** pending user-facing events, exact: job.matched 11, verification.completed 11, signup.completed 1 |
+| Part B1 | **771,636** pending `job.discovered` rows in 20 chunks, exact |
+| Part S | 60,723 jobs carry them. 237 of the 60,960 jobs have no pending event, so a trigger for every job would not be equivalent (§10.14). |
+| Pending total | 771,659 rows, as in R2; fingerprint 445324708623384356660241 |
+| Archive | restored into a fresh database and fingerprinted again: equal. gpg round trip PASS; 54,050,844 bytes, SHA-256 `717a8990…5c840`. |
+| Egress | **34.97 MB** received (cap 48 MB) |
+
+On the wire the transfer cost 1.27 × the chunks' size (27.6 MB of chunks). This ratio is used for E3 below.
+
+**Independent checks, after the run (no secrets needed):**
+
+- the archive's SHA-256 equals both the recorded hash and the manifest's;
+- E1's 110 table fingerprints are identical to R2's, by `diff`;
+- the pending counts by type and the database size (1,600,736,403 bytes) equal R2's;
+- no plaintext file and no container was left behind.
+
+**Restore test with your passphrase (R2 + E1 → one PostgreSQL 17 database):** `restore-test.ps1 -OutboxRunDir`, see below. **Waiting for you to run it** (one hidden passphrase prompt).
+
+#### Tooling added for R6, rehearsed end to end
+
+`restore-test.ps1 -OutboxRunDir <E1>[,<E3>]` (with `container/restore.sh` step 10):
+
+1. It decrypts the outbox exports with the backup's passphrase, in the same RAM-only container.
+2. It runs every R3 check on the backup first.
+3. It loads each export data-only into the restored `public.outbox_events`: R2's own definition, keys and defaults, as `robin_app`, in one transaction.
+4. It then checks:
+   - the table against each export's manifest;
+   - the pending rows against the snapshot;
+   - with E3 loaded, the **whole table** against R2's record of it (rows and fingerprint);
+   - that every pending event's job, profile and user exists;
+   - that no pending event was ever consumed;
+   - that the outbox sequence cannot collide.
+
+It works the same way against Oracle (`-Target remote`), which makes it the R6 tool.
+
+Rehearsal on a Flyway-migrated, Supabase-shaped synthetic source, in the production order (partial backup, pending export, restore, published export, restore), 8 Nov 23:23–23:25 UTC: **9/9 PASS**.
+
+| Step | Result |
+|---|---|
+| Partial backup, outbox rows deferred | PASS |
+| Pending export, passphrase proven on that backup | PASS (17 checks) |
+| Restore: backup + pending export | 19 PASS, 0 FAIL, Flyway validate PASS. The pending rows equal the export and the snapshot; the NOTE says the published part is not loaded yet. |
+| Published export; `verify-outbox-export.ps1` | PASS; 30,023 + 30,000 = 60,023 rows, and the fingerprint equals the snapshot's |
+| Restore: backup + both exports | 22 PASS, 0 FAIL, Flyway validate PASS. **`outbox_equals_snapshot`: all 60,023 rows, one fingerprint, equal to the snapshot's record of the table.** |
+| An export with a failed check, or a changed archive | refused before anything starts |
+
+The synthetic fixture's 23 other events carry placeholder ids, so `outbox_references` is a NOTE there; on production the real references are checked.
+
+#### E3 prepared, not run (needs your approval)
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\jadak\Documents\antigravity\peaceful-chandrasekhar\scripts\db-migration\export-outbox.ps1 -Parts published -EgressCapMB <cap>
+```
+
+- Expected size, on the wire:
+  - the job dictionary (0.95 MB) plus 898,345 published rows at about 39 bytes each;
+  - that is about 36 MB of chunks, × 1.27 on the wire: **about 46 MB**.
+- Budget by our count: 5,000 − 4,247 (dashboard, 7 Nov) − 629 (R2) − 35 (E1) − 1 (dashboard queries) = **about 88 MB**.
+- **Cap: 60 MB.** The budget check stops cleanly before a chunk that could cross it, and even the full cap leaves about 28 MB.
+- Conditions, all still open:
+  1. E1 passes the restore test above.
+  2. A fresh usage reading shows the 8 Nov bar. It should be about 665 MB (R2 + E1); if it is higher, the cap is lowered by the difference.
+  3. You approve.
+
+#### Dispatch pause (built and tested; nothing deployed)
+
+| Switch | Effect | Default |
+|---|---|---|
+| `app.events.dispatch-enabled=false` | `OutboxProcessor.dispatchPending` and `reconcileDlq` neither read nor write `outbox_events`: nothing is published, retried or dead-lettered. One warning is logged. | `true` |
+| `app.discovery.maintenance-enabled=false` | the hourly sweep does not archive jobs as "not seen for 30 days" while discovery is paused | `true` |
+
+They join the existing `app.discovery.scheduler-enabled` and `app.discovery.identity-backfill-enabled`.
+
+Tests:
+
+- `OutboxDispatchSwitchTest` and `JobDiscoveryMaintenanceSwitchTest`: unit tests, no interaction at all when paused;
+- `OutboxDispatchPausedIT`: the full application, with schedulers firing every 200 ms for 2.5 s. Nothing moves: no publish, no retry, no dead letter, no `consumed_events` row, no archived job.
+- Regression checks, with the defaults:
+  - `DiscoveryToApplicationIT` (3), `OutboxPipelineIT` and the equivalence test all pass;
+  - the 7 existing `JobDiscoveryServiceTest` tests pass.
+
+BUILD SUCCESS: 11 unit tests and 7 integration tests.
+
+#### Render at cutover (prepared; nothing changed)
+
+As §10.6, with one change: the temporary `SPRING_APPLICATION_JSON` for the first start becomes
+
+```json
+{"app":{"events":{"dispatch-enabled":false},"discovery":{"scheduler-enabled":false,"identity-backfill-enabled":false,"maintenance-enabled":false}}}
+```
+
+Steps:
+
+1. Before the first start, record the current three `SPRING_DATASOURCE_*` values in the password manager. They are the rollback.
+2. After the start:
+   - `/api/v1/system/health`, `/actuator/health` (database, Redis) and `/actuator/info` respond;
+   - the log shows *"Outbox dispatch is PAUSED"*;
+   - `select count(*) from outbox_events where published_at is null` stays at 771,659;
+   - `pg_stat_ssl` shows TLS for every backend connection.
+3. Then the smoke tests of §10.9.
+4. Dispatch is turned on by removing `"dispatch-enabled":false` and redeploying, under the backlog policy you approve (§10.14).
+
+#### R4: Oracle, step by step (all steps are yours or need your approval; Always Free only)
+
+In the Oracle Cloud console:
+
+1. **Sign up** for Always Free with home region **Germany Central (Frankfurt)**. The home region cannot be changed later. Turn on MFA.
+2. **Compartment** `robin`.
+3. **Networking:**
+   - the VCN wizard "Create VCN with Internet Connectivity": `robin-vcn`;
+   - a **reserved public IPv4**: `robin-db-ip`.
+4. **Compute instance** `robin-db`:
+   - image Canonical Ubuntu 24.04 (aarch64);
+   - shape `VM.Standard.A1.Flex`, 2 OCPU, 12 GB;
+   - the public subnet;
+   - boot volume 50 GB;
+   - your SSH public key, generated on your laptop; the private key never leaves it.
+
+   Afterwards, move the VNIC's public IP from ephemeral to `robin-db-ip`.
+5. **Block volume** `robin-pgdata`: 100 GB, Balanced. Attach it to `robin-db` as paravirtualized, read/write, with the consistent device path `/dev/oracleoci/oraclevdb`.
+6. **Security list** of the public subnet:
+   - ingress TCP 5432 from each of Render's Frankfurt outbound ranges (the "Connect → Outbound" panel of the Render service; it is not shown while the service is suspended);
+   - ingress TCP 22 from your IP only, or none if you use OCI Bastion.
+
+On the VM, over SSH:
+
+```bash
+sudo mkfs.ext4 -L pgdata /dev/oracleoci/oraclevdb
+sudo mkdir -p /srv/pgdata
+echo 'LABEL=pgdata /srv/pgdata ext4 defaults,noatime,_netdev,nofail 0 2' | sudo tee -a /etc/fstab
+sudo mount -a && findmnt /srv/pgdata
+sudo bash provision-postgres17.sh --data-dir /srv/pgdata --server-ip <reserved IP> --allow <Render range> [--allow <Render range> ...]
+```
+
+What the script sets (reviewed again on 8 Nov):
+
+- PGDG PostgreSQL 17 after checking the signing-key fingerprint;
+- the cluster on the volume, with data checksums;
+- the §5 configuration;
+- TLS 1.2 minimum, from a private CA with a server certificate issued for the reserved IP;
+- SCRAM only, and `robin_app` only (no superuser, no BYPASSRLS), from the allowed ranges; `robin_restore` from loopback only;
+- every other address, IPv6 included, rejected;
+- iptables opened for the same ranges, persistently.
+
+`robin_app`'s password is set at a hidden `\password` prompt.
+
+After provisioning:
+
+- copy `/etc/robin/robin-pg-ca.crt` to the laptop; it is public;
+- keep the CA private key root-only, or move it offline; it is needed only to renew the server certificate.
+
+#### R6 and cutover: the commands
+
+1. **Rehearsal on Oracle** (`robin_restore`, through an SSH tunnel; `pg_hba` allows it from loopback only):
+
+   ```bash
+   ssh -N -L 15432:127.0.0.1:5432 ubuntu@<reserved IP>
+   ```
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\jadak\Documents\antigravity\peaceful-chandrasekhar\scripts\db-migration\restore-test.ps1 -RunDir C:\RobinBackupsCopy\20261108T155443Z-live-partial -OutboxRunDir <E1 folder>,<E3 folder> -Target remote -TargetHost <reserved IP> -TargetHostAddr host.docker.internal -TargetPort 15432 -TargetDb robin_restore -CaCert <path to robin-pg-ca.crt>
+   ```
+
+   Expected: every R3 check, plus `outbox_equals_snapshot` (1,670,004 rows, fingerprint 963152130790551762785771) on ARM64 PostgreSQL 17. Then run Flyway validate over the tunnel, and measure latency from Render.
+2. **Final restore:** the same command with `-TargetDb robin`, which must be empty.
+3. **Switch** (your approval): Render variables as above → deploy → health checks and smoke tests → dispatch on under the approved backlog policy → discovery on.
+4. **Supabase stays untouched** until you accept the migration.
+
+#### Inputs needed from you
+
+| When | What |
+|---|---|
+| now | type the passphrase once for the R2 + E1 restore test |
+| after that | approve E3, once the 8 Nov usage bar is in |
+| R4 | the Oracle sign-up; the console steps above; your SSH key; Render's Frankfurt outbound ranges; `robin_app`'s password (password manager) |
+| cutover | approve the backlog policy (whole replay, or supersede the earlier duplicates, §10.14); approve the Render change and the deploy |
+
 **PHASE 2 STATUS: PLANNING**
