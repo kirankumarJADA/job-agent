@@ -1181,4 +1181,232 @@ Egress needed for an exact export: about 520 MB for all rows uncompressed, from 
 3. **From 18 Nov, if reachable:** first a one-row connection probe. Then either an outbox-only backup (about 0.55 GB, with `-DeferTableData` listing the other tables; no code change) or the planned complete R5 (cap about 1.6 GB), each checked with `verify-backup.ps1 -CompareWith` against R2 on Robin's `public` tables.
 4. **If unreachable after 18 Nov:** Robin can still be migrated from R2, plus step 1 if done, plus step 2. Only the exact outbox history is lost. Recovering it would need a paid upgrade, which you have ruled out, or Supabase support. That decision is yours.
 
+*Superseded the same evening by §10.14:* all 1,670,004 rows can be exported exactly before 12 Nov, in about 86 MB.
+
+### 10.14 Accelerated route, 8 Nov evening
+
+#### Fresh readings, 20:50–21:10 UTC (read-only)
+
+Usage page, organization view, cycle 18 Oct – 18 Nov:
+
+| Item | Reading |
+|---|---|
+| Egress | 4.247 / 5 GB (85 %), unchanged since 17:06. The daily chart ends on 7 Nov, so R2's 629 MB on 8 Nov is **not counted yet**. |
+| Database size | 1.616 / 0.5 GB (323 %) |
+| **Log ingestion** | **0.969 / 1 GB (97 %)**: new, and close to its own quota |
+| Cached egress | 0 / 5 GB |
+
+- The banner says the previous cycle went over on **egress**, and that projects *"will be restricted from 12 Nov, 2026 if your organization remains over quota"*. The database size keeps the organization over quota.
+- Remaining egress by our own count: 5,000 − 4,247 − 629 (R2) ≈ **124 MB**, less anything else on 8 Nov. It is confirmed only when the 8 Nov bar appears.
+
+Three read-only queries in the SQL editor, returning 7, 6 and 5 rows, with no write keywords:
+
+- database size 1,600,736,403 bytes, byte-identical to the R2 snapshot;
+- `public.outbox_events`: 538 MB in total, of which 465 MB is heap;
+- every pending row has `attempt_count` 0 and no `last_error`, so none is dead-lettered;
+- `work_mem` 2,184 kB, `hash_mem_multiplier` 2;
+- pgcrypto (schema `extensions`) compresses with zlib.
+
+Compressed size per row, from 20,000-row samples at the start and middle of each group:
+
+| Encoding | Pending | Published |
+|---|---:|---:|
+| `to_jsonb` text | 69.1 B | 74.5–75.0 B |
+| record text | 67.2 B | 73.0 B |
+| **compact v1** (`sql/outbox-encode-rows.sql`) | **46.5 B** | **51.3 B** |
+
+So the pending parts cost about 38 MB and the published part about 48 MB: **about 86 MB for every row**, inside the remaining egress.
+
+#### Priorities 1 and 3: an exact export of all 1,670,004 outbox rows (built and tested)
+
+`export-outbox.ps1` (README, "Outbox export"):
+
+- one read-only snapshot;
+- the table's shape checked first;
+- compact rows compressed on the source;
+- a clean stop before the cap, plus the hard watchdog;
+- every chunk decoded and checked against the source (SHA-256, rows, fingerprint) in a RAM-only container;
+- the archive restored and fingerprinted again;
+- the passphrase proven on the R2 archive before any connection;
+- gpg like R2.
+
+`verify-outbox-export.ps1` then proves that the runs add up to R2's whole-table fingerprint.
+
+Tests, synthetic only (`sql/dryrun-outbox-source.sql`):
+
+| Test | Result |
+|---|---|
+| Edge cases, all parts, 500-row chunks: non-v7 ids; payloads with extra keys, non-string actions, odd sources, a different job_id, control characters, Unicode and large numbers; NULL and empty strings; published before created; far past and future times; sequence gaps; aggregates outside `jobs` | exact: fingerprint equal to the source; an independent restore equals the source row for row (7,076 rows, 0 differences) |
+| Every-table fingerprints against R2 | PASS when nothing changed. A changed `public.jobs` row gives FAIL; a changed `storage.migrations` row gives a NOTE. |
+| Full scale: 60,960 jobs, 771,636 + 23 pending, 899,243 published | pending run 68 s, 28.65 MB, container peak 0.83 GB. Published run 81 s, 35.58 MB, peak 0.93 GB. Together they equal the whole table (1,670,902 rows, fingerprint equal). |
+| A 25 MB cap on the full-scale table | a clean stop before B1 chunk 16, at 22.64 MB received (the next chunk could have needed 3.26 MB). Everything that arrived is verified and archived. The status is PARTIAL, not failed. |
+| `verify-outbox-export.ps1` on the two full-scale runs | PASS: 771,659 + 899,243 rows, and the fingerprints add up to the table's. FAIL against a different R2 record. |
+| A corrupted byte in one chunk; one row changed after decoding | both detected (`chunk_decode`, `archive_restores_exactly`) |
+| The wrong passphrase | refused **before connecting** |
+| An extra column on the source table | refused before any row is read |
+| Swappable container; data directory on disk | `FAIL plaintext_in_ram`, nothing read |
+| Live mode with test hooks, without a cap, or without TLS; free RAM below the minimum | refused |
+| R2 original and copy | unchanged throughout |
+
+The final run of the suite: **19 PASS, 0 FAIL** (8 Nov 21:48–21:56 UTC). The test driver is kept outside the repository, like R3's. No production system was contacted.
+
+The production runs (each needs you at the terminal):
+
+| Run | Parts | Estimate | Cap | When |
+|---|---|---:|---:|---|
+| E1 | D, A1, S, B1, plus every-table fingerprints (`-FingerprintAllTables`) | about 38 MB | 48 MB | now: before 12 Nov |
+| E3 | D, B2 | about 48 MB | the fresh remaining egress minus 25 MB | once the 8 Nov bar shows E1 and R2 on the usage page |
+
+If the budget check stops E1 or E3 early, the chunks that arrived are kept and verified, and a later run fetches the rest.
+
+#### Priority 2: rebuilding the 771,636 pending `job.discovered` events (evidence)
+
+From the code:
+
+1. **Exactly two consumers.** Only `ApplicationPipelineEventHandler` (consumer `application-pipeline`) and `NotificationEventHandler` (`notification-fanout`) handle `job.discovered`; they are the only two `EventHandler` implementations.
+2. **`application-pipeline` ignores the event's details.** `ApplicationPipelineService.onJobIngested(jobId, action)` never reads `action`. It re-reads the job and, for every profile, does the following, all of it a function of the current rows (no clock is read):
+   - runs the hard filter;
+   - `persistFilterRejection` writes only `where status = 'DISCOVERED'`;
+   - `JobMatchService.evaluateMatch` upserts `job_matches` on (profile, job);
+   - it sets `SCORED` only from `DISCOVERED` or `ANALYSED`;
+   - it emits `job.matched` for APPLY.
+3. **`notification-fanout` keeps one notice per job.** Its dedup key is `job-discovered:<job id>` (`insertIfAbsent` on `notifications_dedup_key_uq`). The owner is NULL: a system notice that no user query returns.
+4. **What follows `job.matched` is idempotent per (profile, job):**
+   - decisions are upserted on (profile, job), and only while not terminal (`ApplicationDecisionService.record`);
+   - one live application per (profile, job), from a pre-check plus `applications_profile_job_live_uq`;
+   - an unused quota reservation is released;
+   - notifications are deduplicated per job.
+5. **`consumed_events` protects only the same event id.** A rebuilt event has a new id, so its safety comes from points 2–4, not from `consumed_events`.
+
+What differs between replaying a job's k events and replaying one:
+
+- bookkeeping:
+  - `consumed_events`;
+  - k − 1 more `job.discovered` rows, and k − 1 more `job.matched` rows per APPLY profile;
+  - `published_at`;
+- timestamps (`scored_at`, `updated_at`);
+- the stored payload of the invisible `job-discovered` notice;
+- one audit row per repeated `job.matched` for a cross-source duplicate refusal;
+- metrics.
+
+The rebuilt trigger must be limited to jobs that **have** pending events (part S lists them, with each job's last pending sequence_id), and placed at that last position. A trigger for every job in R2 would **not** be equivalent: it would re-score jobs that have nothing pending.
+
+Empirical test: `OutboxBacklogCompactionEquivalenceIT`. It runs the real ingestion, the real `OutboxProcessor` and both real consumers, from one database snapshot:
+
+- once with the whole backlog;
+- once with one rebuilt event per job.
+
+It then compares jobs, matches, decisions, applications, the application timeline, notifications and every other table's row count.
+
+The fixture:
+
+- three profiles: one auto-applying, one assisted, one without preferences;
+- 14 jobs, from two sources;
+- first sight, 1–12 re-crawls, edits, and the same posting on another board;
+- two user-facing events interleaved.
+
+**Result, 8 Nov 21:58 UTC: PASS** (1 test, 0 failures, 46 s).
+
+| | Whole backlog | One rebuilt event per job |
+|---|---:|---:|
+| Pending `job.discovered` at the start | 109 (14 jobs) | 14 |
+| Dispatcher rounds to drain | 8 | 5 |
+| **Business state** (jobs, 38 matches, 17 decisions, 17 applications with 85 timeline rows, 118 notifications, row counts of the 66 other tables) | **identical** | **identical** |
+| `job.matched` events produced | 137 | 17 |
+| `application.created` / `application.prepared` | 17 / 17 | 17 / 17 |
+| `consumed_events` rows | 596 | 166 |
+| Audit rows | 118 | 118 |
+| Dead letters | 0 | 0 |
+
+So the rebuild is functionally equivalent, under the conditions above: only jobs with pending events, each at its last position. It drains in fewer rounds and produces 8× fewer downstream events. With the exact rows exported (E1), the cutover can keep every original row and supersede the redundant ones instead of rebuilding anything.
+
+**Throughput.** The dispatcher handles at most 50 events per 2-second poll. At that rate:
+
+- 771,636 events take at least 8.6 hours, and hold the 23 user-facing events, and anything new, behind them;
+- one event per job (about 61,000) takes at least 41 minutes.
+
+**Recommendation for cutover** (needs your approval, and its own test first):
+
+- keep every exported row;
+- mark each job's earlier pending `job.discovered` rows as superseded: record them in a `robin_migration.superseded_events` table and set `published_at`;
+- leave only each job's last original event pending.
+
+Nothing is deleted, and the history stays complete.
+
+#### Priority 4: R4 decisions that are yours
+
+| Decision | Recommendation | Reason |
+|---|---|---|
+| Oracle Cloud account | you create it (Always Free sign-up; it asks for a card to verify identity) | account creation is yours |
+| Home region (**permanent**) | Germany Central (Frankfurt) | the backend runs in Render's Frankfurt region, and Always Free compute must be in the home region |
+| Pay As You Go | not at first; switch only if "Out of host capacity" persists | Always Free resources stay free on PAYG, but its exemption from reclamation is not documented |
+| Shape | `VM.Standard.A1.Flex`, 2 OCPU, 12 GB, Ubuntu 24.04 aarch64 | the whole Always Free A1 allowance; `provision-postgres17.sh` requires Ubuntu 24.04 |
+| Storage | boot volume 50 GB; block volume 100 GB at `/srv/pgdata` | 150 of the free 200 GB |
+| Public address | a reserved public IPv4 | the certificate and Render's allowlist stay valid across restarts |
+| Port 5432 | open only to Render's Frankfurt outbound ranges (Render dashboard) | they are shared ranges, so TLS + SCRAM + `robin_app` only (already in the script) |
+| SSH | OCI Bastion, no open port 22; or your IP only | |
+| Certificate name | the reserved IP (no DNS needed), or a DNS name you own | |
+| Backups on the VM | a private Object Storage bucket, plus a backup **public** key you generate; keep the private key offline | the VM can never decrypt its own backups |
+
+#### Priority 5: offsite copy (built and tested)
+
+`copy-offsite.ps1` (README, "Offsite copy"):
+
+- copies only ciphertext and metadata;
+- checks every archive against its recorded hash;
+- verifies every copy byte for byte and marks it read-only;
+- writes a receipt;
+- verifies, instead of copying, on a second run;
+- never overwrites a differing copy;
+- refuses the same volume and OneDrive unless you allow them.
+
+Tests 9/9 PASS:
+
+- copy and verify;
+- a comma-separated list of folders through `powershell -File`;
+- re-run verifies;
+- a damaged copy is reported and not overwritten;
+- same volume refused;
+- OneDrive refused;
+- a folder with an unencrypted archive refused;
+- an archive that no longer matches its hash refused;
+- both R2 folders unchanged.
+
+**Your decision:** the destination. An external USB drive is recommended. OneDrive means uploading the ciphertext to Microsoft, and Object Storage needs R4.
+
+#### Priority 6: end-to-end execution plan (shortest safe route)
+
+With R2 plus E1 and E3 verified against R2's whole-table fingerprints, and E1's every-table fingerprints proving `public` unchanged, the complete backup no longer depends on 18 Nov or on reaching Supabase after 12 Nov. R5 becomes an optional confirmation. This changes your earlier rule *"Do not skip the full backup"* in form, not in substance: the full backup is assembled from verified parts. **It needs your agreement.**
+
+| Step | What | Depends on | Your part | Supabase egress |
+|---|---|---|---|---:|
+| E1 | outbox export, pending parts + every-table fingerprints | tools (done) | type host, user, password, passphrase | about 38 MB |
+| E2 | usage reading that includes 8 Nov | the day's bar | none (read-only) | 0 |
+| E3 | outbox export, published part | E1, E2 | type the secrets again | about 48 MB |
+| E4 | `verify-outbox-export.ps1` on E1 + E3 | E3 | none | 0 |
+| O1 | offsite copy of R2, E1, E3 | your destination; E3 | plug in the drive | 0 |
+| K1 | code: dispatch kill switch, maintenance pause, supersession step, with tests (§6, §10.7) | your approval | approve, review | 0 |
+| V1 | Oracle account and home region | you | sign up | 0 |
+| V2 | VM, volumes, VCN, reserved IP, security list, Bastion | V1 | console, or me in the browser with your approval | 0 |
+| V3 | `provision-postgres17.sh` on the VM | V2, Render's ranges | run over SSH | 0 |
+| V4 | rehearsal on Oracle: R2 + E1 + E3 into `robin_restore`; Stage C checks; outbox fingerprints; Flyway validate; latency from Render | V3, E4 | passphrase | 0 |
+| V5 | nightly encrypted backups on the VM | V3 | approve; key pair | 0 |
+| C1 | cutover: restore into `robin`, supersession step, Render variables (§10.6), deploy with dispatch and discovery paused, smoke tests, resume dispatch, then discovery | V4, V5, K1 | approve each change | 0 |
+| C2 | week 1: OCI metrics (reclamation, disk), backups, restore test; Supabase kept intact | C1 | — | 0 |
+| R5 | optional: complete backup from 18 Nov, compared with R2 | reachable | approve | about 1.1 GB |
+
+- **Critical path:** E1 → E3 → E4 → V4 → C1. V1–V3 and K1 run alongside.
+- **Earliest cutover:** about 11 Nov, if the Oracle account exists by 9 Nov. Robin has been offline since R1, so earlier is better.
+- No step after E3 reads anything from Supabase.
+
+#### Risks, updated
+
+| Risk | Mitigation |
+|---|---|
+| Restriction from 12 Nov blocks E3 | E1 first (the pending rows and the job list); E3 as soon as the usage page allows; a budget stop keeps partial progress |
+| Log ingestion at 97 % | three SQL editor queries tonight; the export is one session; no polling |
+| R2 metered higher than our count | E3's cap comes from the usage page, with a 25 MB margin |
+| A1 capacity, or idle reclamation | another availability domain, then PAYG (your decision); metrics in week 1 |
+| A forgotten passphrase | E1 and E3 refuse any passphrase that does not open R2 |
+
 **PHASE 2 STATUS: PLANNING**
