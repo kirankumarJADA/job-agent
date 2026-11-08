@@ -7,7 +7,10 @@
 .DESCRIPTION
   -Target local (the default) starts a disposable postgres:17.11 container.
   Its data directory and the decrypted archive live only on RAM-backed tmpfs
-  mounts, and its port is bound to 127.0.0.1. Inside it, container/restore.sh:
+  mounts, and its port is bound to 127.0.0.1. The container may not swap
+  (--memory equals --memory-swap, so memory.swap.max is 0), and the server
+  runs with wal_level=minimal so that the single-transaction restore writes
+  almost no WAL into that RAM. Inside it, container/restore.sh:
 
   - decrypts the archive;
   - restores the application scope as robin_app (NOSUPERUSER NOBYPASSRLS, the
@@ -97,19 +100,28 @@ Write-Step "report directory: $reportDir"
 if ($Target -eq 'local') {
     $superPw = New-HexSecret
     $appPw = New-HexSecret
-    Write-Step "container: $name (data and decrypted archive on tmpfs; port 127.0.0.1:$HostPort only)"
+    Write-Step "container: $name (data and decrypted archive on tmpfs, no swap; port 127.0.0.1:$HostPort only)"
+    # The Docker VM has a swap disk: --memory equal to --memory-swap gives the
+    # container memory.swap.max = 0, so the restored data (tmpfs) and the
+    # server's memory are never swapped out to it. restore.sh checks this.
+    # wal_level=minimal (with max_wal_senders=0) lets the single-transaction
+    # restore skip WAL for the tables it creates, which keeps RAM use down.
+    $memArg = "$($DataTmpfsGb + 1)g"
     $runArgs = @('run', '-d', '--name', $name,
         '-p', "127.0.0.1:${HostPort}:5432",
         '--tmpfs', "/var/lib/postgresql/data:rw,size=${DataTmpfsGb}g",
         '--tmpfs', '/restore:rw,size=4g,mode=0700',
+        '--memory', $memArg, '--memory-swap', $memArg,
         '-e', "POSTGRES_PASSWORD=$superPw", '-e', "ROBIN_APP_PASSWORD=$appPw", '-e', "ROBIN_MODE=$Mode",
         $Image,
         '-c', 'fsync=off', '-c', 'full_page_writes=off', '-c', 'synchronous_commit=off',
+        '-c', 'wal_level=minimal', '-c', 'max_wal_senders=0',
         '-c', 'max_wal_size=2GB', '-c', 'maintenance_work_mem=512MB')
 } else {
     Write-Step "container: $name (client tools only; decrypted archive on tmpfs; restores into $TargetDb on $TargetHost over TLS verify-full)"
     $runArgs = @('run', '-d', '--name', $name,
         '--tmpfs', '/restore:rw,size=4g,mode=0700',
+        '--memory', '5g', '--memory-swap', '5g',
         '-e', "ROBIN_MODE=$Mode", '-e', 'ROBIN_TARGET=remote', '-e', "ROBIN_TARGET_DB=$TargetDb",
         '-e', "PGHOST=$TargetHost", '-e', "PGPORT=$TargetPort", '-e', 'PGSSLMODE=verify-full',
         '-e', 'PGSSLROOTCERT=/in/ca.crt')

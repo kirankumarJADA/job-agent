@@ -4,7 +4,8 @@
 # 127.0.0.1 only). See scripts/db-migration/README.md.
 #
 #   /in       the encrypted archive and the backup's metadata files
-#   /restore  RAM-backed tmpfs: the decrypted archive and the passphrase
+#   /restore  RAM-backed tmpfs, never swapped (the container's
+#             memory.swap.max is 0): the decrypted archive and the passphrase
 #   /work     scripts
 #   /out      the restore report (metadata only, no row data)
 #
@@ -37,6 +38,26 @@ case "$MODE" in
   live|dryrun) ;;
   *) echo "ROBIN_MODE must be 'live' or 'dryrun'" >&2; exit 2 ;;
 esac
+
+# ── 0. plaintext stays in RAM ─────────────────────────────────────────
+# The decrypted archive (/restore) and, for a local target, the restored data
+# directory must be on tmpfs, and this container must be unable to swap: the
+# Docker VM has a swap disk, so restore-test.ps1 starts the container with
+# --memory equal to --memory-swap (memory.swap.max = 0). Otherwise the test
+# stops here, before the passphrase is asked for.
+swap_max=$(cat /sys/fs/cgroup/memory.swap.max 2>/dev/null || echo unknown)
+ram_paths=("$R")
+[[ ${ROBIN_TARGET:-local} == local ]] && ram_paths+=("${PGDATA:-/var/lib/postgresql/data}")
+not_tmpfs=""
+for p in "${ram_paths[@]}"; do
+  [[ $(stat -fc %T "$p" 2>/dev/null || echo missing) == tmpfs ]] || not_tmpfs+="$p "
+done
+if [[ -z $not_tmpfs && $swap_max == 0 ]]; then
+  pass plaintext_in_ram "${ram_paths[*]} on tmpfs and this container cannot swap (memory.swap.max=0)"
+else
+  abort plaintext_in_ram "not on tmpfs: ${not_tmpfs:-none}; memory.swap.max is $swap_max, so plaintext could reach a disk; nothing was decrypted"
+fi
+
 for f in robin.dump.gpg robin.dump.sha256 source-fingerprints.txt source-inventory.txt source-facts.txt archive-counts.txt; do
   [[ -s $IN/$f ]] || { echo "missing $IN/$f" >&2; exit 2; }
 done

@@ -17,7 +17,7 @@ They run on Windows PowerShell 5.1 or later, and every PostgreSQL tool runs insi
   - The unencrypted archive exists only in a container `tmpfs` and disappears with the container.
   - The backup container cannot swap. The Docker VM has a swap disk, so the container runs with `--memory 5g --memory-swap 5g`, which gives it `memory.swap.max = 0` (cgroup v2). Neither its `tmpfs` nor the memory of `pg_dump`, `psql` and `gpg` is ever written to that disk. `backup.sh` checks this before it asks for any secret or connects, and stops with `FAIL|plaintext_in_ram` otherwise.
   - Windows itself can still page the Docker VM's memory to `C:\pagefile.sys` when the laptop runs short of RAM. Keep about 3 GB of RAM available during a live run.
-  - In the restore test, the data directory and the decrypted archive are also on `tmpfs`. The restore containers do not have the swap guard yet: add it before restoring production data (Stage C).
+  - In the restore test, the data directory and the decrypted archive are also on `tmpfs`, and the restore containers cannot swap either: `--memory` equals `--memory-swap`, and `restore.sh` checks it first (`plaintext_in_ram`). The local restore server runs with `wal_level=minimal`, so the single-transaction restore writes almost no WAL into that RAM.
   - Only the AES-256 encrypted archive and metadata files reach the backup folder.
 - **No secrets on command lines or on disk (live mode).** The database password and the encryption passphrase are typed at prompts inside the container (`docker exec -it`). They are never echoed, logged or passed as arguments.
 - **No personal data in outputs.** Metadata files hold counts, SHA-256 values, fingerprints (hash sums) and object names. The manifest leaves out the host and user names.
