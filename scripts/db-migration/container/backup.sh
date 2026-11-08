@@ -3,7 +3,8 @@
 # backup-supabase.ps1. See scripts/db-migration/README.md.
 #
 #   /work  scripts (container disk)
-#   /dump  RAM-backed tmpfs: plaintext archive and the transient secrets
+#   /dump  RAM-backed tmpfs, never swapped (the container's memory.swap.max
+#          is 0): plaintext archive and the transient secrets
 #   /out   container disk: ONLY the encrypted archive and metadata files
 #
 # Live mode reads the database password and the encryption passphrase from
@@ -148,6 +149,20 @@ else
   log "scope: complete (every table's rows)"
 fi
 if (( CAP > 0 )); then log "egress cap: $(mb "$CAP") MB received by this container"; else log "egress cap: none"; fi
+
+# ── 0. plaintext stays in RAM ─────────────────────────────────────────
+# /dump must be a tmpfs, and this container must be unable to swap: the
+# Docker VM has a swap disk, so backup-supabase.ps1 starts the container with
+# --memory equal to --memory-swap (cgroup v2 memory.swap.max = 0). Otherwise
+# the plaintext could be swapped out to that disk, and the run stops here,
+# before any secret is asked for or any connection is made.
+dump_fs=$(stat -fc %T "$DUMP" 2>/dev/null || echo unknown)
+swap_max=$(cat /sys/fs/cgroup/memory.swap.max 2>/dev/null || echo unknown)
+if [[ $dump_fs == tmpfs && $swap_max == 0 ]]; then
+  pass plaintext_in_ram "/dump is a tmpfs and this container cannot swap (memory.swap.max=0)"
+else
+  abort plaintext_in_ram "/dump is $dump_fs and memory.swap.max is $swap_max, so plaintext could reach a disk; nothing was read"
+fi
 
 # ── 1. secrets, in tmpfs only ─────────────────────────────────────────
 if [[ $MODE == live ]]; then

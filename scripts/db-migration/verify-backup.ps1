@@ -18,6 +18,12 @@
   counts and content fingerprints. Use it to prove that a later complete
   backup saw exactly the data an earlier partial one did.
 
+  A live source that was not read-only at the snapshot fails source_read_only,
+  unless -AcceptWritableSource is given: then it is reported as a WARN. Use it
+  only when you have decided to back up a writable but idle source; the
+  archive still comes from one REPEATABLE READ snapshot, and a later backup's
+  -CompareWith shows whether any data changed in between.
+
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\db-migration\verify-backup.ps1 `
     -RunDir C:\RobinBackups\20261118T090000Z-live -CompareWith C:\RobinBackups\20261107T180000Z-live-partial
@@ -25,7 +31,8 @@
 param(
     [Parameter(Mandatory = $true)] [string] $RunDir,
     [ValidateSet('live', 'dryrun')] [string] $Mode = 'live',
-    [string] $CompareWith
+    [string] $CompareWith,
+    [switch] $AcceptWritableSource
 )
 $ErrorActionPreference = 'Stop'
 $script:pass = 0; $script:fail = 0; $script:warn = 0
@@ -121,7 +128,7 @@ $fails = @($lines | Where-Object { $_ -like 'FAIL|*' })
 $notes = @($lines | Where-Object { $_ -like 'NOTE|*' })
 $passes = @($lines | Where-Object { $_ -like 'PASS|*' })
 $names = @($lines | ForEach-Object { ($_ -split '\|')[1] })
-$expectedNames = @('server_major', 'pg_dump_exit', 'snapshot_session', 'pg_dump_log', 'source_fingerprints', 'toc_readable',
+$expectedNames = @('plaintext_in_ram', 'server_major', 'pg_dump_exit', 'snapshot_session', 'pg_dump_log', 'source_fingerprints', 'toc_readable',
     'toc_table_data_public', 'toc_row_security_public', 'toc_triggers_public', 'toc_views_public', 'toc_sequence_set_public',
     'toc_indexes_public', 'archive_row_counts', 'decrypt_roundtrip')
 if ([long]$m['egress_cap_bytes'] -gt 0) { $expectedNames += 'egress_within_cap' }
@@ -201,8 +208,15 @@ Check ($seq -eq $exp.OutboxSeq) 'outbox_sequence' "outbox_events_sequence_id_seq
 $fwOk = ($inv['flyway_rows'] -eq '52') -and ($inv['flyway_success_rows'] -eq '52') -and ($inv['flyway_baseline_rows'] -eq '1') -and ($inv['flyway_max_version'] -eq '051')
 Check $fwOk 'flyway_history' ("rows $($inv['flyway_rows']), successful $($inv['flyway_success_rows']), baseline $($inv['flyway_baseline_rows']), latest version $($inv['flyway_max_version'])")
 
-# 10. the source was read-only when the snapshot was taken
-Check ($facts['default_transaction_read_only'] -eq $exp.ReadOnly) 'source_read_only' "default_transaction_read_only=$($facts['default_transaction_read_only']) at snapshot $($facts['snapshot_time']) (expected $($exp.ReadOnly))"
+# 10. the source was read-only when the snapshot was taken. A writable live
+#     source is accepted only with -AcceptWritableSource, and then as a WARN.
+$ro = [string]$facts['default_transaction_read_only']
+$roText = "default_transaction_read_only=$ro at snapshot $($facts['snapshot_time']) (expected $($exp.ReadOnly))"
+if ($ro -eq $exp.ReadOnly) { Pass 'source_read_only' $roText }
+elseif ($AcceptWritableSource -and ($Mode -eq 'live') -and ($ro -eq 'off')) {
+    Warn 'source_read_only' "$roText; accepted with -AcceptWritableSource: one REPEATABLE READ snapshot, and a later backup's -CompareWith shows whether data changed"
+}
+else { Fail 'source_read_only' $roText }
 
 # 11. transfer measured by the container, against its cap
 if ($m.ContainsKey('network_rx_bytes')) {

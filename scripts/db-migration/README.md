@@ -15,7 +15,9 @@ They run on Windows PowerShell 5.1 or later, and every PostgreSQL tool runs insi
 - **One snapshot.** That transaction exports its snapshot. In that snapshot it records per-table row counts and content fingerprints. It then holds the snapshot open while `pg_dump --snapshot` copies exactly the same state.
 - **Plaintext only in RAM.**
   - The unencrypted archive exists only in a container `tmpfs` and disappears with the container.
-  - In the restore test, the data directory and the decrypted archive are also on `tmpfs`.
+  - The backup container cannot swap. The Docker VM has a swap disk, so the container runs with `--memory 5g --memory-swap 5g`, which gives it `memory.swap.max = 0` (cgroup v2). Neither its `tmpfs` nor the memory of `pg_dump`, `psql` and `gpg` is ever written to that disk. `backup.sh` checks this before it asks for any secret or connects, and stops with `FAIL|plaintext_in_ram` otherwise.
+  - Windows itself can still page the Docker VM's memory to `C:\pagefile.sys` when the laptop runs short of RAM. Keep about 3 GB of RAM available during a live run.
+  - In the restore test, the data directory and the decrypted archive are also on `tmpfs`. The restore containers do not have the swap guard yet: add it before restoring production data (Stage C).
   - Only the AES-256 encrypted archive and metadata files reach the backup folder.
 - **No secrets on command lines or on disk (live mode).** The database password and the encryption passphrase are typed at prompts inside the container (`docker exec -it`). They are never echoed, logged or passed as arguments.
 - **No personal data in outputs.** Metadata files hold counts, SHA-256 values, fingerprints (hash sums) and object names. The manifest leaves out the host and user names.
@@ -155,6 +157,7 @@ The script then decrypts the archive once to prove it decrypts correctly. Neithe
 
 The checks cover:
 
+- the plaintext stays in RAM: `/dump` is a `tmpfs` and the container cannot swap;
 - server major version 17;
 - `pg_dump` exit 0 with no errors in its log;
 - the table-of-contents entries for `public` match the snapshot inventory: table data, row security, triggers, views, sequences and indexes;
@@ -181,6 +184,8 @@ The checks cover:
   - no leftover container.
 
   For a complete backup taken after a partial one, add `-CompareWith <partial run folder>`. Every table's count and fingerprint must be equal, which proves that nothing changed between the two runs.
+
+  If the source was not read-only at the snapshot, `source_read_only` fails. Add `-AcceptWritableSource` only when you decided to back up a writable but idle source: the check is then a WARN. The archive is still one consistent snapshot, and `-CompareWith` on the next backup shows whether anything changed.
 - Copy `robin.dump.gpg` and `manifest.txt` to your offsite location. Copy only the encrypted file.
 - Even after a pass, the backup is only "taken". It is "verified" once Stage C passes.
 

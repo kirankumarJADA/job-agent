@@ -7,7 +7,10 @@
 .DESCRIPTION
   Runs pg_dump 17 inside a disposable postgres:17.11 container. The plaintext
   archive exists only in that container's RAM-backed tmpfs and disappears with
-  the container. Only the encrypted archive and metadata files (counts, hashes,
+  the container. The container may not swap (--memory equals --memory-swap),
+  so neither the tmpfs nor the memory of the processes handling plaintext is
+  ever written to the Docker VM's swap disk; backup.sh checks this before it
+  connects. Only the encrypted archive and metadata files (counts, hashes,
   object names; no row data, no host, no user, no credentials) reach
   -BackupRoot.
 
@@ -127,8 +130,13 @@ Write-Step "container: $name (plaintext only in its RAM-backed /dump)"
 if ($scope -eq 'partial') { Write-Step ("PARTIAL backup: the rows of {0} are left out (not the complete backup)" -f ($deferred -join ', ')) }
 if ($EgressCapMB -gt 0) { Write-Step "egress cap: $EgressCapMB MB received by the container, then pg_dump and psql are stopped" }
 
+# The Docker VM has a swap disk. With --memory equal to --memory-swap the
+# container gets memory.swap.max = 0 (cgroup v2): its tmpfs pages and process
+# memory, which hold the plaintext, can never be swapped out to that disk.
+# backup.sh refuses to start (plaintext_in_ram) if that is not the case.
 $runArgs = @('run', '-d', '--name', $name,
     '--tmpfs', '/dump:rw,size=4g,mode=0700',
+    '--memory', '5g', '--memory-swap', '5g',
     '-e', "PGHOST=$PgHost", '-e', "PGPORT=$PgPort", '-e', "PGUSER=$PgUser",
     '-e', "PGDATABASE=$PgDatabase", '-e', "PGSSLMODE=$SslMode",
     '-e', "ROBIN_MODE=$Mode", '-e', "ROBIN_IMAGE=$Image", '-e', "ROBIN_IMAGE_DIGEST=$imageId",
