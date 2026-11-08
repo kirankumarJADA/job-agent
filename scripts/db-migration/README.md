@@ -246,6 +246,117 @@ It installs `postgresql-17` from PGDG, after checking the signing key's fingerpr
 
 To test the script locally first: `dry-run.ps1 -OracleRehearsal`.
 
+## Outbox export (the rows R2 left out)
+
+R2 is a complete backup except for the rows of `public.outbox_events`
+(1,670,004 at the R2 snapshot). `export-outbox.ps1` takes exactly those rows,
+for a fraction of their size in egress:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\db-migration\export-outbox.ps1 -Parts pending -EgressCapMB 48 -FingerprintAllTables
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\db-migration\export-outbox.ps1 -Parts published -EgressCapMB <from a fresh usage reading>
+```
+
+| Part | What | Order read |
+|---|---|---|
+| D | every `public.jobs` id (the dictionary the compact rows refer to) | id |
+| A1 | pending rows of every type except `job.discovered` (production: 23) | sequence_id |
+| S | per job: pending `job.discovered` events, first and last sequence_id | job |
+| B1 | pending `job.discovered` rows, in chunks of `-ChunkRows` | sequence_id, via `outbox_pending_idx` |
+| B2 | published rows, in chunks | id, via the primary key |
+
+How it works, and what it guarantees:
+
+- **One read-only snapshot.** One session, `REPEATABLE READ, READ ONLY`
+  (`sql/outbox-export-session.sql`). The server rejects any write. Every
+  chunk is read in that snapshot. Chunks are sorted within `work_mem`
+  (32 MB): no temp files on the source, checked through `temp_bytes`.
+- **The table's shape is checked first.** If `public.outbox_events` does not
+  have exactly the 13 columns the encoder knows, the plan is refused before
+  any row is read.
+- **Compressed on the server.** The source encodes each chunk compactly
+  (`sql/outbox-encode-rows.sql`: deltas, UUIDv7 times relative to
+  `created_at`, the job id as its rank in part D). It also computes the
+  chunk's row count, its R2-style fingerprint and the SHA-256 of the encoded
+  text, then compresses it with zlib level 9 inside pgcrypto. The transit
+  key is random and thrown away: TLS protects the transfer, and the pgcrypto
+  layer only carries the compression.
+  - Measured on production on 8 Nov: 46.5 bytes per pending row and 51.3 per
+    published row, against 69 and 75 for plain JSON compressed the same way.
+- **Capped twice.** Before each chunk, the budget check stops cleanly if the
+  next chunk could cross `-EgressCapMB`; the estimate is the larger of a
+  generous first guess and 1.25 times the largest chunk so far. The watchdog
+  from `backup.sh` still enforces the cap as a hard limit. A clean stop keeps
+  every chunk that fully arrived: the run is PARTIAL, not failed.
+- **Verified before it is kept.** A throwaway server inside the container
+  decodes every chunk: Unix socket only, data directory on tmpfs, no swap.
+  Each chunk's SHA-256, row count and fingerprint must equal the source's.
+  Then:
+  - part S is compared with the B1 rows, job by job;
+  - the rows are written with `pg_dump`;
+  - the archive is restored into a fresh database and fingerprinted again;
+  - it is compared with the R2 snapshot's figures (`-R2RunDir`).
+
+  The pending and published fingerprints of all runs add up to the
+  whole-table fingerprint recorded at R2.
+- **`-FingerprintAllTables`** also fingerprints every table R2 fingerprinted,
+  in the same snapshot, and compares each with R2's
+  `source-fingerprints.txt`. That proves whether anything changed since R2.
+  It reads every table once on the source, as R2 did; the egress is a few KB.
+- **One passphrase.** The passphrase is asked for first and must decrypt the
+  R2 archive (mounted read-only) to its recorded hash, before any connection
+  is made. A typo therefore cannot waste egress or create a second
+  passphrase.
+- **Encrypted like R2.** gpg AES-256, S2K SHA-512 with 65,011,712
+  iterations, and a decrypt round trip. Only `outbox-export.dump.gpg` and
+  metadata reach `-BackupRoot`.
+
+To restore the rows onto a restored R2 database:
+
+```bash
+pg_restore --data-only --table=outbox_events -d robin outbox-export.dump
+```
+
+`robin_export.pending_job_summary` is in the same archive; restore it with
+`-n robin_export` after `CREATE SCHEMA robin_export`.
+
+Tests (synthetic, `sql/dryrun-outbox-source.sql`):
+
+- edge cases: non-v7 ids, unusual payloads, control characters, NULL and
+  empty strings, published before created;
+- full scale (1.67 M rows);
+- a corrupted chunk, a changed row, the wrong passphrase, a changed table;
+- swappable containers, live-mode misuse;
+- a 25 MB cap.
+
+Results are in the plan, §10.14.
+
+## Offsite copy
+
+`copy-offsite.ps1` copies run folders to a second device and proves the copy:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\db-migration\copy-offsite.ps1 `
+  -RunDir C:\RobinBackups\20261108T155443Z-live-partial,C:\RobinBackups\<outbox run> -Destination E:\RobinOffsite
+```
+
+(Through `-File`, separate several folders with commas and no spaces.)
+
+- Only `*.gpg`, `*.sha256` and the metadata files are copied. A folder that
+  holds an unencrypted archive is refused.
+- Every archive must still match the hash recorded when it was made.
+- Every copy must equal its source byte for byte. Copies are written as
+  `.partial` first, then marked read-only.
+- `offsite-receipt.txt` in each destination folder lists every file with its
+  hash.
+- Running it again verifies instead of copying. A differing copy is
+  reported, never overwritten.
+- Refused unless you allow it:
+  - the same volume as the source (`-AllowSameVolume`, tests only);
+  - a OneDrive folder (`-AllowOneDrive`: an upload of the ciphertext to
+    Microsoft).
+- The source folders are only read.
+
 ## Troubleshooting
 
 - **Docker Desktop fails with "dockerInference … cannot be accessed by the system".**
