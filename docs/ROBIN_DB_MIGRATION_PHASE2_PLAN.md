@@ -1087,7 +1087,98 @@ Run folder: `C:\RobinBackups\20261108T155443Z-live-partial` (on the laptop only,
 - R2 is partial: the `outbox_events` rows exist only in the source until R5.
 - No restore test (R3) and no offsite copy (B5) yet.
 - Supabase-owned tables such as `storage.migrations` can change whenever Supabase's services start. R5's `-CompareWith` should be judged on Robin's `public` tables, and differences in Supabase-owned tables explained.
-- The restore containers still lack the swap guard.
+- The restore containers still lack the swap guard. *Fixed in `bf2c1d8`; see R3 below.*
 - The dev containers, OneDrive and WhatsApp are still to be restarted.
+
+**Second encrypted copy, 8 Nov 16:58 UTC.**
+
+- All 16 files of the R2 folder were copied to `C:\RobinBackupsCopy\20261108T155443Z-live-partial`, outside the original folder, outside OneDrive and outside this repository.
+- Every file's SHA-256 is equal to the original's; the archive is `c56297ff…d7272cd`. No file in the copy is a plaintext archive.
+- The original was neither moved nor changed.
+- This laptop has one SSD and no other drive, so the copy protects against an accidental deletion, not against losing the disk.
+- An offsite copy needs your choice and approval. The options:
+  - an external USB drive;
+  - OneDrive, the encrypted `.gpg` and its metadata only. This is an upload to Microsoft. The tooling refuses OneDrive for run folders because they could hold plaintext; the ciphertext alone is a separate decision.
+  - Oracle Object Storage, once R4 exists;
+  - another machine.
+
+**R3 preparation, 8 Nov (commit `bf2c1d8`, tested).**
+
+- The restore containers now cannot swap either:
+  - the local server runs with `--memory` equal to `--memory-swap` (7 GB with the default data tmpfs);
+  - the remote target's client-tools container runs with 5 GB.
+- `restore.sh` first checks `plaintext_in_ram`: `/restore`, and locally PGDATA, must be tmpfs, and `memory.swap.max` must be 0. Otherwise it stops before asking for the passphrase.
+- The local server runs with `wal_level=minimal` and `max_wal_senders=0`, so the single-transaction restore writes almost no WAL into RAM.
+- Tests (synthetic, 10/10 PASS):
+
+| Test | Result |
+|---|---|
+| Partial dry run, with local and Oracle-shaped remote restore | local 12 PASS, 0 FAIL, 2 NOTE; remote 12 PASS, 0 FAIL, 2 NOTE; Flyway validate PASS for both |
+| Complete dry run | 14 PASS, 0 FAIL |
+| Swappable container, or PGDATA on the container disk | `FAIL plaintext_in_ram`, nothing decrypted |
+| Verifier on both new backups | PASS |
+| The R2 archive | unchanged |
+
+**R3 done, 8 Nov 18:02–18:04 UTC: local PostgreSQL 17 restore of the partial archive, PASS.**
+
+Run against the verified second copy, so the original R2 folder stays untouched (16 files, no sub-folder). Available RAM before the run: 4.76 and 5.04 GB, with Chrome closed. You typed the passphrase at a hidden prompt. No production system was contacted.
+
+| Check | Result |
+|---|---|
+| RAM only | `/restore` and PGDATA on tmpfs, `memory.swap.max` 0 |
+| Decryption | SHA-256 `0f0d05a7…a11ac`, equal to the one recorded before encryption |
+| Target | `robin_restore` owned by `robin_app` (NOSUPERUSER, NOBYPASSRLS), with citext and pgcrypto |
+| Restore | 519 of 1,235 table-of-contents entries (application scope) restored as `robin_app` in one transaction, in 48 s; `pg_restore.log` empty |
+| Schema inventory | all 21 keys equal the snapshot: 70 tables, 175 indexes, constraints (70 primary key, 101 foreign key, 25 unique, 74 check), 12 triggers, 7 functions, 1 view, 1 sequence |
+| Constraints | 0 left NOT VALID |
+| Sequence | `outbox_events_sequence_id_seq` last value 1,670,005 |
+| Rows | 70 public tables, 2,079,709 rows: counts and content fingerprints equal the snapshot. `public.outbox_events` restored empty, as deferred. |
+| Archive counts | identical to backup time |
+| Data outside `public` (auth, realtime, storage, vault) | readable, 253 rows |
+| Permissions | every object owned by `robin_app`. RLS enabled on 70 tables, none forced: the owner sees all 1,796,659 rows of `consumed_events`, and a role without BYPASSRLS sees 0. Supabase's grants (264 ACL and 24 default-ACL entries) and platform-only entries are left out by design, because the Oracle target has no Supabase roles. |
+| Flyway validate | application configuration, over JDBC: 52 history rows, 51 applied, 1 baseline, 0 failed, 0 pending, 0 invalid, current version 051 |
+
+- RAM during the run:
+  - minimum available 2.45 GB;
+  - Docker VM peak 2.45 GB;
+  - restore container peak 1.31 GB;
+  - tmpfs peaks: 940 MB data directory, 136 MB `/restore`;
+  - 0 samples with swap in use.
+- Cleanup: no container, no new volume, port 55439 closed, Docker VM swap 0 used, no plaintext anywhere in the copy folder or report. Both archives are unchanged (`c56297ff…`).
+- The report is in the copy folder: `restore-test-20261108T180216Z`.
+
+**Supabase from 12 Nov: what the docs say (read 8 Nov).**
+
+| Topic | What the docs say | Source |
+|---|---|---|
+| Grace period | It ends on 12 Nov, as the usage page says: *"Projects will be restricted from 12 Nov, 2026 if your organization remains over quota"*. After a grace period, *"you will not receive another grace period"*. | [Billing FAQ](https://supabase.com/docs/guides/platform/billing-faq) |
+| What a restriction is | Listed: databases switched to read-only, and 402 responses for all API requests. Whether direct database connections through the pooler are blocked is **not stated**. | [Billing FAQ](https://supabase.com/docs/guides/platform/billing-faq) |
+| When it lifts | When the quota refills at the next billing cycle, or at once by upgrading | [Billing FAQ](https://supabase.com/docs/guides/platform/billing-faq) |
+| Database size | The 500 MB quota is measured as *"the average daily database size over the billing period"*. This database is 1.616 GB, so the organization stays over quota in the cycle that starts on 18 Nov as well: **the reset does not end the overage.** | [Database size](https://supabase.com/docs/guides/platform/database-size) |
+| Disk | Fixed 2 GB. At 95 % the database becomes read-only. If the disk fills, *"Postgres shuts down. It stays down until you upgrade to the Pro Plan."* WAL can fill a 2 GB disk. The database alone is about 1.6 GB of that disk. | [Database size](https://supabase.com/docs/guides/platform/database-size) |
+| Inactivity | Free projects pause after a week of inactivity. Robin's own activity stopped on 7 Nov, when the backend was suspended; whether dashboard queries count as activity is not stated. A paused project can be restored from the dashboard for a year; a backup download is offered only after that window. | [Upgrading](https://supabase.com/docs/guides/platform/upgrading) |
+
+Conclusion:
+
+- Access after 12 Nov is not guaranteed, and 18 Nov does not guarantee it either.
+- Read-only would not stop a backup. A pooler block, a full disk or a pause would.
+- The only reliable windows are now until 12 Nov, with about 120 MB of egress left, and from 18 Nov only if the database is still reachable.
+
+**The 1,670,004 deferred outbox rows.**
+
+| Group | Rows | What they are | Can they be rebuilt without Supabase? |
+|---|---:|---|---|
+| Published | 898,345 | dispatched history. Their consumption is recorded in `consumed_events` (1,796,659 rows, in R2). | No; audit value only |
+| Pending `job.discovered` | 771,636 | pipeline triggers. The payload is `{job_id, action, source_id}` (`JobDiscoveryService.emitDiscovered`). The handler calls `ApplicationPipelineService.onJobIngested(job_id, …)`, which re-reads the job row and every profile. | **Yes**: one trigger per job reproduces them. R2 has all 60,960 jobs, about 12.7 pending triggers per job. |
+| Pending, other types | 23 | `job.matched` 11, `verification.completed` 11, `signup.completed` 1: user-facing | Not exactly; tiny to export |
+
+Egress needed for an exact export: about 520 MB for all rows uncompressed, from the R2 estimate of the table's size on the wire. That is about 280 MB for published rows, about 239 MB for pending rows, and a few KB for the 23 others.
+
+**Fallback if Supabase becomes unreachable (decision tree; nothing below has been run).**
+
+1. **Now until 12 Nov** (your approval needed; tiny egress): export the 23 user-facing pending events exactly, plus a count summary of the outbox by type, status and day. Use a small purpose-built extraction with the same safeguards: one read-only snapshot, RAM only, encrypted with your passphrase, capped. Estimated well under 1 MB.
+2. **After cutover, local work:** regenerate the pending pipeline triggers from the restored jobs, one per job and rate-limited behind the dispatch kill switch (§6). This needs no Supabase access.
+3. **From 18 Nov, if reachable:** first a one-row connection probe. Then either an outbox-only backup (about 0.55 GB, with `-DeferTableData` listing the other tables; no code change) or the planned complete R5 (cap about 1.6 GB), each checked with `verify-backup.ps1 -CompareWith` against R2 on Robin's `public` tables.
+4. **If unreachable after 18 Nov:** Robin can still be migrated from R2, plus step 1 if done, plus step 2. Only the exact outbox history is lost. Recovering it would need a paid upgrade, which you have ruled out, or Supabase support. That decision is yours.
 
 **PHASE 2 STATUS: PLANNING**
