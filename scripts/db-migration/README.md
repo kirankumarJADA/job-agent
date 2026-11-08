@@ -311,7 +311,14 @@ How it works, and what it guarantees:
   iterations, and a decrypt round trip. Only `outbox-export.dump.gpg` and
   metadata reach `-BackupRoot`.
 
-To restore the rows onto a restored R2 database:
+To restore the rows together with the backup, use the Stage C tool. It decrypts every archive with the same passphrase, runs every R3 check on the backup, then loads each export data-only into the restored `public.outbox_events`. Finally it checks the combined table against the exports' manifests and against the backup snapshot's record of the table, plus references, consumption and the sequence. It works locally or against Oracle (`-Target remote`):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\db-migration\restore-test.ps1 `
+  -RunDir C:\RobinBackupsCopy\20261108T155443Z-live-partial -OutboxRunDir <E1 folder>,<E3 folder>
+```
+
+By hand, onto a restored R2 database, the equivalent is:
 
 ```bash
 pg_restore --data-only --table=outbox_events -d robin outbox-export.dump

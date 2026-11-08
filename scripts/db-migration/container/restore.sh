@@ -3,7 +3,9 @@
 # restore-test.ps1 (its server is running, PGDATA is on tmpfs, port bound to
 # 127.0.0.1 only). See scripts/db-migration/README.md.
 #
-#   /in       the encrypted archive and the backup's metadata files
+#   /in       the encrypted archive and the backup's metadata files; with
+#             ROBIN_OUTBOX_RUNS=n also /in/outbox/1..n, each one outbox export
+#             (export-outbox.ps1) whose rows are loaded after the restore
 #   /restore  RAM-backed tmpfs, never swapped (the container's
 #             memory.swap.max is 0): the decrypted archive and the passphrase
 #   /work     scripts
@@ -118,6 +120,23 @@ mkdir -p -m 700 "$GNUPGHOME"
 gpg --batch --quiet --pinentry-mode loopback --passphrase-file "$R/.passphrase" \
     --decrypt --output "$R/robin.dump" "$IN/robin.dump.gpg" 2>> "$LOG" \
   || abort decrypt "gpg could not decrypt the archive (wrong passphrase?)"
+# Outbox exports (export-outbox.ps1) hold the rows a partial backup left out.
+# They share the backup's passphrase (the export proves it before it runs),
+# so they are decrypted here, into the same tmpfs, while it is still there.
+OUTBOX_RUNS=${ROBIN_OUTBOX_RUNS:-0}
+[[ $OUTBOX_RUNS =~ ^[0-9]+$ ]] || abort outbox_inputs "ROBIN_OUTBOX_RUNS must be a number"
+for (( k = 1; k <= OUTBOX_RUNS; k++ )); do
+  od=$IN/outbox/$k
+  for f in outbox-export.dump.gpg outbox-export.dump.sha256 manifest.txt; do
+    [[ -s $od/$f ]] || abort outbox_inputs "missing $od/$f"
+  done
+  gpg --batch --quiet --pinentry-mode loopback --passphrase-file "$R/.passphrase" \
+      --decrypt --output "$R/outbox-$k.dump" "$od/outbox-export.dump.gpg" 2>> "$LOG" \
+    || abort outbox_decrypt "gpg could not decrypt outbox export $k with the backup's passphrase"
+  osha=$(sha256sum "$R/outbox-$k.dump" | cut -d' ' -f1)
+  owant=$(cut -d' ' -f1 "$od/outbox-export.dump.sha256")
+  if [[ $osha == "$owant" ]]; then pass "outbox_${k}_sha256" "$osha"; else abort "outbox_${k}_sha256" "decrypted $osha, manifest $owant"; fi
+done
 rm -f "$R/.passphrase"
 pass decrypt "decrypted into tmpfs"
 sha=$(sha256sum "$R/robin.dump" | cut -d' ' -f1)
@@ -309,6 +328,92 @@ if [[ -n $src_pending && ,$DEFERRED, == *,public.outbox_events,* ]]; then
 elif [[ -n $src_pending ]]; then
   dst_pending=$("${APP[@]}" -c 'select count(*) from public.outbox_events where published_at is null')
   if [[ $dst_pending == "$src_pending" ]]; then pass outbox_pending "$dst_pending pending events preserved"; else fail outbox_pending "snapshot $src_pending, restored $dst_pending"; fi
+  "${APP[@]}" -f "$WORK/outbox-analysis.sql" > "$OUT/outbox-analysis.txt" 2>> "$LOG" \
+    && pass outbox_analysis "written to outbox-analysis.txt" \
+    || note outbox_analysis "analysis queries failed; see restore.log"
+fi
+
+# ── 10. outbox exports: the deferred rows, loaded into the restored table ─
+# Each export is loaded data-only into public.outbox_events as restored from
+# the backup (its own definition, keys and defaults), as robin_app, in one
+# transaction. Then the combined table is checked against every export's
+# manifest and against the backup snapshot's own record of the table.
+mf() { awk -F'|' -v k="$2" '$1 == k { print substr($0, length(k) + 2); exit }' "$1"; }
+if (( OUTBOX_RUNS > 0 )); then
+  [[ ,$DEFERRED, == *,public.outbox_events,* ]] || abort outbox_scope "outbox exports given, but this backup did not defer public.outbox_events"
+  want_pend_rows=0; want_pend_fp=0; want_pub_rows=0; want_pub_fp=0; covered=""
+  for (( k = 1; k <= OUTBOX_RUNS; k++ )); do
+    m=$IN/outbox/$k/manifest.txt
+    st=$(mf "$m" status); parts=$(mf "$m" parts_complete)
+    [[ $st == complete || $st == partial ]] || abort "outbox_${k}_manifest" "status '$st'"
+    started=$(date +%s)
+    if pg_restore "${PGR_TARGET[@]}" --data-only --schema=public --table=outbox_events --no-owner --no-privileges \
+         --exit-on-error --single-transaction "$R/outbox-$k.dump" 2>> "$OUT/pg_restore-outbox.log"; then
+      pass "outbox_${k}_loaded" "$(mf "$m" pending_rows) pending and $(mf "$m" published_rows) published rows (parts $parts, status $st) in $(( $(date +%s) - started ))s as robin_app, single transaction"
+    else
+      abort "outbox_${k}_loaded" "pg_restore failed (pg_restore-outbox.log)"
+    fi
+    sums=$("${APP[@]}" -c "select ($want_pend_rows + $(mf "$m" pending_rows)) || '|' || ($want_pend_fp + $(mf "$m" pending_fingerprint)) || '|' || ($want_pub_rows + $(mf "$m" published_rows)) || '|' || ($want_pub_fp + $(mf "$m" published_fingerprint))")
+    IFS='|' read -r want_pend_rows want_pend_fp want_pub_rows want_pub_fp <<< "$sums"
+    covered+=" $parts"
+  done
+  got=$("${APP[@]}" <<'SQL'
+SET TimeZone = 'UTC'; SET extra_float_digits = 1; SET bytea_output = 'hex'; SET IntervalStyle = 'postgres'; SET DateStyle = 'ISO, MDY';
+SELECT count(*) FILTER (WHERE published_at IS NULL) || '|' ||
+       coalesce(sum(('x' || substr(md5(to_jsonb(t)::text), 1, 15))::bit(60)::bigint) FILTER (WHERE published_at IS NULL), 0) || '|' ||
+       count(*) FILTER (WHERE published_at IS NOT NULL) || '|' ||
+       coalesce(sum(('x' || substr(md5(to_jsonb(t)::text), 1, 15))::bit(60)::bigint) FILTER (WHERE published_at IS NOT NULL), 0) || '|' ||
+       count(*) || '|' || coalesce(sum(('x' || substr(md5(to_jsonb(t)::text), 1, 15))::bit(60)::bigint), 0)
+  FROM public.outbox_events t;
+SQL
+)
+  IFS='|' read -r got_pend_rows got_pend_fp got_pub_rows got_pub_fp got_rows got_fp <<< "$got"
+  if [[ $got_pend_rows == "$want_pend_rows" && $got_pend_fp == "$want_pend_fp" && $got_pub_rows == "$want_pub_rows" && $got_pub_fp == "$want_pub_fp" ]]; then
+    pass outbox_matches_exports "pending $got_pend_rows rows / $got_pend_fp, published $got_pub_rows rows / $got_pub_fp: equal to the exports' manifests"
+  else
+    fail outbox_matches_exports "loaded pending $got_pend_rows / $got_pend_fp and published $got_pub_rows / $got_pub_fp; the manifests say $want_pend_rows / $want_pend_fp and $want_pub_rows / $want_pub_fp"
+  fi
+  if [[ -n $src_pending ]]; then
+    [[ $got_pend_rows == "$src_pending" ]] && pass outbox_pending_equals_snapshot "$got_pend_rows pending rows, as in the backup snapshot" \
+      || fail outbox_pending_equals_snapshot "$got_pend_rows pending rows; the backup snapshot had $src_pending"
+  fi
+  r2line=$(awk -F'|' '$1 == "public.outbox_events" { print $2 "|" $3 }' "$IN/source-fingerprints.txt")
+  if [[ " $covered " == *" A1 "* && " $covered " == *" B1 "* && " $covered " == *" B2 "* ]]; then
+    [[ "$got_rows|$got_fp" == "$r2line" ]] \
+      && pass outbox_equals_snapshot "all $got_rows rows; fingerprint $got_fp equals the backup snapshot's record of public.outbox_events" \
+      || fail outbox_equals_snapshot "$got_rows rows / $got_fp; the backup snapshot recorded $r2line"
+  else
+    note outbox_coverage "parts loaded:$covered; the published part (B2) is not loaded yet, so the table holds $got_rows of the snapshot's ${r2line%%|*} rows"
+  fi
+  # Relationships of the pending events (no foreign keys exist on the outbox).
+  rel=$("${APP[@]}" <<'SQL'
+SELECT
+  (SELECT count(*) FROM public.outbox_events o WHERE o.published_at IS NULL AND o.event_type = 'job.discovered'
+      AND NOT EXISTS (SELECT 1 FROM public.jobs j WHERE j.id = o.aggregate_id)) || '|' ||
+  (SELECT count(*) FROM public.outbox_events o WHERE o.published_at IS NULL AND o.event_type = 'job.matched'
+      AND (NOT EXISTS (SELECT 1 FROM public.jobs j WHERE j.id::text = o.payload ->> 'job_id')
+           OR NOT EXISTS (SELECT 1 FROM public.profiles p WHERE p.id::text = o.payload ->> 'profile_id'))) || '|' ||
+  (SELECT count(*) FROM public.outbox_events o WHERE o.published_at IS NULL AND o.aggregate_type = 'USER'
+      AND NOT EXISTS (SELECT 1 FROM public.users u WHERE u.id = o.aggregate_id)) || '|' ||
+  (SELECT count(*) FROM public.consumed_events c JOIN public.outbox_events o ON o.id = c.event_id WHERE o.published_at IS NULL) || '|' ||
+  (SELECT count(DISTINCT aggregate_id) FROM public.outbox_events WHERE published_at IS NULL AND event_type = 'job.discovered') || '|' ||
+  (SELECT coalesce(max(sequence_id), 0) FROM public.outbox_events) || '|' ||
+  (SELECT last_value FROM public.outbox_events_sequence_id_seq);
+SQL
+)
+  IFS='|' read -r orphan_jobs orphan_matched orphan_users consumed_pending pend_jobs max_seq seq_last <<< "$rel"
+  if [[ $orphan_jobs == 0 && $orphan_matched == 0 && $orphan_users == 0 ]]; then
+    pass outbox_references "every pending event's job, profile and user exists ($pend_jobs jobs with pending job.discovered)"
+  else
+    note outbox_references "pending events whose referenced row is missing: job.discovered $orphan_jobs, job.matched $orphan_matched, USER $orphan_users (the handlers skip a missing job)"
+  fi
+  [[ $consumed_pending == 0 ]] && pass outbox_pending_unconsumed "no pending event has a consumed_events row: every one will run in full" \
+    || note outbox_pending_unconsumed "$consumed_pending consumed_events rows belong to pending events (those consumers are skipped on replay)"
+  if (( max_seq <= seq_last )); then
+    pass outbox_sequence "highest sequence_id $max_seq <= outbox_events_sequence_id_seq $seq_last: new events cannot collide"
+  else
+    fail outbox_sequence "highest sequence_id $max_seq is above outbox_events_sequence_id_seq $seq_last"
+  fi
   "${APP[@]}" -f "$WORK/outbox-analysis.sql" > "$OUT/outbox-analysis.txt" 2>> "$LOG" \
     && pass outbox_analysis "written to outbox-analysis.txt" \
     || note outbox_analysis "analysis queries failed; see restore.log"

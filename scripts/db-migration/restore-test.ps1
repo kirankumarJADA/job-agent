@@ -34,6 +34,12 @@
   Live mode asks for the encryption passphrase (and, for a remote target,
   robin_app's password) inside the container.
 
+  -OutboxRunDir lists outbox export run folders (export-outbox.ps1) for a
+  partial backup that deferred public.outbox_events. After every check of
+  the backup itself, their rows are loaded into the restored table, and the
+  combined table is checked against each export's manifest and against the
+  backup snapshot's record of the table (all rows, one fingerprint).
+
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\db-migration\restore-test.ps1 `
     -RunDir C:\RobinBackups\20261107T090000Z-live
@@ -64,7 +70,9 @@ param(
     [string] $Network,
     [string] $DryRunAppPassword,
     [string] $FlywayJdbcHost,
-    [int] $FlywayJdbcPort = 0
+    [int] $FlywayJdbcPort = 0,
+    # Outbox export run folders whose rows complete a partial backup.
+    [string[]] $OutboxRunDir = @()
 )
 
 Set-StrictMode -Version Latest
@@ -83,6 +91,19 @@ $inputs = @('robin.dump.gpg', 'robin.dump.sha256', 'source-fingerprints.txt', 's
             'source-facts.txt', 'archive-counts.txt', 'manifest.txt')
 foreach ($f in $inputs) {
     if (-not (Test-Path -LiteralPath (Join-Path $RunDir $f))) { throw "Missing $f in $RunDir" }
+}
+# powershell -File passes "a,b" as one string: accept comma-separated lists.
+$OutboxRunDir = @($OutboxRunDir | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+foreach ($od in $OutboxRunDir) {
+    foreach ($f in @('outbox-export.dump.gpg', 'outbox-export.dump.sha256', 'manifest.txt', 'checks.txt')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $od $f))) { throw "Missing $f in outbox export $od" }
+    }
+    $failed = @(Get-Content -LiteralPath (Join-Path $od 'checks.txt') | Where-Object { $_ -like 'FAIL|*' })
+    if ($failed.Count) { throw "Outbox export $od has $($failed.Count) failed check(s); it is not loaded." }
+    $want = ((Get-Content -LiteralPath (Join-Path $od 'outbox-export.dump.gpg.sha256') -TotalCount 1) -split '\s+')[0].ToLowerInvariant()
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $od 'outbox-export.dump.gpg')).Hash.ToLowerInvariant() -ne $want) {
+        throw "Outbox export $od no longer matches its recorded hash."
+    }
 }
 Assert-DockerReady
 Assert-NoLeftoverContainer 'robin-restore-'
@@ -145,6 +166,12 @@ try {
     # Present only in partial backups (it lists the tables whose rows were left out).
     $deferredFile = Join-Path $RunDir 'deferred-table-data.txt'
     if (Test-Path -LiteralPath $deferredFile) { Invoke-Docker @('cp', $deferredFile, "${name}:/in/") | Out-Null }
+    for ($k = 1; $k -le $OutboxRunDir.Count; $k++) {
+        Invoke-Docker @('exec', $name, 'mkdir', '-p', "/in/outbox/$k") | Out-Null
+        foreach ($f in @('outbox-export.dump.gpg', 'outbox-export.dump.sha256', 'manifest.txt')) {
+            Invoke-Docker @('cp', (Join-Path $OutboxRunDir[$k - 1] $f), "${name}:/in/outbox/$k/") | Out-Null
+        }
+    }
     if ($Target -eq 'remote') {
         Invoke-Docker @('cp', $CaCert, "${name}:/in/ca.crt") | Out-Null
         if ($TargetHostAddr) {
@@ -155,6 +182,7 @@ try {
         } else { $execEnv = @() }
     } else { $execEnv = @() }
 
+    $execEnv += @('-e', "ROBIN_OUTBOX_RUNS=$($OutboxRunDir.Count)")
     if ($Mode -eq 'live') {
         Write-Step 'starting the restore test; you will be asked for the encryption passphrase'
         & docker exec -it @execEnv $name bash /work/restore.sh
