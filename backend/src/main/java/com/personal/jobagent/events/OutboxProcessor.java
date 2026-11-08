@@ -6,6 +6,7 @@ import com.personal.jobagent.notifications.NotificationRecord;
 import com.personal.jobagent.notifications.NotificationRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -14,6 +15,7 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Owns both the normal dispatch cadence and the DLQ/reconciliation sweep —
@@ -45,6 +47,20 @@ public class OutboxProcessor {
     private final EventPublisher eventPublisher;
     private final NotificationRepository notificationRepository;
 
+    /**
+     * Migration kill switch (database migration Phase 2, plan §6 and §10.7).
+     * With {@code app.events.dispatch-enabled=false} the backend starts and
+     * serves requests, but neither {@link #dispatchPending()} nor
+     * {@link #reconcileDlq()} reads or writes {@code outbox_events}: no event
+     * is published, retried or dead-lettered, so a restored backlog stays
+     * exactly as it was restored until an operator turns dispatch back on.
+     * Events written meanwhile are kept, pending, in sequence order. Default:
+     * enabled, so nothing changes unless the variable is set.
+     */
+    @Value("${app.events.dispatch-enabled:true}")
+    private boolean dispatchEnabled = true;
+    private final AtomicBoolean pausedLogged = new AtomicBoolean(false);
+
     public OutboxProcessor(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper, EventPublisher eventPublisher,
                            NotificationRepository notificationRepository) {
         this.jdbcTemplate = jdbcTemplate;
@@ -70,6 +86,10 @@ public class OutboxProcessor {
 
     @Scheduled(fixedDelayString = "${app.events.dispatch-interval-ms:2000}")
     public void dispatchPending() {
+        if (!dispatchEnabled) {
+            logPausedOnce();
+            return;
+        }
         List<PendingRow> rows = jdbcTemplate.query("""
                 select id, aggregate_type, aggregate_id, event_type, payload::text as payload,
                        correlation_id, causation_id, attempt_count
@@ -104,6 +124,10 @@ public class OutboxProcessor {
 
     @Scheduled(fixedDelayString = "${app.events.reconcile-interval-ms:300000}")
     public void reconcileDlq() {
+        if (!dispatchEnabled) {
+            logPausedOnce();
+            return;
+        }
         List<Map<String, Object>> stuck = jdbcTemplate.queryForList("""
                 select id, event_type, attempt_count, last_error
                 from outbox_events
@@ -140,6 +164,18 @@ public class OutboxProcessor {
                 log.error("Outbox event {} exceeded {} attempts, moving to DLQ. Last error: {}",
                         eventId, MAX_ATTEMPTS, row.get("last_error"));
             }
+        }
+    }
+
+    /** Whether dispatch is on ({@code app.events.dispatch-enabled}). */
+    public boolean isDispatchEnabled() {
+        return dispatchEnabled;
+    }
+
+    private void logPausedOnce() {
+        if (pausedLogged.compareAndSet(false, true)) {
+            log.warn("Outbox dispatch is PAUSED (app.events.dispatch-enabled=false): no event is published, "
+                    + "retried or dead-lettered until it is re-enabled");
         }
     }
 

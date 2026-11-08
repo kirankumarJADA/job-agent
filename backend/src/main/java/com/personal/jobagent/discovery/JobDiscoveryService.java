@@ -6,6 +6,7 @@ import com.personal.jobagent.events.OutboxWriter;
 import com.personal.jobagent.notifications.NotificationEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -300,8 +301,20 @@ public class JobDiscoveryService {
         }
     }
 
+    /**
+     * Migration switch (database migration Phase 2, plan §10.7): while
+     * discovery is paused no job is "seen", so the hourly sweep below would
+     * archive jobs only because the pause outlasted 30 days.
+     * {@code app.discovery.maintenance-enabled=false} skips it. Default: on.
+     */
+    @Value("${app.discovery.maintenance-enabled:true}")
+    private boolean maintenanceEnabled = true;
+
     @Scheduled(cron = "0 0 * * * *") // hourly scheduled refresh for source health and stale jobs
     public void scheduledDiscoveryMaintenance() {
+        if (!maintenanceEnabled) {
+            return;
+        }
         // Mark jobs not seen in 30 days as ARCHIVED
         int archived = jdbcTemplate.update("""
                 update jobs set status = 'ARCHIVED'
