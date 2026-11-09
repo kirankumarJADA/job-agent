@@ -1436,7 +1436,29 @@ On the wire the transfer cost 1.27 × the chunks' size (27.6 MB of chunks). This
 - the pending counts by type and the database size (1,600,736,403 bytes) equal R2's;
 - no plaintext file and no container was left behind.
 
-**Restore test with your passphrase (R2 + E1 → one PostgreSQL 17 database):** `restore-test.ps1 -OutboxRunDir`, see below. **Waiting for you to run it** (one hidden passphrase prompt).
+**Restore test with your passphrase (R2 + E1 → one PostgreSQL 17 database), 8 Nov 23:50 UTC: PASS.** Report: `C:\RobinBackupsCopy\20261108T155443Z-live-partial\restore-test-20261108T235013Z`. 0 FAIL; the 3 NOTEs are expected (partial scope; the outbox empty before the load; B2 not loaded yet).
+
+- Every R3 check passed again on the backup: inventory (21 keys), 70 tables / 2,079,709 rows by fingerprint, RLS, archive counts.
+- The 771,659 pending rows loaded in 4 s as `robin_app`. They equal E1's manifest and R2's snapshot.
+- **Every pending event's job, profile and user exists** (60,723 jobs).
+- No pending event has a `consumed_events` row.
+- The sequence cannot collide (1,670,005).
+- Flyway validate PASS: 52 history rows, version 051, 0 pending.
+- The pending `job.discovered` rows by action: TOUCHED 656,990, INSERTED 58,292, UPDATED 56,354.
+
+**Egress, 9 Nov 00:05 UTC.** The dashboard still shows 4.247 GB, with daily bars to 7 Nov only; log ingestion is at 0.969 GB, and 8 Nov added 70.7 KB. By our measured counts:
+
+| | MB |
+|---|---:|
+| Dashboard total | 4,247 |
+| R2 on 8 Nov | 628.9 |
+| E1 on 8 Nov | 35.0 |
+| Dashboard queries, upper bound | 1 |
+| **Left** | **about 88** |
+
+E3 needs about 46 MB. **Cap 55 MB**: that is 20 % headroom, and it leaves at least 33 MB by our count. The one assumption left: Supabase meters R2 and E1 no higher than we received them. The 8 Nov bar will settle it.
+
+**E3 exporter.** The 10 files are byte-identical to the 19/19-tested version that E1 ran, with no change since `99b6b08`; the image is the same.
 
 #### Tooling added for R6, rehearsed end to end
 
@@ -1471,18 +1493,45 @@ The synthetic fixture's 23 other events carry placeholder ids, so `outbox_refere
 #### E3 prepared, not run (needs your approval)
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\jadak\Documents\antigravity\peaceful-chandrasekhar\scripts\db-migration\export-outbox.ps1 -Parts published -EgressCapMB <cap>
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\jadak\Documents\antigravity\peaceful-chandrasekhar\scripts\db-migration\export-outbox.ps1 -Parts published -EgressCapMB 55 -FingerprintAllTables
 ```
+
+`-FingerprintAllTables` proves again, at E3's own snapshot, that every table still equals R2. It costs about 2.5 minutes of reads on the source and a few KB of egress.
 
 - Expected size, on the wire:
   - the job dictionary (0.95 MB) plus 898,345 published rows at about 39 bytes each;
   - that is about 36 MB of chunks, × 1.27 on the wire: **about 46 MB**.
 - Budget by our count: 5,000 − 4,247 (dashboard, 7 Nov) − 629 (R2) − 35 (E1) − 1 (dashboard queries) = **about 88 MB**.
-- **Cap: 60 MB.** The budget check stops cleanly before a chunk that could cross it, and even the full cap leaves about 28 MB.
+- **Cap: 55 MB** (updated 9 Nov; it was 60). The budget check stops cleanly before a chunk that could cross it, and even the full cap leaves about 33 MB by our count.
 - Conditions, all still open:
   1. E1 passes the restore test above.
   2. A fresh usage reading shows the 8 Nov bar. It should be about 665 MB (R2 + E1); if it is higher, the cap is lowered by the difference.
   3. You approve.
+
+#### After E3: proving R2 + E1 + E3 is the whole database
+
+1. **E3's own checks:**
+   - OUTBOX EXPORT OK;
+   - `public_unchanged_since_r2` (110 tables);
+   - `part_B2` (898,345 rows);
+   - `archive_restores_exactly`;
+   - `egress_within_cap`.
+2. **Independent host-side checks,** as for E1: the archive's hash against the recorded and manifest hashes, E3's table fingerprints against R2's by `diff`, and no plaintext or container left.
+3. **The fingerprints add up** (metadata only, no secret):
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\jadak\Documents\antigravity\peaceful-chandrasekhar\scripts\db-migration\verify-outbox-export.ps1 -RunDir C:\RobinBackups\20261108T231043Z-live-outbox-pending,<E3 folder>
+   ```
+
+   Expected `equals_r2_snapshot`: 771,659 + 898,345 = 1,670,004 rows, fingerprint 963152130790551762785771.
+4. **Everything restores as one database** (your passphrase, once):
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\jadak\Documents\antigravity\peaceful-chandrasekhar\scripts\db-migration\restore-test.ps1 -RunDir C:\RobinBackupsCopy\20261108T155443Z-live-partial -OutboxRunDir C:\RobinBackups\20261108T231043Z-live-outbox-pending,<E3 folder>
+   ```
+
+   Expected: every R3 check, `outbox_equals_snapshot` (the whole table, one fingerprint) and Flyway validate.
+5. **Offsite copy** of the three folders with `copy-offsite.ps1`, to the destination you choose.
 
 #### Dispatch pause (built and tested; nothing deployed)
 
@@ -1547,12 +1596,30 @@ In the Oracle Cloud console:
 On the VM, over SSH:
 
 ```bash
-sudo mkfs.ext4 -L pgdata /dev/oracleoci/oraclevdb
-sudo mkdir -p /srv/pgdata
-echo 'LABEL=pgdata /srv/pgdata ext4 defaults,noatime,_netdev,nofail 0 2' | sudo tee -a /etc/fstab
-sudo mount -a && findmnt /srv/pgdata
-sudo bash provision-postgres17.sh --data-dir /srv/pgdata --server-ip <reserved IP> --allow <Render range> [--allow <Render range> ...]
+sudo bash prepare-vm.sh --device /dev/oracleoci/oraclevdb --mount /srv/pgdata
+sudo bash provision-postgres17.sh --data-dir /srv/pgdata --server-ip <reserved IP> --server-ip 127.0.0.1 --allow <your IP>/32
+sudo bash install-backup.sh --public-key backup-public.asc --par-url-file par.txt --run-now
+# at cutover, once Render's ranges are visible:
+sudo bash allow-client.sh add <Render range>
 ```
+
+Added 9 Nov and tested in containers (results below):
+
+- `prepare-vm.sh` formats and mounts the volume, and never touches a disk that holds anything.
+- `allow-client.sh` adds Render's ranges later. This is because Render shows them only while the service runs, so provisioning no longer waits for them.
+- `new-backup-key.ps1` makes the backup key pair on the laptop.
+- `install-backup.sh` and `robin-backup.sh` take the nightly encrypted backups.
+
+Tests, 9 Nov 00:17–00:32 UTC, local containers only: **32/32 PASS**.
+
+| Script | Tested |
+|---|---|
+| `prepare-vm.sh` (loop devices, privileged container), 7/7 | Formats, labels, mounts and adds to fstab. A second run is "already prepared". It refuses, writing nothing: an existing filesystem (left intact), a partition table, a non-block path, a non-empty or already-used mount point. |
+| Backup on provisioned PostgreSQL 17 (Ubuntu 24.04, PGDG 17.11), 12/12 | Install: root-only settings, key, service, timer. Three runs: retention keeps 2; every archive and manifest uploaded (to an HTTP PUT target standing in for the pre-authenticated request), with equal hashes. **The uploaded archive, decrypted with the private key and restored on a "laptop" container: 50,000 rows, equal to the source.** A secret key is refused, both at install and at backup. A failed dump leaves nothing. A failed upload is reported, the local copy is kept and retention does not run. No plaintext dump on the VM. |
+| `new-backup-key.ps1`, 4/4 | Public key with an encryption subkey. A message encrypted to it opens with the private key and its passphrase, and not with a wrong one. An existing key folder is never overwritten. |
+| `allow-client.sh` on provisioned PostgreSQL 17, 7/7 | A range not allowed is refused. After `add` it connects over TLS verify-full, from a line placed before the reject rules. Adding it again changes nothing. After `remove` it is refused again. 0.0.0.0/0, invalid addresses and non-CIDRs are refused. |
+
+Not exercised locally: the OCI console, iptables persistence on the real image, systemd timers firing, aarch64, and a real pre-authenticated request.
 
 What the script sets (reviewed again on 8 Nov):
 
@@ -1592,9 +1659,10 @@ After provisioning:
 
 | When | What |
 |---|---|
-| now | type the passphrase once for the R2 + E1 restore test |
-| after that | approve E3, once the 8 Nov usage bar is in |
-| R4 | the Oracle sign-up; the console steps above; your SSH key; Render's Frankfurt outbound ranges; `robin_app`'s password (password manager) |
-| cutover | approve the backlog policy (whole replay, or supersede the earlier duplicates, §10.14); approve the Render change and the deploy |
+| ~~now~~ | ~~type the passphrase once for the R2 + E1 restore test~~ (done, PASS) |
+| now | approve E3 (cap 55 MB): now, or once the 8 Nov usage bar confirms the meter |
+| after E3 | type the passphrase once for the R2 + E1 + E3 restore test |
+| R4 | the Oracle sign-up (Frankfurt, MFA); your SSH key pair; Always Free or PAYG; SSH through Bastion or your IP; the backup key's passphrase (`new-backup-key.ps1`); the Object Storage bucket and its write-only pre-authenticated request; `robin_app`'s password (password manager) |
+| cutover | Render's Frankfurt outbound ranges (shown while the service runs); approve the backlog policy (whole replay, or supersede the earlier duplicates, §10.14); approve the Render change and the deploy |
 
 **PHASE 2 STATUS: PLANNING**
