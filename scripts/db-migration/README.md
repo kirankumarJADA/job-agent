@@ -227,7 +227,15 @@ You will be asked for the encryption passphrase, and for `robin_app`'s password.
 
 ## Stage D: PostgreSQL 17 on the Oracle VM
 
-On a fresh Ubuntu 24.04 VM, with the block volume mounted at `/srv/pgdata`:
+First, on the fresh Ubuntu 24.04 VM, format and mount the attached block volume. Attach it with "consistent device path", so it appears as `/dev/oracleoci/oraclevdb`:
+
+```
+sudo bash prepare-vm.sh --device /dev/oracleoci/oraclevdb --mount /srv/pgdata
+```
+
+It never formats a disk that holds partitions or any filesystem, RAID or LVM signature, or one that is mounted. It refuses a non-empty or already-used mount point. Run again, it only reports "already prepared".
+
+Then, with the block volume mounted at `/srv/pgdata`:
 
 ```
 sudo bash provision-postgres17.sh --data-dir /srv/pgdata --server-ip <public IP> --server-ip 127.0.0.1 --allow <Render outbound CIDR> [--allow ...]
@@ -245,6 +253,31 @@ It installs `postgresql-17` from PGDG, after checking the signing key's fingerpr
 `robin_app`'s password is set at psql's `\password` prompt, so it is hashed on the client and never shown. The CA certificate for the backend is `/etc/robin/robin-pg-ca.crt`; it is public, not secret.
 
 To test the script locally first: `dry-run.ps1 -OracleRehearsal`.
+
+**Allowed clients later.** Render shows its outbound ranges only while the service runs. You can therefore provision with your own address (`--allow <your IP>/32`), rehearse through the SSH tunnel (loopback), and add Render's ranges at cutover:
+
+```
+sudo bash allow-client.sh add <CIDR>     # also: remove <CIDR>, list
+```
+
+It edits only the `hostssl robin robin_app` lines that the provisioning wrote, placed before the reject rules. It then reloads the server and updates the persistent iptables rule. The VCN security list must be changed to match.
+
+**Nightly encrypted backups.** On the laptop, generate the key pair; GnuPG runs in a throwaway container and asks for the private key's passphrase at a hidden prompt:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\db-migration\oracle\new-backup-key.ps1
+```
+
+Copy `backup-public.asc` to the VM. `backup-secret.asc` and its passphrase belong in your password manager, with an offline copy; they never go to the VM. Then, on the VM:
+
+```
+sudo bash install-backup.sh --public-key backup-public.asc --par-url-file par.txt --run-now
+```
+
+- `par.txt` holds an Object Storage pre-authenticated request URL that allows object writes only and ends in `/o/`. It is read from the file, so it never appears on a command line.
+- Each night at 02:30 UTC, `robin-backup.sh` pipes `pg_dump -Fc` straight into `gpg` encryption to the public key. No plaintext file exists, and the VM cannot read its own backups.
+- It keeps the newest 7 archives on the boot volume (not PGDATA's volume), and uploads each archive with a manifest (SHA-256, sizes, key fingerprint).
+- A failure leaves no partial file and fails the systemd unit. A bucket lifecycle rule (for example, delete after 14 days) handles retention in Object Storage.
 
 ## Outbox export (the rows R2 left out)
 
