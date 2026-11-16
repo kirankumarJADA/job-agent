@@ -1,7 +1,12 @@
 package com.personal.jobagent.system;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.actuate.data.redis.RedisHealthIndicator;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
@@ -32,13 +37,18 @@ import java.net.SocketAddress;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.time.Duration;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Supplier;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -631,7 +641,7 @@ class RedisConnectivityDiagnosticsTest {
     }
 
     @Test
-    void overallCapIsReportedAsDiagnosticTimeoutNotNetworkTimeout() throws Exception {
+    void hangingDnsIsBoundedByItsOwnPhaseTimeoutWithoutAnOverallCap() throws Exception {
         RedisProperties properties = properties("hanging.example", 6379, true, "token");
         RedisConnectionFactory factory = factoryWithInfo();
         RedisConnectivityDiagnostics diagnostics =
@@ -662,12 +672,68 @@ class RedisConnectivityDiagnosticsTest {
                     }
                 };
 
-        CompletableFuture<RedisConnectivityDiagnostics.Diagnostic> probe =
-                diagnostics.probeAsync(Duration.ofMillis(120));
+        CompletableFuture<RedisConnectivityDiagnostics.Diagnostic> probe = diagnostics.probeAsync();
 
+        // The resolver hangs for 5s; DNS_TIMEOUT (2s) ends the phase well inside 3s.
         RedisConnectivityDiagnostics.Diagnostic diagnostic = probe.get(3, TimeUnit.SECONDS);
         assertThat(diagnostic.result()).isEqualTo("DOWN");
         assertThat(diagnostic.errorCategory()).isEqualTo("TIMEOUT");
+        assertThat(diagnostic.phases()).contains("dns:FAIL").contains("TimeoutException")
+                .contains("springSharedNativeInfo:SKIPPED");
+    }
+
+    @Test
+    void anUnexpectedDiagnosticErrorIsLoggedAsUnknownNotAsRedisDownOrTimeout() {
+        RedisConnectivityDiagnostics diagnostics = new RedisConnectivityDiagnostics(
+                properties("upstash.example", 6379, true, "token"), factoryWithInfo()) {
+            @Override
+            Diagnostic diagnose() {
+                throw new IllegalStateException(
+                        "probe bug password=hunter2 while using rediss://default:s3cret@redis.example:6379");
+            }
+        };
+        Logger logger = (Logger) LoggerFactory.getLogger(RedisConnectivityDiagnostics.class);
+        ListAppender<ILoggingEvent> events = new ListAppender<>();
+        events.start();
+        logger.addAppender(events);
+        // Other tests' background probes may log here too; pick this failure's event.
+        Supplier<Optional<ILoggingEvent>> failureEvent = () -> {
+            synchronized (events) {
+                return events.list.stream()
+                        .filter(event -> event.getFormattedMessage().contains("could not complete")).findFirst();
+            }
+        };
+        try {
+            diagnostics.probeAfterApplicationReady();
+
+            await().atMost(Duration.ofSeconds(5)).until(() -> failureEvent.get().isPresent());
+            ILoggingEvent event = failureEvent.get().orElseThrow();
+            assertThat(event.getLevel()).isEqualTo(Level.WARN);
+            assertThat(event.getFormattedMessage())
+                    .contains("result=UNKNOWN", "errorCategory=DIAGNOSTIC_ERROR", "IllegalStateException",
+                            "password=<redacted>", "rediss://<redacted>@redis.example")
+                    .doesNotContain("result=DOWN", "TIMEOUT", "hunter2", "s3cret");
+        } finally {
+            logger.detachAppender(events);
+        }
+    }
+
+    @Test
+    void diagnosticFailuresAreReportedAsTimeoutsOnlyWhenATimeoutOccurred() {
+        assertThat(RedisConnectivityDiagnostics.diagnosticFailureCategory(
+                new CompletionException(new TimeoutException("waited"))))
+                .isEqualTo("DIAGNOSTIC_TIMEOUT");
+        assertThat(RedisConnectivityDiagnostics.diagnosticFailureCategory(new SocketTimeoutException("read")))
+                .isEqualTo("DIAGNOSTIC_TIMEOUT");
+        assertThat(RedisConnectivityDiagnostics.diagnosticFailureCategory(
+                new CompletionException(new IllegalStateException("bug"))))
+                .isEqualTo("DIAGNOSTIC_ERROR");
+        assertThat(RedisConnectivityDiagnostics.diagnosticFailureCategory(new NullPointerException()))
+                .isEqualTo("DIAGNOSTIC_ERROR");
+        // Even a Redis-looking exception escaping the diagnostic is a diagnostic error, not a Redis verdict.
+        assertThat(RedisConnectivityDiagnostics.diagnosticFailureCategory(new RedisConnectionFailureException(
+                "unavailable", new ConnectException("refused"))))
+                .isEqualTo("DIAGNOSTIC_ERROR");
     }
 
     @Test

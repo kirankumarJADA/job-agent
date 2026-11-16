@@ -4,11 +4,11 @@
 **Service:** Render `job-agent` (`srv-dan7t1oae00c73dqu1d0`), Render **Free** plan (0.1 CPU, 512 MB)
 **Redis provider:** Upstash (TLS, port 6379), credentials unchanged
 **Stack:** Spring Boot 3.3.4 · Spring Data Redis 3.3.4 · Lettuce 6.3.2.RELEASE · Netty 4.1.113.Final · Java 21
-**Branch:** `fix/redis-diagnostic-cold-start`, not merged and not deployed
+**Branch:** `fix/redis-diagnostic-cold-start`, pushed; draft [PR #12](https://github.com/kirankumarJADA/job-agent/pull/12); not merged into `master`; not deployed
 
 ## Classification
 
-**ROOT CAUSE CONFIRMED** and **FIX IMPLEMENTED AND TESTED** (locally). Nothing has been deployed to production.
+**ROOT CAUSE CONFIRMED** and **FIX IMPLEMENTED AND TESTED**: locally, in a clean checkout, and in GitHub Actions on the feature branch. Nothing has been deployed to production.
 
 ## 1. Summary
 
@@ -164,46 +164,70 @@ Effective production settings, taken from the diagnostic log (non-secret): SSL o
 3. **No interference.** The protocol comparison runs only after the Spring path has **terminally failed**. It is skipped, with the reason logged, when the Spring path is `UP` or still in flight. In production's normal case, no extra Lettuce clients are created.
 4. **No self-inflicted teardown.** Each comparison mode now waits for its own connect + handshake budget before shutting its client down, so it reports the real outcome instead of "Connection closed prematurely". `raw-resp2` now uses the same initialization budget as `spring-equivalent` (previously the 60 s Lettuce default), so the two differ only by protocol.
 5. The diagnosis log line now also prints `initializationTimeout` and `observationBudget`.
+6. **No misleading timeout API.** `PROBE_TIMEOUT` (20 s) and the `Duration` argument of `probeAsync(...)` were never applied, and `RAW_TOTAL_TIMEOUT` (10 s) was never used. All three are removed, and the ready listener calls `probeAsync()`. The diagnosis still never uses an overall `orTimeout()`, which would only stop observing, never the shared Lettuce operation. Every phase keeps its own bound, and the Spring observation budget is still derived as in item 1.
+7. **Truthful failure reporting.** If the diagnostic itself fails to run, it now logs a `WARN` line, `Redis connectivity diagnosis could not complete: result=UNKNOWN, errorCategory=DIAGNOSTIC_ERROR` (`DIAGNOSTIC_TIMEOUT` only when an actual timeout is in the cause chain), with the redacted cause. Previously it reported `result=DOWN, errorCategory=DIAGNOSTIC_TIMEOUT`, a Redis verdict and a timeout claim that were both unfounded. The redaction now also masks `scheme://user:password@` credentials embedded in exception messages.
 
 **`application.yml` / `application-prod.yml`:** comments only. The old comments claimed the client timeouts "must stay below the diagnostic's 3s budget", which was the false premise behind this misreport.
 
 **Tests:**
 
 - New `RedisLettuceConnectionLifecycleIT` (Testcontainers Redis 7.4, TLS + password, delaying/stalling/rejecting proxy) with 9 tests: TLS + AUTH + PING + INFO; wrong and missing credentials → `AUTHENTICATION`; shared-connection release and reuse over 25 cycles with no connection growth; recovery after failed initial attempts; factory `stop()`/`start()` and full application restart; slow handshake inside the initialization budget; 2 s command timeout still enforced and the shared connection reusable afterwards; diagnostic reports a slow but healthy Redis as `UP`; protocol comparison reports real per-mode outcomes.
-- `RedisConnectivityDiagnosticsTest`: the old observation-timeout test now asserts `INCONCLUSIVE`/`PENDING` with no comparison started. New tests cover slow-but-successful → `UP` with no comparison, the comparison running only after a terminal failure, and budget derivation (Lettuce factory and properties fallback).
+- `RedisConnectivityDiagnosticsTest`: the old observation-timeout test now asserts `INCONCLUSIVE`/`PENDING` with no comparison started. New tests cover:
+  - slow-but-successful → `UP`, with no comparison;
+  - the comparison running only after a terminal failure;
+  - budget derivation (Lettuce factory and properties fallback);
+  - an unexpected diagnostic error logged as `UNKNOWN`/`DIAGNOSTIC_ERROR` with credentials redacted, never `DOWN` or a timeout;
+  - timeout classification only for actual timeouts.
+
+  The former "overall cap" test is renamed to what it proves: a hanging DNS lookup is ended by its own 2 s phase bound.
 - `RedisTlsBindingTest`: a client-side close during the handshake yields "Connection closed prematurely" (no Docker needed). One test was renamed to drop the obsolete 3 s rationale.
+
+**Also on this branch (commit `87794a4`):** two test-suite problems unrelated to Redis, which failed the first PR CI run:
+- `CrossSourceDiscoveryIT` had a stale dedup-key assertion (see §12).
+- `OutboxDiscoveryExclusionIT` needs three operator scripts, `scripts/db-migration/cutover/outbox-exclusion-{apply,check,revert}.sql`, that had never been committed. They were added unchanged after validation against the V052 functions.
 
 ## 8. Test results
 
 | Run | Result |
 |---|---|
 | New IT against **unchanged** code | 7/9 pass. The 2 diagnostic tests fail with production's exact signature (§3.4). |
-| New IT after the fix | **9/9 pass** (34 s) |
-| Redis unit tests after the fix | **51/51 pass**. With disposable local Redis fixtures on 6379/6380, 0 skipped, including the A/B experiment and the authenticated three-mode comparison. |
-| Full backend unit suite (`mvn verify`, surefire) | **1,526 run, 0 failures, 0 errors**, 6 skipped (the six Redis tests that need manually started local fixtures; passed separately above) |
-| Full backend integration suite (`mvn verify`, failsafe: Spring Boot contexts on Testcontainers PostgreSQL covering startup, Flyway, auth, CSRF, CORS, seeded-credential guards, outbox, discovery, track, mail) | **303 run: 274 passed, 1 failed, 28 skipped.** The failure, `CrossSourceDiscoveryIT.twoDifferentRolesWithTheSameEmployerTitleAndLocationStaySeparate` (a discovery dedup-key assertion), **fails identically on untouched `master` (`c2ffe8d`)** in a separate checkout, so it predates this work and is unrelated to Redis. The 28 skips are opt-in suites: 21 `UserDataIsolationIT`, 3 external-database ITs, 4 live-ingestion ITs. |
+| New IT after the fix (commit `129b00e`) | **9/9 pass** (34 s) |
+| Redis unit tests at `129b00e`, with disposable local Redis fixtures on 6379/6380 | **51/51 pass**, 0 skipped, including the A/B experiment and the authenticated three-mode comparison |
 | `UserDataIsolationIT`, run opt-in against a disposable PostgreSQL 17.11 | **21/21 pass.** Flyway migrated an empty database to V052, the full application context started, and the diagnostic reported the deliberately absent Redis correctly as `DOWN/CONNECTION` (`tcp:FAIL ... ConnectException`, with `observationBudget=24000ms` logged). |
+| First PR #12 CI run [`43960860772`](https://github.com/kirankumarJADA/job-agent/actions/runs/43960860772) (`ba459a5`) | The backend job failed on the two test-suite problems fixed in `87794a4` (§7, "Also on this branch"). `RedisLettuceConnectionLifecycleIT` passed 9/9 on GitHub's Linux runner. |
+| **Full `mvn -B verify` in a clean checkout of `87794a4`** (no untracked files) | **Completed successfully (BUILD SUCCESS).** Unit tests: **1,526 run, 0 failures, 0 errors, 6 skipped.** Integration tests: **303 run, 0 failures, 0 errors, 28 skipped.** `CrossSourceDiscoveryIT` **10/10**; `OutboxDiscoveryExclusionIT` **8/8**, including `theOperatorScriptsRunUnderPsql` against the committed scripts; `RedisLettuceConnectionLifecycleIT` **9/9**. |
+| GitHub Actions run [`43967439203`](https://github.com/kirankumarJADA/job-agent/actions/runs/43967439203) on `87794a4` | **Success**: backend, worker, frontend and cloudflare-email-worker all passed. |
+| Final cleanup (timeout API removal, failure classification, report corrections), verified in the working tree before commit | Targeted runs, all 0 failures and 0 errors: `RedisConnectivityDiagnosticsTest` 38 run (2 skipped: local fixtures), `RedisTlsBindingTest` 13 run (2 skipped: local fixtures), `CrossSourceDiscoveryIT` 10/10, `OutboxDiscoveryExclusionIT` 8/8, `RedisLettuceConnectionLifecycleIT` 9/9. Full `mvn -B verify`: **BUILD SUCCESS**. Unit tests: **1,528 run, 0 failures, 0 errors, 6 skipped** (1,526 plus the 2 new diagnostic tests). Integration tests: **303 run, 0 failures, 0 errors, 28 skipped**. |
+
+The skips are pre-existing opt-in requirements, not hidden failures:
+- The 6 unit skips are Redis tests that need manually started local Redis fixtures: 2 each in `RedisConnectivityDiagnosticsTest`, `RedisTlsBindingTest` and `RedisLettuceAbExperimentTest`.
+- The 28 integration skips are opt-in suites: 21 in `UserDataIsolationIT`, 3 external-database ITs and 4 live-ingestion ITs.
 
 ## 9. Production risk assessment
 
-- **Scope:** one diagnostic class that runs once per startup on a background daemon thread, plus YAML comments. It does not touch `LettuceConnectionFactory`, `ClientResources`, client timeouts, credentials, the Redis provider, the datasource, Flyway, security, schedulers, the outbox or maintenance mode. Maintenance mode and paused workers are environment-driven (`SPRING_APPLICATION_JSON` / `APP_MAINTENANCE_ENABLED`) and unaffected by a code deploy.
+- **Scope:** one diagnostic class that runs once per startup on a background daemon thread, YAML comments, tests, and three operator SQL scripts. The application never runs those scripts; an operator runs them by hand per the cutover runbook. The change does not touch `LettuceConnectionFactory`, `ClientResources`, client timeouts, credentials, the Redis provider, the datasource, Flyway, security, schedulers, the outbox or maintenance mode. Maintenance mode and paused workers are environment-driven (`SPRING_APPLICATION_JSON` / `APP_MAINTENANCE_ENABLED`) and unaffected by a code deploy.
 - **Expected production effect:** the startup log reports `result=UP` with the real connection time instead of a false `DOWN/TIMEOUT`. On success, the three comparison clients are no longer created, so right after startup there is less CPU contention on the 0.1 CPU instance and the application's first Redis connection should get faster, not slower.
 - **Risks:**
-  - Log-format change (`PENDING`, `SKIPPED[reason]`, `INCONCLUSIVE`, two new fields) affects anyone grepping for the old strings.
+  - Log-format change (`PENDING`, `SKIPPED[reason]`, `INCONCLUSIVE`, two new fields, and the `could not complete ... result=UNKNOWN` warning that replaces `DIAGNOSTIC_TIMEOUT`) affects anyone grepping for the old strings.
   - If Redis is genuinely down, the diagnosis line appears up to ~24 s later, plus up to ~30 s for the comparison, all in the background.
   - The deploy itself restarts the service. On this plan that is a ~4-minute cold start, but the previous deploy shows Render's zero-downtime swap: old instance `z2j2b` closed at 19:48:12, one second before new instance `j292j` went live.
 - **Rollback:** revert the merge commit on `master` (auto-deploys), or use Render's rollback to the previous deploy. No data or schema is involved.
 
 ## 10. Recommended controlled deployment steps
 
-**STOPPED here. Nothing has been merged, pushed or deployed.** Render's `job-agent` service builds `kirankumarJADA/job-agent@master` with **Auto-Deploy: On Commit**, so **merging or pushing to `master` is a production deploy**.
+**Current status:**
+- The feature branch `fix/redis-diagnostic-cold-start` has been pushed.
+- [PR #12](https://github.com/kirankumarJADA/job-agent/pull/12) is open and still a **draft**.
+- Nothing has been merged into `master`, and nothing has been deployed to Render production.
 
-1. Review the branch diff (`git diff master...fix/redis-diagnostic-cold-start`). Optionally open a PR without merging.
+**Warning:** Render's `job-agent` service builds `kirankumarJADA/job-agent@master` with **Auto-Deploy: On Commit** (PR previews are off), so **merging or pushing to `master` is a production deploy**.
+
+1. Review draft PR #12 (`git diff master...fix/redis-diagnostic-cold-start`).
 2. Choose a deploy window. Avoid Render's announced infrastructure maintenance (2026-11-18 02:00 UTC). Confirm with the operator that no Render environment changes are pending; this release needs none.
-3. On approval, merge to `master`. Render auto-builds `backend/Dockerfile` and deploys.
+3. On approval, mark PR #12 ready for review and merge it into `master`. Render auto-builds `backend/Dockerfile` and deploys.
 4. Watch the deploy logs for:
    - `Started JobAgentApplication`, Flyway at V052 up to date, the maintenance-mode / outbox-paused / scheduler-paused lines (unchanged behaviour).
-   - The new diagnosis line: `result=UP`, `springSharedNativeInfo:OK/<connect time>`, `protocolComparison:SKIPPED[springSharedNativeInfo=UP]`, `observationBudget=24000ms`, and **no** `Connection closed prematurely`.
+   - The new diagnosis line: `result=UP`, `springSharedNativeInfo:OK/<connect time>`, `protocolComparison:SKIPPED[springSharedNativeInfo=UP]`, `observationBudget=24000ms`, and **no** `Connection closed prematurely` or `could not complete` warning.
 5. Verify `GET /api/v1/system/health` returns 200 (the Render health check, DB only). Optionally check `GET /actuator/health` (component status only; it runs one `INFO` over Redis).
 6. Rollback criteria: startup failure, health check not 200, or any new error unrelated to the diagnostic. Roll back with Render "Rollback" or `git revert` on `master`.
 
@@ -213,12 +237,18 @@ Effective production settings, taken from the diagnostic log (non-secret): SSL o
 - Production Redis was not replaced. No Render environment variables or settings were changed. Dashboard pages (logs, compute, settings) were only read.
 - The production service was not restarted, redeployed or woken. No requests were made to the production app.
 - Oracle PostgreSQL was not touched. Maintenance mode, schedulers and outbox dispatch remain as configured.
-- No paid infrastructure was created. All testing used disposable local Docker containers.
-- Nothing was pushed, and nothing was committed to `master`.
+- No paid infrastructure was created. Testing used disposable local Docker containers and GitHub Actions on the feature branch.
+- Only the feature branch `fix/redis-diagnostic-cold-start` was pushed, for draft PR #12. Nothing was committed or pushed to `master`.
 
-## 12. Further observations (not changed)
+## 12. Further observations
 
 - **The Render Free plan is why cold connections are slow.** It caused the 217 s startup, ~1–2 s TLS handshakes and a ~10 s first Redis connection, and a free instance spins down after inactivity, so every wake-up repeats the cold start. Only a larger instance (for example 0.5 CPU) would make the first connection fast. That is a paid change and the owner's decision.
 - **The protocol comparison was investigation scaffolding.** It is now dormant whenever Redis is healthy. Once the fixed diagnostic has been verified in production, consider deleting it (`rawLettuceProbe` and its lifecycle instrumentation) to shrink the class.
-- **Pre-existing failing test on `master`:** `CrossSourceDiscoveryIT.twoDifferentRolesWithTheSameEmployerTitleAndLocationStaySeparate` expects two distinct roles with the same employer, title and location to keep sharing the old title-based dedup key (line 151). Since the dedup-hierarchy change in `35a1f0a` they no longer do. Either the test is stale or that change regressed. Until it is resolved, `mvn verify` is not green on `master` and cannot serve as a release gate.
+- **`CrossSourceDiscoveryIT` dedup assertion (fixed on this branch).** `twoDifferentRolesWithTheSameEmployerTitleAndLocationStaySeparate` used to expect two distinct roles with the same employer, title and location to share the legacy title-based dedup key. Since the dedup-hierarchy change in `35a1f0a`, a job's key comes from provider + organisation + external job ID. Commit `87794a4` corrected the test to match:
+  - each job's key must be that identity key;
+  - the two keys must differ;
+  - neither may fall back to the title key;
+  - the jobs must stay separate.
+
+  Production deduplication logic was not changed by this test fix. The feature branch's complete CI is green (run `43967439203` on `87794a4`). Untouched `master` is unchanged and keeps the old assertion until this PR is merged.
 - **Test-only dependency clash:** Testcontainers 2.0.5's file copy (`withCopyFileToContainer`) fails under Spring Boot 3.3.4's managed commons-lang3 (`NoSuchMethodError: SystemProperties.getUserName`). The new IT works around it. Future tests that copy files into containers will need commons-lang3 overridden in test scope.

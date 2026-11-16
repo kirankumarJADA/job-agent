@@ -91,15 +91,12 @@ import java.security.NoSuchAlgorithmException;
 public class RedisConnectivityDiagnostics {
     private static final Logger log = LoggerFactory.getLogger(RedisConnectivityDiagnostics.class);
 
-    /** Overall asynchronous safety cap retained for diagnostic compatibility; phases have their own budgets. */
-    static final Duration PROBE_TIMEOUT = Duration.ofSeconds(20);
     static final Duration DNS_TIMEOUT = Duration.ofSeconds(2);
     static final Duration TCP_TIMEOUT = Duration.ofSeconds(2);
     static final Duration TLS_TIMEOUT = Duration.ofSeconds(3);
     /** Local client bootstrap (event loops, SslContext, class loading) runs before Lettuce's own timers start. */
     static final Duration COLD_CLIENT_BOOTSTRAP_ALLOWANCE = Duration.ofSeconds(10);
     static final Duration RAW_PHASE_TIMEOUT = Duration.ofSeconds(2);
-    static final Duration RAW_TOTAL_TIMEOUT = Duration.ofSeconds(10);
     static final Duration LATE_EVENT_GRACE = Duration.ofMillis(1500);
 
     private final RedisProperties properties;
@@ -143,29 +140,34 @@ public class RedisConnectivityDiagnostics {
 
     @EventListener(ApplicationReadyEvent.class)
     void probeAfterApplicationReady() {
-        probeAsync(PROBE_TIMEOUT).whenComplete((diagnostic, failure) -> {
-            if (failure != null) {
-                // The overall cap fired. Do NOT claim a network TIMEOUT here:
-                // the failing phase was not identified, so label it explicitly.
-                log.info("Redis connectivity diagnosis: client={}, host={}, port={}, sslEnabled={}, "
-                                + "authenticationConfigured={}, passwordLength={}, passwordSha256Prefix={}, "
-                                + "healthProbe=INFO, effectiveClient={}, result=DOWN, "
-                                + "errorCategory=DIAGNOSTIC_TIMEOUT, phases={}",
-                        client(), host(), port(), sslEnabled(), authenticationConfigured(),
-                        passwordLength(), passwordSha256Prefix(), effectiveClientDetails(), failureName(failure));
+        probeAsync().whenComplete((diagnostic, failure) -> {
+            if (failure == null) {
+                logDiagnostic(diagnostic);
                 return;
             }
-            logDiagnostic(diagnostic);
+            // The diagnostic itself failed to run: that is not a Redis verdict.
+            Throwable cause = failure instanceof CompletionException && failure.getCause() != null
+                    ? failure.getCause() : failure;
+            log.warn("Redis connectivity diagnosis could not complete: result=UNKNOWN, errorCategory={}, "
+                            + "failure={}",
+                    diagnosticFailureCategory(cause), safeCauseChain(cause, null));
         });
     }
 
-    CompletableFuture<Diagnostic> probeAsync(Duration overallTimeout) {
-        // Every external phase has its own bound. Do not apply CompletableFuture
-        // orTimeout() to the whole diagnosis: that only times out observation
-        // and can leave a shared Lettuce operation running without a retained
-        // completion path. The argument is retained for source compatibility;
-        // phase-specific bounds are authoritative.
+    CompletableFuture<Diagnostic> probeAsync() {
+        // No overall orTimeout(): it would only stop observing, never the shared
+        // Lettuce operation. Every phase carries its own bound.
         return CompletableFuture.supplyAsync(this::diagnose, PROBE_EXECUTOR);
+    }
+
+    /** Classifies a failure of the diagnostic's own execution; never a statement about Redis. */
+    static String diagnosticFailureCategory(Throwable failure) {
+        for (Throwable current = failure; current != null; current = current.getCause()) {
+            if (current instanceof TimeoutException || current instanceof SocketTimeoutException) {
+                return "DIAGNOSTIC_TIMEOUT";
+            }
+        }
+        return "DIAGNOSTIC_ERROR";
     }
 
     private void logDiagnostic(Diagnostic diagnostic) {
@@ -1109,8 +1111,12 @@ public class RedisConnectivityDiagnostics {
     }
 
     private static String sanitizeDiagnosticMessage(String message) {
-        String sanitized = message.replaceAll("(?i)(password|token|secret|authorization)\\s*[=:]\\s*[^,;\\s]+",
-                "$1=<redacted>");
+        if (message == null) {
+            return "";
+        }
+        String sanitized = message
+                .replaceAll("(?i)(password|token|secret|authorization)\\s*[=:]\\s*[^,;\\s]+", "$1=<redacted>")
+                .replaceAll("(?i)\\b([a-z][a-z0-9+.-]*://)[^/@\\s]+@", "$1<redacted>@");
         return sanitized.length() > 240 ? sanitized.substring(0, 240) + "..." : sanitized;
     }
 
@@ -1137,10 +1143,6 @@ public class RedisConnectivityDiagnostics {
             cause = cause.getCause();
         }
         return cause.getClass().getSimpleName();
-    }
-
-    private static String failureName(Throwable failure) {
-        return simpleName(failure);
     }
 
     private static String family(InetAddress address) {
