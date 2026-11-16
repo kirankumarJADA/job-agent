@@ -170,6 +170,18 @@ public class ApplicationPipelineEventHandler implements EventHandler {
             return;
         }
 
+        // Migration guard, second line: decide() never returns AUTO_APPLY while
+        // app.migration.manual-review-only is on. Should that ever change,
+        // nothing is created here either and any reservation is given back.
+        if ("AUTO_APPLY".equals(decision.decision()) && decisionService.isManualReviewOnly()) {
+            if (decision.quotaPeriodStart() != null) {
+                quotaService.release(profileId, "application_daily", 1, decision.quotaPeriodStart());
+            }
+            log.error("Migration guard: refusing an automatic application for profile={} job={}; "
+                    + "it waits for human review", profileId, jobId);
+            return;
+        }
+
         if (!"AUTO_APPLY".equals(decision.decision())) {
             log.info("Match profile={} job={} queued for review ({}): {}",
                     profileId, jobId, decision.decision(), decision.reason());

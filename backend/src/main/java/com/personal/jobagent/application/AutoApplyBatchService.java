@@ -9,6 +9,7 @@ import com.personal.jobagent.jobs.JobRepository;
 import com.personal.jobagent.profile.ProfileRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -55,6 +56,15 @@ public class AutoApplyBatchService {
 
     /** This batch feature's own quota key — separate from the continuous engine's "application_daily". */
     static final String QUOTA_KEY = "auto_apply_batch_daily";
+
+    /**
+     * Migration guard ({@code app.migration.manual-review-only}, see
+     * ApplicationDecisionService): while it is on, a batch run is refused
+     * before anything is read or reserved, because it would create
+     * applications without a review of each one. Default off.
+     */
+    @Value("${app.migration.manual-review-only:false}")
+    private boolean manualReviewOnly = false;
 
     private final AutoApplySettingsService settingsService;
     private final JobRepository jobRepository;
@@ -139,6 +149,10 @@ public class AutoApplyBatchService {
      * must never fabricate progress.
      */
     public UUID runBatch(UUID profileId) {
+        if (manualReviewOnly) {
+            throw new BatchDisabledException("Auto Apply batch preparation is paused during the database migration: "
+                    + "every match goes to human review.");
+        }
         AutoApplySettingsService.Settings settings = settingsService.get(profileId);
         if (!settings.enabled()) {
             throw new BatchDisabledException("Auto Apply batch preparation is disabled. Enable it in settings first.");

@@ -59,6 +59,7 @@ public class HardFilterService {
 
         List<HardFilterResult.FilterReason> reasons = new ArrayList<>();
 
+        checkTitles(job, prefs, reasons);
         checkLocation(job, prefs, reasons);
         checkRemoteType(job, prefs, reasons);
         checkEmploymentType(job, prefs, reasons);
@@ -79,6 +80,70 @@ public class HardFilterService {
 
     // ── Individual filter methods ────────────────────────────────────
 
+    private static final java.util.Set<String> UK_SYNONYMS = java.util.Set.of(
+            "uk", "gb", "united kingdom", "great britain", "england", "scotland", "wales", "northern ireland");
+
+    private static final java.util.regex.Pattern UK_PATTERN = java.util.regex.Pattern.compile(
+            "\\b(uk|gb|united kingdom|great britain|england|scotland|wales|northern ireland|london|manchester|birmingham|edinburgh|bristol|cambridge|oxford|leeds|glasgow|belfast|cardiff)\\b",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    private void checkTitles(JobRecord job, PreferenceSetRecord prefs,
+                             List<HardFilterResult.FilterReason> reasons) {
+        List<String> allowedTitles = prefs.titles();
+        if (allowedTitles == null || allowedTitles.isEmpty()) return;
+
+        String jobTitle = job.title();
+        if (isBlank(jobTitle)) return; // benefit of the doubt
+
+        boolean matched = matchesAnyTitle(jobTitle, allowedTitles);
+        if (!matched) {
+            reasons.add(new HardFilterResult.FilterReason(
+                    "TITLE",
+                    String.join(", ", allowedTitles),
+                    jobTitle,
+                    "Job title '" + jobTitle + "' does not match your preferred titles."
+            ));
+        }
+    }
+
+    public static boolean matchesAnyTitle(String jobTitle, List<String> allowedTitles) {
+        if (jobTitle == null || jobTitle.isBlank() || allowedTitles == null || allowedTitles.isEmpty()) {
+            return false;
+        }
+        String jobTitleClean = normalizeTitle(jobTitle);
+        for (String allowed : allowedTitles) {
+            if (allowed == null || allowed.isBlank()) continue;
+            String allowedClean = normalizeTitle(allowed);
+            if (jobTitleClean.contains(allowedClean)) {
+                return true;
+            }
+            String[] tokens = allowedClean.split("\\s+");
+            if (tokens.length > 1) {
+                boolean allTokensMatch = true;
+                for (String t : tokens) {
+                    if (!jobTitleClean.contains(t)) {
+                        allTokensMatch = false;
+                        break;
+                    }
+                }
+                if (allTokensMatch) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static String normalizeTitle(String title) {
+        if (title == null) return "";
+        return title.toLowerCase(Locale.ROOT)
+                .replace("-", " ")
+                .replace("/", " ")
+                .replaceAll("[^a-z0-9\\s]", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
+    }
+
     private void checkLocation(JobRecord job, PreferenceSetRecord prefs,
                                List<HardFilterResult.FilterReason> reasons) {
         List<String> allowed = prefs.locationsAllowed();
@@ -91,13 +156,7 @@ public class HardFilterService {
 
         if (isBlank(city) && isBlank(country) && isBlank(locationRaw)) return;
 
-        // Check if any allowed location matches city, country, or locationRaw
-        boolean matched = allowed.stream().anyMatch(loc -> {
-            String locLower = loc.toLowerCase(Locale.ROOT);
-            return equalsIgnoreCase(locLower, city)
-                    || equalsIgnoreCase(locLower, country)
-                    || containsIgnoreCase(locationRaw, locLower);
-        });
+        boolean matched = matchesLocation(job, allowed);
 
         if (!matched) {
             String jobLocation = buildJobLocationString(city, country, locationRaw);
@@ -108,6 +167,53 @@ public class HardFilterService {
                     "Job location '" + jobLocation + "' is not in your allowed locations."
             ));
         }
+    }
+
+    public static boolean matchesLocation(JobRecord job, List<String> allowedLocations) {
+        if (allowedLocations == null || allowedLocations.isEmpty()) return true;
+
+        String city = job.city();
+        String country = job.country();
+        String locationRaw = job.locationRaw();
+
+        if (isBlank(city) && isBlank(country) && isBlank(locationRaw)) return true;
+
+        boolean hasUkPref = allowedLocations.stream()
+                .anyMatch(l -> l != null && UK_SYNONYMS.contains(l.trim().toLowerCase(Locale.ROOT)));
+
+        if (hasUkPref && isUkLocation(city, country, locationRaw, job.remoteType())) {
+            return true;
+        }
+
+        return allowedLocations.stream().anyMatch(loc -> {
+            if (loc == null || loc.isBlank()) return false;
+            String locLower = loc.toLowerCase(Locale.ROOT).trim();
+            return equalsIgnoreCase(locLower, city)
+                    || equalsIgnoreCase(locLower, country)
+                    || containsIgnoreCase(locationRaw, locLower);
+        });
+    }
+
+    private static boolean isUkLocation(String city, String country, String locationRaw, String remoteType) {
+        if (country != null) {
+            String c = country.trim().toLowerCase(Locale.ROOT);
+            if (UK_SYNONYMS.contains(c)) return true;
+        }
+        if (city != null && UK_PATTERN.matcher(city).find()) {
+            return true;
+        }
+        if (locationRaw != null && UK_PATTERN.matcher(locationRaw).find()) {
+            return true;
+        }
+        if ("REMOTE".equalsIgnoreCase(remoteType) && (country == null || country.isBlank() || UK_SYNONYMS.contains(country.trim().toLowerCase(Locale.ROOT)))) {
+            if (locationRaw == null || locationRaw.isBlank() || locationRaw.equalsIgnoreCase("remote")) {
+                return true;
+            }
+            if (locationRaw.toLowerCase(Locale.ROOT).contains("uk") || locationRaw.toLowerCase(Locale.ROOT).contains("united kingdom")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void checkRemoteType(JobRecord job, PreferenceSetRecord prefs,

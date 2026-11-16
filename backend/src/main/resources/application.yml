@@ -59,6 +59,15 @@ spring:
 
 app:
   frontend-url: ${APP_FRONTEND_URL:http://localhost:5173}
+  maintenance:
+    # Central maintenance mode (APP_MAINTENANCE_ENABLED). When true, every background
+    # writer checks MaintenanceModeService at execution time and stays idle: outbox
+    # dispatch and reconciliation, discovery sweeps and the hourly discovery
+    # maintenance, identity backfill, automation stale-plan recovery (scheduled and
+    # POST /plans/recover), managed-mail retention and inbound deliveries (503 retry),
+    # local job seeding and the NIM model refresh. Nothing is persisted: a restart
+    # without the variable resumes normal operation. Production default: false.
+    enabled: ${APP_MAINTENANCE_ENABLED:false}
   # Gmail TRACK integration. Explicit environment mappings are required because
   # the Java beans read app.gmail.* properties rather than raw GMAIL_* variables.
   gmail:

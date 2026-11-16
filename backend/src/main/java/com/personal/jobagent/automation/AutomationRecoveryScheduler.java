@@ -1,8 +1,11 @@
 package com.personal.jobagent.automation;
 
 import com.personal.jobagent.common.AutomationMetrics;
+import com.personal.jobagent.common.MaintenanceModeService;
+import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -20,6 +23,9 @@ import java.time.Instant;
  * are re-served by claim-next; the worker's durable step state skips already
  * completed steps on re-execution, and no greenhouse plan contains a
  * submit-capable step, so a reclaim can never double-submit anything.
+ *
+ * <p>When maintenance mode is active ({@code app.maintenance.enabled=true}),
+ * both scheduled and startup sweeps are suppressed.
  */
 @Component
 public class AutomationRecoveryScheduler {
@@ -29,17 +35,38 @@ public class AutomationRecoveryScheduler {
     private final AutomationPlanRepository plans;
     private final long stalePlanMinutes;
     private final AutomationMetrics metrics;
+    private final MaintenanceModeService maintenanceMode;
 
+    @Autowired
     public AutomationRecoveryScheduler(AutomationPlanRepository plans,
                                        @Value("${app.automation.stale-plan-minutes:15}") long stalePlanMinutes,
-                                       AutomationMetrics metrics) {
+                                       AutomationMetrics metrics,
+                                       @Autowired(required = false) MaintenanceModeService maintenanceMode) {
         this.plans = plans;
         this.stalePlanMinutes = stalePlanMinutes;
         this.metrics = metrics;
+        this.maintenanceMode = maintenanceMode != null ? maintenanceMode : new MaintenanceModeService(false);
+    }
+
+    public AutomationRecoveryScheduler(AutomationPlanRepository plans,
+                                       long stalePlanMinutes,
+                                       AutomationMetrics metrics) {
+        this(plans, stalePlanMinutes, metrics, new MaintenanceModeService(false));
+    }
+
+    @PostConstruct
+    void init() {
+        if (maintenanceMode.isMaintenanceMode()) {
+            log.warn("Automation recovery scheduler is PAUSED (maintenance mode active): "
+                    + "no stale plans will be recovered at startup or on schedule.");
+        }
     }
 
     @Scheduled(fixedDelayString = "${app.automation.stale-sweep-interval-ms:60000}")
     public void recoverStalePlans() {
+        if (maintenanceMode.isMaintenanceMode()) {
+            return;
+        }
         int recovered = plans.recoverStale(Instant.now().minusSeconds(stalePlanMinutes * 60));
         metrics.stalePlansRecovered(recovered);
         if (recovered > 0) {

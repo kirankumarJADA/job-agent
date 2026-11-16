@@ -341,4 +341,59 @@ class ApplicationPipelineEventHandlerTest {
         verify(pipeline, never()).createApplicationFromMatch(any(), any());
         verify(resumeService, never()).tailor(any(), any(), any());
     }
+
+    // ── Database migration: app.migration.manual-review-only ──
+
+    @Test
+    void underTheMigrationGuardAnAutoApplyDecisionCreatesNothingAndGivesTheReservationBack() {
+        // Second line of defence: decide() never says AUTO_APPLY while the
+        // guard is on, but should it ever, the handler still creates nothing
+        // and releases the unit decide() reserved, on the day it reserved it.
+        when(decisionService.isManualReviewOnly()).thenReturn(true);
+
+        handler.handle(envelope(NotificationEvents.JOB_MATCHED, Map.of(
+                "job_id", JOB.toString(), "profile_id", PROFILE.toString(),
+                "recommendation", "APPLY", "score", 91)));
+
+        verify(pipeline, never()).createApplicationFromMatch(any(), any());
+        verify(quotaService).release(PROFILE, "application_daily", 1, RESERVATION_PERIOD_START);
+        verify(notifications, never()).emit(any());
+        verify(inspectionPlanService, never()).createInspectionPlan(any(), any(), any());
+    }
+
+    @Test
+    void underTheMigrationGuardAnApplyMatchIsQueuedForHumanReview() {
+        when(decisionService.isManualReviewOnly()).thenReturn(true);
+        when(decisionService.decide(PROFILE, JOB, 91, "APPLY"))
+                .thenReturn(new ApplicationDecisionService.DecisionResult("NEEDS_REVIEW",
+                        ApplicationDecisionService.MIGRATION_GUARD_REASON, 91));
+
+        handler.handle(envelope(NotificationEvents.JOB_MATCHED, Map.of(
+                "job_id", JOB.toString(), "profile_id", PROFILE.toString(),
+                "recommendation", "APPLY", "score", 91)));
+
+        verify(pipeline, never()).createApplicationFromMatch(any(), any());
+        // Nothing was reserved, so nothing is released.
+        verify(quotaService, never()).release(any(), any(), org.mockito.ArgumentMatchers.anyDouble(), any());
+        ArgumentCaptor<NotificationService.NotificationCommand> event =
+                ArgumentCaptor.forClass(NotificationService.NotificationCommand.class);
+        verify(notifications).emit(event.capture());
+        assertThat(event.getValue().eventType()).isEqualTo(NotificationEvents.APPROVAL_REQUIRED);
+        Map<?, ?> payload = (Map<?, ?>) event.getValue().payload();
+        assertThat(payload.get("decision")).isEqualTo("NEEDS_REVIEW");
+        assertThat(payload.get("reason")).isEqualTo(ApplicationDecisionService.MIGRATION_GUARD_REASON);
+    }
+
+    @Test
+    void underTheMigrationGuardDiscoveryStillScoresTheJob() {
+        // Replayed job.discovered events still produce matches; it is the
+        // matches they produce that the decision engine then holds.
+        when(decisionService.isManualReviewOnly()).thenReturn(true);
+
+        handler.handle(envelope(NotificationEvents.JOB_DISCOVERED, Map.of(
+                "job_id", JOB.toString(), "action", "UPDATED")));
+
+        verify(pipeline).onJobIngested(JOB, "UPDATED");
+        verify(pipeline, never()).createApplicationFromMatch(any(), any());
+    }
 }

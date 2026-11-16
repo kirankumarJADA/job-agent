@@ -1,7 +1,9 @@
 package com.personal.jobagent.discovery.platform;
 
+import com.personal.jobagent.common.MaintenanceModeService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
@@ -28,15 +30,27 @@ public class JobIdentityBackfill {
 
     private final JdbcTemplate db;
     private final boolean enabled;
+    private final MaintenanceModeService maintenanceMode;
 
-    public JobIdentityBackfill(JdbcTemplate db, @Value("${app.discovery.identity-backfill-enabled:true}") boolean enabled) {
+    @Autowired
+    public JobIdentityBackfill(JdbcTemplate db, @Value("${app.discovery.identity-backfill-enabled:true}") boolean enabled,
+                               MaintenanceModeService maintenanceMode) {
         this.db = db;
         this.enabled = enabled;
+        this.maintenanceMode = maintenanceMode != null ? maintenanceMode : new MaintenanceModeService(false);
+    }
+
+    public JobIdentityBackfill(JdbcTemplate db, boolean enabled) {
+        this(db, enabled, new MaintenanceModeService(false));
     }
 
     @EventListener(ApplicationReadyEvent.class)
     public void onReady() {
         if (!enabled) return;
+        if (maintenanceMode.isMaintenanceMode()) {
+            log.warn("Identity backfill is PAUSED (maintenance mode active): no job identity key is written at startup");
+            return;
+        }
         try {
             int total = backfill(20);
             if (total > 0) log.info("Identity backfill gave {} job(s) URL/platform keys", total);

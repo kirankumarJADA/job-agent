@@ -1,8 +1,10 @@
 package com.personal.jobagent.discovery;
 
 import com.personal.jobagent.common.AutomationMetrics;
+import com.personal.jobagent.common.MaintenanceModeService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -51,17 +53,26 @@ public class DiscoveryScheduler {
     private final int circuitOpenAfterFailures;
     private final AutomationMetrics metrics;
     private final boolean enabled;
+    private final MaintenanceModeService maintenanceMode;
 
+    @Autowired
     public DiscoveryScheduler(JdbcTemplate db, BoardDiscoveryService boards, PlatformRegistry registry,
                               @Value("${app.discovery.circuit-open-after-failures:10}") int circuitOpenAfterFailures,
                               @Value("${app.discovery.scheduler-enabled:true}") boolean enabled,
-                              AutomationMetrics metrics) {
+                              AutomationMetrics metrics,
+                              MaintenanceModeService maintenanceMode) {
         this.db = db;
         this.boards = boards;
         this.registry = registry;
         this.circuitOpenAfterFailures = circuitOpenAfterFailures;
         this.enabled = enabled;
         this.metrics = metrics;
+        this.maintenanceMode = maintenanceMode != null ? maintenanceMode : new MaintenanceModeService(false);
+    }
+
+    public DiscoveryScheduler(JdbcTemplate db, BoardDiscoveryService boards, PlatformRegistry registry,
+                              int circuitOpenAfterFailures, boolean enabled, AutomationMetrics metrics) {
+        this(db, boards, registry, circuitOpenAfterFailures, enabled, metrics, new MaintenanceModeService(false));
     }
 
     private record SchedulableSource(UUID id, String kind, String orgIdentifier,
@@ -71,6 +82,10 @@ public class DiscoveryScheduler {
     public void runDueSources() {
         if (!enabled) {
             return; // integration tests disable live board polling entirely
+        }
+        if (maintenanceMode.isMaintenanceMode()) {
+            log.warn("Discovery scheduler sweep is PAUSED (maintenance mode active): no board source is polled");
+            return;
         }
         List<String> kinds = registry.supportedKinds().stream().map(Enum::name).toList();
         if (kinds.isEmpty()) return;

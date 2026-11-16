@@ -186,6 +186,48 @@ class JobDiscoveryServiceTest {
         verify(jdbcTemplate).update(contains("set application_url = ?"), eq("https://boards.greenhouse.io/acme/jobs/42"), eq(existingId));
     }
 
+    @Test
+    void distinctGreenhouseIdsRemainDistinctAndNeverMerge() {
+        String key1 = JobDiscoveryService.computeDedupKey("GREENHOUSE", "stripe", "8172508",
+                "https://boards.greenhouse.io/stripe/jobs/8172508", "Stripe", "Abuse Investigator", "Dublin");
+        String key2 = JobDiscoveryService.computeDedupKey("GREENHOUSE", "stripe", "8172487",
+                "https://boards.greenhouse.io/stripe/jobs/8172487", "Stripe", "Abuse Investigator", "Dublin");
+
+        assertThat(key1).isNotEqualTo(key2);
+        assertThat(key1).isEqualTo(JobDiscoveryService.sha256("id:greenhouse:stripe:8172508"));
+        assertThat(key2).isEqualTo(JobDiscoveryService.sha256("id:greenhouse:stripe:8172487"));
+    }
+
+    @Test
+    void genuineDuplicateWithSameProviderAndExternalIdProducesIdenticalDedupKey() {
+        String key1 = JobDiscoveryService.computeDedupKey("GREENHOUSE", "stripe", "8172508",
+                "https://boards.greenhouse.io/stripe/jobs/8172508", "Stripe", "Abuse Investigator", "Dublin");
+        String key2 = JobDiscoveryService.computeDedupKey("GREENHOUSE", "stripe", "8172508",
+                "https://boards.greenhouse.io/stripe/jobs/8172508?gh_src=feed", "Stripe", "Abuse Investigator", "Dublin");
+
+        assertThat(key1).isEqualTo(key2);
+    }
+
+    @Test
+    void canonicalUrlUsedAsFallbackWhenExternalIdMissing() {
+        String key1 = JobDiscoveryService.computeDedupKey(null, null, null,
+                "https://example.com/jobs/dev-101", "Acme", "Developer", "London");
+        String key2 = JobDiscoveryService.computeDedupKey(null, null, null,
+                "https://example.com/jobs/dev-101?utm_source=feed", "Acme", "Developer", "London");
+
+        assertThat(key1).isEqualTo(key2);
+        assertThat(key1).isEqualTo(JobDiscoveryService.sha256("url:https://example.com/jobs/dev-101"));
+    }
+
+    @Test
+    void companyTitleLocationUsedAsLastResort() {
+        String key1 = JobDiscoveryService.computeDedupKey(null, null, null, null, "Acme", "Developer", "London");
+        String key2 = JobDiscoveryService.computeDedupKey("Acme", "Developer", "London");
+
+        assertThat(key1).isEqualTo(key2);
+        assertThat(key1).isEqualTo(JobDiscoveryService.sha256("acme|developer|london"));
+    }
+
     private void identityLookupReturns(String key, UUID jobId) {
         doReturn(List.of(Map.of("key", key, "job_id", jobId))).when(jdbcTemplate)
                 .queryForList(contains("from job_identity_keys where key in"), any(Object[].class));
