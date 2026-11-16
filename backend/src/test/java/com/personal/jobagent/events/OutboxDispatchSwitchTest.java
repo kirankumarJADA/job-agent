@@ -49,4 +49,20 @@ class OutboxDispatchSwitchTest {
         assertThat(processor.isDispatchEnabled()).isTrue();
         verify(jdbc).query(anyString(), any(RowMapper.class), any(), any());
     }
+
+    @Test
+    void pausedDispatchWhenCentralMaintenanceModeActive() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        EventPublisher publisher = mock(EventPublisher.class);
+        NotificationRepository notifications = mock(NotificationRepository.class);
+        com.personal.jobagent.common.MaintenanceModeService maintenanceMode =
+                new com.personal.jobagent.common.MaintenanceModeService(true);
+        OutboxProcessor processor = new OutboxProcessor(jdbc, new ObjectMapper(), publisher, notifications, maintenanceMode);
+
+        processor.dispatchPending();
+        processor.reconcileDlq();
+
+        assertThat(processor.isDispatchEnabled()).isFalse();
+        verifyNoInteractions(jdbc, publisher, notifications);
+    }
 }

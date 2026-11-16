@@ -33,4 +33,15 @@ class JobDiscoveryMaintenanceSwitchTest {
 
         verify(jdbc).update(contains("status = 'ARCHIVED'"));
     }
+
+    @Test
+    void pausedWhenCentralMaintenanceModeActive() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        JobDiscoveryService service = new JobDiscoveryService(
+                jdbc, mock(OutboxWriter.class), new com.personal.jobagent.common.MaintenanceModeService(true));
+
+        service.scheduledDiscoveryMaintenance();
+
+        verifyNoInteractions(jdbc);
+    }
 }

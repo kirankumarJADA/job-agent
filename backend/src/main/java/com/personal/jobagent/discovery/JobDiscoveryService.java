@@ -1,11 +1,13 @@
 package com.personal.jobagent.discovery;
 
+import com.personal.jobagent.common.MaintenanceModeService;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.discovery.platform.JobIdentity;
 import com.personal.jobagent.events.OutboxWriter;
 import com.personal.jobagent.notifications.NotificationEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -28,10 +30,19 @@ public class JobDiscoveryService {
 
     private final JdbcTemplate jdbcTemplate;
     private final OutboxWriter outboxWriter;
+    private final MaintenanceModeService maintenanceMode;
 
-    public JobDiscoveryService(JdbcTemplate jdbcTemplate, OutboxWriter outboxWriter) {
+    @Autowired
+    public JobDiscoveryService(JdbcTemplate jdbcTemplate,
+                               OutboxWriter outboxWriter,
+                               @Autowired(required = false) MaintenanceModeService maintenanceMode) {
         this.jdbcTemplate = jdbcTemplate;
         this.outboxWriter = outboxWriter;
+        this.maintenanceMode = maintenanceMode != null ? maintenanceMode : new MaintenanceModeService(false);
+    }
+
+    public JobDiscoveryService(JdbcTemplate jdbcTemplate, OutboxWriter outboxWriter) {
+        this(jdbcTemplate, outboxWriter, new MaintenanceModeService(false));
     }
 
     public record IngestJobCommand(
@@ -312,7 +323,7 @@ public class JobDiscoveryService {
 
     @Scheduled(cron = "0 0 * * * *") // hourly scheduled refresh for source health and stale jobs
     public void scheduledDiscoveryMaintenance() {
-        if (!maintenanceEnabled) {
+        if (!maintenanceEnabled || maintenanceMode.isMaintenanceMode()) {
             return;
         }
         // Mark jobs not seen in 30 days as ARCHIVED

@@ -1,9 +1,11 @@
 package com.personal.jobagent.jobs;
 
+import com.personal.jobagent.common.MaintenanceModeService;
 import com.personal.jobagent.common.UuidV7;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -28,13 +30,25 @@ public class JobSeedService {
     @Value("${app.seed.uk-jobs.enabled:true}")
     private boolean seedEnabled;
 
-    public JobSeedService(JdbcTemplate jdbcTemplate) {
+    private final MaintenanceModeService maintenanceMode;
+
+    @Autowired
+    public JobSeedService(JdbcTemplate jdbcTemplate, MaintenanceModeService maintenanceMode) {
         this.jdbcTemplate = jdbcTemplate;
+        this.maintenanceMode = maintenanceMode != null ? maintenanceMode : new MaintenanceModeService(false);
+    }
+
+    public JobSeedService(JdbcTemplate jdbcTemplate) {
+        this(jdbcTemplate, new MaintenanceModeService(false));
     }
 
     @PostConstruct
     public void onStartup() {
         if (!seedEnabled) {
+            return;
+        }
+        if (maintenanceMode.isMaintenanceMode()) {
+            log.warn("Job seeding is PAUSED (maintenance mode active): no seed row is written at startup");
             return;
         }
         try {

@@ -1,5 +1,6 @@
 package com.personal.jobagent.events;
 
+import com.personal.jobagent.ats.GreenhouseAdapter;
 import com.personal.jobagent.discovery.JobDiscoveryService;
 import com.personal.jobagent.llm.LlmCompletion;
 import com.personal.jobagent.llm.ModelRouter;
@@ -10,7 +11,9 @@ import com.personal.jobagent.notifications.NotificationService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.context.annotation.Bean;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -24,6 +27,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -56,6 +60,9 @@ import static org.mockito.Mockito.when;
  */
 @SpringBootTest(properties = {
         "spring.flyway.placeholders.remove_seed_dev_account=false",
+        // OfflineAts (below) replaces the greenhouseAdapter component by name, so the
+        // drain never reaches a real job board.
+        "spring.main.allow-bean-definition-overriding=true",
         "app.discovery.scheduler-enabled=false",
         // The test drives the dispatcher itself, so that nothing runs between
         // building the backlog and taking the snapshot.
@@ -78,6 +85,27 @@ class OutboxBacklogCompactionEquivalenceIT {
     }
 
     @MockBean ModelRouter modelRouter;
+
+    /** ATS inspections the drains attempted; each one failed offline, as a network failure would. */
+    private static final AtomicInteger OFFLINE_ATS_FETCHES = new AtomicInteger();
+
+    /**
+     * Replaces the {@code greenhouseAdapter} component (same bean name), so the seeded
+     * boards.greenhouse.io URLs are never fetched. The registry resolves adapters with
+     * findFirst over every AtsAdapter bean, so a second, {@code @Primary} adapter would not
+     * be enough. Every inspection fails here with FETCH_FAILED, deterministically and in
+     * both drains.
+     */
+    @TestConfiguration
+    static class OfflineAts {
+        @Bean(name = "greenhouseAdapter")
+        GreenhouseAdapter greenhouseAdapter() {
+            return new GreenhouseAdapter(url -> {
+                OFFLINE_ATS_FETCHES.incrementAndGet();
+                throw new IllegalStateException("FETCH_FAILED: offline test fixture, no network");
+            });
+        }
+    }
 
     @Autowired private JobDiscoveryService discovery;
     @Autowired private OutboxProcessor outbox;
@@ -161,6 +189,8 @@ class OutboxBacklogCompactionEquivalenceIT {
         assertThat(bookkeepingB.get("dead_letter")).isEqualTo(bookkeepingA.get("dead_letter"));
         assertThat(bookkeepingB.get("job.discovered")).isLessThan(bookkeepingA.get("job.discovered"));
         assertThat(bookkeepingB.get("consumed_events")).isLessThan(bookkeepingA.get("consumed_events"));
+        assertThat(OFFLINE_ATS_FETCHES.get())
+                .as("ATS inspections went to the offline fixture, never to the network").isPositive();
     }
 
     // ── fixture ──────────────────────────────────────────────────────

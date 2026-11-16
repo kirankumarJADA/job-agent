@@ -2,12 +2,14 @@ package com.personal.jobagent.automation;
 
 import com.personal.jobagent.audit.*;
 import com.personal.jobagent.common.AutomationMetrics;
+import com.personal.jobagent.common.MaintenanceModeService;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.notifications.NotificationEvents;
 import com.personal.jobagent.notifications.NotificationService;
 import com.personal.jobagent.security.OwnerContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -59,7 +61,9 @@ public class AutomationController {
     private final GreenhouseExecutionPlanService greenhousePlans;
     private final AshbyExecutionPlanService ashbyPlans;
     private final WorkdayExecutionPlanService workdayPlans;
+    private final MaintenanceModeService maintenanceMode;
 
+    @Autowired
     public AutomationController(AutomationPlanRepository plans,
                                 AuditLogWriter audit,
                                 OwnerContext ownerContext,
@@ -72,7 +76,8 @@ public class AutomationController {
                                 com.personal.jobagent.application.ApplicationStatusService applicationStatus,
                                 GreenhouseExecutionPlanService greenhousePlans,
                                 AshbyExecutionPlanService ashbyPlans,
-                                WorkdayExecutionPlanService workdayPlans) {
+                                WorkdayExecutionPlanService workdayPlans,
+                                @Autowired(required = false) MaintenanceModeService maintenanceMode) {
         this.plans = plans;
         this.audit = audit;
         this.ownerContext = ownerContext;
@@ -86,6 +91,25 @@ public class AutomationController {
         this.greenhousePlans = greenhousePlans;
         this.ashbyPlans = ashbyPlans;
         this.workdayPlans = workdayPlans;
+        this.maintenanceMode = maintenanceMode != null ? maintenanceMode : new MaintenanceModeService(false);
+    }
+
+    public AutomationController(AutomationPlanRepository plans,
+                                AuditLogWriter audit,
+                                OwnerContext ownerContext,
+                                String workerToken,
+                                ExecutionPackageService executionPackages,
+                                NotificationService notifications,
+                                AutomationMetrics metrics,
+                                com.personal.jobagent.apply.ApplyReadinessService applyReadiness,
+                                ApplyDocumentSelector documentSelector,
+                                com.personal.jobagent.application.ApplicationStatusService applicationStatus,
+                                GreenhouseExecutionPlanService greenhousePlans,
+                                AshbyExecutionPlanService ashbyPlans,
+                                WorkdayExecutionPlanService workdayPlans) {
+        this(plans, audit, ownerContext, workerToken, executionPackages, notifications, metrics,
+                applyReadiness, documentSelector, applicationStatus, greenhousePlans, ashbyPlans, workdayPlans,
+                new MaintenanceModeService(false));
     }
 
     public record CreateRequest(UUID applicationId, UUID jobId, String targetUrl, String idempotencyKey, List<AutomationPlan.Step> steps) {}
@@ -870,6 +894,9 @@ public class AutomationController {
     public ResponseEntity<?> recover(@RequestParam(defaultValue = "15") long minutes) {
         if (!machineOrLocalDev()) {
             return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
+        }
+        if (maintenanceMode != null && maintenanceMode.isMaintenanceMode()) {
+            return ResponseEntity.status(503).body(Map.of("error", "maintenance mode active", "recovered", 0));
         }
         return ResponseEntity.ok(Map.of("recovered", plans.recoverStale(Instant.now().minusSeconds(minutes * 60))));
     }

@@ -3,7 +3,9 @@ package com.personal.jobagent.llm;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.common.JdbcConversions;
+import com.personal.jobagent.common.MaintenanceModeService;
 import com.personal.jobagent.common.UuidV7;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
@@ -17,8 +19,12 @@ import java.util.*;
 @Service
 public class NimModelRegistry {
     private final ObjectMapper mapper; private final JdbcTemplate db; private final String baseUrl; private final String apiKey;
-    public NimModelRegistry(ObjectMapper mapper, JdbcTemplate db, @Value("${NIM_BASE_URL:https://integrate.api.nvidia.com}") String baseUrl, @Value("${NIM_API_KEY:}") String apiKey){this.mapper=mapper;this.db=db;this.baseUrl=(baseUrl==null?"https://integrate.api.nvidia.com":baseUrl).replaceAll("/+$","");this.apiKey=apiKey;}
-    @EventListener(ApplicationReadyEvent.class) public void refreshOnReady(){if(configured())try{refresh();}catch(RuntimeException ignored){}}
+    private final MaintenanceModeService maintenanceMode;
+    @Autowired
+    public NimModelRegistry(ObjectMapper mapper, JdbcTemplate db, @Value("${NIM_BASE_URL:https://integrate.api.nvidia.com}") String baseUrl, @Value("${NIM_API_KEY:}") String apiKey, MaintenanceModeService maintenanceMode){this.mapper=mapper;this.db=db;this.baseUrl=(baseUrl==null?"https://integrate.api.nvidia.com":baseUrl).replaceAll("/+$","");this.apiKey=apiKey;this.maintenanceMode=maintenanceMode!=null?maintenanceMode:new MaintenanceModeService(false);}
+    public NimModelRegistry(ObjectMapper mapper, JdbcTemplate db, String baseUrl, String apiKey){this(mapper,db,baseUrl,apiKey,new MaintenanceModeService(false));}
+    /** Startup refresh (external catalogue call + llm_models write); idle in maintenance mode. */
+    @EventListener(ApplicationReadyEvent.class) public void refreshOnReady(){if(maintenanceMode.isMaintenanceMode())return;if(configured())try{refresh();}catch(RuntimeException ignored){}}
     public boolean configured(){return apiKey!=null&&!apiKey.isBlank();}
     public List<ModelDescriptor> refresh(){if(!configured())return List.of();try{HttpRequest req=HttpRequest.newBuilder().uri(URI.create(baseUrl+"/v1/models")).timeout(Duration.ofSeconds(15)).header("Authorization","Bearer "+apiKey).GET().build();HttpResponse<String> r=HttpClient.newHttpClient().send(req,HttpResponse.BodyHandlers.ofString());if(r.statusCode()/100!=2)throw new LlmProviderException("NVIDIA catalogue returned HTTP "+r.statusCode());JsonNode root=mapper.readTree(r.body()),data=root.path("data");if(!data.isArray())data=root.path("models");List<ModelDescriptor> out=new ArrayList<>();if(data.isArray())for(JsonNode n:data){String id=n.path("id").asText(n.path("model").asText());if(!id.isBlank())out.add(parse(n,id));}persist(out);return out;}catch(InterruptedException e){Thread.currentThread().interrupt();throw new LlmProviderException("NVIDIA catalogue interrupted",e);}catch(Exception e){if(e instanceof LlmProviderException l)throw l;throw new LlmProviderException("NVIDIA catalogue failed: "+e.getMessage(),e);}}
     public Set<String> eligibleModelIds(){try{return new LinkedHashSet<>(db.query("select model_key from llm_models where provider_id='nim' and enabled=true and coalesce((notes->>'free_endpoint')::boolean,false)=true and coalesce((notes->>'deprecated')::boolean,false)=false and coalesce(notes->>'availability','UNKNOWN')='AVAILABLE'",(rs,n)->rs.getString(1)));}catch(Exception e){return Set.of();}}
