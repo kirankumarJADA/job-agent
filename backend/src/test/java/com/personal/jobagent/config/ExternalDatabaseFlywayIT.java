@@ -75,6 +75,7 @@ class ExternalDatabaseFlywayIT {
                     configure(dataSource).ignoreMigrationPatterns("*:pending").load(), jdbc);
             case "migrate" -> migrateDryRunSource(url, dataSource, configure(dataSource).load(), jdbc);
             case "migrate-restore" -> migrateRestoredCopy(url, dataSource, configure(dataSource).load(), jdbc);
+            case "migrate-clean" -> migrateClean(url, dataSource, configure(dataSource).load(), jdbc);
             default -> throw new IllegalArgumentException("Unknown robin.flyway.external.action: " + action);
         }
     }
@@ -96,6 +97,41 @@ class ExternalDatabaseFlywayIT {
         assertThat(history.failed()).as("failed history rows").isZero();
         assertThat(history.versioned()).as("applied versioned migrations").isEqualTo(expected);
         assertThat(history.maxVersion()).as("max version reached").isEqualTo("052");
+    }
+
+    private static void migrateClean(String url, DriverManagerDataSource dataSource,
+                                     Flyway flyway, JdbcTemplate jdbc) throws Exception {
+        assertThat(url).as("migrate-clean only runs against an authorized loopback or staging host").matches(ALLOWED_RESTORE_URL);
+        assertThat(System.getProperty("robin.flyway.external.allow-migrate"))
+                .as("explicit clean-init opt-in").isEqualTo("clean-init");
+        String dbName = jdbc.queryForObject("select current_database()", String.class);
+        assertThat(dbName).as("target database name").isEqualTo("robin");
+
+        Integer tableCount = jdbc.queryForObject(
+                "select count(*)::int from information_schema.tables where table_schema = 'public'", Integer.class);
+        assertThat(tableCount).as("database must be completely empty before clean migrate").isZero();
+
+        new FlywayBootstrapRecoveryConfiguration(dataSource).guardedFlywayMigrationStrategy().migrate(flyway);
+
+        // Remove dev/seed mock rows to ensure a pristine production schema with zero fake entities
+        jdbc.execute("truncate table jobs cascade");
+        jdbc.execute("delete from job_sources where org_identifier in ('examplefintech', 'examplecloud')");
+        jdbc.execute("delete from companies where slug in ('example-fintech', 'example-cloud')");
+        jdbc.execute("delete from users where email = 'dev@example.local'");
+
+        History history = History.read(jdbc);
+        int expected = shippedMigrationCount();
+        boolean ok = history.failed() == 0 && history.versioned() == expected && "052".equals(history.maxVersion());
+        report((ok ? "ROBIN_FLYWAY migrate PASS " : "ROBIN_FLYWAY migrate FAIL ") + history + " shipped=" + expected);
+        assertThat(history.failed()).as("failed history rows").isZero();
+        assertThat(history.versioned()).as("applied versioned migrations").isEqualTo(expected);
+        assertThat(history.maxVersion()).as("max version reached").isEqualTo("052");
+
+        // Verify clean state
+        Integer userCount = jdbc.queryForObject("select count(*)::int from users", Integer.class);
+        Integer jobCount = jdbc.queryForObject("select count(*)::int from jobs", Integer.class);
+        assertThat(userCount).as("users count after clean initialization").isZero();
+        assertThat(jobCount).as("jobs count after clean initialization").isZero();
     }
 
     /**

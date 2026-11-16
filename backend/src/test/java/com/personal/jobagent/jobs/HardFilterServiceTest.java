@@ -88,7 +88,111 @@ class HardFilterServiceTest {
         assertThat(service.evaluate(simpleJob(), emptyPrefs()).passed()).isTrue();
     }
 
+    // ── Title filter ────────────────────────────────────────────────
+
+    @Test
+    void targetEngineeringTitlesPassTheFilter() {
+        var titles = List.of("Software Engineer", "Backend Engineer", "Java Developer", "Full-stack", "Cloud", "Platform Engineer");
+        var p = new PreferenceSetRecord(UUID.randomUUID(), PROFILE_ID,
+                titles, List.of(), List.of(), List.of(),
+                List.of(), List.of(), List.of(), List.of(),
+                null, null, List.of(), List.of(), "ASSISTED", Map.of(), Map.of(), true);
+
+        // Substring and token matches
+        var j1 = job("London", "UK", "REMOTE", "FULL_TIME", "MID", BigDecimal.valueOf(70000), COMPANY_ID,
+                "Senior Software Engineer", "desc", List.of());
+        var j2 = job("London", "UK", "REMOTE", "FULL_TIME", "MID", BigDecimal.valueOf(70000), COMPANY_ID,
+                "Backend Engineer", "desc", List.of());
+        var j3 = job("London", "UK", "REMOTE", "FULL_TIME", "MID", BigDecimal.valueOf(70000), COMPANY_ID,
+                "Lead Java Developer", "desc", List.of());
+        var j4 = job("London", "UK", "REMOTE", "FULL_TIME", "MID", BigDecimal.valueOf(70000), COMPANY_ID,
+                "Full Stack Engineer", "desc", List.of());
+        var j5 = job("London", "UK", "REMOTE", "FULL_TIME", "MID", BigDecimal.valueOf(70000), COMPANY_ID,
+                "Cloud Platform Engineer", "desc", List.of());
+
+        assertThat(service.evaluate(j1, p).passed()).isTrue();
+        assertThat(service.evaluate(j2, p).passed()).isTrue();
+        assertThat(service.evaluate(j3, p).passed()).isTrue();
+        assertThat(service.evaluate(j4, p).passed()).isTrue();
+        assertThat(service.evaluate(j5, p).passed()).isTrue();
+    }
+
+    @Test
+    void irrelevantTitlesAreExcludedFromPrimaryFeed() {
+        var titles = List.of("Software Engineer", "Backend Engineer", "Java Developer", "Full-stack", "Cloud", "Platform Engineer");
+        var p = new PreferenceSetRecord(UUID.randomUUID(), PROFILE_ID,
+                titles, List.of(), List.of(), List.of(),
+                List.of(), List.of(), List.of(), List.of(),
+                null, null, List.of(), List.of(), "ASSISTED", Map.of(), Map.of(), true);
+
+        var jAbuse = job("Dublin", "IE", "ONSITE", "FULL_TIME", "MID", BigDecimal.valueOf(70000), COMPANY_ID,
+                "Abuse Investigator", "desc", List.of());
+        var jMarketing = job("Berlin", "DE", "HYBRID", "FULL_TIME", "MID", BigDecimal.valueOf(70000), COMPANY_ID,
+                "Praktikum Content & AI Marketing", "desc", List.of());
+        var jGrowth = job("London", "UK", "HYBRID", "FULL_TIME", "MID", BigDecimal.valueOf(70000), COMPANY_ID,
+                "Growth Manager", "desc", List.of());
+
+        var resAbuse = service.evaluate(jAbuse, p);
+        assertThat(resAbuse.passed()).isFalse();
+        assertThat(resAbuse.reasons().stream().map(HardFilterResult.FilterReason::criterion).toList()).contains("TITLE");
+
+        var resMarketing = service.evaluate(jMarketing, p);
+        assertThat(resMarketing.passed()).isFalse();
+        assertThat(resMarketing.reasons().stream().map(HardFilterResult.FilterReason::criterion).toList()).contains("TITLE");
+
+        var resGrowth = service.evaluate(jGrowth, p);
+        assertThat(resGrowth.passed()).isFalse();
+        assertThat(resGrowth.reasons().stream().map(HardFilterResult.FilterReason::criterion).toList()).contains("TITLE");
+    }
+
+    @Test
+    void emptyTitlePreferencesPassesAnyJobTitle() {
+        var p = prefs(List.of(), List.of(), List.of(), List.of(), null, null, List.of(), List.of(), List.of());
+        var jAbuse = job("London", "UK", "REMOTE", "FULL_TIME", "MID", BigDecimal.valueOf(70000), COMPANY_ID,
+                "Abuse Investigator", "desc", List.of());
+        assertThat(service.evaluate(jAbuse, p).passed()).isTrue();
+    }
+
     // ── Location filter ─────────────────────────────────────────────
+
+    @Test
+    void ukLocationMatchingRecognizesGbAndRegions() {
+        var p = prefs(List.of("UK"), List.of(), List.of(), List.of(), null, null, List.of(), List.of(), List.of());
+
+        var jLondonGb = job("London", "GB", "HYBRID", "FULL_TIME", "MID", BigDecimal.valueOf(70000), COMPANY_ID,
+                "Backend Engineer", "desc", List.of());
+        var jManchester = job("Manchester", "United Kingdom", "HYBRID", "FULL_TIME", "MID", BigDecimal.valueOf(70000), COMPANY_ID,
+                "Backend Engineer", "desc", List.of());
+        var jScotland = job("Edinburgh", "Scotland", "HYBRID", "FULL_TIME", "MID", BigDecimal.valueOf(70000), COMPANY_ID,
+                "Backend Engineer", "desc", List.of());
+        var jUkRemote = new JobRecord(JOB_ID, SOURCE_ID, "ext-1", COMPANY_ID, "TestCo", "Backend Engineer",
+                "Remote - UK", null, "GB", "REMOTE", "FULL_TIME", "MID",
+                null, BigDecimal.valueOf(70000), "GBP", "desc", List.of(),
+                "https://example.com/job", "https://example.com/job", Instant.now(), "DISCOVERED");
+
+        assertThat(service.evaluate(jLondonGb, p).passed()).isTrue();
+        assertThat(service.evaluate(jManchester, p).passed()).isTrue();
+        assertThat(service.evaluate(jScotland, p).passed()).isTrue();
+        assertThat(service.evaluate(jUkRemote, p).passed()).isTrue();
+    }
+
+    @Test
+    void nonUkLocationIsRejectedWhenUkRequired() {
+        var p = prefs(List.of("UK"), List.of(), List.of(), List.of(), null, null, List.of(), List.of(), List.of());
+
+        var jDublin = job("Dublin", "Ireland", "ONSITE", "FULL_TIME", "MID", BigDecimal.valueOf(70000), COMPANY_ID,
+                "Backend Engineer", "desc", List.of());
+        var jBerlin = job("Berlin", "Germany", "HYBRID", "FULL_TIME", "MID", BigDecimal.valueOf(70000), COMPANY_ID,
+                "Backend Engineer", "desc", List.of());
+
+        var resDublin = service.evaluate(jDublin, p);
+        assertThat(resDublin.passed()).isFalse();
+        assertThat(resDublin.reasons().stream().map(HardFilterResult.FilterReason::criterion).toList()).contains("LOCATION");
+
+        var resBerlin = service.evaluate(jBerlin, p);
+        assertThat(resBerlin.passed()).isFalse();
+        assertThat(resBerlin.reasons().stream().map(HardFilterResult.FilterReason::criterion).toList()).contains("LOCATION");
+    }
 
     @Test
     void locationMatchOnCityPassesTheFilter() {
