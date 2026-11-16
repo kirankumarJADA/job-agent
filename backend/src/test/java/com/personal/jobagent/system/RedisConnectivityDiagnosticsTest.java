@@ -12,7 +12,12 @@ import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.connection.RedisServerCommands;
+import org.springframework.data.redis.connection.RedisStandaloneConfiguration;
+import org.springframework.data.redis.connection.lettuce.LettuceClientConfiguration;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
+
+import io.lettuce.core.ClientOptions;
+import io.lettuce.core.SocketOptions;
 
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLParameters;
@@ -30,6 +35,7 @@ import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -250,14 +256,116 @@ class RedisConnectivityDiagnosticsTest {
             return connection;
         });
         FakeHooks hooks = FakeHooks.healthy(1);
+        AtomicInteger comparisons = new AtomicInteger();
 
         RedisConnectivityDiagnostics.Diagnostic diagnostic =
-                new RedisConnectivityDiagnostics(properties, factory).diagnose(hooks, Duration.ofMillis(25));
+                countingComparisons(properties, factory, comparisons).diagnose(hooks, Duration.ofMillis(25));
 
-        assertThat(diagnostic.phases()).contains("springSharedNativeInfo:FAIL")
-                .contains("observationTimeout,inFlight=true,completionTracked=true");
+        // An attempt still running inside its own budgets is not a failure.
+        assertThat(diagnostic.result()).isEqualTo("INCONCLUSIVE");
+        assertThat(diagnostic.errorCategory()).isEqualTo("OBSERVATION_TIMEOUT");
+        assertThat(diagnostic.phases()).contains("springSharedNativeInfo:PENDING")
+                .contains("factoryAcquire:PENDING")
+                .contains("observationBudgetElapsed=25ms,inFlight=true,completionTracked=true")
+                .contains("protocolComparison:SKIPPED[springSharedNativeInfo in flight]")
+                .doesNotContain("springSharedNativeInfo:FAIL");
+        assertThat(comparisons).hasValue(0);
         assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
         verify(connection, org.mockito.Mockito.timeout(2_000)).close();
+    }
+
+    @Test
+    void slowButSuccessfulSharedConnectionIsUpWithoutStartingComparisonClients() throws Exception {
+        // Production: the shared connection succeeded after 9.3s and 11.7s on a
+        // cold 0.1 CPU host while a fixed 3s observation reported DOWN/TIMEOUT.
+        RedisProperties properties = properties("slow-but-healthy.example", 6379, true, "token");
+        RedisConnection connection = connectionWithInfo();
+        RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
+        when(factory.getConnection()).thenAnswer(invocation -> {
+            Thread.sleep(400);
+            return connection;
+        });
+        AtomicInteger comparisons = new AtomicInteger();
+
+        RedisConnectivityDiagnostics.Diagnostic diagnostic =
+                countingComparisons(properties, factory, comparisons).diagnose(FakeHooks.healthy(1), Duration.ofSeconds(5));
+
+        assertThat(diagnostic.result()).isEqualTo("UP");
+        assertThat(diagnostic.errorCategory()).isNull();
+        assertThat(diagnostic.phases()).contains("springSharedNativeInfo:OK")
+                .contains("protocolComparison:SKIPPED[springSharedNativeInfo=UP]");
+        assertThat(comparisons).hasValue(0);
+    }
+
+    @Test
+    void protocolComparisonRunsOnlyAfterTheSpringPathHasTerminallyFailed() throws Exception {
+        RedisProperties properties = properties("refused.example", 6379, true, "token");
+        RedisConnectionFactory factory = mock(RedisConnectionFactory.class);
+        AtomicBoolean springTerminal = new AtomicBoolean();
+        when(factory.getConnection()).thenAnswer(invocation -> {
+            Thread.sleep(100);
+            springTerminal.set(true);
+            throw new RedisConnectionFailureException("refused", new ConnectException("refused"));
+        });
+        AtomicBoolean comparisonStartedAfterTerminalFailure = new AtomicBoolean();
+        RedisConnectivityDiagnostics diagnostics = new RedisConnectivityDiagnostics(properties, factory) {
+            @Override
+            String rawLettuceProbe(ConnectionSettings settings) {
+                comparisonStartedAfterTerminalFailure.set(springTerminal.get());
+                return "comparison-ran";
+            }
+        };
+
+        RedisConnectivityDiagnostics.Diagnostic diagnostic =
+                diagnostics.diagnose(FakeHooks.healthy(1), Duration.ofSeconds(5));
+
+        assertThat(diagnostic.result()).isEqualTo("DOWN");
+        assertThat(diagnostic.errorCategory()).isEqualTo("CONNECTION");
+        assertThat(diagnostic.phases()).contains("springSharedNativeInfo:FAIL")
+                .contains("protocolComparison:OK").contains("comparison-ran");
+        assertThat(comparisonStartedAfterTerminalFailure).isTrue();
+    }
+
+    @Test
+    void observationBudgetCoversTheClientsOwnConnectInitializationAndCommandBudgets() {
+        LettuceConnectionFactory factory = new LettuceConnectionFactory(
+                new RedisStandaloneConfiguration("upstash.example", 6379),
+                LettuceClientConfiguration.builder()
+                        .commandTimeout(Duration.ofSeconds(2))
+                        .clientOptions(ClientOptions.builder()
+                                .socketOptions(SocketOptions.builder().connectTimeout(Duration.ofSeconds(2)).build())
+                                .build())
+                        .build());
+        RedisConnectivityDiagnostics diagnostics = new RedisConnectivityDiagnostics(
+                properties("upstash.example", 6379, true, "token"), factory, "10s");
+
+        // 2s connect + 10s initialization + 2s INFO + 10s cold bootstrap allowance.
+        assertThat(diagnostics.springObservationBudget()).isEqualTo(Duration.ofSeconds(24));
+        // The slowest successful production connection observed took 11.7s.
+        assertThat(diagnostics.springObservationBudget()).isGreaterThan(Duration.ofMillis(11_700));
+    }
+
+    @Test
+    void observationBudgetFallsBackToRedisPropertiesForNonLettuceFactories() {
+        RedisProperties properties = properties("redis.example", 6379, false, "token");
+        properties.setConnectTimeout(Duration.ofSeconds(3));
+        properties.setTimeout(Duration.ofSeconds(1));
+
+        RedisConnectivityDiagnostics diagnostics = new RedisConnectivityDiagnostics(
+                properties, mock(RedisConnectionFactory.class), "5s");
+
+        assertThat(diagnostics.springObservationBudget()).isEqualTo(Duration.ofSeconds(19));
+    }
+
+    private static RedisConnectivityDiagnostics countingComparisons(
+            RedisProperties properties, RedisConnectionFactory factory, AtomicInteger comparisons) {
+        return new RedisConnectivityDiagnostics(properties, factory) {
+            @Override
+            String rawLettuceProbe(ConnectionSettings settings) {
+                comparisons.incrementAndGet();
+                return "comparison-ran";
+            }
+        };
     }
 
     @Test
@@ -685,13 +793,17 @@ class RedisConnectivityDiagnosticsTest {
     }
 
     private RedisConnectionFactory factoryWithInfo() {
+        return factory(connectionWithInfo());
+    }
+
+    private static RedisConnection connectionWithInfo() {
         RedisConnection connection = mock(RedisConnection.class);
         RedisServerCommands serverCommands = mock(RedisServerCommands.class);
         java.util.Properties info = new java.util.Properties();
         info.setProperty("redis_version", "7.2.0");
         when(connection.serverCommands()).thenReturn(serverCommands);
         when(serverCommands.info()).thenReturn(info);
-        return factory(connection);
+        return connection;
     }
 
     private RedisProperties properties(String host, int port, boolean ssl, String password) {

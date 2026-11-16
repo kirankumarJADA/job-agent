@@ -96,7 +96,8 @@ public class RedisConnectivityDiagnostics {
     static final Duration DNS_TIMEOUT = Duration.ofSeconds(2);
     static final Duration TCP_TIMEOUT = Duration.ofSeconds(2);
     static final Duration TLS_TIMEOUT = Duration.ofSeconds(3);
-    static final Duration SPRING_FACTORY_INFO_TIMEOUT = Duration.ofSeconds(3);
+    /** Local client bootstrap (event loops, SslContext, class loading) runs before Lettuce's own timers start. */
+    static final Duration COLD_CLIENT_BOOTSTRAP_ALLOWANCE = Duration.ofSeconds(10);
     static final Duration RAW_PHASE_TIMEOUT = Duration.ofSeconds(2);
     static final Duration RAW_TOTAL_TIMEOUT = Duration.ofSeconds(10);
     static final Duration LATE_EVENT_GRACE = Duration.ofMillis(1500);
@@ -177,7 +178,33 @@ public class RedisConnectivityDiagnostics {
     }
 
     Diagnostic diagnose() {
-        return diagnose(hooks(), SPRING_FACTORY_INFO_TIMEOUT);
+        return diagnose(hooks(), springObservationBudget());
+    }
+
+    /** Longest the application's own client may legitimately take to connect, initialize and answer INFO. */
+    Duration springObservationBudget() {
+        return effectiveConnectTimeout()
+                .plus(springConnectionInitializationTimeout)
+                .plus(effectiveCommandTimeout())
+                .plus(COLD_CLIENT_BOOTSTRAP_ALLOWANCE);
+    }
+
+    private Duration effectiveConnectTimeout() {
+        if (connectionFactory instanceof LettuceConnectionFactory lettuce) {
+            var options = lettuce.getClientConfiguration().getClientOptions();
+            if (options.isPresent()) {
+                return options.get().getSocketOptions().getConnectTimeout();
+            }
+        }
+        return properties.getConnectTimeout() != null
+                ? properties.getConnectTimeout() : SocketOptions.DEFAULT_CONNECT_TIMEOUT_DURATION;
+    }
+
+    private Duration effectiveCommandTimeout() {
+        if (connectionFactory instanceof LettuceConnectionFactory lettuce) {
+            return lettuce.getClientConfiguration().getCommandTimeout();
+        }
+        return properties.getTimeout() != null ? properties.getTimeout() : RedisURI.DEFAULT_TIMEOUT_DURATION;
     }
 
     /** Overridable in tests so the asynchronous listener path stays fakeable. */
@@ -307,6 +334,17 @@ public class RedisConnectivityDiagnostics {
         SpringFactoryObservation spring = observeSpringFactoryInfo(springSharedNativeInfoTimeout);
         phases.add(spring.phase());
 
+        // Comparison clients compete for CPU with the application's connection,
+        // so they run only after the Spring path has terminally failed.
+        if (spring.inFlight()) {
+            phases.add(Phase.skipped("protocolComparison", "springSharedNativeInfo in flight"));
+            return inconclusive(s, phases);
+        }
+        if (spring.failure() == null) {
+            phases.add(Phase.skipped("protocolComparison", "springSharedNativeInfo=UP"));
+            return up(s, phases);
+        }
+
         long rawStart = System.nanoTime();
         try {
             String rawDetail = rawLettuceProbe(s);
@@ -315,9 +353,7 @@ public class RedisConnectivityDiagnostics {
             phases.add(Phase.fail("protocolComparison", elapsed(rawStart),
                     rawFailureDetail(rawFailure)));
         }
-        return spring.failure() == null
-                ? up(s, phases)
-                : down(s, phases, errorCategory(spring.failure()));
+        return down(s, phases, errorCategory(spring.failure()));
     }
 
     /**
@@ -352,27 +388,31 @@ public class RedisConnectivityDiagnostics {
             Throwable failure = outcome.failure();
             if (failure == null) {
                 return new SpringFactoryObservation(
-                        Phase.ok("springSharedNativeInfo", elapsed(started), renderSubPhases(phases)), null);
+                        Phase.ok("springSharedNativeInfo", elapsed(started), renderSubPhases(phases)), null, false);
             }
             if (phases.isEmpty()) {
                 phases.add(Phase.fail("factoryAcquire", elapsed(started), simpleName(failure)));
             }
             return new SpringFactoryObservation(
-                    Phase.fail("springSharedNativeInfo", elapsed(started), renderSubPhases(phases)), failure);
-        } catch (TimeoutException timeoutFailure) {
-            phases.add(Phase.fail("factoryAcquire", elapsed(started), "observationTimeout,inFlight=true,completionTracked=true"));
+                    Phase.fail("springSharedNativeInfo", elapsed(started), renderSubPhases(phases)), failure, false);
+        } catch (TimeoutException observationBudgetElapsed) {
+            // Not a failure: the application's connection attempt is still
+            // running within its own budgets and its outcome is logged later.
+            String running = hasPhaseNamed(phases, "factoryAcquire") ? "factoryInfo" : "factoryAcquire";
+            phases.add(Phase.pending(running, elapsed(started),
+                    "observationBudgetElapsed=" + timeout.toMillis() + "ms,inFlight=true,completionTracked=true"));
             return new SpringFactoryObservation(
-                    Phase.fail("springSharedNativeInfo", elapsed(started), renderSubPhases(phases)), timeoutFailure);
+                    Phase.pending("springSharedNativeInfo", elapsed(started), renderSubPhases(phases)), null, true);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             phases.add(Phase.fail("factoryAcquire", elapsed(started), "interrupted"));
             return new SpringFactoryObservation(
-                    Phase.fail("springSharedNativeInfo", elapsed(started), renderSubPhases(phases)), interrupted);
+                    Phase.fail("springSharedNativeInfo", elapsed(started), renderSubPhases(phases)), interrupted, false);
         } catch (ExecutionException execution) {
             Throwable failure = execution.getCause() == null ? execution : execution.getCause();
             phases.add(Phase.fail("factoryAcquire", elapsed(started), simpleName(failure)));
             return new SpringFactoryObservation(
-                    Phase.fail("springSharedNativeInfo", elapsed(started), renderSubPhases(phases)), failure);
+                    Phase.fail("springSharedNativeInfo", elapsed(started), renderSubPhases(phases)), failure, false);
         }
     }
 
@@ -411,10 +451,10 @@ public class RedisConnectivityDiagnostics {
     }
 
     /**
-     * Runs three independent authenticated comparisons. The first is the
-     * Spring-equivalent Lettuce construction (automatic protocol plus the same
-     * two-second URI initialization timeout), followed by RESP2 and automatic
-     * protocol controls. Each result is retained independently.
+     * Runs three independent authenticated comparisons: the Spring-equivalent
+     * construction (automatic protocol, configured initialization timeout), a
+     * RESP2 control with the same budget, and an automatic-protocol control
+     * with a two-second budget. Each result is retained independently.
      */
     String rawLettuceProbe(ConnectionSettings settings) throws Exception {
         String password = effectivePassword();
@@ -424,7 +464,8 @@ public class RedisConnectivityDiagnostics {
         List<String> results = new ArrayList<>();
         results.add(runProtocolComparison(settings, "spring-equivalent", null, password,
                 springConnectionInitializationTimeout));
-        results.add(runProtocolComparison(settings, "raw-resp2", ProtocolVersion.RESP2, password, null));
+        results.add(runProtocolComparison(settings, "raw-resp2", ProtocolVersion.RESP2, password,
+                springConnectionInitializationTimeout));
         results.add(runProtocolComparison(settings, "raw-auto-2s", null, password, Duration.ofSeconds(2)));
         return String.join(";", results);
     }
@@ -493,7 +534,10 @@ public class RedisConnectivityDiagnostics {
                     connectionTerminal.countDown();
                 });
                 ConnectionFuture<StatefulRedisConnection<String, String>> future = connectionFuture;
-                connection = observeConnectionFuture(future, RAW_PHASE_TIMEOUT);
+                // Wait out Lettuce's own connect + handshake budgets: shutting the
+                // client down earlier closes the channel mid-handshake, which Lettuce
+                // reports as "Connection closed prematurely".
+                connection = observeConnectionFuture(future, RAW_PHASE_TIMEOUT.plus(uri.getTimeout()));
                 phases.add(mode + ".connect:OK/" + elapsed(started) + "ms");
                 // Credentials are attached to the URI. Lettuce therefore
                 // performs AUTH during its connection initializer, before the
@@ -619,7 +663,9 @@ public class RedisConnectivityDiagnostics {
                 })
                 .orElse("resources=unavailable");
         return "shareNativeConnection=" + lettuce.getShareNativeConnection()
-                + "," + optionsSummary + ",dnsResolver=" + resolver;
+                + "," + optionsSummary + ",dnsResolver=" + resolver
+                + ",initializationTimeout=" + springConnectionInitializationTimeout.toMillis()
+                + "ms,observationBudget=" + springObservationBudget().toMillis() + "ms";
     }
 
     private String effectivePassword() {
@@ -733,6 +779,11 @@ public class RedisConnectivityDiagnostics {
                 s.authenticationConfigured(), "UP", null, render(phases));
     }
 
+    private Diagnostic inconclusive(ConnectionSettings s, List<Phase> phases) {
+        return new Diagnostic(s.client(), s.host(), s.port(), s.sslEnabled(),
+                s.authenticationConfigured(), "INCONCLUSIVE", "OBSERVATION_TIMEOUT", render(phases));
+    }
+
     private Diagnostic down(ConnectionSettings s, List<Phase> phases, String category) {
         markRemainingSkipped(phases);
         return new Diagnostic(s.client(), s.host(), s.port(), s.sslEnabled(),
@@ -841,7 +892,7 @@ public class RedisConnectivityDiagnostics {
     private record SpringFactoryOutcome(Throwable failure) {
     }
 
-    private record SpringFactoryObservation(Phase phase, Throwable failure) {
+    private record SpringFactoryObservation(Phase phase, Throwable failure, boolean inFlight) {
     }
 
     private static final class MultiModeFailure extends Exception {
@@ -1147,17 +1198,25 @@ public class RedisConnectivityDiagnostics {
             return new Phase(name, "FAIL", durationMs, detail);
         }
 
+        static Phase pending(String name, long durationMs, String detail) {
+            return new Phase(name, "PENDING", durationMs, detail);
+        }
+
         static Phase skipped(String name) {
             return new Phase(name, "SKIPPED", 0, null);
+        }
+
+        static Phase skipped(String name, String reason) {
+            return new Phase(name, "SKIPPED", 0, reason);
         }
 
         String render() {
             StringBuilder rendered = new StringBuilder(name).append(':').append(status);
             if (!"SKIPPED".equals(status)) {
                 rendered.append('/').append(durationMs).append("ms");
-                if (detail != null && !detail.isBlank()) {
-                    rendered.append('[').append(detail).append(']');
-                }
+            }
+            if (detail != null && !detail.isBlank()) {
+                rendered.append('[').append(detail).append(']');
             }
             return rendered.toString();
         }
