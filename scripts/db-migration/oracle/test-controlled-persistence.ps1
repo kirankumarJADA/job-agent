@@ -30,6 +30,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Strict safety guard: This script truncates jobs cascade; it must NEVER target robin_restore
+if ($TargetDb -cne 'robin') {
+    throw "SAFETY ABORT: test-controlled-persistence.ps1 is strictly restricted to database 'robin'. It must NEVER run against 'robin_restore' because its cleanup executes TRUNCATE TABLE jobs CASCADE which would destroy the 2,666 historical jobs in robin_restore."
+}
+
 function Write-Step([string] $Message) {
     Write-Host ("[{0:HH:mm:ss}] {1}" -f (Get-Date), $Message)
 }
