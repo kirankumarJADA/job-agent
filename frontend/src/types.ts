@@ -352,11 +352,18 @@ export interface WorkExperience {
   id: string;
   company: string;
   title: string;
-  start_month: string;
+  start_month?: string;
+  startMonth?: string;
   end_month?: string | null;
+  endMonth?: string | null;
   location?: string;
   bullets: Array<{ id?: string; text: string }>;
-  sort_order: number;
+  sort_order?: number;
+  sortOrder?: number;
+  startDatePrecision?: 'YEAR' | 'MONTH' | null;
+  endDatePrecision?: 'YEAR' | 'MONTH' | null;
+  start_date_precision?: 'YEAR' | 'MONTH' | null;
+  end_date_precision?: 'YEAR' | 'MONTH' | null;
 }
 
 export interface Skill {
@@ -390,7 +397,11 @@ export interface Certification {
   name: string;
   issuer?: string;
   issued_on?: string;
+  issuedOn?: string;
   credential_id?: string;
+  credentialId?: string;
+  issuedOnPrecision?: 'YEAR' | 'MONTH' | null;
+  issued_on_precision?: 'YEAR' | 'MONTH' | null;
 }
 
 export interface Profile {

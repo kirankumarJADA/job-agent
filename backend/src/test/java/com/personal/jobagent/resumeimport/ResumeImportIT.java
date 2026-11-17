@@ -585,4 +585,144 @@ class ResumeImportIT {
         // Certification month-level must format as "(Apr 2023)"
         assertThat(resumeMarkdown).contains("- CKA Kubernetes — CNCF (Apr 2023)");
     }
+
+    @Test
+    @Order(17)
+    void ordinaryProfileEditsPreserveDatePrecisionWhenMetadataIsOmitted() throws Exception {
+        // --- Part A: YEAR precision ---
+        // 1. Import a YEAR-only experience and certification
+        String previewToken1 = JsonPath.read(runPreview().getResponse().getContentAsString(), "$.previewToken");
+        String importBody1 = """
+                {"previewToken": "%s",
+                 "personalFieldUpdates": {},
+                 "experiences": [
+                   {"action": "ADD", "matchedExistingId": null, "company": "Year Edit Corp", "title": "Staff Architect",
+                    "location": "Edinburgh", "startMonth": "2021", "endMonth": "2023",
+                    "responsibilities": ["Led infrastructure"], "achievements": ["99.99%% uptime"]}
+                 ],
+                 "education": [], "projects": [], "skills": [],
+                 "certifications": [
+                   {"action": "ADD", "matchedExistingId": null, "name": "Terraform Associate", "issuer": "HashiCorp",
+                    "issuedOn": "2022", "credentialId": "TA-001"}
+                 ]}
+                """.formatted(previewToken1);
+
+        mockMvc.perform(post("/api/v1/profile/resume-import/confirm").with(csrf()).session(login())
+                        .contentType(MediaType.APPLICATION_JSON).content(importBody1))
+                .andExpect(status().isOk());
+
+        String profileJson1 = mockMvc.perform(get("/api/v1/profile").session(login()))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+
+        String yearExpId = JsonPath.<List<String>>read(profileJson1, "$.experiences[?(@.company=='Year Edit Corp')].id").get(0);
+        String yearCertId = JsonPath.<List<String>>read(profileJson1, "$.certifications[?(@.name=='Terraform Associate')].id").get(0);
+
+        assertThat(JsonPath.<List<String>>read(profileJson1, "$.experiences[?(@.company=='Year Edit Corp')].startDatePrecision").get(0))
+                .isEqualTo("YEAR");
+        assertThat(JsonPath.<List<String>>read(profileJson1, "$.certifications[?(@.name=='Terraform Associate')].issuedOnPrecision").get(0))
+                .isEqualTo("YEAR");
+
+        // 2. Edit an unrelated field through the normal profile PUT endpoints without sending precision metadata
+        // For experience: edit company and location, send startMonth as stored LocalDate (2021-01-01), omit precision
+        String updateExpBody = """
+                {"company": "Year Edit Corp Renamed", "title": "Staff Architect",
+                 "location": "Glasgow", "startMonth": "2021-01-01", "endMonth": "2023-01-01",
+                 "bullets": [{"text": "Led infrastructure"}], "sortOrder": 0}
+                """;
+        mockMvc.perform(put("/api/v1/profile/experiences/" + yearExpId).with(csrf()).session(login())
+                        .contentType(MediaType.APPLICATION_JSON).content(updateExpBody))
+                .andExpect(status().isOk());
+
+        // For certification: edit name and issuer, send issuedOn as stored LocalDate (2022-01-01), omit precision
+        String updateCertBody = """
+                {"name": "Terraform Associate Renamed", "issuer": "HashiCorp Inc",
+                 "issuedOn": "2022-01-01", "credentialId": "TA-001"}
+                """;
+        mockMvc.perform(put("/api/v1/profile/certifications/" + yearCertId).with(csrf()).session(login())
+                        .contentType(MediaType.APPLICATION_JSON).content(updateCertBody))
+                .andExpect(status().isOk());
+
+        // 3. Retrieve the profile and generate the resume
+        String profileAfterEdit1 = mockMvc.perform(get("/api/v1/profile").session(login()))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+
+        // 4. Confirm precision remains YEAR and output remains 2021, not Jan 2021
+        assertThat(JsonPath.<List<String>>read(profileAfterEdit1, "$.experiences[?(@.id=='" + yearExpId + "')].startDatePrecision").get(0))
+                .isEqualTo("YEAR");
+        assertThat(JsonPath.<List<String>>read(profileAfterEdit1, "$.experiences[?(@.id=='" + yearExpId + "')].endDatePrecision").get(0))
+                .isEqualTo("YEAR");
+        assertThat(JsonPath.<List<String>>read(profileAfterEdit1, "$.certifications[?(@.id=='" + yearCertId + "')].issuedOnPrecision").get(0))
+                .isEqualTo("YEAR");
+
+        UUID profileId1 = UUID.fromString(JsonPath.read(profileAfterEdit1, "$.profile.id"));
+        var source1 = resumeIntelligenceService.loadSource(profileId1);
+        String resumeMarkdown1 = resumeIntelligenceService.render(source1, Set.of());
+
+        assertThat(resumeMarkdown1).contains("### Staff Architect — Year Edit Corp Renamed\n2021 – 2023 · Glasgow");
+        assertThat(resumeMarkdown1).doesNotContain("Jan 2021 – Dec 2023 · Glasgow");
+        assertThat(resumeMarkdown1).contains("- Terraform Associate Renamed — HashiCorp Inc (2022)");
+        assertThat(resumeMarkdown1).doesNotContain("Terraform Associate Renamed — HashiCorp Inc (Jan 2022)");
+
+        // --- Part B: Repeat with MONTH precision and ensure it remains MONTH ---
+        String previewToken2 = JsonPath.read(runPreview().getResponse().getContentAsString(), "$.previewToken");
+        String importBody2 = """
+                {"previewToken": "%s",
+                 "personalFieldUpdates": {},
+                 "experiences": [
+                   {"action": "ADD", "matchedExistingId": null, "company": "Month Edit Ltd", "title": "Platform Lead",
+                    "location": "Belfast", "startMonth": "2019-05", "endMonth": "2020-11",
+                    "responsibilities": ["Platform engineering"], "achievements": ["Cut deploy time 50%%"]}
+                 ],
+                 "education": [], "projects": [], "skills": [],
+                 "certifications": [
+                   {"action": "ADD", "matchedExistingId": null, "name": "CKAD Certified", "issuer": "Linux Foundation",
+                    "issuedOn": "2023-04", "credentialId": "CKAD-99"}
+                 ]}
+                """.formatted(previewToken2);
+
+        mockMvc.perform(post("/api/v1/profile/resume-import/confirm").with(csrf()).session(login())
+                        .contentType(MediaType.APPLICATION_JSON).content(importBody2))
+                .andExpect(status().isOk());
+
+        String profileJson2 = mockMvc.perform(get("/api/v1/profile").session(login()))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+
+        String monthExpId = JsonPath.<List<String>>read(profileJson2, "$.experiences[?(@.company=='Month Edit Ltd')].id").get(0);
+        String monthCertId = JsonPath.<List<String>>read(profileJson2, "$.certifications[?(@.name=='CKAD Certified')].id").get(0);
+
+        // Edit an unrelated field without precision metadata
+        String updateMonthExpBody = """
+                {"company": "Month Edit Ltd Renamed", "title": "Platform Lead",
+                 "location": "Cardiff", "startMonth": "2019-05-01", "endMonth": "2020-11-01",
+                 "bullets": [{"text": "Platform engineering"}], "sortOrder": 1}
+                """;
+        mockMvc.perform(put("/api/v1/profile/experiences/" + monthExpId).with(csrf()).session(login())
+                        .contentType(MediaType.APPLICATION_JSON).content(updateMonthExpBody))
+                .andExpect(status().isOk());
+
+        String updateMonthCertBody = """
+                {"name": "CKAD Certified Renamed", "issuer": "CNCF / Linux Foundation",
+                 "issuedOn": "2023-04-01", "credentialId": "CKAD-99"}
+                """;
+        mockMvc.perform(put("/api/v1/profile/certifications/" + monthCertId).with(csrf()).session(login())
+                        .contentType(MediaType.APPLICATION_JSON).content(updateMonthCertBody))
+                .andExpect(status().isOk());
+
+        String profileAfterEdit2 = mockMvc.perform(get("/api/v1/profile").session(login()))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+
+        assertThat(JsonPath.<List<String>>read(profileAfterEdit2, "$.experiences[?(@.id=='" + monthExpId + "')].startDatePrecision").get(0))
+                .isEqualTo("MONTH");
+        assertThat(JsonPath.<List<String>>read(profileAfterEdit2, "$.experiences[?(@.id=='" + monthExpId + "')].endDatePrecision").get(0))
+                .isEqualTo("MONTH");
+        assertThat(JsonPath.<List<String>>read(profileAfterEdit2, "$.certifications[?(@.id=='" + monthCertId + "')].issuedOnPrecision").get(0))
+                .isEqualTo("MONTH");
+
+        UUID profileId2 = UUID.fromString(JsonPath.read(profileAfterEdit2, "$.profile.id"));
+        var source2 = resumeIntelligenceService.loadSource(profileId2);
+        String resumeMarkdown2 = resumeIntelligenceService.render(source2, Set.of());
+
+        assertThat(resumeMarkdown2).contains("### Platform Lead — Month Edit Ltd Renamed\nMay 2019 – Nov 2020 · Cardiff");
+        assertThat(resumeMarkdown2).contains("- CKAD Certified Renamed — CNCF / Linux Foundation (Apr 2023)");
+    }
 }

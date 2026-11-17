@@ -1,5 +1,6 @@
 package com.personal.jobagent.profile;
 
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.personal.jobagent.audit.AuditEntry;
 import com.personal.jobagent.audit.AuditLogWriter;
 import com.personal.jobagent.common.ApiError;
@@ -133,9 +134,17 @@ public class ProfileController {
 
     // ---- experiences ----
 
-    public record ExperienceRequest(String company, String title, LocalDate startMonth, LocalDate endMonth,
-                                     String location, List<Map<String, Object>> bullets, int sortOrder,
-                                     String startDatePrecision, String endDatePrecision) {
+    public record ExperienceRequest(
+            String company,
+            String title,
+            @JsonDeserialize(using = FlexibleLocalDateDeserializer.class) LocalDate startMonth,
+            @JsonDeserialize(using = FlexibleLocalDateDeserializer.class) LocalDate endMonth,
+            String location,
+            List<Map<String, Object>> bullets,
+            int sortOrder,
+            String startDatePrecision,
+            String endDatePrecision
+    ) {
         public ExperienceRequest(String company, String title, LocalDate startMonth, LocalDate endMonth,
                                  String location, List<Map<String, Object>> bullets, int sortOrder) {
             this(company, title, startMonth, endMonth, location, bullets, sortOrder, null, null);
@@ -234,8 +243,13 @@ public class ProfileController {
 
     // ---- certifications ----
 
-    public record CertificationRequest(String name, String issuer, LocalDate issuedOn, String credentialId,
-                                       String issuedOnPrecision) {
+    public record CertificationRequest(
+            String name,
+            String issuer,
+            @JsonDeserialize(using = FlexibleLocalDateDeserializer.class) LocalDate issuedOn,
+            String credentialId,
+            String issuedOnPrecision
+    ) {
         public CertificationRequest(String name, String issuer, LocalDate issuedOn, String credentialId) {
             this(name, issuer, issuedOn, credentialId, null);
         }

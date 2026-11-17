@@ -167,10 +167,82 @@ export const ProfilePage: React.FC = () => {
         </SectionCard>
 
         <EvidenceSection title="Education / MSc and degrees" items={p.education} fields={['institution', 'qualification', 'field', 'startYear', 'endYear', 'grade']} values={newEducation} setValues={setNewEducation} onAdd={() => add('/profile/education', { ...newEducation, startYear: newEducation.startYear ? Number(newEducation.startYear) : null, endYear: newEducation.endYear ? Number(newEducation.endYear) : null }, () => setNewEducation({ institution: '', qualification: '', field: '', startYear: '', endYear: '', grade: '' }))} onUpdate={(id, values, reset) => update('/profile/education', id, { ...values, startYear: values.startYear ? Number(values.startYear) : null, endYear: values.endYear ? Number(values.endYear) : null }, reset)} onDelete={(id) => remove('/profile/education', id)} />
-        <EvidenceSection title="Work experience" items={p.experiences} fields={['company', 'title', 'startMonth', 'endMonth', 'location', 'bullets']} values={newExperience} setValues={setNewExperience} onAdd={() => add('/profile/experiences', { ...newExperience, startMonth: newExperience.startMonth || null, endMonth: newExperience.endMonth || null, bullets: newExperience.bullets ? newExperience.bullets.split('\n').map((text) => ({ text })) : [] }, () => setNewExperience({ company: '', title: '', startMonth: '', endMonth: '', location: '', bullets: '' }))} onUpdate={(id, values, reset) => update('/profile/experiences', id, { ...values, startMonth: values.startMonth || null, endMonth: values.endMonth || null, bullets: values.bullets ? values.bullets.split('\\\\n').map((text) => ({ text })) : [] }, reset)} onDelete={(id) => remove('/profile/experiences', id)} />
+        <EvidenceSection
+          title="Work experience"
+          items={p.experiences}
+          fields={['company', 'title', 'startMonth', 'endMonth', 'location', 'bullets']}
+          values={newExperience}
+          setValues={setNewExperience}
+          onAdd={() => {
+            const start = parseDateInput(newExperience.startMonth);
+            const end = parseDateInput(newExperience.endMonth);
+            add(
+              '/profile/experiences',
+              {
+                ...newExperience,
+                startMonth: start.date,
+                endMonth: end.date,
+                startDatePrecision: start.precision,
+                endDatePrecision: end.precision,
+                bullets: newExperience.bullets ? newExperience.bullets.split('\n').map((text) => ({ text })) : [],
+              },
+              () => setNewExperience({ company: '', title: '', startMonth: '', endMonth: '', location: '', bullets: '' })
+            );
+          }}
+          onUpdate={(id, values, reset) => {
+            const start = parseDateInput(values.startMonth, (values as any).startDatePrecision);
+            const end = parseDateInput(values.endMonth, (values as any).endDatePrecision);
+            update(
+              '/profile/experiences',
+              id,
+              {
+                ...values,
+                startMonth: start.date,
+                endMonth: end.date,
+                startDatePrecision: start.precision,
+                endDatePrecision: end.precision,
+                bullets: values.bullets ? values.bullets.split(/\\n|\n/).map((text) => ({ text })) : [],
+              },
+              reset
+            );
+          }}
+          onDelete={(id) => remove('/profile/experiences', id)}
+        />
         <EvidenceSection title="Projects" items={p.projects} fields={['name', 'summary', 'url']} values={newProject} setValues={setNewProject} onAdd={() => add('/profile/projects', { ...newProject, bullets: [] }, () => setNewProject({ name: '', summary: '', url: '' }))} onUpdate={(id, values, reset) => update('/profile/projects', id, { ...values, bullets: [] }, reset)} onDelete={(id) => remove('/profile/projects', id)} />
         <EvidenceSection title="Verified skills" items={p.skills} fields={['name', 'category', 'mastery', 'years']} values={newSkill} setValues={setNewSkill} onAdd={() => add('/profile/skills', { ...newSkill, mastery: Number(newSkill.mastery), years: newSkill.years ? Number(newSkill.years) : null }, () => setNewSkill({ name: '', category: '', mastery: '3', years: '' }))} onUpdate={(id, values, reset) => update('/profile/skills', id, { ...values, mastery: Number(values.mastery), years: values.years ? Number(values.years) : null }, reset)} onDelete={(id) => remove('/profile/skills', id)} />
-        <EvidenceSection title="Certifications" items={p.certifications} fields={['name', 'issuer', 'issuedOn', 'credentialId']} values={newCertification} setValues={setNewCertification} onAdd={() => add('/profile/certifications', newCertification, () => setNewCertification({ name: '', issuer: '', issuedOn: '', credentialId: '' }))} onUpdate={(id, values, reset) => update('/profile/certifications', id, values, reset)} onDelete={(id) => remove('/profile/certifications', id)} />
+        <EvidenceSection
+          title="Certifications"
+          items={p.certifications}
+          fields={['name', 'issuer', 'issuedOn', 'credentialId']}
+          values={newCertification}
+          setValues={setNewCertification}
+          onAdd={() => {
+            const issued = parseDateInput(newCertification.issuedOn);
+            add(
+              '/profile/certifications',
+              {
+                ...newCertification,
+                issuedOn: issued.date,
+                issuedOnPrecision: issued.precision,
+              },
+              () => setNewCertification({ name: '', issuer: '', issuedOn: '', credentialId: '' })
+            );
+          }}
+          onUpdate={(id, values, reset) => {
+            const issued = parseDateInput(values.issuedOn, (values as any).issuedOnPrecision);
+            update(
+              '/profile/certifications',
+              id,
+              {
+                ...values,
+                issuedOn: issued.date,
+                issuedOnPrecision: issued.precision,
+              },
+              reset
+            );
+          }}
+          onDelete={(id) => remove('/profile/certifications', id)}
+        />
 
         <div className="flex justify-end">
           <button
@@ -258,14 +330,114 @@ function normalizeProfile(raw: any): Profile {
   } as Profile;
 }
 
+export function formatDateForInput(
+  dateStr?: string | null,
+  precision?: string | null
+): string {
+  if (!dateStr) return '';
+  const clean = String(dateStr).trim();
+  if (!clean) return '';
+  if (precision === 'YEAR') {
+    const match = clean.match(/^(\d{4})/);
+    return match ? match[1] : clean;
+  }
+  if (precision === 'MONTH') {
+    const match = clean.match(/^(\d{4}-\d{2})/);
+    return match ? match[1] : clean;
+  }
+  const match = clean.match(/^(\d{4}-\d{2})-\d{2}$/);
+  if (match) {
+    return match[1];
+  }
+  return clean;
+}
+
+export function parseDateInput(
+  raw?: string | null,
+  existingPrecision?: string | null
+): { date: string | null; precision: 'YEAR' | 'MONTH' | null } {
+  if (!raw || !raw.trim()) {
+    return { date: null, precision: null };
+  }
+  const trimmed = raw.trim();
+  if (/^\d{4}$/.test(trimmed)) {
+    return { date: `${trimmed}-01-01`, precision: 'YEAR' };
+  }
+  if (/^\d{4}-\d{2}$/.test(trimmed)) {
+    return { date: `${trimmed}-01`, precision: 'MONTH' };
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    if (existingPrecision === 'YEAR' && trimmed.endsWith('-01-01')) {
+      return { date: trimmed, precision: 'YEAR' };
+    }
+    return { date: trimmed, precision: (existingPrecision as 'YEAR' | 'MONTH') || 'MONTH' };
+  }
+  return { date: trimmed, precision: (existingPrecision as 'YEAR' | 'MONTH') || 'MONTH' };
+}
+
 function EvidenceSection({ title, items, fields, values, setValues, onAdd, onUpdate, onDelete }: { title: string; items: any[]; fields: string[]; values: Record<string, string>; setValues: (v: any) => void; onAdd: () => void; onUpdate?: (id: string, values: Record<string, string>, reset: () => void) => void; onDelete?: (id: string) => void }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const valueFor = (item: any, field: string) => {
     const snake = field.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
     if (field === 'bullets') return (item.bullets ?? []).map((bullet: any) => bullet.text ?? '').join('\\n');
-    return String(item[field] ?? item[snake] ?? '');
+    const rawVal = item[field] ?? item[snake];
+    if (field === 'startMonth') {
+      const precision = item.startDatePrecision ?? item.start_date_precision;
+      return formatDateForInput(rawVal, precision);
+    }
+    if (field === 'endMonth') {
+      const precision = item.endDatePrecision ?? item.end_date_precision;
+      return formatDateForInput(rawVal, precision);
+    }
+    if (field === 'issuedOn') {
+      const precision = item.issuedOnPrecision ?? item.issued_on_precision;
+      return formatDateForInput(rawVal, precision);
+    }
+    return String(rawVal ?? '');
   };
+
+  const handleStartEdit = (item: any) => {
+    setEditingId(item.id);
+    const initial: Record<string, any> = Object.fromEntries(
+      fields.map((field) => [field, valueFor(item, field)])
+    );
+    if (item.startDatePrecision || item.start_date_precision) {
+      initial.startDatePrecision = item.startDatePrecision ?? item.start_date_precision;
+    }
+    if (item.endDatePrecision || item.end_date_precision) {
+      initial.endDatePrecision = item.endDatePrecision ?? item.end_date_precision;
+    }
+    if (item.issuedOnPrecision || item.issued_on_precision) {
+      initial.issuedOnPrecision = item.issuedOnPrecision ?? item.issued_on_precision;
+    }
+    setValues(initial);
+  };
+
   const reset = () => { setEditingId(null); };
+
+  const renderDateBadge = (item: any) => {
+    const startRaw = item.startMonth ?? item.start_month;
+    const endRaw = item.endMonth ?? item.end_month;
+    const startPrec = item.startDatePrecision ?? item.start_date_precision;
+    const endPrec = item.endDatePrecision ?? item.end_date_precision;
+    if (startRaw) {
+      const formattedStart = formatDateForInput(startRaw, startPrec);
+      const formattedEnd = endRaw ? formatDateForInput(endRaw, endPrec) : 'Present';
+      return `${formattedStart} – ${formattedEnd}`;
+    }
+    const issuedRaw = item.issuedOn ?? item.issued_on;
+    const issuedPrec = item.issuedOnPrecision ?? item.issued_on_precision;
+    if (issuedRaw) {
+      return `Issued ${formatDateForInput(issuedRaw, issuedPrec)}`;
+    }
+    const startYear = item.startYear ?? item.start_year;
+    const endYear = item.endYear ?? item.end_year;
+    if (startYear || endYear) {
+      return `${startYear ?? ''} – ${endYear ?? 'Present'}`;
+    }
+    return null;
+  };
+
   return (
     <SectionCard
       title={title}
@@ -296,33 +468,43 @@ function EvidenceSection({ title, items, fields, values, setValues, onAdd, onUpd
         </p>
       ) : (
         <div className="grid gap-2 md:grid-cols-2">
-          {(items ?? []).map((item: any) => (
-            <div key={item.id} className="rounded-lg border border-line bg-cream-50/70 p-3.5 text-xs">
-              <div className="font-semibold text-ink">{item.name ?? item.title ?? item.qualification ?? item.company}</div>
-              <div className="mt-0.5 text-ink-muted">{item.summary ?? item.institution ?? item.issuer ?? item.category ?? ''}</div>
-              <div className="mt-2 flex items-center justify-between">
-                <StatusPill tone="emerald">User-verified evidence</StatusPill>
-                <span className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => { setEditingId(item.id); setValues(Object.fromEntries(fields.map((field) => [field, valueFor(item, field)]))); }}
-                    className="font-semibold text-forest-700 hover:text-forest-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600"
-                  >
-                    Edit
-                  </button>
-                  {onDelete && (
+          {(items ?? []).map((item: any) => {
+            const dateBadge = renderDateBadge(item);
+            const mainTitle = item.title && item.company
+              ? `${item.title} — ${item.company}`
+              : item.name ?? item.title ?? item.qualification ?? item.company;
+            const subtitle = item.title && item.company
+              ? (item.location ?? '')
+              : item.summary ?? item.institution ?? item.issuer ?? item.category ?? '';
+            return (
+              <div key={item.id} className="rounded-lg border border-line bg-cream-50/70 p-3.5 text-xs">
+                <div className="font-semibold text-ink">{mainTitle}</div>
+                {subtitle && <div className="mt-0.5 text-ink-muted">{subtitle}</div>}
+                {dateBadge && <div className="mt-0.5 font-medium text-ink-muted">{dateBadge}</div>}
+                <div className="mt-2 flex items-center justify-between">
+                  <StatusPill tone="emerald">User-verified evidence</StatusPill>
+                  <span className="flex gap-2">
                     <button
                       type="button"
-                      onClick={() => onDelete(item.id)}
-                      className="font-semibold text-red-600 hover:text-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600"
+                      onClick={() => handleStartEdit(item)}
+                      className="font-semibold text-forest-700 hover:text-forest-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-forest-600"
                     >
-                      Delete
+                      Edit
                     </button>
-                  )}
-                </span>
+                    {onDelete && (
+                      <button
+                        type="button"
+                        onClick={() => onDelete(item.id)}
+                        className="font-semibold text-red-600 hover:text-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600"
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </span>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </SectionCard>

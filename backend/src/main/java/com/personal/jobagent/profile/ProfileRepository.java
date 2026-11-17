@@ -197,7 +197,7 @@ public class ProfileRepository {
     public boolean updateExperience(UUID id, UUID profileId, String company, String title,
                                     LocalDate startMonth, LocalDate endMonth, String location,
                                     List<Map<String, Object>> bullets, int sortOrder) {
-        return updateExperience(id, profileId, company, title, startMonth, endMonth, location, bullets, sortOrder, "MONTH", endMonth != null ? "MONTH" : null);
+        return updateExperience(id, profileId, company, title, startMonth, endMonth, location, bullets, sortOrder, null, null);
     }
 
     public boolean updateExperience(UUID id, UUID profileId, String company, String title,
@@ -205,12 +205,25 @@ public class ProfileRepository {
                                     List<Map<String, Object>> bullets, int sortOrder,
                                     String startDatePrecision, String endDatePrecision) {
         return jdbcTemplate.update("""
-                update work_experiences set company=?, title=?, start_month=?, end_month=?, location=?,
-                    bullets=?::jsonb, sort_order=?, start_date_precision=?, end_date_precision=? where id=? and profile_id=?
-                """, company, title, Date.valueOf(startMonth), endMonth == null ? null : Date.valueOf(endMonth),
+                update work_experiences set
+                    company = coalesce(?, company),
+                    title = coalesce(?, title),
+                    start_month = coalesce(?, start_month),
+                    end_month = ?,
+                    location = ?,
+                    bullets = ?::jsonb,
+                    sort_order = ?,
+                    start_date_precision = coalesce(?::text, start_date_precision, 'MONTH'),
+                    end_date_precision = case
+                        when (?::date) is null then null
+                        else coalesce(?::text, end_date_precision, 'MONTH')
+                    end
+                where id = ? and profile_id = ?
+                """, company, title, startMonth == null ? null : Date.valueOf(startMonth),
+                endMonth == null ? null : Date.valueOf(endMonth),
                 location, JdbcConversions.toJson(bullets == null ? List.of() : bullets, objectMapper), sortOrder,
-                startDatePrecision != null ? startDatePrecision : "MONTH",
-                endMonth != null ? (endDatePrecision != null ? endDatePrecision : "MONTH") : null,
+                startDatePrecision,
+                endMonth == null ? null : Date.valueOf(endMonth), endDatePrecision,
                 id, profileId) > 0;
     }
 
@@ -396,16 +409,24 @@ public class ProfileRepository {
 
     public boolean updateCertification(UUID id, UUID profileId, String name, String issuer,
                                        LocalDate issuedOn, String credentialId) {
-        return updateCertification(id, profileId, name, issuer, issuedOn, credentialId, issuedOn != null ? "MONTH" : null);
+        return updateCertification(id, profileId, name, issuer, issuedOn, credentialId, null);
     }
 
     public boolean updateCertification(UUID id, UUID profileId, String name, String issuer,
                                        LocalDate issuedOn, String credentialId, String issuedOnPrecision) {
         return jdbcTemplate.update("""
-                update certifications set name=?, issuer=?, issued_on=?, credential_id=?, issued_on_precision=?
-                where id=? and profile_id=?
+                update certifications set
+                    name = coalesce(?, name),
+                    issuer = coalesce(?, issuer),
+                    issued_on = ?,
+                    credential_id = ?,
+                    issued_on_precision = case
+                        when (?::date) is null then null
+                        else coalesce(?::text, issued_on_precision, 'MONTH')
+                    end
+                where id = ? and profile_id = ?
                 """, name, issuer, issuedOn == null ? null : Date.valueOf(issuedOn), credentialId,
-                issuedOn != null ? (issuedOnPrecision != null ? issuedOnPrecision : "MONTH") : null,
+                issuedOn == null ? null : Date.valueOf(issuedOn), issuedOnPrecision,
                 id, profileId) > 0;
     }
 
