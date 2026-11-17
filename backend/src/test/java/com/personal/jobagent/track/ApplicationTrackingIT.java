@@ -6,6 +6,7 @@ import com.personal.jobagent.application.ApplicationPipelineService;
 import com.personal.jobagent.application.ApplicationStatusService;
 import com.personal.jobagent.ats.GreenhouseAdapter;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.documents.DocumentFactValidator;
 import com.personal.jobagent.discovery.platform.JobIdentity;
 import com.personal.jobagent.email.EmailIntelligenceService;
 import com.personal.jobagent.email.EmailIntelligenceService.ConnectorMessage;
@@ -948,7 +949,7 @@ class ApplicationTrackingIT {
                 values (?, ?, ?, ?, 'TAILORED', 'Tailored CV', 'CV text', '{}', false, 1, 'snap', ?, true, ?, now())
                 """, cvVersionId, jobId, applicationId, devProfile, pdfSha, fileId);
         Map<String, Object> report = new LinkedHashMap<>();
-        report.put("validation", Map.of("passed", true, "validator_version", "fact-validator-1"));
+        report.put("validation", Map.of("passed", true, "validator_version", DocumentFactValidator.VERSION));
         jdbc.update("""
                 insert into resume_ats_analyses (id, profile_id, job_id, application_id, input_hash, role, domain,
                     required_skills, preferred_skills, normalized_skills, verified_evidence, gaps, ats_report,
@@ -971,6 +972,6 @@ class ApplicationTrackingIT {
                 values (?, ?, ?, ?, 1, 'Cover letter', ?, ?, ?::jsonb, true, 'GENERATED', now(), now())
                 """, UuidV7.generate(), devProfile, jobId, applicationId, body,
                 com.personal.jobagent.automation.ExecutionPackageService.Sha256.of(body),
-                json.writeValueAsString(Map.of("passed", true, "validator_version", "fact-validator-1")));
+                json.writeValueAsString(Map.of("passed", true, "validator_version", DocumentFactValidator.VERSION)));
     }
 }

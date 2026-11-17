@@ -69,14 +69,76 @@ class DocumentFactValidatorTest {
     }
 
     @Test
-    void workAuthorisationIsABlockerWithoutRecordedEligibilityAndAWarningWithIt() {
+    void workAuthorisationIsABlockerWithoutRecordedEligibilityAndAWarningWithAmbiguousEligibility() {
         var none = validator.validate("I have the right to work in the UK.", facts(Map.of()), null);
         assertThat(none.findings()).extracting(Finding::code).contains("UNSUPPORTED_WORK_AUTHORISATION");
         assertThat(none.passed()).isFalse();
 
+        // An unstructured/legacy value is not treated as proof of a specific right.
         var recorded = validator.validate("I have the right to work in the UK.", facts(Map.of("uk", "settled")), null);
         assertThat(recorded.passed()).isTrue();
         assertThat(recorded.findings()).extracting(Finding::code).containsExactly("WORK_AUTHORISATION_STATEMENT");
+    }
+
+    @Test
+    void contradictoryRightToWorkAndSponsorshipClaimsAreBlockers() {
+        CandidateFacts facts = facts(Map.of(
+                "right_to_work_uk", false,
+                "visa_status", "requires_sponsorship"));
+        var report = validator.validate(
+                "I have the right to work in the UK and do not require visa sponsorship.", facts, null);
+
+        assertThat(report.passed()).isFalse();
+        assertThat(report.findings()).extracting(Finding::code)
+                .contains("CONTRADICTED_WORK_AUTHORISATION", "CONTRADICTED_SPONSORSHIP_REQUIREMENT");
+        assertThat(report.findings()).allSatisfy(f -> assertThat(f.severity()).isEqualTo(Severity.BLOCKER));
+    }
+
+    @Test
+    void consistentStructuredWorkEligibilitySupportsTheExactClaim() {
+        CandidateFacts facts = facts(Map.of(
+                "right_to_work_uk", true,
+                "visa_status", "not_required"));
+        var report = validator.validate(
+                "I have the right to work in the UK and do not require visa sponsorship.", facts, null);
+
+        assertThat(report.passed()).isTrue();
+        assertThat(report.findings()).isEmpty();
+    }
+
+    @Test
+    void onlyCompletedNonOverlappingWorkMonthsSupportYearsOfExperience() {
+        CandidateFacts oldShortHistory = new CandidateFacts(
+                List.of(),
+                List.of(new WorkExperienceRecord(UUID.randomUUID(), P, "Old Company", "Engineer",
+                        LocalDate.of(2019, 1, 1), LocalDate.of(2020, 12, 1), "London", List.of(), 1)),
+                List.of(), List.of(), List.of(), Map.of(), null);
+
+        var report = validator.validate("I have 3 years of experience.", oldShortHistory, null);
+
+        assertThat(report.passed()).isFalse();
+        assertThat(report.findings()).anySatisfy(f -> {
+            assertThat(f.code()).isEqualTo("UNSUPPORTED_YEARS_OF_EXPERIENCE");
+            assertThat(f.severity()).isEqualTo(Severity.BLOCKER);
+        });
+    }
+
+    @Test
+    void figuresMustMatchTheirCurrencyOrUnitNotJustTheirDigits() {
+        var report = validator.validate("I increased revenue by £30.", facts(Map.of()), null);
+
+        assertThat(report.passed()).isFalse();
+        assertThat(report.findings()).extracting(Finding::code).contains("UNSUPPORTED_FIGURE");
+    }
+
+    @Test
+    void hiringCompanyIsNotEvidenceOfPastEmploymentThere() {
+        var report = validator.validate("I worked at Monzo.", facts(Map.of()),
+                new JobContext("Monzo", List.of()));
+
+        assertThat(report.findings()).extracting(Finding::code).contains("UNRECOGNISED_ORGANISATION");
+        // Employer-name detection is deliberately heuristic, so it warns rather than hard-blocks.
+        assertThat(report.passed()).isTrue();
     }
 
     @Test

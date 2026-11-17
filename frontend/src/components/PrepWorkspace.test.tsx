@@ -35,7 +35,7 @@ const readiness = (overrides: Record<string, unknown> = {}) => ({
 });
 
 const validation = (passed: boolean) => ({
-  validator_version: 'fact-validator-1',
+  validator_version: 'fact-validator-2',
   passed,
   blocker_count: passed ? 0 : 1,
   warning_count: 1,
@@ -134,6 +134,21 @@ describe('PrepWorkspace', () => {
     expect(screen.getByText(/It is not an ATS score and guarantees nothing/)).toBeTruthy();
   });
 
+  it('marks a passing CV from an older validator as outdated and requires regeneration', async () => {
+    routes({
+      '/resume-intelligence/job/job-1': () => {
+        const stale = cvResponse(true, true);
+        stale.cv.analysis.atsReport.validation.validator_version = 'fact-validator-1';
+        return stale;
+      },
+    });
+    renderWorkspace();
+    expect(await screen.findByText('Validation outdated')).toBeTruthy();
+    expect(screen.getByText(/checked by an older validation version/i)).toBeTruthy();
+    expect(screen.getByText(/Regenerate it, review the new validation findings/)).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Approve this CV' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('approves a valid CV through the review endpoint', async () => {
     let approved = false;
     routes({
@@ -188,6 +203,32 @@ describe('PrepWorkspace', () => {
     expect(mockedDownload).toHaveBeenCalledWith('/cover-letters/cl-2/pdf', 'cover-letter-cl-2.pdf');
     expect(await screen.findByText(/does not match its recorded checksum/)).toBeTruthy();
     expect(vi.mocked(saveDownload)).not.toHaveBeenCalled();
+  });
+
+  it('offers current revalidation for a previously approved cover letter with stale checks', async () => {
+    let revalidated = false;
+    const staleLetter = {
+      ...letters[0],
+      isApproved: true,
+      claimsValidation: { ...validation(true), validator_version: 'fact-validator-1' },
+    };
+    routes({
+      '/cover-letters/job/job-1': () => [revalidated
+        ? { ...staleLetter, claimsValidation: validation(true) }
+        : staleLetter],
+      '/cover-letters/cl-2/approval': () => {
+        revalidated = true;
+        return { ...staleLetter, claimsValidation: validation(true) };
+      },
+    });
+    renderWorkspace();
+    expect(await screen.findByText('Validation outdated')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Revalidate & approve this version' })).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Revalidate & approve this version' }));
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/cover-letters/cl-2/approval',
+      { method: 'PUT', body: JSON.stringify({ approved: true }) }));
+    expect(await screen.findByText('Approved by you')).toBeTruthy();
   });
 
   it('lists letter versions, surfaces a refused approval and saves corrections as a new version', async () => {

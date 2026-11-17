@@ -80,6 +80,8 @@ export const PrepWorkspace: React.FC<{ jobId: string }> = ({ jobId }) => {
 /* Readiness                                                           */
 /* ------------------------------------------------------------------ */
 
+const CURRENT_DOCUMENT_VALIDATOR_VERSION = 'fact-validator-2';
+
 const OVERALL_TONE: Record<PrepReadiness['overall'], 'slate' | 'red' | 'amber' | 'emerald'> = {
   NOT_STARTED: 'slate',
   BLOCKED: 'red',
@@ -246,8 +248,9 @@ export const TailoredCvSection: React.FC<{ jobId: string; applicationId: string 
   const analysis = cv?.analysis;
   const validation = analysis?.atsReport?.validation as DocumentValidation | undefined;
   const renderer = analysis?.atsReport?.renderer as { pages?: number; substituted_characters?: number } | undefined;
-  const blocked = !!validation && !validation.passed;
-  const approved = !!cv?.review?.approved && cv.review.contentSha256 === cv.artifact.sha256;
+  const staleValidation = !!validation && validation.validator_version !== CURRENT_DOCUMENT_VALIDATOR_VERSION;
+  const blocked = !!validation && (!validation.passed || staleValidation);
+  const approved = !staleValidation && !!cv?.review?.approved && cv.review.contentSha256 === cv.artifact.sha256;
 
   const generate = async () => {
     setBusy(true); setActionError(null); setNotice(null);
@@ -315,8 +318,8 @@ export const TailoredCvSection: React.FC<{ jobId: string; applicationId: string 
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-2">
-            <StatusPill tone={approved ? 'emerald' : blocked || !cv?.artifact.intact ? 'red' : 'amber'}>
-              {approved ? 'Approved by you' : blocked ? 'Blocked by validation' : !cv?.artifact.intact ? 'PDF integrity failed' : 'Awaiting your review'}
+            <StatusPill tone={staleValidation || blocked || !cv?.artifact.intact ? 'red' : approved ? 'emerald' : 'amber'}>
+              {staleValidation ? 'Validation outdated' : approved ? 'Approved by you' : blocked ? 'Blocked by validation' : !cv?.artifact.intact ? 'PDF integrity failed' : 'Awaiting your review'}
             </StatusPill>
             <span className="text-xs text-ink-muted">
               Version {analysis.cvVersionId.slice(0, 8)} · profile revision r{analysis.profileRevision}
@@ -324,7 +327,14 @@ export const TailoredCvSection: React.FC<{ jobId: string; applicationId: string 
             </span>
           </div>
 
-          <FindingsList validation={validation} legacyNote="This CV was generated before the current checks and PDF renderer. Regenerate it to validate it and get a readable PDF." />
+          {staleValidation ? (
+            <Alert tone="info">
+              This CV was checked by an older validation version. It cannot be approved or used in an application.
+              Regenerate it, review the new validation findings, and approve the new version.
+            </Alert>
+          ) : (
+            <FindingsList validation={validation} legacyNote="This CV was generated before the current checks and PDF renderer. Regenerate it to validate it and get a readable PDF." />
+          )}
 
           {analysis.gaps.length > 0 && (
             <div className="rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900">
@@ -459,6 +469,9 @@ export const CoverLetterSection: React.FC<{ jobId: string; applicationId: string
 
   const letter = letters?.find((l) => l.id === selectedId) ?? null;
   const validation = letter?.claimsValidation as DocumentValidation | undefined;
+  const staleLetterValidation = !!letter && (!validation?.validator_version
+    || validation.validator_version !== CURRENT_DOCUMENT_VALIDATOR_VERSION);
+  const letterApproved = !!letter?.isApproved && !staleLetterValidation;
 
   const run = async (action: () => Promise<unknown>, success: string) => {
     setBusy(true); setActionError(null); setNotice(null);
@@ -518,12 +531,15 @@ export const CoverLetterSection: React.FC<{ jobId: string; applicationId: string
             >
               {letters.map((l) => (
                 <option key={l.id} value={l.id}>
-                  v{l.version}{l.origin === 'USER_CORRECTED' ? ' (your correction)' : ''}{l.isApproved ? ' — approved' : ''}
+                  v{l.version}{l.origin === 'USER_CORRECTED' ? ' (your correction)' : ''}{l.isApproved ? (
+                    (l.claimsValidation as DocumentValidation | undefined)?.validator_version === CURRENT_DOCUMENT_VALIDATOR_VERSION
+                      ? ' — approved' : ' — validation outdated'
+                  ) : ''}
                 </option>
               ))}
             </select>
-            <StatusPill tone={letter.isApproved ? 'emerald' : validation?.validator_version && !validation.passed ? 'red' : 'amber'}>
-              {letter.isApproved ? 'Approved by you' : validation?.validator_version && !validation.passed ? 'Blocked by validation' : 'Awaiting your review'}
+            <StatusPill tone={staleLetterValidation || (validation?.validator_version && !validation.passed) ? 'red' : letterApproved ? 'emerald' : 'amber'}>
+              {staleLetterValidation ? 'Validation outdated' : letterApproved ? 'Approved by you' : validation?.validator_version && !validation.passed ? 'Blocked by validation' : 'Awaiting your review'}
             </StatusPill>
             {applicationId && (
               <span className="text-xs text-ink-muted">
@@ -532,7 +548,14 @@ export const CoverLetterSection: React.FC<{ jobId: string; applicationId: string
             )}
           </div>
 
-          <FindingsList validation={validation} legacyNote="This letter was checked only by earlier, weaker checks. Approving it re-runs the current checks first." />
+          {staleLetterValidation ? (
+            <Alert tone="info">
+              This cover letter has not been checked by the current validator. Use “Revalidate & approve this version”
+              to rerun the current checks against your profile before application use.
+            </Alert>
+          ) : (
+            <FindingsList validation={validation} legacyNote="This letter was checked only by earlier, weaker checks. Revalidation is required before approval." />
+          )}
 
           {editing ? (
             <div className="space-y-2">
@@ -557,10 +580,12 @@ export const CoverLetterSection: React.FC<{ jobId: string; applicationId: string
             <SecondaryButton onClick={() => file.download(`/cover-letters/${letter.id}/pdf`, `cover-letter-${letter.id}.pdf`)} disabled={file.busy}>
               {file.busy ? 'Downloading…' : 'Download PDF'}
             </SecondaryButton>
-            {letter.isApproved ? (
+            {letterApproved ? (
               <SecondaryButton onClick={() => approve(false)} disabled={busy}>Withdraw approval</SecondaryButton>
             ) : (
-              <PrimaryButton onClick={() => approve(true)} disabled={busy}>Approve this version</PrimaryButton>
+              <PrimaryButton onClick={() => approve(true)} disabled={busy}>
+                {staleLetterValidation ? 'Revalidate & approve this version' : 'Approve this version'}
+              </PrimaryButton>
             )}
             {!editing && <SecondaryButton onClick={() => { setDraft(letter.bodyMarkdown); setEditing(true); }}>Correct this letter</SecondaryButton>}
             <SecondaryButton onClick={generate} disabled={busy}>{busy ? 'Working…' : 'Generate a new version'}</SecondaryButton>

@@ -185,8 +185,29 @@ class PrepWorkflowIT {
             assertThat(text).contains("Zoë Brontë-Núñez").contains("Café Systems").contains("Zürich release item 1 ")
                     .contains("“reliably”").contains("FINAL-BULLET-MARKER");
         }
+        // Trace a fact from the authenticated user's persisted profile through
+        // deterministic CV rendering, provenance, and the validator report.
+        assertThat(cv.get("resumeMarkdown").asText()).contains("Java").contains("Café Systems");
+        assertThat(cv.get("verifiedEvidence").toString())
+                .contains("\"source_type\":\"SKILL\"")
+                .contains("\"claim\":\"Java\"")
+                .contains("\"evidence_status\":\"USER_VERIFIED\"");
+        JsonNode validation = cv.path("atsReport").path("validation");
+        assertThat(validation.path("validator_version").asText()).isEqualTo("fact-validator-2");
+        assertThat(validation.path("passed").asBoolean()).isTrue();
         assertThat(cv.get("resumeMarkdown").asText()).doesNotContain("PhD").doesNotContain("{text=");
         assertThat(cv.get("gaps").toString()).contains("kubernetes");
+
+        // Adversarially inject a qualification absent from this real DB profile.
+        var injected = new com.personal.jobagent.documents.DocumentFactValidator().validate(
+                cv.get("resumeMarkdown").asText() + "\nI hold a PhD in Physics.",
+                tailoring.loadSource(devProfile).facts(), null);
+        assertThat(injected.passed()).isFalse();
+        assertThat(injected.findings()).anySatisfy(finding -> {
+            assertThat(finding.code()).isEqualTo("UNSUPPORTED_QUALIFICATION");
+            assertThat(finding.severity()).isEqualTo(
+                    com.personal.jobagent.documents.DocumentFactValidator.Severity.BLOCKER);
+        });
     }
 
     @Test
@@ -215,6 +236,29 @@ class PrepWorkflowIT {
         } finally {
             jdbc.update("delete from skills where id = ?", skill);
         }
+    }
+
+    @Test
+    void staleValidatorVersionCannotBeApprovedEvenWhenItsOldReportPassed() throws Exception {
+        UUID job = seedJob("Stale Validation Engineer");
+        UUID application = seedApplication(devProfile, job);
+        String cvId = tailor(job, application).get("cvVersionId").asText();
+
+        // Simulate a CV persisted under validator v1 with a passing v1 report.
+        jdbc.update("""
+                update resume_ats_analyses
+                set ats_report = jsonb_set(ats_report, '{validation,validator_version}', to_jsonb(?::text), true)
+                where cv_version_id = ?::uuid
+                """, "fact-validator-1", cvId);
+
+        mvc.perform(put("/api/v1/resume-intelligence/cv/" + cvId + "/review").session(session).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"approved\":true}"))
+                .andExpect(status().isConflict())
+                .andExpect(result -> assertThat(result.getResponse().getContentAsString())
+                        .contains("older validation version"));
+
+        assertThat(jdbc.queryForObject(
+                "select count(*) from cv_version_reviews where cv_version_id = ?::uuid", Integer.class, cvId)).isZero();
     }
 
     @Test

@@ -94,6 +94,36 @@ class CoverLetterReviewTest {
     }
 
     @Test
+    void coverLetterPromptIncludesStructuredSummaryAndCertificationEvidenceWithoutVisaSecrets() {
+        UUID id = UUID.randomUUID();
+        llmReturns("At Deliveroo I build Java services.");
+        when(repository.getNextVersion(jobId, profileId)).thenReturn(1);
+        when(repository.insert(any(), any(), any(), anyInt(), anyString(), anyString(), anyString(), anyMap(), anyBoolean()))
+                .thenReturn(id);
+        when(repository.findById(id)).thenReturn(Optional.of(new CoverLetterRecord(id, profileId, jobId, null, 1, "t",
+                "At Deliveroo I build Java services.", Map.of(), false, Instant.now(), Instant.now())));
+        when(profiles.findById(profileId)).thenReturn(Optional.of(new ProfileRecord(profileId, UUID.randomUUID(),
+                "Backend Engineer", null, "London",
+                Map.of("right_to_work_uk", false, "visa_status", "requires_sponsorship"),
+                Map.of(), "Candidate-authored summary with verified API delivery experience.", Map.of(), 2, "READY")));
+        when(profiles.findCertifications(profileId)).thenReturn(List.of(new CertificationRecord(
+                UUID.randomUUID(), profileId, "AWS Certified Developer", "Amazon", LocalDate.of(2024, 5, 1), "CERT-123")));
+
+        service.generateCoverLetter(profileId, jobId, null);
+
+        ArgumentCaptor<LlmCompletionRequest> request = ArgumentCaptor.forClass(LlmCompletionRequest.class);
+        verify(router).execute(eq(TaskType.COVER_LETTER), request.capture(), any(Duration.class));
+        String prompt = request.getValue().messages().getFirst().get("content");
+        assertThat(prompt).contains("Candidate-Provided Professional Summary")
+                .contains("Candidate-authored summary with verified API delivery experience.")
+                .contains("Verified Certifications")
+                .contains("AWS Certified Developer")
+                .contains("Amazon")
+                .doesNotContain("requires_sponsorship")
+                .doesNotContain("CERT-123");
+    }
+
+    @Test
     void aForeignOrMismatchedApplicationIsRefusedBeforeAnyGeneration() {
         UUID foreignApplication = UUID.randomUUID();
         when(repository.applicationBelongs(profileId, jobId, foreignApplication)).thenReturn(false);
