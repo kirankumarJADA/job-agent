@@ -10,9 +10,17 @@ public record ExperienceDecision(
         String company,
         String title,
         String location,
-        LocalDate startMonth,
-        LocalDate endMonth,
+        String startMonth,
+        String endMonth,
         List<String> responsibilities,
         List<String> achievements
 ) {
+    public ExperienceDecision(ImportAction action, UUID matchedExistingId, String company, String title,
+                              String location, LocalDate startMonth, LocalDate endMonth,
+                              List<String> responsibilities, List<String> achievements) {
+        this(action, matchedExistingId, company, title, location,
+                startMonth != null ? startMonth.toString().substring(0, 7) : null,
+                endMonth != null ? endMonth.toString().substring(0, 7) : null,
+                responsibilities, achievements);
+    }
 }

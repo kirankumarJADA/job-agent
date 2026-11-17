@@ -11,6 +11,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.time.LocalDate;
 import java.util.*;
 import java.util.regex.Pattern;
 
@@ -122,15 +123,15 @@ public class ResumeImportService {
 
     private List<PersonalFieldCandidate> buildPersonalFieldCandidates(ExtractedPersonal personal, ProfileRecord profile) {
         List<PersonalFieldCandidate> out = new ArrayList<>();
-        out.add(new PersonalFieldCandidate("headline", personal.headline(), profile.headline(), personal.sourceVerified()));
-        out.add(new PersonalFieldCandidate("phone", personal.phone(), profile.phone(), personal.sourceVerified()));
-        out.add(new PersonalFieldCandidate("location", personal.location(), profile.location(), personal.sourceVerified()));
+        out.add(new PersonalFieldCandidate("headline", personal.headline(), profile.headline(), personal.isFieldVerified("headline")));
+        out.add(new PersonalFieldCandidate("phone", personal.phone(), profile.phone(), personal.isFieldVerified("phone")));
+        out.add(new PersonalFieldCandidate("location", personal.location(), profile.location(), personal.isFieldVerified("location")));
         Object existingLinkedin = profile.links() == null ? null : profile.links().get("linkedin");
         Object existingWebsite = profile.links() == null ? null : profile.links().get("website");
         out.add(new PersonalFieldCandidate("linkedinUrl", personal.linkedinUrl(),
-                existingLinkedin == null ? null : String.valueOf(existingLinkedin), personal.sourceVerified()));
+                existingLinkedin == null ? null : String.valueOf(existingLinkedin), personal.isFieldVerified("linkedinUrl")));
         out.add(new PersonalFieldCandidate("websiteUrl", personal.websiteUrl(),
-                existingWebsite == null ? null : String.valueOf(existingWebsite), personal.sourceVerified()));
+                existingWebsite == null ? null : String.valueOf(existingWebsite), personal.isFieldVerified("websiteUrl")));
         // fullName/email are shown nowhere as an import target: the account's
         // authenticated identity/email is never overwritten by this feature.
         return out;
@@ -220,7 +221,9 @@ public class ResumeImportService {
         int sortOrder = current.size();
         for (ExperienceDecision d : decisions) {
             if (d.action() == null || d.action() == ImportAction.SKIP) { tally.skip(null); continue; }
-            if (isBlank(d.company()) || isBlank(d.title()) || d.startMonth() == null) {
+            LocalDate start = toStorageDate(d.startMonth());
+            LocalDate end = toStorageDate(d.endMonth());
+            if (isBlank(d.company()) || isBlank(d.title()) || start == null) {
                 tally.skip("Skipped a work experience entry: company, title and a start date are required.");
                 continue;
             }
@@ -233,7 +236,7 @@ public class ResumeImportService {
                     continue;
                 }
                 profiles.updateExperience(d.matchedExistingId(), profileId, d.company(), d.title(),
-                        d.startMonth(), d.endMonth(), d.location(), bullets, target.get().sortOrder());
+                        start, end, d.location(), bullets, target.get().sortOrder());
                 tally.replaced++;
                 continue;
             }
@@ -243,9 +246,9 @@ public class ResumeImportService {
                 tally.skip("\"" + d.title() + "\" at \"" + d.company() + "\" is already in your profile, so it was not added again.");
                 continue;
             }
-            UUID id = profiles.insertExperience(profileId, d.company(), d.title(), d.startMonth(), d.endMonth(),
+            UUID id = profiles.insertExperience(profileId, d.company(), d.title(), start, end,
                     d.location(), bullets, sortOrder);
-            current.add(new WorkExperienceRecord(id, profileId, d.company(), d.title(), d.startMonth(), d.endMonth(),
+            current.add(new WorkExperienceRecord(id, profileId, d.company(), d.title(), start, end,
                     d.location(), bullets, sortOrder++));
             tally.added++;
         }
@@ -377,12 +380,13 @@ public class ResumeImportService {
                 tally.skip("Skipped a certification entry: a name is required.");
                 continue;
             }
+            LocalDate issuedOnDate = toStorageDate(d.issuedOn());
             if (d.action() == ImportAction.REPLACE) {
                 if (current.stream().noneMatch(c -> c.id().equals(d.matchedExistingId()))) {
                     tally.skip("Could not replace certification \"" + d.name() + "\": the matched record no longer exists.");
                     continue;
                 }
-                profiles.updateCertification(d.matchedExistingId(), profileId, d.name(), d.issuer(), d.issuedOn(), d.credentialId());
+                profiles.updateCertification(d.matchedExistingId(), profileId, d.name(), d.issuer(), issuedOnDate, d.credentialId());
                 tally.replaced++;
                 continue;
             }
@@ -392,10 +396,25 @@ public class ResumeImportService {
                 tally.skip("Certification \"" + d.name() + "\" is already in your profile, so it was not added again.");
                 continue;
             }
-            UUID id = profiles.insertCertification(profileId, d.name(), d.issuer(), d.issuedOn(), d.credentialId());
-            current.add(new CertificationRecord(id, profileId, d.name(), d.issuer(), d.issuedOn(), d.credentialId()));
+            UUID id = profiles.insertCertification(profileId, d.name(), d.issuer(), issuedOnDate, d.credentialId());
+            current.add(new CertificationRecord(id, profileId, d.name(), d.issuer(), issuedOnDate, d.credentialId()));
             tally.added++;
         }
+    }
+
+    static LocalDate toStorageDate(String dateStr) {
+        if (dateStr == null || dateStr.isBlank()) return null;
+        String s = dateStr.strip();
+        if (s.matches("\\d{4}")) {
+            return LocalDate.of(Integer.parseInt(s), 1, 1);
+        }
+        if (s.matches("\\d{4}-\\d{2}")) {
+            return LocalDate.parse(s + "-01");
+        }
+        if (s.matches("\\d{4}-\\d{2}-\\d{2}")) {
+            return LocalDate.parse(s);
+        }
+        return null;
     }
 
     /**

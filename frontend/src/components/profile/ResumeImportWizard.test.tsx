@@ -201,4 +201,192 @@ describe('ResumeImportWizard', () => {
     expect(await screen.findByText('This preview has expired.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Import selected' })).toBeTruthy();
   });
+
+  it('defaults unverified items and unverified skills to unchecked', async () => {
+    const unverifiedResponse = {
+      ...PREVIEW_RESPONSE,
+      personal: [
+        { field: 'headline', extractedValue: 'Fabricated CTO', currentValue: null, sourceVerified: false },
+      ],
+      experiences: [
+        {
+          clientId: 'exp-unverified',
+          data: {
+            company: 'Acme Corp', title: 'Software Engineer', location: 'Austin, TX',
+            startMonth: '2021', endMonth: '2023',
+            responsibilities: ['Fake responsibility'], achievements: ['Fake metric'], technologies: ['Java'],
+            sourceVerified: false, requiresReview: true,
+          },
+          matchStatus: 'NEW',
+          matchedExistingId: null,
+        },
+      ],
+      skills: [
+        { clientId: 'skill-unverified', data: { name: 'Rust', category: 'Technical', sourceVerified: false }, matchStatus: 'NEW', matchedExistingId: null },
+      ],
+    };
+    mockedApiFetch.mockResolvedValueOnce(unverifiedResponse as any);
+    render(React.createElement(ResumeImportWizard, { onClose: vi.fn(), onImported: vi.fn() }));
+    await uploadFile();
+    await screen.findByText(/2 new/);
+
+    expect((screen.getByLabelText('Apply headline') as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByLabelText('Include this entry') as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByLabelText('Include skill Rust') as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('defaults all items and personal fields to unchecked when offlineFallback is true', async () => {
+    const offlineResponse = {
+      ...PREVIEW_RESPONSE,
+      offlineFallback: true,
+      personal: [
+        { field: 'headline', extractedValue: 'Senior Engineer', currentValue: null, sourceVerified: true },
+      ],
+      skills: [
+        { clientId: 'skill-offline', data: { name: 'Java', category: 'Technical', sourceVerified: true }, matchStatus: 'NEW', matchedExistingId: null },
+      ],
+    };
+    mockedApiFetch.mockResolvedValueOnce(offlineResponse as any);
+    render(React.createElement(ResumeImportWizard, { onClose: vi.fn(), onImported: vi.fn() }));
+    await uploadFile();
+    await screen.findByText(/2 new/);
+
+    expect((screen.getByLabelText('Apply headline') as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByLabelText('Include this entry') as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByLabelText('Include skill Java') as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('displays and allows editing of every persisted field across experience, education, projects, and certifications', async () => {
+    const fullResponse = {
+      ...PREVIEW_RESPONSE,
+      experiences: [
+        {
+          clientId: 'exp-full',
+          data: {
+            company: 'Tech Corp', title: 'Lead Engineer', location: 'London, UK',
+            startMonth: '2020-01-01', endMonth: '2022-06-01',
+            responsibilities: ['Architected core platform'], achievements: ['Reduced latency 50%'], technologies: ['Go'],
+            sourceVerified: true, requiresReview: false,
+          },
+          matchStatus: 'NEW',
+          matchedExistingId: null,
+        },
+      ],
+      education: [
+        {
+          clientId: 'edu-full',
+          data: {
+            institution: 'Oxford University', qualification: 'BSc', field: 'Computer Science',
+            startYear: 2016, endYear: 2019, grade: 'First Class',
+            sourceVerified: true, requiresReview: false,
+          },
+          matchStatus: 'NEW',
+          matchedExistingId: null,
+        },
+      ],
+      projects: [
+        {
+          clientId: 'proj-full',
+          data: {
+            name: 'OpenSource App', description: 'High throughput pipeline', url: 'https://github.com/test/app',
+            technologies: ['React', 'TypeScript'], achievements: ['10k GitHub stars'],
+            sourceVerified: true, requiresReview: false,
+          },
+          matchStatus: 'NEW',
+          matchedExistingId: null,
+        },
+      ],
+      certifications: [
+        {
+          clientId: 'cert-full',
+          data: {
+            name: 'AWS Solutions Architect', issuer: 'Amazon Web Services', issuedOn: '2021-05-01', expiresOn: null,
+            credentialId: 'AWS-12345', verificationUrl: 'https://aws.cert/123',
+            sourceVerified: true, requiresReview: false,
+          },
+          matchStatus: 'NEW',
+          matchedExistingId: null,
+        },
+      ],
+      skills: [],
+      counts: { newCount: 4, existingCount: 0, possibleDuplicateCount: 0, conflictCount: 0, needsReviewCount: 0 },
+    };
+    mockedApiFetch.mockResolvedValueOnce(fullResponse as any);
+    mockedApiFetch.mockResolvedValueOnce({ added: 4, replaced: 0, skipped: 0, warnings: [] } as any);
+    render(React.createElement(ResumeImportWizard, { onClose: vi.fn(), onImported: vi.fn() }));
+    await uploadFile();
+    await screen.findByText(/4 new/);
+
+    // Verify all fields are rendered in the DOM
+    expect(screen.getByLabelText('Location')).toBeTruthy();
+    expect(screen.getByLabelText('Responsibilities')).toBeTruthy();
+    expect(screen.getByLabelText('Achievements')).toBeTruthy();
+
+    expect(screen.getByLabelText('Institution')).toBeTruthy();
+    expect(screen.getByLabelText('Qualification')).toBeTruthy();
+    expect(screen.getByLabelText('Field of study')).toBeTruthy();
+    expect(screen.getByLabelText('Start year')).toBeTruthy();
+    expect(screen.getByLabelText('End year')).toBeTruthy();
+    expect(screen.getByLabelText('Grade')).toBeTruthy();
+
+    expect(screen.getByLabelText('Project name')).toBeTruthy();
+    expect(screen.getByLabelText('Project URL')).toBeTruthy();
+    expect(screen.getByLabelText('Project description')).toBeTruthy();
+    expect(screen.getByLabelText('Project achievements')).toBeTruthy();
+
+    expect(screen.getByLabelText('Certification name')).toBeTruthy();
+    expect(screen.getByLabelText('Certification issuer')).toBeTruthy();
+    expect(screen.getByLabelText('Certification issue date')).toBeTruthy();
+    expect(screen.getByLabelText('Certification credential ID')).toBeTruthy();
+
+    // Edit fields across sections
+    fireEvent.change(screen.getByLabelText('Location'), { target: { value: 'Cambridge, UK' } });
+    fireEvent.change(screen.getByLabelText('Grade'), { target: { value: 'Distinction' } });
+    fireEvent.change(screen.getByLabelText('Project description'), { target: { value: 'Updated pipeline' } });
+    fireEvent.change(screen.getByLabelText('Certification credential ID'), { target: { value: 'AWS-99999' } });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Import selected' }));
+
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(2));
+    const confirmBody = JSON.parse((mockedApiFetch.mock.calls[1][1] as any).body);
+    expect(confirmBody.experiences[0].location).toBe('Cambridge, UK');
+    expect(confirmBody.education[0].grade).toBe('Distinction');
+    expect(confirmBody.projects[0].summary).toBe('Updated pipeline');
+    expect(confirmBody.certifications[0].credentialId).toBe('AWS-99999');
+  });
+
+  it('preserves year-only dates without inventing a month and sends year-only format', async () => {
+    const yearOnlyResponse = {
+      ...PREVIEW_RESPONSE,
+      experiences: [
+        {
+          clientId: 'exp-year',
+          data: {
+            company: 'Acme Corp', title: 'Engineer', location: null,
+            startMonth: '2021', endMonth: '2023',
+            responsibilities: [], achievements: [], technologies: [],
+            sourceVerified: true, requiresReview: false,
+          },
+          matchStatus: 'NEW',
+          matchedExistingId: null,
+        },
+      ],
+      skills: [],
+      counts: { newCount: 1, existingCount: 0, possibleDuplicateCount: 0, conflictCount: 0, needsReviewCount: 0 },
+    };
+    mockedApiFetch.mockResolvedValueOnce(yearOnlyResponse as any);
+    mockedApiFetch.mockResolvedValueOnce({ added: 1, replaced: 0, skipped: 0, warnings: [] } as any);
+    render(React.createElement(ResumeImportWizard, { onClose: vi.fn(), onImported: vi.fn() }));
+    await uploadFile();
+    await screen.findByText(/1 new/);
+
+    const startInput = screen.getByLabelText('Start month') as HTMLInputElement;
+    expect(startInput.value).toBe('2021');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Import selected' }));
+
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(2));
+    const confirmBody = JSON.parse((mockedApiFetch.mock.calls[1][1] as any).body);
+    expect(confirmBody.experiences[0].startMonth).toBe('2021');
+  });
 });

@@ -63,17 +63,25 @@ const STATUS_LABEL: Record<MatchStatus, string> = {
 };
 
 /**
- * Only NEW items start selected. Including anything else defaults to adding it
- * as a separate record; replacing an existing record is always a deliberate
+ * Only NEW items start selected, and only when verified against the original
+ * resume text without requiring review. Unverified, needs-review, or offline
+ * fallback items default to unchecked. Including anything else defaults to adding
+ * it as a separate record; replacing an existing record is always a deliberate
  * second choice. EXISTING items are already in the profile and cannot be picked.
  */
-function toRows<T>(candidates: Candidate<T>[]): Row<T>[] {
-  return candidates.map((c) => ({
-    candidate: c,
-    include: c.matchStatus === 'NEW',
-    action: c.matchStatus === 'NEW' ? 'ADD' : 'SKIP',
-    edited: { ...(c.data as any) } as T,
-  }));
+function toRows<T>(candidates: Candidate<T>[], offlineFallback: boolean = false): Row<T>[] {
+  return candidates.map((c) => {
+    const data = c.data as any;
+    const isVerified = data?.sourceVerified === true && !offlineFallback;
+    const requiresReview = data?.requiresReview === true || offlineFallback;
+    const autoSelect = c.matchStatus === 'NEW' && isVerified && !requiresReview;
+    return {
+      candidate: c,
+      include: autoSelect,
+      action: autoSelect ? 'ADD' : 'SKIP',
+      edited: { ...data } as T,
+    };
+  });
 }
 
 function withInclude<T>(row: Row<T>, include: boolean): Row<T> {
@@ -81,13 +89,19 @@ function withInclude<T>(row: Row<T>, include: boolean): Row<T> {
   return { ...row, include, action: include ? (row.action === 'SKIP' ? 'ADD' : row.action) : 'SKIP' };
 }
 
-/** The API stores months as the first day ("2021-01-01"); the review shows and edits just the month. */
+/** Shows month (YYYY-MM) or year-only (YYYY) precision; never invents a day or month. */
 function toMonthInput(date: string | null): string {
-  return date ? date.slice(0, 7) : '';
+  if (!date) return '';
+  if (/^\d{4}$/.test(date)) return date;
+  return date.slice(0, 7);
 }
 
 function fromMonthInput(value: string): string | null {
-  return /^\d{4}-\d{2}$/.test(value) ? `${value}-01` : null;
+  const v = value.trim();
+  if (/^\d{4}$/.test(v)) return v;
+  if (/^\d{4}-\d{2}$/.test(v)) return `${v}-01`;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  return v ? v : null;
 }
 
 export const ResumeImportWizard: React.FC<{ onClose: () => void; onImported: () => void }> = ({ onClose, onImported }) => {
@@ -128,7 +142,8 @@ export const ResumeImportWizard: React.FC<{ onClose: () => void; onImported: () 
       const accepted: Record<string, boolean> = {};
       const values: Record<string, string> = {};
       response.personal.forEach((field) => {
-        const shouldAccept = !field.currentValue && !!field.extractedValue;
+        const isVerified = field.sourceVerified === true && !response.offlineFallback;
+        const shouldAccept = !field.currentValue && !!field.extractedValue && isVerified;
         accepted[field.field] = shouldAccept;
         values[field.field] = field.extractedValue ?? '';
       });
@@ -136,11 +151,11 @@ export const ResumeImportWizard: React.FC<{ onClose: () => void; onImported: () 
       setPersonalValues(values);
       setSummaryValue(response.extractedProfessionalSummary ?? '');
       setSummaryAccepted(false);
-      setExperienceRows(toRows(response.experiences));
-      setEducationRows(toRows(response.education));
-      setProjectRows(toRows(response.projects));
-      setSkillRows(toRows(response.skills));
-      setCertificationRows(toRows(response.certifications));
+      setExperienceRows(toRows(response.experiences, response.offlineFallback));
+      setEducationRows(toRows(response.education, response.offlineFallback));
+      setProjectRows(toRows(response.projects, response.offlineFallback));
+      setSkillRows(toRows(response.skills, response.offlineFallback));
+      setCertificationRows(toRows(response.certifications, response.offlineFallback));
       setStep('review');
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Could not process this resume. Please try again.');
@@ -308,6 +323,9 @@ export const ResumeImportWizard: React.FC<{ onClose: () => void; onImported: () 
                       aria-label={`${field.field} value`}
                     />
                     {field.currentValue && <span className="text-ink-muted">current: {field.currentValue}</span>}
+                    {!field.sourceVerified && (
+                      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">Unverified</span>
+                    )}
                   </label>
                 ))}
               </ReviewSection>
@@ -337,11 +355,26 @@ export const ResumeImportWizard: React.FC<{ onClose: () => void; onImported: () 
                     <div className="grid gap-2 md:grid-cols-2">
                       <TextInput aria-label="Company" value={row.edited.company ?? ''} onChange={(e) => setExperienceRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, company: e.target.value } } : r)))} placeholder="Company" />
                       <TextInput aria-label="Title" value={row.edited.title ?? ''} onChange={(e) => setExperienceRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, title: e.target.value } } : r)))} placeholder="Title" />
-                      <TextInput type="month" aria-label="Start month" value={toMonthInput(row.edited.startMonth)} onChange={(e) => setExperienceRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, startMonth: fromMonthInput(e.target.value) } } : r)))} />
-                      <TextInput type="month" aria-label="End month (leave empty if current)" value={toMonthInput(row.edited.endMonth)} onChange={(e) => setExperienceRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, endMonth: fromMonthInput(e.target.value) } } : r)))} />
+                      <TextInput aria-label="Location" value={row.edited.location ?? ''} onChange={(e) => setExperienceRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, location: e.target.value } } : r)))} placeholder="Location" />
+                      <TextInput aria-label="Start month" placeholder="Start date (YYYY or YYYY-MM)" value={toMonthInput(row.edited.startMonth)} onChange={(e) => setExperienceRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, startMonth: fromMonthInput(e.target.value) } } : r)))} />
+                      <TextInput aria-label="End month (leave empty if current)" placeholder="End date (YYYY or YYYY-MM)" value={toMonthInput(row.edited.endMonth)} onChange={(e) => setExperienceRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, endMonth: fromMonthInput(e.target.value) } } : r)))} />
                     </div>
-                    {!row.candidate.data.sourceVerified && (
-                      <p className="text-amber-700">Not found verbatim in the uploaded resume — double-check before saving.</p>
+                    <div className="space-y-2 mt-2">
+                      <div>
+                        <label className="text-[11px] font-medium text-ink-muted">Responsibilities (one per line)</label>
+                        <Textarea aria-label="Responsibilities" rows={2} value={(row.edited.responsibilities ?? []).join('\n')}
+                          onChange={(e) => setExperienceRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, responsibilities: e.target.value.split('\n').map((s) => s.trim()).filter(Boolean) } } : r)))}
+                          placeholder="Responsibilities (one per line)" />
+                      </div>
+                      <div>
+                        <label className="text-[11px] font-medium text-ink-muted">Achievements (one per line)</label>
+                        <Textarea aria-label="Achievements" rows={2} value={(row.edited.achievements ?? []).join('\n')}
+                          onChange={(e) => setExperienceRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, achievements: e.target.value.split('\n').map((s) => s.trim()).filter(Boolean) } } : r)))}
+                          placeholder="Achievements (one per line)" />
+                      </div>
+                    </div>
+                    {(!row.candidate.data.sourceVerified || row.candidate.data.requiresReview) && (
+                      <p className="text-xs text-amber-700 mt-1">Not found verbatim in the uploaded resume — double-check before saving.</p>
                     )}
                   </CandidateRow>
                 ))}
@@ -358,7 +391,22 @@ export const ResumeImportWizard: React.FC<{ onClose: () => void; onImported: () 
                     <div className="grid gap-2 md:grid-cols-2">
                       <TextInput aria-label="Institution" value={row.edited.institution ?? ''} onChange={(e) => setEducationRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, institution: e.target.value } } : r)))} placeholder="Institution" />
                       <TextInput aria-label="Qualification" value={row.edited.qualification ?? ''} onChange={(e) => setEducationRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, qualification: e.target.value } } : r)))} placeholder="Qualification" />
+                      <TextInput aria-label="Field of study" value={row.edited.field ?? ''} onChange={(e) => setEducationRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, field: e.target.value } } : r)))} placeholder="Field of study" />
+                      <TextInput aria-label="Start year" value={row.edited.startYear != null ? String(row.edited.startYear) : ''} onChange={(e) => {
+                        const val = e.target.value.trim();
+                        const num = /^\d+$/.test(val) ? parseInt(val, 10) : null;
+                        setEducationRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, startYear: num } } : r)));
+                      }} placeholder="Start year (YYYY)" />
+                      <TextInput aria-label="End year" value={row.edited.endYear != null ? String(row.edited.endYear) : ''} onChange={(e) => {
+                        const val = e.target.value.trim();
+                        const num = /^\d+$/.test(val) ? parseInt(val, 10) : null;
+                        setEducationRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, endYear: num } } : r)));
+                      }} placeholder="End year (YYYY)" />
+                      <TextInput aria-label="Grade" value={row.edited.grade ?? ''} onChange={(e) => setEducationRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, grade: e.target.value } } : r)))} placeholder="Grade" />
                     </div>
+                    {(!row.candidate.data.sourceVerified || row.candidate.data.requiresReview) && (
+                      <p className="text-xs text-amber-700 mt-1">Not found verbatim in the uploaded resume — double-check before saving.</p>
+                    )}
                   </CandidateRow>
                 ))}
                 {educationRows.length === 0 && <EmptySection text="No education detected." />}
@@ -371,7 +419,27 @@ export const ResumeImportWizard: React.FC<{ onClose: () => void; onImported: () 
                     onToggle={(include) => setProjectRows((rows) => rows.map((r, i) => (i === idx ? withInclude(r, include) : r)))}
                     onAction={(action) => setProjectRows((rows) => rows.map((r, i) => (i === idx ? { ...r, action } : r)))}
                   >
-                    <TextInput aria-label="Project name" value={row.edited.name ?? ''} onChange={(e) => setProjectRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, name: e.target.value } } : r)))} placeholder="Name" />
+                    <div className="grid gap-2 md:grid-cols-2">
+                      <TextInput aria-label="Project name" value={row.edited.name ?? ''} onChange={(e) => setProjectRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, name: e.target.value } } : r)))} placeholder="Project name" />
+                      <TextInput aria-label="Project URL" value={row.edited.url ?? ''} onChange={(e) => setProjectRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, url: e.target.value } } : r)))} placeholder="Project URL (optional)" />
+                    </div>
+                    <div className="space-y-2 mt-2">
+                      <div>
+                        <label className="text-[11px] font-medium text-ink-muted">Description / Summary</label>
+                        <Textarea aria-label="Project description" rows={2} value={row.edited.description ?? ''}
+                          onChange={(e) => setProjectRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, description: e.target.value } } : r)))}
+                          placeholder="Description / Summary" />
+                      </div>
+                      <div>
+                        <label className="text-[11px] font-medium text-ink-muted">Key achievements / bullets (one per line)</label>
+                        <Textarea aria-label="Project achievements" rows={2} value={(row.edited.achievements ?? []).join('\n')}
+                          onChange={(e) => setProjectRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, achievements: e.target.value.split('\n').map((s) => s.trim()).filter(Boolean) } } : r)))}
+                          placeholder="Achievements / bullets (one per line)" />
+                      </div>
+                    </div>
+                    {(!row.candidate.data.sourceVerified || row.candidate.data.requiresReview) && (
+                      <p className="text-xs text-amber-700 mt-1">Not found verbatim in the uploaded resume — double-check before saving.</p>
+                    )}
                   </CandidateRow>
                 ))}
                 {projectRows.length === 0 && <EmptySection text="No projects detected." />}
@@ -385,6 +453,9 @@ export const ResumeImportWizard: React.FC<{ onClose: () => void; onImported: () 
                         onChange={(e) => setSkillRows((rows) => rows.map((r, i) => (i === idx ? withInclude(r, e.target.checked) : r)))}
                         aria-label={`Include skill ${row.edited.name}`} />
                       {row.edited.name}
+                      {!row.candidate.data.sourceVerified && (
+                        <span className="rounded bg-amber-100 px-1 py-0.2 text-[9px] font-medium text-amber-800">Unverified</span>
+                      )}
                       {row.candidate.matchStatus === 'EXISTING' && <span className="text-[10px]">(already have this)</span>}
                     </label>
                   ))}
@@ -399,7 +470,15 @@ export const ResumeImportWizard: React.FC<{ onClose: () => void; onImported: () 
                     onToggle={(include) => setCertificationRows((rows) => rows.map((r, i) => (i === idx ? withInclude(r, include) : r)))}
                     onAction={(action) => setCertificationRows((rows) => rows.map((r, i) => (i === idx ? { ...r, action } : r)))}
                   >
-                    <TextInput aria-label="Certification name" value={row.edited.name ?? ''} onChange={(e) => setCertificationRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, name: e.target.value } } : r)))} placeholder="Name" />
+                    <div className="grid gap-2 md:grid-cols-2">
+                      <TextInput aria-label="Certification name" value={row.edited.name ?? ''} onChange={(e) => setCertificationRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, name: e.target.value } } : r)))} placeholder="Certification name" />
+                      <TextInput aria-label="Certification issuer" value={row.edited.issuer ?? ''} onChange={(e) => setCertificationRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, issuer: e.target.value } } : r)))} placeholder="Issuer" />
+                      <TextInput aria-label="Certification issue date" placeholder="Issue date (YYYY or YYYY-MM)" value={toMonthInput(row.edited.issuedOn)} onChange={(e) => setCertificationRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, issuedOn: fromMonthInput(e.target.value) } } : r)))} />
+                      <TextInput aria-label="Certification credential ID" value={row.edited.credentialId ?? ''} onChange={(e) => setCertificationRows((rows) => rows.map((r, i) => (i === idx ? { ...r, edited: { ...r.edited, credentialId: e.target.value } } : r)))} placeholder="Credential ID (optional)" />
+                    </div>
+                    {(!row.candidate.data.sourceVerified || row.candidate.data.requiresReview) && (
+                      <p className="text-xs text-amber-700 mt-1">Not found verbatim in the uploaded resume — double-check before saving.</p>
+                    )}
                   </CandidateRow>
                 ))}
                 {certificationRows.length === 0 && <EmptySection text="No certifications detected." />}

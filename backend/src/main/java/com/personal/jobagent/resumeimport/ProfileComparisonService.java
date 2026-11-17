@@ -31,8 +31,8 @@ public class ProfileComparisonService {
 
         for (WorkExperienceRecord e : existing) {
             if (normalize(e.company()).equals(company) && normalize(e.title()).equals(title)) {
-                boolean sameDates = Objects.equals(e.startMonth(), candidate.startMonth())
-                        && Objects.equals(e.endMonth(), candidate.endMonth());
+                boolean sameDates = datesMatch(e.startMonth(), candidate.startMonth())
+                        && datesMatch(e.endMonth(), candidate.endMonth());
                 return new MatchResult(sameDates ? MatchStatus.EXISTING : MatchStatus.CONFLICT, e.id());
             }
         }
@@ -115,6 +115,27 @@ public class ProfileComparisonService {
     static String normalizeSkill(String value) {
         if (value == null) return "";
         return value.toLowerCase(Locale.ROOT).replaceAll("\\s+", " ").strip();
+    }
+
+    static boolean datesMatch(java.time.LocalDate existing, String candidateDate) {
+        if (existing == null && (candidateDate == null || candidateDate.isBlank())) {
+            return true;
+        }
+        if (existing == null || candidateDate == null || candidateDate.isBlank()) {
+            return false;
+        }
+        String s = candidateDate.strip();
+        if (s.matches("\\d{4}")) {
+            return existing.getYear() == Integer.parseInt(s);
+        }
+        if (s.matches("\\d{4}-\\d{2}")) {
+            return existing.getYear() == Integer.parseInt(s.substring(0, 4))
+                    && existing.getMonthValue() == Integer.parseInt(s.substring(5, 7));
+        }
+        if (s.matches("\\d{4}-\\d{2}-\\d{2}")) {
+            return existing.equals(java.time.LocalDate.parse(s));
+        }
+        return false;
     }
 
     private static boolean blank(String value) {

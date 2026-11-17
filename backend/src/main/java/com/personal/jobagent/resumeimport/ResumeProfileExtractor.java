@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.util.*;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -219,9 +220,18 @@ public class ResumeProfileExtractor {
         String location = asString(map, "location");
         String linkedinUrl = asString(map, "linkedinUrl");
         String websiteUrl = asString(map, "websiteUrl");
-        boolean verified = (fullName == null || contains(normalizedSource, fullName))
-                && (email == null || contains(normalizedSource, email));
-        return new ExtractedPersonal(fullName, headline, email, phone, location, linkedinUrl, websiteUrl, verified);
+
+        Map<String, Boolean> fieldVerifications = new HashMap<>();
+        fieldVerifications.put("fullName", fullName == null || contains(normalizedSource, fullName));
+        fieldVerifications.put("headline", headline == null || contains(normalizedSource, headline));
+        fieldVerifications.put("email", email == null || contains(normalizedSource, email));
+        fieldVerifications.put("phone", phone == null || containsPhone(normalizedSource, phone));
+        fieldVerifications.put("location", location == null || contains(normalizedSource, location));
+        fieldVerifications.put("linkedinUrl", linkedinUrl == null || containsUrl(normalizedSource, linkedinUrl));
+        fieldVerifications.put("websiteUrl", websiteUrl == null || containsUrl(normalizedSource, websiteUrl));
+
+        boolean verified = fieldVerifications.values().stream().allMatch(Boolean::booleanValue);
+        return new ExtractedPersonal(fullName, headline, email, phone, location, linkedinUrl, websiteUrl, verified, fieldVerifications);
     }
 
     private ExtractedSummary readSummary(Map<String, Object> map, String normalizedSource) {
@@ -241,13 +251,31 @@ public class ResumeProfileExtractor {
             String company = asString(item, "company");
             String title = asString(item, "title");
             if (company == null && title == null) continue;
+
+            String location = asString(item, "location");
+            String startDateRaw = asString(item, "startDate");
+            String endDateRaw = asString(item, "endDate");
+            String startDate = parseDate(startDateRaw);
+            String endDate = parseDate(endDateRaw);
+            boolean current = asBool(item, "current");
+            List<String> responsibilities = asStringList(item, "responsibilities");
+            List<String> achievements = asStringList(item, "achievements");
+            List<String> technologies = asStringList(item, "technologies");
+
             boolean verified = (company == null || contains(normalizedSource, company))
-                    && (title == null || contains(normalizedSource, title));
+                    && (title == null || contains(normalizedSource, title))
+                    && (location == null || contains(normalizedSource, location))
+                    && containsDate(normalizedSource, startDateRaw)
+                    && (current || containsDate(normalizedSource, endDateRaw))
+                    && containsAll(normalizedSource, responsibilities)
+                    && containsAll(normalizedSource, achievements)
+                    && containsAll(normalizedSource, technologies);
+
             boolean requiresReview = forceReview || !verified || company == null || title == null;
-            out.add(new ExtractedExperience(company, title, asString(item, "location"),
-                    parseDate(asString(item, "startDate")), parseDate(asString(item, "endDate")),
-                    asBool(item, "current"), asStringList(item, "responsibilities"),
-                    asStringList(item, "achievements"), asStringList(item, "technologies"),
+            out.add(new ExtractedExperience(company, title, location,
+                    startDate, endDate,
+                    current, responsibilities,
+                    achievements, technologies,
                     verified, requiresReview));
         }
         return out;
@@ -260,11 +288,23 @@ public class ResumeProfileExtractor {
             String institution = asString(item, "institution");
             String qualification = asString(item, "qualification");
             if (institution == null && qualification == null) continue;
+
+            String field = asString(item, "field");
+            Integer startYear = asInt(item, "startYear");
+            Integer endYear = asInt(item, "endYear");
+            String grade = asString(item, "grade");
+
             boolean verified = (institution == null || contains(normalizedSource, institution))
-                    && (qualification == null || contains(normalizedSource, qualification));
-            out.add(new ExtractedEducation(institution, qualification, asString(item, "field"),
-                    asInt(item, "startYear"), asInt(item, "endYear"), asString(item, "grade"),
-                    verified, forceReview || !verified || institution == null));
+                    && (qualification == null || contains(normalizedSource, qualification))
+                    && (field == null || contains(normalizedSource, field))
+                    && containsYear(normalizedSource, startYear)
+                    && containsYear(normalizedSource, endYear)
+                    && (grade == null || contains(normalizedSource, grade));
+
+            boolean requiresReview = forceReview || !verified || institution == null || qualification == null;
+            out.add(new ExtractedEducation(institution, qualification, field,
+                    startYear, endYear, grade,
+                    verified, requiresReview));
         }
         return out;
     }
@@ -275,10 +315,21 @@ public class ResumeProfileExtractor {
             Map<String, Object> item = asMap(raw);
             String name = asString(item, "name");
             if (name == null) continue;
-            boolean verified = contains(normalizedSource, name);
-            out.add(new ExtractedProject(name, asString(item, "description"), asString(item, "url"),
-                    asStringList(item, "technologies"), asStringList(item, "achievements"), verified,
-                    forceReview || !verified));
+
+            String description = asString(item, "description");
+            String url = asString(item, "url");
+            List<String> technologies = asStringList(item, "technologies");
+            List<String> achievements = asStringList(item, "achievements");
+
+            boolean verified = contains(normalizedSource, name)
+                    && (description == null || contains(normalizedSource, description))
+                    && (url == null || containsUrl(normalizedSource, url))
+                    && containsAll(normalizedSource, technologies)
+                    && containsAll(normalizedSource, achievements);
+
+            boolean requiresReview = forceReview || !verified;
+            out.add(new ExtractedProject(name, description, url,
+                    technologies, achievements, verified, requiresReview));
         }
         return out;
     }
@@ -314,11 +365,26 @@ public class ResumeProfileExtractor {
             Map<String, Object> item = asMap(raw);
             String name = asString(item, "name");
             if (name == null) continue;
-            boolean verified = contains(normalizedSource, name);
-            out.add(new ExtractedCertification(name, asString(item, "issuer"),
-                    parseDate(asString(item, "issueDate")), parseDate(asString(item, "expirationDate")),
-                    asString(item, "credentialId"), asString(item, "verificationUrl"), verified,
-                    forceReview || !verified));
+
+            String issuer = asString(item, "issuer");
+            String issueDateRaw = asString(item, "issueDate");
+            String expirationDateRaw = asString(item, "expirationDate");
+            String issueDate = parseDate(issueDateRaw);
+            String expirationDate = parseDate(expirationDateRaw);
+            String credentialId = asString(item, "credentialId");
+            String verificationUrl = asString(item, "verificationUrl");
+
+            boolean verified = contains(normalizedSource, name)
+                    && (issuer == null || contains(normalizedSource, issuer))
+                    && containsDate(normalizedSource, issueDateRaw)
+                    && containsDate(normalizedSource, expirationDateRaw)
+                    && (credentialId == null || contains(normalizedSource, credentialId))
+                    && (verificationUrl == null || containsUrl(normalizedSource, verificationUrl));
+
+            boolean requiresReview = forceReview || !verified;
+            out.add(new ExtractedCertification(name, issuer,
+                    issueDate, expirationDate,
+                    credentialId, verificationUrl, verified, requiresReview));
         }
         return out;
     }
@@ -326,22 +392,125 @@ public class ResumeProfileExtractor {
     // ---- grounding / dates ----
 
     static String normalize(String text) {
-        return text == null ? "" : text.toLowerCase(Locale.ROOT).replaceAll("\\s+", " ").strip();
+        if (text == null) return "";
+        return text.toLowerCase(Locale.ROOT)
+                .replace('\u00a0', ' ')
+                .replace('’', '\'')
+                .replace('–', '-')
+                .replace('—', '-')
+                .replaceAll("\\s+", " ")
+                .strip();
     }
 
     static boolean contains(String normalizedSource, String value) {
         if (value == null || value.isBlank()) return true;
-        return normalizedSource.contains(normalize(value));
+        String normVal = normalize(value);
+        if (normalizedSource.contains(normVal)) return true;
+        if (normVal.endsWith(".")) {
+            String stripped = normVal.substring(0, normVal.length() - 1).stripTrailing();
+            if (!stripped.isEmpty() && normalizedSource.contains(stripped)) {
+                return true;
+            }
+        }
+        return false;
     }
 
-    /** Accepts "YYYY-MM", "YYYY-MM-DD" or "YYYY"; always materializes to day 1 — the day is never AI-reported. */
-    static LocalDate parseDate(String value) {
+    static boolean containsAll(String normalizedSource, List<String> values) {
+        if (values == null || values.isEmpty()) return true;
+        for (String v : values) {
+            if (!contains(normalizedSource, v)) return false;
+        }
+        return true;
+    }
+
+    static boolean containsYear(String normalizedSource, Integer year) {
+        if (year == null) return true;
+        return normalizedSource.contains(String.valueOf(year));
+    }
+
+    static boolean containsDate(String normalizedSource, String rawDateStr) {
+        if (rawDateStr == null || rawDateStr.isBlank()) return true;
+        String s = rawDateStr.strip().toLowerCase(Locale.ROOT);
+        if (s.equals("present") || s.equals("current") || s.equals("now")) {
+            return true;
+        }
+        Matcher ym = Pattern.compile("^(\\d{4})(?:-(\\d{2}))?").matcher(s);
+        if (!ym.find()) {
+            return contains(normalizedSource, s);
+        }
+        String year = ym.group(1);
+        if (!normalizedSource.contains(year)) {
+            return false;
+        }
+        String monthStr = ym.group(2);
+        if (monthStr != null) {
+            int month = Integer.parseInt(monthStr);
+            return containsMonthToken(normalizedSource, month);
+        }
+        return true;
+    }
+
+    static boolean containsMonthToken(String normalizedSource, int month) {
+        String[] monthNames = switch (month) {
+            case 1 -> new String[]{"january", "jan", "01", " 1 "};
+            case 2 -> new String[]{"february", "feb", "02", " 2 "};
+            case 3 -> new String[]{"march", "mar", "03", " 3 "};
+            case 4 -> new String[]{"april", "apr", "04", " 4 "};
+            case 5 -> new String[]{"may", "05", " 5 "};
+            case 6 -> new String[]{"june", "jun", "06", " 6 "};
+            case 7 -> new String[]{"july", "jul", "07", " 7 "};
+            case 8 -> new String[]{"august", "aug", "08", " 8 "};
+            case 9 -> new String[]{"september", "sep", "sept", "09", " 9 "};
+            case 10 -> new String[]{"october", "oct", "10"};
+            case 11 -> new String[]{"november", "nov", "11"};
+            case 12 -> new String[]{"december", "dec", "12"};
+            default -> new String[0];
+        };
+        for (String token : monthNames) {
+            if (normalizedSource.contains(token)) return true;
+        }
+        return false;
+    }
+
+    static boolean containsUrl(String normalizedSource, String url) {
+        if (url == null || url.isBlank()) return true;
+        String normUrl = normalize(url);
+        if (normalizedSource.contains(normUrl)) return true;
+        String stripped = normUrl.replaceAll("^https?://", "").replaceAll("^www\\.", "").replaceAll("/+$", "").strip();
+        if (!stripped.isEmpty() && normalizedSource.contains(stripped)) {
+            return true;
+        }
+        return false;
+    }
+
+    static boolean containsPhone(String normalizedSource, String phone) {
+        if (phone == null || phone.isBlank()) return true;
+        if (contains(normalizedSource, phone)) return true;
+        String digits = phone.replaceAll("\\D+", "");
+        if (digits.length() >= 7) {
+            String sourceDigits = normalizedSource.replaceAll("\\D+", "");
+            return sourceDigits.contains(digits);
+        }
+        return false;
+    }
+
+    /**
+     * Preserves date precision: returns "YYYY", "YYYY-MM", or "YYYY-MM" from "YYYY-MM-DD".
+     * Never invents a month when only a year is given.
+     */
+    static String parseDate(String value) {
         if (value == null || value.isBlank()) return null;
         String v = value.strip();
         try {
-            if (v.matches("\\d{4}")) return LocalDate.of(Integer.parseInt(v), 1, 1);
-            if (v.matches("\\d{4}-\\d{2}")) return LocalDate.parse(v + "-01");
-            if (v.matches("\\d{4}-\\d{2}-\\d{2}")) return LocalDate.parse(v);
+            if (v.matches("\\d{4}")) return v;
+            if (v.matches("\\d{4}-\\d{2}")) {
+                java.time.YearMonth.parse(v);
+                return v;
+            }
+            if (v.matches("\\d{4}-\\d{2}-\\d{2}")) {
+                LocalDate.parse(v);
+                return v.substring(0, 7);
+            }
         } catch (DateTimeParseException ignored) {
             return null;
         }

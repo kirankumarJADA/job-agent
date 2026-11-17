@@ -8,7 +8,13 @@ public record CertificationDecision(
         UUID matchedExistingId,
         String name,
         String issuer,
-        LocalDate issuedOn,
+        String issuedOn,
         String credentialId
 ) {
+    public CertificationDecision(ImportAction action, UUID matchedExistingId, String name, String issuer,
+                                 LocalDate issuedOn, String credentialId) {
+        this(action, matchedExistingId, name, issuer,
+                issuedOn != null ? issuedOn.toString().substring(0, 7) : null,
+                credentialId);
+    }
 }
