@@ -110,8 +110,9 @@ public class HardFilterService {
         if (jobTitle == null || jobTitle.isBlank() || allowedTitles == null || allowedTitles.isEmpty()) {
             return false;
         }
+        List<String> expandedAllowed = TitleSynonymRegistry.expandTitles(allowedTitles);
         String jobTitleClean = normalizeTitle(jobTitle);
-        for (String allowed : allowedTitles) {
+        for (String allowed : expandedAllowed) {
             if (allowed == null || allowed.isBlank()) continue;
             String allowedClean = normalizeTitle(allowed);
             if (jobTitleClean.contains(allowedClean)) {

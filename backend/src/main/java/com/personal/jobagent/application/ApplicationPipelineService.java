@@ -125,7 +125,7 @@ public class ApplicationPipelineService {
                 // Hard filters run FIRST, before expensive scoring
                 HardFilterResult filterResult = hardFilterService.evaluate(job, preferences);
                 if (!filterResult.passed()) {
-                    persistFilterRejection(jobId, filterResult);
+                    persistFilterRejection(profileId, jobId, filterResult);
                     log.debug("Pipeline hard-filter REJECT job={} profile={} reasons={}",
                             jobId, profileId, filterResult.reasons().size());
                     continue; // skip scoring entirely
@@ -145,24 +145,33 @@ public class ApplicationPipelineService {
     }
 
     /**
-     * Persists the hard-filter rejection: writes structured filter_reasons
-     * to the jobs table and sets status to FILTERED_OUT.
+     * Persists the hard-filter rejection: candidate-scoped state is written to
+     * job_matches with recommendation 'FILTERED_OUT' and score 0.
+     * The shared catalogue row (jobs) remains unaffected.
      */
-    private void persistFilterRejection(UUID jobId, HardFilterResult result) {
+    private void persistFilterRejection(UUID profileId, UUID jobId, HardFilterResult result) {
         try {
-            String reasonsJson = objectMapper.writeValueAsString(
-                    result.reasons().stream().map(r -> java.util.Map.of(
+            String reasonsJson = objectMapper.writeValueAsString(Map.of(
+                    "filtered_out", true,
+                    "reasons", result.reasons().stream().map(r -> Map.of(
                             "criterion", r.criterion(),
                             "expected", r.expected(),
                             "actual", r.actual(),
                             "message", r.message()
-                    )).toList());
+                    )).toList()));
 
-            db.update(
-                    "update jobs set filter_reasons = ?::jsonb, status = 'FILTERED_OUT' where id = ? and status = 'DISCOVERED'",
-                    reasonsJson, jobId);
+            db.update("""
+                    insert into job_matches (profile_id, job_id, score, recommendation, breakdown, scored_at)
+                    values (?, ?, 0, 'FILTERED_OUT', ?::jsonb, now())
+                    on conflict (profile_id, job_id) do update set
+                        score = 0,
+                        recommendation = 'FILTERED_OUT',
+                        breakdown = excluded.breakdown,
+                        scored_at = now()
+                    """,
+                    profileId, jobId, reasonsJson);
         } catch (JsonProcessingException e) {
-            log.error("Failed to serialize filter reasons for job={}", jobId, e);
+            log.error("Failed to serialize filter reasons for profile={} job={}", profileId, jobId, e);
         }
     }
 
@@ -183,6 +192,21 @@ public class ApplicationPipelineService {
         Optional<UUID> existing = findLiveApplication(profileId, jobId);
         if (existing.isPresent()) {
             return new CreatedApplication(existing.get(), false, statusOf(existing.get()));
+        }
+
+        // Hard filter verification (Phase 23 exit criterion / Agent 2):
+        // Re-evaluate hard eligibility to guarantee no delayed or replayed event
+        // or manual trigger bypasses the candidate's active preferences.
+        JobRecord jobRecord = jobRepository.findById(jobId).orElse(null);
+        if (jobRecord == null) {
+            throw new IllegalArgumentException("Job not found: " + jobId);
+        }
+        var preferences = preferenceSets.findActiveByProfileId(profileId).orElse(null);
+        HardFilterResult filterResult = hardFilterService.evaluate(jobRecord, preferences);
+        if (!filterResult.passed()) {
+            persistFilterRejection(profileId, jobId, filterResult);
+            log.warn("createApplicationFromMatch rejected by hard filters for profile={} job={}", profileId, jobId);
+            return new CreatedApplication(null, false, "EXCLUDED");
         }
 
         // Cross-source duplicate protection (Phase 8.2): the same role seen
