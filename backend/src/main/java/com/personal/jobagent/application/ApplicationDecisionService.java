@@ -4,8 +4,10 @@ import com.personal.jobagent.common.AutomationMetrics;
 import com.personal.jobagent.common.QuotaService;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.preferences.PreferenceSetRepository;
+import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -70,6 +72,11 @@ import java.util.UUID;
  * rules) to consume. The table is upserted on {@code (profile_id, job_id)},
  * so event replays are idempotent.
  *
+ * <p><b>Migration guard:</b> with {@code app.migration.manual-review-only=true}
+ * every APPLY-level match is recorded as NEEDS_REVIEW, in every mode and
+ * whatever the owner's rule says, and no quota is reserved. See
+ * {@link #isManualReviewOnly()}.
+ *
  * <p><b>Owner isolation:</b> the decision is always scoped to one profile,
  * the rule lookup is filtered by {@code profile_id}, and the quota check is
  * per-profile.
@@ -89,6 +96,25 @@ public class ApplicationDecisionService {
     /** Accepted range for a rule's minimum score; anything else fails closed. */
     static final int MIN_SCORE = 1;
     static final int MAX_SCORE = 100;
+
+    /** The reason recorded on every decision the migration guard takes. */
+    static final String MIGRATION_GUARD_REASON =
+            "Automatic applications are paused for the database migration; awaiting human review";
+
+    /**
+     * Migration guard (database migration Phase 2). While
+     * {@code app.migration.manual-review-only=true}, no match is applied
+     * automatically: every APPLY-level match, in every mode and whatever the
+     * owner's approval rule says, is recorded as NEEDS_REVIEW and waits in the
+     * review queue; no quota is reserved and the rule is not consulted. This
+     * covers pending {@code job.matched} events restored from the old database
+     * and matches produced by replayed {@code job.discovered} events alike,
+     * since both reach {@link #decide}. Explicit owner actions (approving a
+     * review item, {@code POST /api/v1/jobs/{id}/apply}) are not affected.
+     * Default off, so nothing changes unless it is set.
+     */
+    @Value("${app.migration.manual-review-only:false}")
+    private boolean manualReviewOnly = false;
 
     private final PreferenceSetRepository preferenceSets;
     private final QuotaService quotaService;
@@ -153,6 +179,16 @@ public class ApplicationDecisionService {
         if ("REVIEW".equals(recommendation)) {
             return record(profileId, jobId, matchScore, recommendation, mode,
                     "NEEDS_REVIEW", "Score in review range");
+        }
+
+        // ── 1b. Migration guard: human review only ──
+        // Ahead of the mode, the rule and the quota: while the database
+        // migration is in progress nothing is applied automatically, whatever
+        // they say. No reservation is made and the rule is not read. A
+        // terminal decision already on record is kept by record()'s guard.
+        if (manualReviewOnly) {
+            return record(profileId, jobId, matchScore, recommendation, mode,
+                    "NEEDS_REVIEW", MIGRATION_GUARD_REASON);
         }
 
         // ── 2. MANUAL mode: always needs human review ──
@@ -279,6 +315,19 @@ public class ApplicationDecisionService {
         // application, it must release against this same day, however much
         // real time (and possibly a midnight rollover) has passed by then.
         return new DecisionResult(result.decision(), result.reason(), result.matchScore(), reservation.periodStart());
+    }
+
+    /** Whether the migration guard ({@code app.migration.manual-review-only}) is on. */
+    public boolean isManualReviewOnly() {
+        return manualReviewOnly;
+    }
+
+    @PostConstruct
+    void announceMigrationGuard() {
+        if (manualReviewOnly) {
+            log.warn("Migration guard is ON (app.migration.manual-review-only=true): no match is applied "
+                    + "automatically; every APPLY match is recorded as NEEDS_REVIEW for human review");
+        }
     }
 
     /**

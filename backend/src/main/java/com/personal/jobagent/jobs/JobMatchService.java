@@ -374,11 +374,7 @@ public class JobMatchService {
         if (isBlankLocation(city) && isBlankLocation(country) && isBlankLocation(locationRaw)) {
             return CategoryScore.applicable("location", weight, 0.5);
         }
-        boolean matched = allowedLocations.stream().anyMatch(loc -> {
-            String locLower = loc.toLowerCase(Locale.ROOT);
-            return locLower.equalsIgnoreCase(city) || locLower.equalsIgnoreCase(country)
-                    || (locationRaw != null && locationRaw.toLowerCase(Locale.ROOT).contains(locLower));
-        });
+        boolean matched = HardFilterService.matchesLocation(job, allowedLocations);
         return CategoryScore.applicable("location", weight, matched ? 1.0 : 0.0);
     }
 

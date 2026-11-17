@@ -155,6 +155,65 @@ describe('Cloudflare Email Worker', () => {
     assert.ok(msg.getRejectReason()?.includes('exceeds maximum allowed size'), 'oversize rejected');
   });
 
+  it('forwards reply headers, including a folded References header, for thread linking', async () => {
+    const rawMime = 'From: Sarah <recruiter@employer.example>\r\n' +
+      'To: robin+u7kq2m9x4vb3tn5p@mail.aplivenosi.com\r\n' +
+      'Subject: Re: Interview Invitation\r\n' +
+      'Message-ID: <reply-2@employer.example>\r\n' +
+      'In-Reply-To: <invite-1@employer.example>\r\n' +
+      'References: <thread-0@employer.example>\r\n' +
+      ' <invite-1@employer.example>\r\n' +
+      'Content-Type: text/plain; charset=utf-8\r\n\r\n' +
+      'Does Thursday still suit you?';
+
+    let captured = null;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url, opts) => { captured = JSON.parse(opts.body); return { status: 200, json: async () => ({}) }; };
+    try {
+      await worker.email(mockMessage(rawMime), { ROBIN_BACKEND_URL: BACKEND, CLOUDFLARE_EMAIL_WORKER_SECRET: SECRET }, {});
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    assert.equal(captured.inReplyTo, '<invite-1@employer.example>');
+    assert.equal(captured.references, '<thread-0@employer.example> <invite-1@employer.example>');
+  });
+
+  it('sends empty reply headers for a message that starts a thread', async () => {
+    const rawMime = 'From: hr@employer.example\r\nSubject: Hello\r\nMessage-ID: <first@employer.example>\r\n\r\nBody';
+    let captured = null;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url, opts) => { captured = JSON.parse(opts.body); return { status: 200, json: async () => ({}) }; };
+    try {
+      await worker.email(mockMessage(rawMime), { ROBIN_BACKEND_URL: BACKEND, CLOUDFLARE_EMAIL_WORKER_SECRET: SECRET }, {});
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    assert.equal(captured.inReplyTo, '');
+    assert.equal(captured.references, '');
+  });
+
+  it('rejects an oversize body even when rawSize under-reports it, without contacting the backend', async () => {
+    const msg = mockMessage('A'.repeat(500));
+    msg.rawSize = 50;
+    let fetched = false;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => { fetched = true; return { status: 200, json: async () => ({}) }; };
+    try {
+      await worker.email(msg, {
+        ROBIN_BACKEND_URL: BACKEND,
+        CLOUDFLARE_EMAIL_WORKER_SECRET: SECRET,
+        MAX_EMAIL_BYTES: 100
+      }, {});
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    assert.ok(msg.getRejectReason()?.includes('Message size 500 exceeds'), 'measured size is enforced');
+    assert.equal(fetched, false, 'an oversize message is never forwarded');
+  });
+
   describe('MIME Parser', () => {
     it('unfolds multiline headers and parses multipart MIME', () => {
       const multipartMime = 'From: "Hiring Manager" <hiring@company.example>\r\n' +

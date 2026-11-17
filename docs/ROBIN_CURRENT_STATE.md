@@ -8,10 +8,20 @@ Java 21 / Spring Boot 3.3.4 modular monolith (`backend/pom.xml`), React 18.3.1 /
 
 ## Repository and CI state
 
+<<<<<<< HEAD
 - PR #10 is merged to `master` as `6c3a72a`; it added a dedicated Node 22 GitHub Actions job for `cloudflare-email-worker`.
 - PR #13 (Master Resume Import) is merged to `master` as `0ddf7dfa8954a2c838a9facb87c3aa2ba51d3ad0`. It adds PDF/DOCX resume import, source-grounded review and explicit confirmation, date precision metadata and category editing for imported skills. Its recorded CI passed backend, frontend, browser worker, Cloudflare email worker and Vercel preview status checks.
 - PR #11, `phase21-candidate-knowledge-integrity`, contains the Phase 21 candidate-fact validator and PREP/CV/cover-letter changes. The recorded code head `cd668c6` passed GitHub Actions run #75: backend, browser worker, frontend and Cloudflare email worker all successful. Backend results for that recorded run: Surefire 1,397 tests (0 failures, 6 skipped); Failsafe 272 tests (0 failures, 25 skipped). The PR also carries later documentation and is now being reconciled against the newer `master` baseline. CI for its final reconciled head must pass before merge.
 - No Phase 21 production deployment or real employer submission is claimed here.
+=======
+- **Updated 2026-11-04:** all Phase 20 work through `b2be7e0` is pushed to `origin/master` (local and remote SHAs verified after each push). CI evidence per commit is kept in one place: `ROBIN_PHASE20_VERIFICATION.md` §3.1.
+- CI now has four jobs — `backend`, `worker`, `frontend`, `cloudflare-email-worker` (added in `6c3a72a`; also runs the Phase 20 operator-probe tests since `b2be7e0`).
+- **Production runs `master`:** Render serves `f3204f0` (built 2026-11-05 00:22 UTC) and the Cloudflare Worker serves version `579c2681…` (tag `170af8b`, 2026-11-04 23:36 UTC). Render auto-deploy is off; backend deploys are manual.
+- **Open P0 (2026-11-05):** the production database is rejecting writes — the Firebase session exchange and the worker's plan claim fail with `UncategorizedSQLException` while reads succeed. Root cause confirmed 2026-11-06: Supabase Free-plan read-only mode. The 2 GB disk sits at the 95 % threshold, so writes succeed only in short windows. See `ROBIN_GAP_REGISTER.md`, and the backup-first migration plan in `ROBIN_DB_MIGRATION_PHASE2_PLAN.md`.
+- 3 stale open PRs (#1, #7, #6 — earlier phase branches) exist on GitHub but their content is already folded into `master` via commit `1b49773`; not blocking.
+- PR #11 (`phase21-candidate-knowledge-integrity`, 26 commits, based on `6c3a72a`) holds the Phase 21 implementation. A trial merge into current `master` conflicts only in `docs/ROBIN_PHASE20_VERIFICATION.md`; it is reconciled after Phase 20 closes.
+- PR #9's own description states inbound Cloudflare mail delivery is explicitly unproven and Phase 20 must stay open.
+>>>>>>> origin/master
 
 ## Confirmed candidate knowledge / document path (PR #11)
 

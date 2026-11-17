@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.track.TrackText;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -20,6 +22,10 @@ public final class CloudflareInboundParser {
     static final int MAX_SUBJECT = 500;
     static final int MAX_TEXT = 10_000;
     static final int MAX_LINKS = 50;
+    static final int MAX_THREAD_REFERENCES = 20;
+    static final int MAX_REFERENCE_HEADER = 8_192;
+
+    private static final Pattern BRACKETED_MESSAGE_ID = Pattern.compile("<([^<>\\s]{1,255})>");
 
     private static final Pattern HREF = Pattern.compile("(?i)href[ \\t\\r\\n]{0,10}=[ \\t\\r\\n]{0,10}[\"']([^\"'\\s<>]{1,2048})[\"']");
     private static final Pattern HTML_TAG = Pattern.compile("<[^>]+>");
@@ -105,9 +111,39 @@ public final class CloudflareInboundParser {
                 date,
                 spfResults,
                 dkimResults,
-                spamFlags
+                spamFlags,
+                threadReferences(text(root, "inReplyTo"), text(root, "references"))
         );
         return Result.ok(message);
+    }
+
+    /**
+     * Message-Ids this message replies to, normalised like its own Message-Id
+     * (no angle brackets, at most 255 characters): In-Reply-To first, then
+     * References newest to oldest, de-duplicated and bounded. Older Workers send
+     * neither field, which simply yields no thread references.
+     */
+    static List<String> threadReferences(String inReplyTo, String references) {
+        Set<String> ids = new LinkedHashSet<>(messageIds(inReplyTo));
+        List<String> older = new ArrayList<>(messageIds(references));
+        Collections.reverse(older);
+        ids.addAll(older);
+        return ids.stream().limit(MAX_THREAD_REFERENCES).toList();
+    }
+
+    private static List<String> messageIds(String header) {
+        if (header == null || header.isBlank()) return List.of();
+        String bounded = TrackText.cap(header, MAX_REFERENCE_HEADER);
+        List<String> ids = new ArrayList<>();
+        Matcher m = BRACKETED_MESSAGE_ID.matcher(bounded);
+        while (m.find()) ids.add(m.group(1));
+        if (ids.isEmpty()) {
+            String bare = bounded.trim();
+            if (bare.length() <= 255 && bare.indexOf('@') > 0 && bare.chars().noneMatch(Character::isWhitespace)) {
+                ids.add(bare);
+            }
+        }
+        return ids;
     }
 
     private static String text(JsonNode node, String field) {

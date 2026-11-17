@@ -1,11 +1,14 @@
 package com.personal.jobagent.events;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.personal.jobagent.common.MaintenanceModeService;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.notifications.NotificationRecord;
 import com.personal.jobagent.notifications.NotificationRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -14,6 +17,8 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Owns both the normal dispatch cadence and the DLQ/reconciliation sweep —
@@ -32,6 +37,15 @@ import java.util.UUID;
  * the fast path (see the WHERE clause below) to avoid a hot retry loop
  * against a permanently-broken handler; this sweep is what surfaces them
  * via a notification instead of retrying forever silently.
+ *
+ * Exclusion (database migration Option C, V052): while an
+ * outbox_exclusion_batches row is active, neither path reads, dispatches,
+ * retries or dead-letters a pending job.discovered event at or below its
+ * watermark (max_sequence_id), so none is ever marked published or recorded
+ * in consumed_events. Every other event is dispatched in sequence order as
+ * before. outbox_exclude_pending_discovery() records exactly that set, under
+ * a lock that keeps any later event from committing below the watermark.
+ * With no active batch, both queries are the original ones.
  */
 @Component
 public class OutboxProcessor {
@@ -40,17 +54,99 @@ public class OutboxProcessor {
     private static final int MAX_ATTEMPTS = 5;
     private static final int BATCH_SIZE = 50;
 
+    /** The next events to dispatch, in sequence order; used when no exclusion is active. */
+    static final String PENDING_SQL = """
+            select id, aggregate_type, aggregate_id, event_type, payload::text as payload,
+                   correlation_id, causation_id, attempt_count
+            from outbox_events
+            where published_at is null and attempt_count < ?
+            order by sequence_id
+            limit ?
+            """;
+
+    /**
+     * The same selection while an exclusion is active (watermark W):
+     * everything above W, plus the events at or below W that are not
+     * job.discovered. Each branch is an index range scan (outbox_pending_idx
+     * above W, outbox_pending_non_discovery_idx at or below it), so the
+     * excluded rows are never read, however many there are. The literal
+     * 'job.discovered' must stay a literal: it is what lets the planner use
+     * the partial index.
+     */
+    static final String PENDING_WITH_EXCLUSION_SQL = """
+            select id, aggregate_type, aggregate_id, event_type, payload, correlation_id, causation_id, attempt_count
+            from (
+                (select sequence_id, id, aggregate_type, aggregate_id, event_type, payload::text as payload,
+                        correlation_id, causation_id, attempt_count
+                   from outbox_events
+                  where published_at is null and attempt_count < ? and sequence_id > ?
+                  order by sequence_id
+                  limit ?)
+                union all
+                (select sequence_id, id, aggregate_type, aggregate_id, event_type, payload::text as payload,
+                        correlation_id, causation_id, attempt_count
+                   from outbox_events
+                  where published_at is null and event_type <> 'job.discovered'
+                    and attempt_count < ? and sequence_id <= ?
+                  order by sequence_id
+                  limit ?)
+            ) eligible
+            order by sequence_id
+            limit ?
+            """;
+
+    static final String DEAD_LETTER_SQL = """
+            select id, event_type, attempt_count, last_error
+            from outbox_events
+            where published_at is null and attempt_count >= ?
+            """;
+
+    static final String DEAD_LETTER_WITH_EXCLUSION_SQL = """
+            select id, event_type, attempt_count, last_error
+            from outbox_events
+            where published_at is null and attempt_count >= ?
+              and not (event_type = 'job.discovered' and sequence_id <= ?)
+            """;
+
+    /** The active exclusion's watermark, or 0. At most one batch is active (V052's unique index). */
+    static final String EXCLUSION_WATERMARK_SQL =
+            "select coalesce(max(max_sequence_id), 0) from outbox_exclusion_batches where reverted_at is null";
+
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final EventPublisher eventPublisher;
     private final NotificationRepository notificationRepository;
+    private final MaintenanceModeService maintenanceMode;
 
+    /**
+     * Migration kill switch (database migration Phase 2, plan §6 and §10.7).
+     * With {@code app.events.dispatch-enabled=false} the backend starts and
+     * serves requests, but neither {@link #dispatchPending()} nor
+     * {@link #reconcileDlq()} reads or writes {@code outbox_events}: no event
+     * is published, retried or dead-lettered, so a restored backlog stays
+     * exactly as it was restored until an operator turns dispatch back on.
+     * Events written meanwhile are kept, pending, in sequence order. Default:
+     * enabled, so nothing changes unless the variable is set.
+     */
+    @Value("${app.events.dispatch-enabled:true}")
+    private boolean dispatchEnabled = true;
+    private final AtomicBoolean pausedLogged = new AtomicBoolean(false);
+    private final AtomicLong loggedWatermark = new AtomicLong(0);
+
+    @Autowired
     public OutboxProcessor(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper, EventPublisher eventPublisher,
-                           NotificationRepository notificationRepository) {
+                           NotificationRepository notificationRepository,
+                           @Autowired(required = false) MaintenanceModeService maintenanceMode) {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
         this.eventPublisher = eventPublisher;
         this.notificationRepository = notificationRepository;
+        this.maintenanceMode = maintenanceMode != null ? maintenanceMode : new MaintenanceModeService(false);
+    }
+
+    public OutboxProcessor(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper, EventPublisher eventPublisher,
+                           NotificationRepository notificationRepository) {
+        this(jdbcTemplate, objectMapper, eventPublisher, notificationRepository, new MaintenanceModeService(false));
     }
 
     private record PendingRow(UUID id, String aggregateType, UUID aggregateId, String eventType,
@@ -70,14 +166,18 @@ public class OutboxProcessor {
 
     @Scheduled(fixedDelayString = "${app.events.dispatch-interval-ms:2000}")
     public void dispatchPending() {
-        List<PendingRow> rows = jdbcTemplate.query("""
-                select id, aggregate_type, aggregate_id, event_type, payload::text as payload,
-                       correlation_id, causation_id, attempt_count
-                from outbox_events
-                where published_at is null and attempt_count < ?
-                order by sequence_id
-                limit ?
-                """, ROW_MAPPER, MAX_ATTEMPTS, BATCH_SIZE);
+        if (!dispatchEnabled || maintenanceMode.isMaintenanceMode()) {
+            logPausedOnce();
+            return;
+        }
+        // Read first, every round, so an exclusion or a revert applies from the
+        // next round. If it cannot be read, the round fails and nothing is
+        // dispatched: the unfiltered query is never a fallback.
+        long watermark = exclusionWatermark();
+        List<PendingRow> rows = watermark > 0
+                ? jdbcTemplate.query(PENDING_WITH_EXCLUSION_SQL, ROW_MAPPER,
+                        MAX_ATTEMPTS, watermark, BATCH_SIZE, MAX_ATTEMPTS, watermark, BATCH_SIZE, BATCH_SIZE)
+                : jdbcTemplate.query(PENDING_SQL, ROW_MAPPER, MAX_ATTEMPTS, BATCH_SIZE);
 
         for (PendingRow row : rows) {
             dispatchOne(row);
@@ -104,11 +204,14 @@ public class OutboxProcessor {
 
     @Scheduled(fixedDelayString = "${app.events.reconcile-interval-ms:300000}")
     public void reconcileDlq() {
-        List<Map<String, Object>> stuck = jdbcTemplate.queryForList("""
-                select id, event_type, attempt_count, last_error
-                from outbox_events
-                where published_at is null and attempt_count >= ?
-                """, MAX_ATTEMPTS);
+        if (!dispatchEnabled || maintenanceMode.isMaintenanceMode()) {
+            logPausedOnce();
+            return;
+        }
+        long watermark = exclusionWatermark();
+        List<Map<String, Object>> stuck = watermark > 0
+                ? jdbcTemplate.queryForList(DEAD_LETTER_WITH_EXCLUSION_SQL, MAX_ATTEMPTS, watermark)
+                : jdbcTemplate.queryForList(DEAD_LETTER_SQL, MAX_ATTEMPTS);
 
         for (Map<String, Object> row : stuck) {
             UUID eventId = (UUID) row.get("id");
@@ -139,6 +242,42 @@ public class OutboxProcessor {
             if (stored != null) {
                 log.error("Outbox event {} exceeded {} attempts, moving to DLQ. Last error: {}",
                         eventId, MAX_ATTEMPTS, row.get("last_error"));
+            }
+        }
+    }
+
+    /** Whether dispatch is on ({@code app.events.dispatch-enabled} and maintenance mode is inactive). */
+    public boolean isDispatchEnabled() {
+        return dispatchEnabled && !maintenanceMode.isMaintenanceMode();
+    }
+
+    /**
+     * The highest sequence_id the active exclusion batch covers, or 0 when no
+     * batch is active (V052). Logs each change once.
+     */
+    long exclusionWatermark() {
+        Long read = jdbcTemplate.queryForObject(EXCLUSION_WATERMARK_SQL, Long.class);
+        long watermark = read == null ? 0L : read;
+        long previous = loggedWatermark.getAndSet(watermark);
+        if (previous != watermark) {
+            if (watermark > 0) {
+                log.warn("Outbox exclusion active: pending job.discovered events at or below sequence {} are not "
+                        + "dispatched, retried or dead-lettered (outbox_exclusion_batches)", watermark);
+            } else {
+                log.warn("Outbox exclusion lifted: every pending event is dispatched again, in sequence order");
+            }
+        }
+        return watermark;
+    }
+
+    private void logPausedOnce() {
+        if (pausedLogged.compareAndSet(false, true)) {
+            if (maintenanceMode.isMaintenanceMode()) {
+                log.warn("Outbox dispatch is PAUSED (maintenance mode active): no event is published, "
+                        + "retried or dead-lettered until maintenance mode is lifted");
+            } else {
+                log.warn("Outbox dispatch is PAUSED (app.events.dispatch-enabled=false): no event is published, "
+                        + "retried or dead-lettered until it is re-enabled");
             }
         }
     }

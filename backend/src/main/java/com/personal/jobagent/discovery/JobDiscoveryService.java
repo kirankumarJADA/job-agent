@@ -1,11 +1,14 @@
 package com.personal.jobagent.discovery;
 
+import com.personal.jobagent.common.MaintenanceModeService;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.discovery.platform.JobIdentity;
 import com.personal.jobagent.events.OutboxWriter;
 import com.personal.jobagent.notifications.NotificationEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -27,10 +30,19 @@ public class JobDiscoveryService {
 
     private final JdbcTemplate jdbcTemplate;
     private final OutboxWriter outboxWriter;
+    private final MaintenanceModeService maintenanceMode;
 
-    public JobDiscoveryService(JdbcTemplate jdbcTemplate, OutboxWriter outboxWriter) {
+    @Autowired
+    public JobDiscoveryService(JdbcTemplate jdbcTemplate,
+                               OutboxWriter outboxWriter,
+                               @Autowired(required = false) MaintenanceModeService maintenanceMode) {
         this.jdbcTemplate = jdbcTemplate;
         this.outboxWriter = outboxWriter;
+        this.maintenanceMode = maintenanceMode != null ? maintenanceMode : new MaintenanceModeService(false);
+    }
+
+    public JobDiscoveryService(JdbcTemplate jdbcTemplate, OutboxWriter outboxWriter) {
+        this(jdbcTemplate, outboxWriter, new MaintenanceModeService(false));
     }
 
     public record IngestJobCommand(
@@ -121,7 +133,13 @@ public class JobDiscoveryService {
      */
     @Transactional
     public IngestResult ingestJob(IngestJobCommand cmd) {
-        String dedupKey = computeDedupKey(cmd.companyNameRaw(), cmd.title(), cmd.locationRaw());
+        SourceMeta meta = sourceMeta(cmd.sourceId());
+        String provider = meta != null ? meta.kind() : null;
+        String org = meta != null ? meta.orgIdentifier() : null;
+        String url = (cmd.canonicalUrl() != null && !cmd.canonicalUrl().isBlank())
+                ? cmd.canonicalUrl() : cmd.applicationUrl();
+        String dedupKey = computeDedupKey(provider, org, cmd.externalId(), url,
+                cmd.companyNameRaw(), cmd.title(), cmd.locationRaw());
         // JDBC cannot infer a type for java.time.Instant via setObject(); bind
         // the driver-supported java.sql.Timestamp instead.
         java.sql.Timestamp postedAtTs = cmd.postedAt() == null ? null : java.sql.Timestamp.from(cmd.postedAt());
@@ -274,10 +292,23 @@ public class JobDiscoveryService {
         return updated > 0;
     }
 
-    private String sourceKind(UUID sourceId) {
+    public record SourceMeta(String kind, String orgIdentifier) {}
+
+    private SourceMeta sourceMeta(UUID sourceId) {
         if (sourceId == null) return null;
-        List<Map<String, Object>> rows = jdbcTemplate.queryForList("select kind from job_sources where id = ?", sourceId);
-        return rows.isEmpty() ? null : (String) rows.get(0).get("kind");
+        try {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList("select kind, org_identifier from job_sources where id = ?", sourceId);
+            if (rows.isEmpty()) return null;
+            Map<String, Object> r = rows.get(0);
+            return new SourceMeta((String) r.get("kind"), (String) r.get("org_identifier"));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String sourceKind(UUID sourceId) {
+        SourceMeta meta = sourceMeta(sourceId);
+        return meta != null ? meta.kind() : null;
     }
 
     /**
@@ -300,8 +331,20 @@ public class JobDiscoveryService {
         }
     }
 
+    /**
+     * Migration switch (database migration Phase 2, plan §10.7): while
+     * discovery is paused no job is "seen", so the hourly sweep below would
+     * archive jobs only because the pause outlasted 30 days.
+     * {@code app.discovery.maintenance-enabled=false} skips it. Default: on.
+     */
+    @Value("${app.discovery.maintenance-enabled:true}")
+    private boolean maintenanceEnabled = true;
+
     @Scheduled(cron = "0 0 * * * *") // hourly scheduled refresh for source health and stale jobs
     public void scheduledDiscoveryMaintenance() {
+        if (!maintenanceEnabled || maintenanceMode.isMaintenanceMode()) {
+            return;
+        }
         // Mark jobs not seen in 30 days as ARCHIVED
         int archived = jdbcTemplate.update("""
                 update jobs set status = 'ARCHIVED'
@@ -312,11 +355,43 @@ public class JobDiscoveryService {
         }
     }
 
-    public static String computeDedupKey(String company, String title, String location) {
-        String raw = (company != null ? company.trim().toLowerCase() : "") + "|"
-                + (title != null ? title.trim().toLowerCase() : "") + "|"
-                + (location != null ? location.trim().toLowerCase() : "");
+    /**
+     * Computes the deduplication key following the strict identity hierarchy:
+     * 1. Prefer provider + organisation + stable external job ID
+     * 2. Canonical source URL as fallback
+     * 3. title/company/location as last resort
+     */
+    public static String computeDedupKey(String provider, String org, String externalId,
+                                         String canonicalUrl, String company, String title, String location) {
+        if (externalId != null && !externalId.isBlank()) {
+            String p = provider != null ? provider.trim().toLowerCase(java.util.Locale.ROOT) : "";
+            String o = org != null ? org.trim().toLowerCase(java.util.Locale.ROOT) : "";
+            if (p.isEmpty() && o.isEmpty() && canonicalUrl != null) {
+                String ats = JobIdentity.atsKey(canonicalUrl);
+                if (ats != null) {
+                    return sha256("id:" + ats);
+                }
+            }
+            String prefix = "";
+            if (!p.isEmpty() || !o.isEmpty()) {
+                prefix = p + ":" + o + ":";
+            }
+            return sha256("id:" + prefix + externalId.trim().toLowerCase(java.util.Locale.ROOT));
+        }
+        if (canonicalUrl != null && !canonicalUrl.isBlank()) {
+            String normalized = JobIdentity.normalizeUrl(canonicalUrl);
+            String urlToUse = (normalized != null && !normalized.isBlank())
+                    ? normalized : canonicalUrl.trim().toLowerCase(java.util.Locale.ROOT);
+            return sha256("url:" + urlToUse);
+        }
+        String raw = (company != null ? company.trim().toLowerCase(java.util.Locale.ROOT) : "") + "|"
+                + (title != null ? title.trim().toLowerCase(java.util.Locale.ROOT) : "") + "|"
+                + (location != null ? location.trim().toLowerCase(java.util.Locale.ROOT) : "");
         return sha256(raw);
+    }
+
+    public static String computeDedupKey(String company, String title, String location) {
+        return computeDedupKey(null, null, null, null, company, title, location);
     }
 
     public static String sha256(String input) {

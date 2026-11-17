@@ -1,7 +1,9 @@
 package com.personal.jobagent.mailbox.managed;
 
+import com.personal.jobagent.common.MaintenanceModeService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -31,15 +33,27 @@ public class ManagedMailRetentionJob {
 
     private final JdbcTemplate db;
     private final ManagedMailSettings settings;
+    private final MaintenanceModeService maintenanceMode;
 
-    public ManagedMailRetentionJob(JdbcTemplate db, ManagedMailSettings settings) {
+    @Autowired
+    public ManagedMailRetentionJob(JdbcTemplate db,
+                                   ManagedMailSettings settings,
+                                   @Autowired(required = false) MaintenanceModeService maintenanceMode) {
         this.db = db;
         this.settings = settings;
+        this.maintenanceMode = maintenanceMode != null ? maintenanceMode : new MaintenanceModeService(false);
+    }
+
+    public ManagedMailRetentionJob(JdbcTemplate db, ManagedMailSettings settings) {
+        this(db, settings, new MaintenanceModeService(false));
     }
 
     @Scheduled(fixedDelayString = "${app.managed-mail.retention-sweep-interval-ms:600000}",
             initialDelayString = "${app.managed-mail.retention-sweep-initial-delay-ms:60000}")
     public void sweep() {
+        if (maintenanceMode.isMaintenanceMode()) {
+            return;
+        }
         try {
             Result result = purge(Instant.now());
             if (result.total() > 0) {
@@ -59,6 +73,9 @@ public class ManagedMailRetentionJob {
 
     /** One bounded pass at {@code now}. */
     public Result purge(Instant now) {
+        if (maintenanceMode.isMaintenanceMode()) {
+            return new Result(0, 0, 0);
+        }
         int erased = db.update("""
                 update managed_inbound_messages
                 set content_encrypted = null, content_purged_at = ?

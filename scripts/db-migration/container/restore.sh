@@ -1,0 +1,426 @@
+#!/usr/bin/env bash
+# Stage C, run INSIDE a disposable postgres:17.11 container started by
+# restore-test.ps1 (its server is running, PGDATA is on tmpfs, port bound to
+# 127.0.0.1 only). See scripts/db-migration/README.md.
+#
+#   /in       the encrypted archive and the backup's metadata files; with
+#             ROBIN_OUTBOX_RUNS=n also /in/outbox/1..n, each one outbox export
+#             (export-outbox.ps1) whose rows are loaded after the restore
+#   /restore  RAM-backed tmpfs, never swapped (the container's
+#             memory.swap.max is 0): the decrypted archive and the passphrase
+#   /work     scripts
+#   /out      the restore report (metadata only, no row data)
+#
+# Restores the application scope (schema public) as robin_app, a role with
+# NOSUPERUSER NOBYPASSRLS that owns every restored object, exactly as planned
+# for the Oracle target, then verifies it against the backup's snapshot.
+set -Eeuo pipefail
+umask 077
+
+WORK=/work
+IN=/in
+R=/restore
+OUT=/out
+LOG="$OUT/restore.log"
+CHECKS="$OUT/restore-checks.txt"
+mkdir -p "$OUT"
+: > "$LOG"
+: > "$CHECKS"
+FAILED=0
+
+log()  { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$LOG" >&2; }
+pass() { printf 'PASS|%s|%s\n' "$1" "${2:-}" >> "$CHECKS"; log "PASS $1 ${2:-}"; }
+fail() { printf 'FAIL|%s|%s\n' "$1" "${2:-}" >> "$CHECKS"; log "FAIL $1 ${2:-}"; FAILED=1; }
+note() { printf 'NOTE|%s|%s\n' "$1" "${2:-}" >> "$CHECKS"; log "NOTE $1 ${2:-}"; }
+trap 'rm -f "$R/.passphrase" "$R/.pgpass"' EXIT
+abort() { fail "$1" "${2:-}"; log "restore test aborted"; exit 1; }
+
+MODE=${ROBIN_MODE:-}
+case "$MODE" in
+  live|dryrun) ;;
+  *) echo "ROBIN_MODE must be 'live' or 'dryrun'" >&2; exit 2 ;;
+esac
+
+# ── 0. plaintext stays in RAM ─────────────────────────────────────────
+# The decrypted archive (/restore) and, for a local target, the restored data
+# directory must be on tmpfs, and this container must be unable to swap: the
+# Docker VM has a swap disk, so restore-test.ps1 starts the container with
+# --memory equal to --memory-swap (memory.swap.max = 0). Otherwise the test
+# stops here, before the passphrase is asked for.
+swap_max=$(cat /sys/fs/cgroup/memory.swap.max 2>/dev/null || echo unknown)
+ram_paths=("$R")
+[[ ${ROBIN_TARGET:-local} == local ]] && ram_paths+=("${PGDATA:-/var/lib/postgresql/data}")
+not_tmpfs=""
+for p in "${ram_paths[@]}"; do
+  [[ $(stat -fc %T "$p" 2>/dev/null || echo missing) == tmpfs ]] || not_tmpfs+="$p "
+done
+if [[ -z $not_tmpfs && $swap_max == 0 ]]; then
+  pass plaintext_in_ram "${ram_paths[*]} on tmpfs and this container cannot swap (memory.swap.max=0)"
+else
+  abort plaintext_in_ram "not on tmpfs: ${not_tmpfs:-none}; memory.swap.max is $swap_max, so plaintext could reach a disk; nothing was decrypted"
+fi
+
+for f in robin.dump.gpg robin.dump.sha256 source-fingerprints.txt source-inventory.txt source-facts.txt archive-counts.txt; do
+  [[ -s $IN/$f ]] || { echo "missing $IN/$f" >&2; exit 2; }
+done
+
+# ROBIN_TARGET=local (default): the server in this container, prepared here.
+# ROBIN_TARGET=remote: a server prepared by oracle/provision-postgres17.sh.
+#   robin_app and the empty target database already exist there, and every
+#   connection is TLS with sslmode=verify-full, as robin_app only (PGHOST,
+#   PGPORT, PGSSLROOTCERT, ROBIN_TARGET_DB). This script never creates,
+#   drops or alters anything on a remote server except by restoring into
+#   the empty target database, and refuses a target that is not empty.
+TARGET=${ROBIN_TARGET:-local}
+case $TARGET in
+  local)
+    [[ -n ${ROBIN_APP_PASSWORD:-} ]] || { echo "ROBIN_APP_PASSWORD is required" >&2; exit 2; }
+    TARGET_DB=robin_restore
+    SU=(psql -X -q -At -F '|' -v ON_ERROR_STOP=1 -U postgres)
+    APP=(psql -X -q -At -F '|' -v ON_ERROR_STOP=1 -U robin_app -d robin_restore)
+    PGR_TARGET=(-U robin_app -d robin_restore) ;;
+  remote)
+    for v in PGHOST PGPORT PGSSLROOTCERT ROBIN_TARGET_DB; do [[ -n ${!v:-} ]] || { echo "$v is required for a remote target" >&2; exit 2; }; done
+    [[ ${PGSSLMODE:-} == verify-full ]] || { echo "a remote target needs PGSSLMODE=verify-full" >&2; exit 2; }
+    [[ $ROBIN_TARGET_DB =~ ^[a-z_][a-z0-9_]*$ ]] || { echo "ROBIN_TARGET_DB is not a plain database name" >&2; exit 2; }
+    TARGET_DB=$ROBIN_TARGET_DB
+    export PGUSER=robin_app PGCONNECT_TIMEOUT=20 PGAPPNAME=robin-restore
+    APP=(psql -X -q -At -F '|' -v ON_ERROR_STOP=1 -d "$TARGET_DB")
+    PGR_TARGET=(-d "$TARGET_DB") ;;
+  *) echo "ROBIN_TARGET must be 'local' or 'remote'" >&2; exit 2 ;;
+esac
+
+# A partial backup lists the tables whose rows it left out. Older run
+# folders have no such file: they are complete backups.
+DEFERRED=""
+if [[ -s $IN/deferred-table-data.txt ]]; then
+  DEFERRED=$(grep -E '^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$' "$IN/deferred-table-data.txt" | paste -sd, - || true)
+fi
+
+log "Robin restore test ($MODE): $(postgres --version); $(gpg --version | head -n 1)"
+if [[ -n $DEFERRED ]]; then
+  note scope "PARTIAL archive: the rows of ${DEFERRED//,/, } were left out at backup time; those tables must restore empty"
+fi
+
+# ── 1. decrypt into tmpfs and check the archive hash ──────────────────
+if [[ $MODE == live ]]; then
+  [[ -t 0 ]] || { echo "live mode needs an interactive terminal (docker exec -it)" >&2; exit 2; }
+  printf 'Encryption passphrase for this backup (input hidden): ' > /dev/tty
+  IFS= read -rs pp < /dev/tty
+  printf '\n' > /dev/tty
+  printf '%s' "$pp" > "$R/.passphrase"
+  unset pp
+else
+  printf '%s' "${ROBIN_DRYRUN_PASSPHRASE:?}" > "$R/.passphrase"
+  unset ROBIN_DRYRUN_PASSPHRASE
+fi
+chmod 600 "$R/.passphrase"
+export GNUPGHOME="$R/.gnupg"
+mkdir -p -m 700 "$GNUPGHOME"
+gpg --batch --quiet --pinentry-mode loopback --passphrase-file "$R/.passphrase" \
+    --decrypt --output "$R/robin.dump" "$IN/robin.dump.gpg" 2>> "$LOG" \
+  || abort decrypt "gpg could not decrypt the archive (wrong passphrase?)"
+# Outbox exports (export-outbox.ps1) hold the rows a partial backup left out.
+# They share the backup's passphrase (the export proves it before it runs),
+# so they are decrypted here, into the same tmpfs, while it is still there.
+OUTBOX_RUNS=${ROBIN_OUTBOX_RUNS:-0}
+[[ $OUTBOX_RUNS =~ ^[0-9]+$ ]] || abort outbox_inputs "ROBIN_OUTBOX_RUNS must be a number"
+for (( k = 1; k <= OUTBOX_RUNS; k++ )); do
+  od=$IN/outbox/$k
+  for f in outbox-export.dump.gpg outbox-export.dump.sha256 manifest.txt; do
+    [[ -s $od/$f ]] || abort outbox_inputs "missing $od/$f"
+  done
+  gpg --batch --quiet --pinentry-mode loopback --passphrase-file "$R/.passphrase" \
+      --decrypt --output "$R/outbox-$k.dump" "$od/outbox-export.dump.gpg" 2>> "$LOG" \
+    || abort outbox_decrypt "gpg could not decrypt outbox export $k with the backup's passphrase"
+  osha=$(sha256sum "$R/outbox-$k.dump" | cut -d' ' -f1)
+  owant=$(cut -d' ' -f1 "$od/outbox-export.dump.sha256")
+  if [[ $osha == "$owant" ]]; then pass "outbox_${k}_sha256" "$osha"; else abort "outbox_${k}_sha256" "decrypted $osha, manifest $owant"; fi
+done
+rm -f "$R/.passphrase"
+pass decrypt "decrypted into tmpfs"
+sha=$(sha256sum "$R/robin.dump" | cut -d' ' -f1)
+expected=$(cut -d' ' -f1 "$IN/robin.dump.sha256")
+if [[ $sha == "$expected" ]]; then pass archive_sha256 "$sha"; else abort archive_sha256 "decrypted $sha, manifest $expected"; fi
+
+# ── 2. the target, shaped like the planned Oracle database ────────────
+if [[ $TARGET == local ]]; then
+"${SU[@]}" -d postgres -v app_pw="$ROBIN_APP_PASSWORD" <<'SQL'
+CREATE ROLE robin_app LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE PASSWORD :'app_pw';
+CREATE ROLE robin_rls_probe NOLOGIN NOSUPERUSER NOBYPASSRLS;
+SQL
+createdb -U postgres -T template0 -E UTF8 --locale=en_US.utf8 -O robin_app robin_restore
+"${SU[@]}" -d robin_restore -c 'CREATE EXTENSION citext WITH SCHEMA public' \
+                            -c 'CREATE EXTENSION pgcrypto WITH SCHEMA public'
+pass target_prepared "robin_restore owned by robin_app (NOSUPERUSER NOBYPASSRLS); citext, pgcrypto"
+else
+  # robin_app's password: typed at a hidden prompt (live) or a dry-run value.
+  if [[ $MODE == live ]]; then
+    printf 'Password of robin_app on the target server (input hidden): ' > /dev/tty
+    IFS= read -rs apw < /dev/tty
+    printf '\n' > /dev/tty
+  else
+    apw=${ROBIN_APP_PASSWORD:?}
+  fi
+  esc=${apw//\\/\\\\}; esc=${esc//:/\\:}
+  printf '*:*:*:*:%s\n' "$esc" > "$R/.pgpass"
+  chmod 600 "$R/.pgpass"
+  unset apw esc ROBIN_APP_PASSWORD
+  export PGPASSFILE="$R/.pgpass"
+  facts=$("${APP[@]}" -c "select current_user, r.rolsuper, r.rolbypassrls, pg_get_userbyid(d.datdba),
+            (select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace
+              where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'S', 'f')),
+            current_setting('server_version_num'),
+            (select string_agg(extname, ',' order by extname) from pg_extension),
+            coalesce((select s.version from pg_stat_ssl s where s.pid = pg_backend_pid() and s.ssl), 'none')
+          from pg_roles r, pg_database d where r.rolname = current_user and d.datname = current_database()") \
+    || abort target_connect "could not connect to $TARGET_DB as robin_app with TLS verify-full (see restore.log)"
+  IFS='|' read -r who su bypass owner objects vnum exts tlsver <<< "$facts"
+  [[ $who == robin_app && $su == f && $bypass == f ]] || abort target_role "connected as $who (superuser=$su, bypassrls=$bypass); expected robin_app, neither"
+  [[ $owner == robin_app ]] || abort target_owner "$TARGET_DB is owned by $owner, not robin_app"
+  [[ $objects == 0 ]] || abort target_not_empty "$TARGET_DB already has $objects relation(s) in public; refusing to restore over them"
+  (( vnum / 10000 == 17 )) || abort target_version "the target is $vnum, not PostgreSQL 17"
+  [[ ,$exts, == *,citext,* && ,$exts, == *,pgcrypto,* ]] || abort target_extensions "citext and pgcrypto must already exist in $TARGET_DB (found: $exts)"
+  [[ $tlsver != none ]] || abort target_tls "the connection is not encrypted"
+  pass target_prepared "$TARGET_DB on PostgreSQL $vnum, owned by robin_app (NOSUPERUSER NOBYPASSRLS), empty; extensions $exts; connection $tlsver with verify-full"
+fi
+
+# ── 3. restore the application scope ──────────────────────────────────
+pg_restore --list "$R/robin.dump" > "$OUT/toc-full.txt"
+pg_restore --list --schema=public "$R/robin.dump" > "$R/public.list"
+# Platform-only entries are excluded even inside public: they need Supabase
+# roles, extensions or publications that a vanilla PostgreSQL does not have.
+grep -vE '^[0-9]+; [0-9]+ [0-9]+ (PUBLICATION|PUBLICATION TABLE|PUBLICATION TABLES IN SCHEMA|EVENT TRIGGER|DEFAULT ACL|ACL|SUBSCRIPTION|SUBSCRIPTION TABLE) ' \
+  "$R/public.list" > "$R/restore.list" || true
+grep '^[0-9]' "$R/restore.list" | sed -E 's/^[0-9]+; [0-9]+ [0-9]+ //' > "$OUT/restored-entries.txt" || true
+grep '^[0-9]' "$OUT/toc-full.txt" | sed -E 's/^[0-9]+; [0-9]+ [0-9]+ //' | sort > "$R/all.sorted"
+sort "$OUT/restored-entries.txt" > "$R/restored.sorted"
+comm -23 "$R/all.sorted" "$R/restored.sorted" > "$OUT/excluded-entries.txt" || true
+log "restoring $(wc -l < "$OUT/restored-entries.txt") of $(wc -l < "$R/all.sorted") TOC entries; excluded entries are listed in excluded-entries.txt"
+started=$(date +%s)
+if pg_restore "${PGR_TARGET[@]}" --no-owner --no-privileges --exit-on-error --single-transaction \
+     -L "$R/restore.list" "$R/robin.dump" 2> "$OUT/pg_restore.log"; then
+  pass pg_restore "application scope restored into $TARGET_DB in $(( $(date +%s) - started ))s as robin_app, single transaction"
+else
+  abort pg_restore "see pg_restore.log"
+fi
+if grep -qiE 'warning|error' "$OUT/pg_restore.log"; then note pg_restore_log "pg_restore.log is not empty"; fi
+
+# ── 4. inventory equals the snapshot inventory ────────────────────────
+"${APP[@]}" -v inv_schema=public -f "$WORK/inventory.sql" > "$OUT/restored-inventory.txt"
+awk -F'|' '
+  FNR == NR { src[$1] = $2; next }
+  { dst[$1] = $2 }
+  END {
+    for (k in src) {
+      if (k == "owners" || k == "extensions") continue
+      if (!(k in dst)) print "MISSING|" k "|source=" src[k]
+      else if (src[k] != dst[k]) print "DIFF|" k "|source=" src[k] "|restored=" dst[k]
+    }
+    for (k in dst) if (!(k in src) && k != "owners" && k != "extensions") print "EXTRA|" k "|restored=" dst[k]
+  }' "$IN/source-inventory.txt" "$OUT/restored-inventory.txt" > "$OUT/inventory-diff.txt"
+inv_keys=$(grep -cvE '^(owners|extensions)\|' "$OUT/restored-inventory.txt" || true)
+if [[ -s $OUT/inventory-diff.txt ]]; then fail inventory "differences in inventory-diff.txt"; else pass inventory "$inv_keys keys equal (tables, indexes, constraints, triggers, functions, RLS, sequences, Flyway)"; fi
+nv=$(awk -F'|' '$1 == "constraints_not_validated" { print $2 }' "$OUT/restored-inventory.txt")
+if [[ ${nv:-0} == 0 ]]; then pass constraints_validated "0 constraints left NOT VALID"; else fail constraints_validated "$nv constraint(s) NOT VALID"; fi
+
+# ── 5. every public table: same row count and same content fingerprint ─
+"${APP[@]}" -v fp_schemas=public > "$OUT/restored-fingerprints.txt" <<'SQL'
+BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY;
+SET LOCAL TimeZone = 'UTC';
+SET LOCAL extra_float_digits = 1;
+SET LOCAL bytea_output = 'hex';
+SET LOCAL IntervalStyle = 'postgres';
+SET LOCAL DateStyle = 'ISO, MDY';
+\i /work/table-fingerprints.sql
+COMMIT;
+SQL
+awk -F'|' -v deferred="$DEFERRED" -v dout="$OUT/deferred-tables.txt" '
+  BEGIN { n = split(deferred, d, ","); for (i = 1; i <= n; i++) if (d[i] != "") dfr[d[i]] = 1 }
+  FNR == NR { if ($1 ~ /^public\./) src[$1] = $2 "|" $3; next }
+  { dst[$1] = $2 "|" $3 }
+  END {
+    for (k in src) {
+      if (!(k in dst)) print "MISSING|" k
+      else if (k in dfr) {
+        # rows were deliberately left out: the table must exist and be empty
+        if (dst[k] == "0|0") print "DEFERRED|" k "|source=" src[k] "|restored=empty" > dout
+        else print "DIFF|" k "|deferred table is not empty|restored=" dst[k]
+      }
+      else if (src[k] != dst[k]) print "DIFF|" k "|source=" src[k] "|restored=" dst[k]
+    }
+    for (k in dst) if (!(k in src)) print "EXTRA|" k
+  }' "$IN/source-fingerprints.txt" "$OUT/restored-fingerprints.txt" > "$OUT/fingerprint-diff.txt"
+touch "$OUT/deferred-tables.txt"
+fp_tables=$(wc -l < "$OUT/restored-fingerprints.txt")
+fp_rows=$(awk -F'|' '{ s += $2 } END { print s + 0 }' "$OUT/restored-fingerprints.txt")
+fp_deferred=$(wc -l < "$OUT/deferred-tables.txt")
+if [[ -s $OUT/fingerprint-diff.txt ]]; then
+  fail fingerprints "differences in fingerprint-diff.txt"
+elif (( fp_deferred > 0 )); then
+  pass fingerprints "$fp_tables public tables, $fp_rows rows: counts and content fingerprints equal the snapshot; $fp_deferred deferred table(s) restored empty as expected"
+else
+  pass fingerprints "$fp_tables public tables, $fp_rows rows: counts and content fingerprints equal the snapshot"
+fi
+
+# ── 6. the decrypted archive yields the same rows as at backup time ───
+pg_restore --data-only --file=- "$R/robin.dump" | awk -f "$WORK/copy-counts.awk" > "$OUT/restore-archive-counts.txt"
+if cmp -s <(sort "$IN/archive-counts.txt") <(sort "$OUT/restore-archive-counts.txt"); then
+  pass archive_counts "archive row counts identical to the backup-time counts"
+else
+  fail archive_counts "archive row counts differ from the backup-time counts"
+fi
+
+# ── 7. data outside public is present and readable ────────────────────
+others=$(awk -F'|' '{ split($1, a, "."); if (a[1] != "public") print a[1] }' "$IN/archive-counts.txt" | sort -u | tr '\n' ' ')
+if [[ -n ${others// /} ]]; then
+  args=()
+  for s in $others; do args+=("--schema=$s"); done
+  if pg_restore --data-only "${args[@]}" --file=/dev/null "$R/robin.dump" 2>> "$LOG"; then
+    pass non_public_data_readable "schemas: ${others% }; $(awk -F'|' '$1 !~ /^public\./ { s += $2 } END { print s + 0 }' "$IN/archive-counts.txt") rows"
+  else
+    fail non_public_data_readable "pg_restore could not read the data of: $others"
+  fi
+else
+  note non_public_data_readable "the archive holds no table data outside public"
+fi
+
+# ── 8. RLS: enabled and inert for the owner, denying for others ───────
+probe=$(sort -t'|' -k2,2nr "$OUT/restored-fingerprints.txt" | head -n 1 | cut -d'|' -f1)
+probe_rows=$(sort -t'|' -k2,2nr "$OUT/restored-fingerprints.txt" | head -n 1 | cut -d'|' -f2)
+probe_rls=$("${APP[@]}" -c "select relrowsecurity from pg_class where oid = '$probe'::regclass")
+owner_rows=$("${APP[@]}" -c "select count(*) from $probe")
+owner_active=$("${APP[@]}" -c "select row_security_active('$probe')")
+if [[ $TARGET == remote ]]; then
+  # No other role may log in to a provisioned server, so only the owner's
+  # view is checked here; the denying side was proven by the local test.
+  rls_tables=$("${APP[@]}" -c "select count(*) filter (where c.relrowsecurity) || '/' || count(*) || ', forced ' || count(*) filter (where c.relforcerowsecurity) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relkind = 'r'")
+  if [[ $probe_rls == t && $owner_rows == "$probe_rows" && $owner_active == f && $probe_rows -gt 0 ]]; then
+    pass rls_behaviour "RLS enabled on $rls_tables; owner robin_app sees all $owner_rows rows of $probe (row_security_active=f)"
+  else
+    fail rls_behaviour "$probe: rls=$probe_rls owner=$owner_rows/$probe_rows active=$owner_active; tables $rls_tables"
+  fi
+  other_rows=skip
+else
+"${SU[@]}" -d robin_restore -c 'GRANT USAGE ON SCHEMA public TO robin_rls_probe' \
+                            -c 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO robin_rls_probe'
+other_rows=$("${SU[@]}" -d robin_restore -c "SET ROLE robin_rls_probe; select count(*) from $probe")
+fi
+if [[ $other_rows == skip ]]; then
+  :
+elif [[ $probe_rls == t && $owner_rows == "$probe_rows" && $owner_active == f && $other_rows == 0 && $probe_rows -gt 0 ]]; then
+  pass rls_behaviour "$probe: RLS enabled; owner robin_app sees $owner_rows rows (row_security_active=f); a role without BYPASSRLS sees 0"
+elif [[ $probe_rls == f && $owner_rows == "$probe_rows" && $other_rows == "$probe_rows" ]]; then
+  note rls_behaviour "$probe has RLS disabled at the source too; owner and other roles both see $owner_rows rows"
+else
+  fail rls_behaviour "$probe: rls=$probe_rls owner=$owner_rows/$probe_rows active=$owner_active other=$other_rows"
+fi
+
+# ── 9. pending outbox preserved exactly ───────────────────────────────
+src_pending=$(awk -F'|' '$1 == "outbox_pending" { print $2 }' "$IN/source-facts.txt")
+if [[ -n $src_pending && ,$DEFERRED, == *,public.outbox_events,* ]]; then
+  dst_pending=$("${APP[@]}" -c 'select count(*) from public.outbox_events')
+  if [[ $dst_pending == 0 ]]; then
+    note outbox_pending "rows of public.outbox_events were deferred: the snapshot had $src_pending pending; the restored table is empty as expected"
+  else
+    fail outbox_pending "public.outbox_events was deferred but restored $dst_pending rows"
+  fi
+elif [[ -n $src_pending ]]; then
+  dst_pending=$("${APP[@]}" -c 'select count(*) from public.outbox_events where published_at is null')
+  if [[ $dst_pending == "$src_pending" ]]; then pass outbox_pending "$dst_pending pending events preserved"; else fail outbox_pending "snapshot $src_pending, restored $dst_pending"; fi
+  "${APP[@]}" -f "$WORK/outbox-analysis.sql" > "$OUT/outbox-analysis.txt" 2>> "$LOG" \
+    && pass outbox_analysis "written to outbox-analysis.txt" \
+    || note outbox_analysis "analysis queries failed; see restore.log"
+fi
+
+# ── 10. outbox exports: the deferred rows, loaded into the restored table ─
+# Each export is loaded data-only into public.outbox_events as restored from
+# the backup (its own definition, keys and defaults), as robin_app, in one
+# transaction. Then the combined table is checked against every export's
+# manifest and against the backup snapshot's own record of the table.
+mf() { awk -F'|' -v k="$2" '$1 == k { print substr($0, length(k) + 2); exit }' "$1"; }
+if (( OUTBOX_RUNS > 0 )); then
+  [[ ,$DEFERRED, == *,public.outbox_events,* ]] || abort outbox_scope "outbox exports given, but this backup did not defer public.outbox_events"
+  want_pend_rows=0; want_pend_fp=0; want_pub_rows=0; want_pub_fp=0; covered=""
+  for (( k = 1; k <= OUTBOX_RUNS; k++ )); do
+    m=$IN/outbox/$k/manifest.txt
+    st=$(mf "$m" status); parts=$(mf "$m" parts_complete)
+    [[ $st == complete || $st == partial ]] || abort "outbox_${k}_manifest" "status '$st'"
+    started=$(date +%s)
+    if pg_restore "${PGR_TARGET[@]}" --data-only --schema=public --table=outbox_events --no-owner --no-privileges \
+         --exit-on-error --single-transaction "$R/outbox-$k.dump" 2>> "$OUT/pg_restore-outbox.log"; then
+      pass "outbox_${k}_loaded" "$(mf "$m" pending_rows) pending and $(mf "$m" published_rows) published rows (parts $parts, status $st) in $(( $(date +%s) - started ))s as robin_app, single transaction"
+    else
+      abort "outbox_${k}_loaded" "pg_restore failed (pg_restore-outbox.log)"
+    fi
+    sums=$("${APP[@]}" -c "select ($want_pend_rows + $(mf "$m" pending_rows)) || '|' || ($want_pend_fp + $(mf "$m" pending_fingerprint)) || '|' || ($want_pub_rows + $(mf "$m" published_rows)) || '|' || ($want_pub_fp + $(mf "$m" published_fingerprint))")
+    IFS='|' read -r want_pend_rows want_pend_fp want_pub_rows want_pub_fp <<< "$sums"
+    covered+=" $parts"
+  done
+  got=$("${APP[@]}" <<'SQL'
+SET TimeZone = 'UTC'; SET extra_float_digits = 1; SET bytea_output = 'hex'; SET IntervalStyle = 'postgres'; SET DateStyle = 'ISO, MDY';
+SELECT count(*) FILTER (WHERE published_at IS NULL) || '|' ||
+       coalesce(sum(('x' || substr(md5(to_jsonb(t)::text), 1, 15))::bit(60)::bigint) FILTER (WHERE published_at IS NULL), 0) || '|' ||
+       count(*) FILTER (WHERE published_at IS NOT NULL) || '|' ||
+       coalesce(sum(('x' || substr(md5(to_jsonb(t)::text), 1, 15))::bit(60)::bigint) FILTER (WHERE published_at IS NOT NULL), 0) || '|' ||
+       count(*) || '|' || coalesce(sum(('x' || substr(md5(to_jsonb(t)::text), 1, 15))::bit(60)::bigint), 0)
+  FROM public.outbox_events t;
+SQL
+)
+  IFS='|' read -r got_pend_rows got_pend_fp got_pub_rows got_pub_fp got_rows got_fp <<< "$got"
+  if [[ $got_pend_rows == "$want_pend_rows" && $got_pend_fp == "$want_pend_fp" && $got_pub_rows == "$want_pub_rows" && $got_pub_fp == "$want_pub_fp" ]]; then
+    pass outbox_matches_exports "pending $got_pend_rows rows / $got_pend_fp, published $got_pub_rows rows / $got_pub_fp: equal to the exports' manifests"
+  else
+    fail outbox_matches_exports "loaded pending $got_pend_rows / $got_pend_fp and published $got_pub_rows / $got_pub_fp; the manifests say $want_pend_rows / $want_pend_fp and $want_pub_rows / $want_pub_fp"
+  fi
+  if [[ -n $src_pending ]]; then
+    [[ $got_pend_rows == "$src_pending" ]] && pass outbox_pending_equals_snapshot "$got_pend_rows pending rows, as in the backup snapshot" \
+      || fail outbox_pending_equals_snapshot "$got_pend_rows pending rows; the backup snapshot had $src_pending"
+  fi
+  r2line=$(awk -F'|' '$1 == "public.outbox_events" { print $2 "|" $3 }' "$IN/source-fingerprints.txt")
+  if [[ " $covered " == *" A1 "* && " $covered " == *" B1 "* && " $covered " == *" B2 "* ]]; then
+    [[ "$got_rows|$got_fp" == "$r2line" ]] \
+      && pass outbox_equals_snapshot "all $got_rows rows; fingerprint $got_fp equals the backup snapshot's record of public.outbox_events" \
+      || fail outbox_equals_snapshot "$got_rows rows / $got_fp; the backup snapshot recorded $r2line"
+  else
+    note outbox_coverage "parts loaded:$covered; the published part (B2) is not loaded yet, so the table holds $got_rows of the snapshot's ${r2line%%|*} rows"
+  fi
+  # Relationships of the pending events (no foreign keys exist on the outbox).
+  rel=$("${APP[@]}" <<'SQL'
+SELECT
+  (SELECT count(*) FROM public.outbox_events o WHERE o.published_at IS NULL AND o.event_type = 'job.discovered'
+      AND NOT EXISTS (SELECT 1 FROM public.jobs j WHERE j.id = o.aggregate_id)) || '|' ||
+  (SELECT count(*) FROM public.outbox_events o WHERE o.published_at IS NULL AND o.event_type = 'job.matched'
+      AND (NOT EXISTS (SELECT 1 FROM public.jobs j WHERE j.id::text = o.payload ->> 'job_id')
+           OR NOT EXISTS (SELECT 1 FROM public.profiles p WHERE p.id::text = o.payload ->> 'profile_id'))) || '|' ||
+  (SELECT count(*) FROM public.outbox_events o WHERE o.published_at IS NULL AND o.aggregate_type = 'USER'
+      AND NOT EXISTS (SELECT 1 FROM public.users u WHERE u.id = o.aggregate_id)) || '|' ||
+  (SELECT count(*) FROM public.consumed_events c JOIN public.outbox_events o ON o.id = c.event_id WHERE o.published_at IS NULL) || '|' ||
+  (SELECT count(DISTINCT aggregate_id) FROM public.outbox_events WHERE published_at IS NULL AND event_type = 'job.discovered') || '|' ||
+  (SELECT coalesce(max(sequence_id), 0) FROM public.outbox_events) || '|' ||
+  (SELECT last_value FROM public.outbox_events_sequence_id_seq);
+SQL
+)
+  IFS='|' read -r orphan_jobs orphan_matched orphan_users consumed_pending pend_jobs max_seq seq_last <<< "$rel"
+  if [[ $orphan_jobs == 0 && $orphan_matched == 0 && $orphan_users == 0 ]]; then
+    pass outbox_references "every pending event's job, profile and user exists ($pend_jobs jobs with pending job.discovered)"
+  else
+    note outbox_references "pending events whose referenced row is missing: job.discovered $orphan_jobs, job.matched $orphan_matched, USER $orphan_users (the handlers skip a missing job)"
+  fi
+  [[ $consumed_pending == 0 ]] && pass outbox_pending_unconsumed "no pending event has a consumed_events row: every one will run in full" \
+    || note outbox_pending_unconsumed "$consumed_pending consumed_events rows belong to pending events (those consumers are skipped on replay)"
+  if (( max_seq <= seq_last )); then
+    pass outbox_sequence "highest sequence_id $max_seq <= outbox_events_sequence_id_seq $seq_last: new events cannot collide"
+  else
+    fail outbox_sequence "highest sequence_id $max_seq is above outbox_events_sequence_id_seq $seq_last"
+  fi
+  "${APP[@]}" -f "$WORK/outbox-analysis.sql" > "$OUT/outbox-analysis.txt" 2>> "$LOG" \
+    && pass outbox_analysis "written to outbox-analysis.txt" \
+    || note outbox_analysis "analysis queries failed; see restore.log"
+fi
+
+if (( FAILED )); then
+  log "RESTORE TEST FAILED: $(grep -c '^FAIL' "$CHECKS") check(s) failed; see restore-checks.txt"
+  exit 1
+fi
+log "RESTORE TEST OK: $(grep -c '^PASS' "$CHECKS") checks passed"

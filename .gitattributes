@@ -1,0 +1,5 @@
+# Files executed inside Linux containers must keep LF line endings on every
+# checkout, including Windows checkouts with core.autocrlf=true.
+scripts/db-migration/**/*.sh text eol=lf
+scripts/db-migration/**/*.sql text eol=lf
+scripts/db-migration/**/*.awk text eol=lf

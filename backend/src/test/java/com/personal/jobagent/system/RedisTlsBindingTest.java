@@ -7,6 +7,11 @@ import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.test.context.ConfigDataApplicationContextInitializer;
 import org.springframework.boot.test.context.assertj.AssertableApplicationContext;
+import io.lettuce.core.ConnectionFuture;
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.RedisURI;
+import io.lettuce.core.api.StatefulRedisConnection;
+import io.lettuce.core.codec.StringCodec;
 import io.lettuce.core.resource.DefaultClientResources;
 import io.lettuce.core.resource.DnsResolvers;
 import java.net.InetAddress;
@@ -16,6 +21,8 @@ import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.catchThrowable;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import com.personal.jobagent.config.RedisLettuceConfiguration.InitializationTimeoutLettuceConnectionFactory;
@@ -241,6 +248,57 @@ class RedisTlsBindingTest {
         }
     }
 
+    @Test
+    void clientSideCloseDuringTheRedisHandshakeIsReportedAsConnectionClosedPrematurely() throws Exception {
+        // Lettuce raises this whenever the channel closes before HELLO/AUTH
+        // completes, whichever side closed it: here only the client does.
+        List<Socket> held = new CopyOnWriteArrayList<>();
+        CountDownLatch accepted = new CountDownLatch(1);
+        try (ServerSocket silent = new ServerSocket(0, 4, InetAddress.getLoopbackAddress())) {
+            Thread acceptor = new Thread(() -> {
+                while (!silent.isClosed()) {
+                    try {
+                        held.add(silent.accept());
+                        accepted.countDown();
+                    } catch (Exception ignored) {
+                        return;
+                    }
+                }
+            }, "silent-redis-acceptor");
+            acceptor.setDaemon(true);
+            acceptor.start();
+
+            RedisURI uri = RedisURI.builder()
+                    .withHost("127.0.0.1")
+                    .withPort(silent.getLocalPort())
+                    .withTimeout(Duration.ofSeconds(10))
+                    .build();
+            RedisClient client = RedisClient.create(uri);
+            ConnectionFuture<StatefulRedisConnection<String, String>> future;
+            try {
+                future = client.connectAsync(StringCodec.UTF8, uri);
+                assertThat(accepted.await(5, TimeUnit.SECONDS)).isTrue();
+                Thread.sleep(300);
+                assertThat(future.isDone()).isFalse();
+            } finally {
+                client.shutdown();
+            }
+
+            Throwable failure = catchThrowable(() -> future.get(5, TimeUnit.SECONDS));
+            assertThat(causeMessages(failure)).contains("Connection closed prematurely");
+            assertThat(held).hasSize(1);
+            assertThat(held.get(0).isClosed()).isFalse();
+        } finally {
+            held.forEach(socket -> {
+                try {
+                    socket.close();
+                } catch (Exception ignored) {
+                    // Test cleanup only.
+                }
+            });
+        }
+    }
+
     private static List<String> causeMessages(Throwable failure) {
         List<String> messages = new ArrayList<>();
         for (Throwable current = failure; current != null; current = current.getCause()) {
@@ -303,10 +361,7 @@ class RedisTlsBindingTest {
     }
 
     @Test
-    void lettuceClientTimeoutsAreBoundedBelowDiagnosticBudget() {
-        // The post-startup diagnostic budgets 3s for the pooled phase; the
-        // Lettuce client itself must fail faster than that so the diagnostic
-        // reports the client's own error instead of its own budget firing.
+    void lettuceCommandTimeoutIsBoundedInsteadOfTheSixtySecondDefault() {
         redisConfigurationContext()
                 .withPropertyValues(
                         "SPRING_REDIS_HOST=upstash.example",

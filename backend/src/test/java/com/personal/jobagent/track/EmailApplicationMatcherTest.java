@@ -166,4 +166,67 @@ class EmailApplicationMatcherTest {
         assertThat(a.rationale().toString().toLowerCase()).doesNotContain("greenhouse").doesNotContain("lever")
                 .doesNotContain("tsenta");
     }
+
+    // ── thread replies ─────────────────────────────────────────────────────
+
+    private EmailApplicationMatcher.Association reply(String body, Set<UUID> thread, UUID asserted) {
+        return matcher.match(MessageEvidence.of("Sam <sam@acme.example>", "Re: Interview", body),
+                List.of(ACME_PLATFORM, ACME_PLATFORM_TWO, GLOBEX_DATA), asserted, EmailCategory.RECRUITER_FOLLOW_UP,
+                thread);
+    }
+
+    @Test
+    void aReplyThatNoLongerQuotesTheJobFollowsItsThread() {
+        var a = reply("Are you free on Thursday afternoon instead?", Set.of(A), null);
+
+        assertThat(a.status()).isEqualTo(LinkStatus.LINKED);
+        assertThat(a.strength()).isEqualTo(MatchStrength.STRONG);
+        assertThat(a.applicationId()).isEqualTo(A);
+        assertThat(a.rationale()).extracting(r -> r.get("code")).contains(EmailApplicationMatcher.THREAD_REPLY);
+    }
+
+    @Test
+    void threadMembershipIsNeverReceiptIdentityEvidence() {
+        var a = reply("Are you free on Thursday afternoon instead?", Set.of(A), null);
+
+        assertThat(a.identityEvidence()).isEmpty();
+    }
+
+    @Test
+    void aReplyWhoseOwnIdentifierNamesAnotherJobIsLeftToTheCandidate() {
+        var a = reply("Unrelated: please also see https://jobs.lever.co/globex/5ac0f0a0-1111-4222-8333-944444444444",
+                Set.of(A), null);
+
+        assertThat(a.status()).isEqualTo(LinkStatus.PENDING_REVIEW);
+        assertThat(a.applicationId()).isNull();
+        assertThat(a.candidates()).extracting(EmailApplicationMatcher.Candidate::applicationId).contains(A, C);
+    }
+
+    @Test
+    void aThreadPointingOutsideTheOwnersApplicationsChangesNothing() {
+        var foreignThread = reply("Are you free on Thursday afternoon instead?", Set.of(UUID.randomUUID()), null);
+        var noThread = reply("Are you free on Thursday afternoon instead?", Set.of(), null);
+
+        assertThat(foreignThread.status()).isEqualTo(noThread.status());
+        assertThat(foreignThread.strength()).isEqualTo(noThread.strength());
+        assertThat(foreignThread.applicationId()).isNull();
+        assertThat(foreignThread.rationale()).extracting(r -> r.get("code"))
+                .doesNotContain(EmailApplicationMatcher.THREAD_REPLY);
+    }
+
+    @Test
+    void aCandidatesChoiceThatTheThreadContradictsIsAConflict() {
+        var a = reply("Are you free on Thursday afternoon instead?", Set.of(A), B);
+
+        assertThat(a.status()).isEqualTo(LinkStatus.CONFLICT);
+        assertThat(a.identifiesOtherApplication()).isTrue();
+    }
+
+    @Test
+    void aSignInCodeInAThreadIsStillNotTrackingEvidence() {
+        var a = matcher.match(MessageEvidence.of("no-reply@acme.example", "Your code", "Use 123456"),
+                List.of(ACME_PLATFORM), null, EmailCategory.VERIFICATION_CODE, Set.of(A));
+
+        assertThat(a.status()).isEqualTo(LinkStatus.NOT_APPLICABLE);
+    }
 }

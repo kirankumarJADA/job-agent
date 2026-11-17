@@ -44,6 +44,50 @@ class CloudflareInboundParserTest {
         assertThat(msg.dkimResult()).isEqualTo("pass");
         assertThat(msg.spamFlagged()).isFalse();
         assertThat(msg.authenticationFailed()).isFalse();
+        assertThat(msg.threadReferences()).isEmpty();
+    }
+
+    @Test
+    void readsReplyHeadersAsThreadReferencesNewestFirst() {
+        String payload = """
+                {
+                  "envelopeRecipient": "robin+u7kq2m9x4vb3tn5p@mail.aplivenosi.com",
+                  "from": "recruiter@acme.example",
+                  "subject": "Re: Interview",
+                  "text": "Thursday works.",
+                  "messageId": "<reply-3@acme.example>",
+                  "inReplyTo": "<msg-2@acme.example>",
+                  "references": "<msg-1@acme.example> <msg-2@acme.example>"
+                }
+                """;
+
+        InboundMailMessage msg = CloudflareInboundParser.parse(payload, json).message();
+
+        assertThat(msg.threadReferences()).containsExactly("msg-2@acme.example", "msg-1@acme.example");
+    }
+
+    @Test
+    void normalisesThreadReferencesLikeMessageIds() {
+        assertThat(CloudflareInboundParser.threadReferences("bare-id@acme.example", null))
+                .containsExactly("bare-id@acme.example");
+        assertThat(CloudflareInboundParser.threadReferences(null, "<a@x.example>\r\n <b@x.example>"))
+                .containsExactly("b@x.example", "a@x.example");
+        assertThat(CloudflareInboundParser.threadReferences("not an id", "  ")).isEmpty();
+        assertThat(CloudflareInboundParser.threadReferences(null, null)).isEmpty();
+        assertThat(CloudflareInboundParser.threadReferences("<" + "x".repeat(256) + "@a.example>", null)).isEmpty();
+    }
+
+    @Test
+    void boundsThreadReferencesAndPrefersTheNewest() {
+        StringBuilder references = new StringBuilder();
+        for (int i = 0; i < 60; i++) references.append("<m-").append(i).append("@acme.example> ");
+
+        var refs = CloudflareInboundParser.threadReferences("<m-59@acme.example>", references.toString());
+
+        assertThat(refs).hasSize(CloudflareInboundParser.MAX_THREAD_REFERENCES);
+        assertThat(refs.get(0)).isEqualTo("m-59@acme.example");
+        assertThat(refs.get(1)).isEqualTo("m-58@acme.example");
+        assertThat(refs).doesNotHaveDuplicates();
     }
 
     @Test

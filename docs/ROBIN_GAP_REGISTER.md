@@ -16,11 +16,66 @@ Each entry records evidence and status. Severity: **P0** user-facing truthfulnes
 
 A real inbound email reached Cloudflare → Worker → Render → Postgres, was encrypted and appeared in Robin. Unit/integration tests also cover signature verification, replay protection and deduplication.
 
+<<<<<<< HEAD
 **Still not production-proven:** live duplicate webhook redelivery/idempotency, association of a received message to the correct specific application, actual automatic OTP extraction/use in a supported employer verification flow, and the complete recruiter-communication lifecycle. A single real email or an isolated Testcontainers run does not prove these live flows. See `ROBIN_PHASE20_VERIFICATION.md` §4.3.
 
 Encryption-key continuity and the initial end-to-end delivery are resolved; do not conflate that with full Phase 20 closure.
 
 ---
+=======
+## P0 — Production database is rejecting writes (opened 2026-11-05 00:57 UTC; root cause confirmed 2026-11-06)
+
+**Evidence (public `/actuator/prometheus` counters since the 00:22 UTC deploy; no logs available to this review):**
+- `POST /api/v1/auth/firebase/session`: 500 `UncategorizedSQLException` on all 5 attempts — two invalid-token probes (whose only write is the audit-row insert) and three of the operator's real page loads. The SPA swallows this failure (`AuthContext` falls back to the bearer token), so the UI looks healthy.
+- `POST /api/v1/automation/plans/claim-next` (worker poll; a `SELECT … FOR UPDATE SKIP LOCKED` plus one `UPDATE`): 204 ×52 early after the deploy, then 500 `UncategorizedSQLException` ×128; between 00:55:51 and 00:57:08 UTC it failed 7 times and succeeded 0 times.
+- Every GET observed returns 200; `/actuator/health` (db `UP`) only proves connectivity.
+
+**Impact while it lasts:** new sign-ups cannot be provisioned (only the exchange creates accounts); the automation worker cannot claim plans; inbound managed mail cannot be stored — the webhook's first statement is an insert, so it answers 503 and Cloudflare retries until its retry window ends; any user write in the UI fails.
+
+**Root cause (confirmed 2026-11-06): Supabase Free-plan read-only mode.**
+
+- The project's disk is fixed at 2 GB.
+- Supabase switches the database to read-only at 95 % disk use and switches it back automatically below 95 %. Read-only queries on 6 Nov returned `default_transaction_read_only = on` with source `configuration file`.
+- Writes therefore succeed only in short windows. In between they fail, which per Supabase's docs raises SQLSTATE `25006`, a class Spring cannot categorise.
+- The disk filled after the discovery surge that began on 2 Nov: about 60,000 jobs and about 774,000 outbox rows.
+- The Render log line itself has not been read.
+
+The organisation's grace period ends on 12 Nov 2026. The evidence and the backup-first migration plan are in `ROBIN_DB_MIGRATION_PHASE2_PLAN.md` §0–§1.
+
+## P2 — Errors on public endpoints reach anonymous callers as 401 (opened 2026-11-05)
+
+**Evidence:** `GET /actuator/does-not-exist` answers 401 `"instance":"/error"`, and the failing session exchange above answered anonymous callers 401 *"Authentication is required"* instead of 500: the error dispatch to `/error` is not permitted, so any 4xx/5xx raised inside a `permitAll` endpoint is replaced by the entry point's 401. It hid this incident from an unauthenticated probe (an authenticated browser saw the real 500). Permitting the `ERROR` dispatch would make failures legible but would also let anonymous callers tell missing paths (404) from protected ones (401) — a deliberate trade-off to decide, not a one-line fix.
+
+## Resolved — Firebase revocation hardening deployed (2026-11-05 00:22 UTC, `f3204f0`)
+
+Render now serves `f3204f0` (`/actuator/info` `deployment.commit`); bearer-authenticated requests work on the fresh JVM, so revocation lookups succeed with the production service account. The session-exchange failure is tracked under the P0 above.
+
+## Resolved (was P1) — Firebase revocation hardening was on `master` but not deployed (opened 2026-11-04)
+
+**Evidence:** `a442f9b`/`484c5c5` (revocation-aware verification, session isolation) and `e3f19c4` (revocation-lookup fault classification, deleted-account session termination) change `backend/src/main`. Render's `/actuator/info` still reports `build.time` `2026-11-03T21:20:48.844Z`, which predates all three, and nine later pushes produced no new build — Render auto-deploy is evidently off. Production therefore still accepts revoked/disabled-account bearer tokens for as long as their signature is valid.
+
+**Fix:** operator triggers a manual Render deploy of current `master`, then confirms `deployment.commit` in `/actuator/info` (added by `5cd8238`) equals `origin/master`. Procedure: `ROBIN_PHASE20_VERIFICATION.md` §3.4.
+
+## P2 — Revocation is checked per bearer request only (opened 2026-11-04)
+
+**Evidence:** `FirebaseAuthenticationFilter` verifies with `checkRevoked=true` only when an `Authorization: Bearer` header is present. The SPA's `apiFetch` attaches one to every request, so normal traffic is checked; a request carrying only the session cookie is not, and stays valid until the in-memory session's idle timeout (Tomcat default, 30 minutes). Each checked request also costs one authenticated Identity Toolkit lookup — expect added per-request latency after the deploy above; measure it before deciding whether a short-TTL cache is warranted.
+
+## P2 — Receipts list answers a foreign application id with `200 {"items":[]}` (opened 2026-11-04)
+
+**Evidence:** `TrackController#receiptsList` → `ApplicationReceiptService.getAttempts` filters by `profile_id` and returns an empty list, whereas every other application-scoped GET answers 404. Not a leak (no foreign row is returned), but inconsistent; the isolation probe treats an empty owner-filtered list as a refusal.
+
+## P2 — Gmail-ingested mail is not threaded (opened 2026-11-04)
+
+**Evidence:** `GmailMessageMapper.fromApi` stores Gmail's API message id (not the RFC Message-ID) in `emails.message_id` and captures `threadId` without passing it on, so `In-Reply-To`/`References` threading (`131823a`) cannot match Gmail-ingested messages. Managed-mail (Cloudflare) replies are threaded. A Gmail design would key on `threadId` or store the RFC Message-ID alongside.
+
+## Resolved — recruiter replies follow their thread (managed mail), `131823a`
+
+Until `131823a` neither the Worker nor the backend read `In-Reply-To`/`References`, so a follow-up that did not repeat the job link or requisition fell to a weak, review-only match. Replies now carry a `THREAD_REPLY` strong signal when an earlier message of the same owner's thread is LINKED/CONFIRMED; proven by `CloudflareRecruiterLifecycleIT` scenarios 5 and 6. Worker redeployed 2026-11-04 23:36 UTC (version `579c2681…`); live effect still requires the Render deploy (`ROBIN_PHASE20_VERIFICATION.md` §3.4).
+
+## Resolved — `cloudflare-email-worker` CI coverage
+
+`6c3a72a` added the `cloudflare-email-worker` job to `.github/workflows/ci.yml`; it has passed on every master run since (runs #63, #81–#88). `b2be7e0` adds a step in the same job for the Phase 20 operator-probe tests.
+>>>>>>> origin/master
 
 ## P0 — Production database write outage (reported 2026-11-05; root cause confirmed 2026-11-06)
 

@@ -52,6 +52,8 @@ export default {
       text: parsed.text,
       html: parsed.html,
       messageId: parsed.messageId,
+      inReplyTo: parsed.inReplyTo,
+      references: parsed.references,
       date: parsed.date,
       spf: parsed.spf,
       dkim: parsed.dkim,

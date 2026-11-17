@@ -1,11 +1,14 @@
 package com.personal.jobagent.security;
 
 import com.google.auth.oauth2.GoogleCredentials;
+import com.google.firebase.ErrorCode;
 import com.google.firebase.FirebaseApp;
 import com.google.firebase.FirebaseOptions;
+import com.google.firebase.auth.AuthErrorCode;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseAuthException;
 import com.google.firebase.auth.FirebaseToken;
+import com.personal.jobagent.common.LogScrubber;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -82,35 +85,43 @@ public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
 
     private final Object initLock = new Object();
 
+    @org.springframework.beans.factory.annotation.Autowired
     public FirebaseAdminTokenVerifier(FirebaseProperties properties) {
         this.properties = properties;
+    }
+
+    /**
+     * Package-private constructor allowing injection of a pre-configured or mocked
+     * {@link FirebaseAuth} instance for unit and regression testing without hitting
+     * production Google endpoints.
+     */
+    FirebaseAdminTokenVerifier(FirebaseProperties properties, FirebaseAuth firebaseAuth) {
+        this.properties = properties;
+        this.firebaseAuth = firebaseAuth;
     }
 
     @Override
     public VerifiedIdentity verifyIdToken(String idToken) {
         if (idToken == null || idToken.isBlank()) {
-            throw new InvalidToken("No Firebase ID token was supplied.");
+            throw new InvalidToken("No Firebase ID token was supplied.", InvalidationReason.MALFORMED, null);
         }
 
         FirebaseToken decoded;
         try {
-            decoded = auth().verifyIdToken(idToken);
+            decoded = auth().verifyIdToken(idToken, true);
         } catch (FirebaseAuthException e) {
-            // Covers expiry, bad signature, wrong audience/issuer, revoked
-            // tokens and non-ID tokens. The SDK's message names which, which
-            // is useful in the server log; the HTTP response stays generic.
-            throw new InvalidToken("Firebase ID token could not be verified.", e);
+            throw classify(e);
         } catch (IllegalArgumentException e) {
-            throw new InvalidToken("Firebase ID token was malformed.", e);
+            throw new InvalidToken("Firebase ID token was malformed.", InvalidationReason.MALFORMED, e);
         } catch (Unavailable e) {
             throw e; // configuration fault, not a credential fault
         } catch (RuntimeException e) {
-            throw new InvalidToken("Firebase ID token could not be verified.", e);
+            throw new InvalidToken("Firebase ID token could not be verified.", InvalidationReason.UNKNOWN, e);
         }
 
         String uid = decoded.getUid();
         if (uid == null || uid.isBlank()) {
-            throw new InvalidToken("Firebase ID token carried no subject.");
+            throw new InvalidToken("Firebase ID token carried no subject.", InvalidationReason.MALFORMED, null);
         }
 
         return new VerifiedIdentity(
@@ -118,6 +129,62 @@ public class FirebaseAdminTokenVerifier implements FirebaseTokenVerifier {
                 decoded.getEmail(),
                 decoded.getName(),
                 decoded.isEmailVerified());
+    }
+
+    /**
+     * Separates "this token or account is not acceptable" (401, and for an
+     * account that has been cut off, the end of any existing session) from
+     * "the server could not complete verification" (503).
+     *
+     * <p>With {@code checkRevoked=true} every verification makes an
+     * authenticated Admin API lookup, so quota exhaustion, a Google-side fault,
+     * or a service account lacking permission would otherwise be reported as a
+     * bad token: every legitimate user would be signed out and the only trace
+     * would be a DEBUG line. Those are server faults and surface as
+     * {@link Unavailable} with an operator-visible log entry. Anything not
+     * recognised still fails closed, but is logged at WARN.
+     */
+    static RuntimeException classify(FirebaseAuthException e) {
+        AuthErrorCode authCode = e.getAuthErrorCode();
+        ErrorCode errorCode = e.getErrorCode();
+
+        InvalidationReason reason = authCode == null ? null : switch (authCode) {
+            case REVOKED_ID_TOKEN -> InvalidationReason.REVOKED;
+            case USER_DISABLED -> InvalidationReason.USER_DISABLED;
+            case USER_NOT_FOUND -> InvalidationReason.ACCOUNT_DELETED;
+            case EXPIRED_ID_TOKEN -> InvalidationReason.EXPIRED;
+            case INVALID_ID_TOKEN, TENANT_ID_MISMATCH -> InvalidationReason.INVALID_SIGNATURE;
+            default -> null;
+        };
+        if (reason != null) {
+            log.debug("Firebase ID token rejected: reason={}, authCode={}", reason, authCode);
+            return new InvalidToken("Firebase ID token could not be verified: " + reason, reason, e);
+        }
+
+        if (authCode == AuthErrorCode.CERTIFICATE_FETCH_FAILED
+                || errorCode == ErrorCode.UNAVAILABLE
+                || errorCode == ErrorCode.DEADLINE_EXCEEDED
+                || errorCode == ErrorCode.RESOURCE_EXHAUSTED
+                || errorCode == ErrorCode.INTERNAL
+                || e.getCause() instanceof IOException) {
+            log.warn("Firebase authentication service is unavailable: {} (errorCode: {}, authCode: {})",
+                    LogScrubber.scrub(e.getMessage()), errorCode, authCode);
+            return new Unavailable("Firebase authentication service is unavailable.", e);
+        }
+
+        if (errorCode == ErrorCode.PERMISSION_DENIED
+                || errorCode == ErrorCode.UNAUTHENTICATED
+                || authCode == AuthErrorCode.CONFIGURATION_NOT_FOUND
+                || authCode == AuthErrorCode.TENANT_NOT_FOUND) {
+            log.error("Firebase Admin credentials were refused during ID token revocation check: {} "
+                            + "(errorCode: {}, authCode: {}). Check the service account's Firebase Authentication permissions.",
+                    LogScrubber.scrub(e.getMessage()), errorCode, authCode);
+            return new Unavailable("Firebase Admin credentials could not complete token verification.", e);
+        }
+
+        log.warn("Firebase ID token verification failed with an unrecognised error (errorCode: {}, authCode: {})",
+                errorCode, authCode);
+        return new InvalidToken("Firebase ID token could not be verified.", InvalidationReason.UNKNOWN, e);
     }
 
     /**

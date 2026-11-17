@@ -8,7 +8,13 @@ Evidence → Tsenta comparison → prioritisation → implementation → verific
 
 **Verified:** one real email completed Cloudflare → Worker → Render → Postgres, encrypted, persisted and visible in Robin. Encryption-key continuity was checked before provisioning the new key. The managed-mail unit and PostgreSQL integration suites pass.
 
+<<<<<<< HEAD
 **Still not production-verified:** duplicate webhook redelivery/idempotency on the live Cloudflare→Render path, email-to-application association, automatic OTP extraction/use in a real supported employer verification flow, and the full recruiter-communication lifecycle. Do not claim Phase 20 closed based on a single delivered email or test-container coverage. See `ROBIN_PHASE20_VERIFICATION.md` §4.3.
+=======
+## Phase 20.2 — Add CI coverage for `cloudflare-email-worker` — **DONE, commit `6c3a72a`**
+**Why:** the one package in the Phase 20 critical path currently has zero CI gate.
+**Acceptance criteria:** new job in `.github/workflows/ci.yml` running `npm test --prefix cloudflare-email-worker`; green on the next PR.
+>>>>>>> origin/master
 
 ### Phase 20.1 — Fix Workday capability-registry truthfulness — **DONE**
 

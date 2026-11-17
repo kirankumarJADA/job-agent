@@ -30,13 +30,16 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -102,8 +105,22 @@ public class EmailIntelligenceService {
      */
     public record ConnectorMessage(String providerId, String messageId, String from, String to, String subject,
                                    String body, Instant receivedAt, String mailboxAddress,
-                                   SenderAuthentication authentication) {
+                                   SenderAuthentication authentication, List<String> threadReferences) {
+
+        public ConnectorMessage {
+            threadReferences = threadReferences == null ? List.of() : List.copyOf(threadReferences);
+        }
+
+        /** A message whose connector reports no In-Reply-To/References (e.g. Gmail, keyed by its own ids). */
+        public ConnectorMessage(String providerId, String messageId, String from, String to, String subject,
+                                String body, Instant receivedAt, String mailboxAddress,
+                                SenderAuthentication authentication) {
+            this(providerId, messageId, from, to, subject, body, receivedAt, mailboxAddress, authentication, List.of());
+        }
     }
+
+    /** Upper bound on thread ids looked up per message; References can grow without limit. */
+    static final int MAX_THREAD_REFERENCES = 20;
 
     private static final Pattern OTP = Pattern.compile("\\b\\d{4,8}\\b");
 
@@ -157,7 +174,7 @@ public class EmailIntelligenceService {
                                String subject, String body, Instant received, UUID applicationId) {
         Objects.requireNonNull(ownerProfileId, "ownerProfileId is required to ingest an email");
         return process(ownerProfileId, messageId, from, to, subject, body, received, applicationId,
-                Channel.CANDIDATE_FORWARDED, null, null);
+                Channel.CANDIDATE_FORWARDED, null, null, List.of());
     }
 
     /** The authenticated mailbox-connector boundary (see {@link ConnectorMessage}). */
@@ -168,12 +185,35 @@ public class EmailIntelligenceService {
         return process(ownerProfileId, message.messageId(), message.from(), message.to(), message.subject(),
                 message.body(), message.receivedAt(), null, Channel.MAILBOX_CONNECTOR,
                 message.authentication() == null ? SenderAuthentication.none() : message.authentication(),
-                message.mailboxAddress());
+                message.mailboxAddress(), message.threadReferences());
+    }
+
+    /**
+     * The owner's applications that messages this one replies to are already
+     * linked to (LINKED or CONFIRMED). Scoped to the owner on both tables, so a
+     * thread id that also exists in another account's mail reveals nothing.
+     */
+    private Set<UUID> threadApplications(UUID ownerProfileId, List<String> references) {
+        if (references == null || references.isEmpty()) return Set.of();
+        List<String> ids = references.stream().filter(Objects::nonNull).map(String::trim)
+                .filter(id -> !id.isEmpty() && id.length() <= 255).distinct().limit(MAX_THREAD_REFERENCES).toList();
+        if (ids.isEmpty()) return Set.of();
+        List<Object> args = new ArrayList<>();
+        args.add(ownerProfileId);
+        args.addAll(ids);
+        return new LinkedHashSet<>(db.query("""
+                select distinct l.application_id from emails e
+                join email_application_links l on l.email_id = e.id and l.profile_id = e.profile_id
+                where e.profile_id = ? and l.application_id is not null and l.status in ('LINKED', 'CONFIRMED')
+                  and e.message_id in (%s)
+                """.formatted(String.join(",", Collections.nCopies(ids.size(), "?"))),
+                (rs, n) -> (UUID) rs.getObject(1), args.toArray()));
     }
 
     private IngestResult process(UUID ownerProfileId, String messageId, String from, String to, String subject,
                                  String body, Instant received, UUID assertedApplicationId, Channel channel,
-                                 SenderAuthentication authentication, String mailboxAddress) {
+                                 SenderAuthentication authentication, String mailboxAddress,
+                                 List<String> threadReferences) {
         boolean receivedTimeKnown = received != null;
         Instant receivedAt = received == null ? Instant.now() : received;
         if (assertedApplicationId != null && track.application(ownerProfileId, assertedApplicationId).isEmpty()) {
@@ -194,7 +234,7 @@ public class EmailIntelligenceService {
         EmailCategory category = classification.category();
         MessageEvidence messageEvidence = MessageEvidence.of(from, subject, body);
         Association association = matcher.match(messageEvidence, track.ownedApplicationsForMatching(ownerProfileId),
-                assertedApplicationId, category);
+                assertedApplicationId, category, threadApplications(ownerProfileId, threadReferences));
         String contentFingerprint = TrackText.sha256(TrackText.lower(from) + "|" + TrackText.lower(subject) + "|"
                 + (receivedTimeKnown ? receivedAt.getEpochSecond() : "unknown") + "|" + TrackText.sha256(body));
         boolean retainBody = category == EmailCategory.VERIFICATION_CODE;

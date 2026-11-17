@@ -1,5 +1,6 @@
 package com.personal.jobagent.mailbox.managed;
 
+import com.personal.jobagent.common.MaintenanceModeService;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.email.EmailIntelligenceService;
 import com.personal.jobagent.track.ReceiptVerificationPolicy;
@@ -78,21 +79,30 @@ public class ManagedInboundService {
     private final ManagedMailboxService mailboxes;
     private final ManagedMessageContent content;
     private final ObjectProvider<EmailIntelligenceService> emailIntelligence;
+    private final MaintenanceModeService maintenanceMode;
 
     @org.springframework.beans.factory.annotation.Autowired
     public ManagedInboundService(JdbcTemplate db, ManagedMailSettings settings, ManagedMailboxService mailboxes,
                                  ManagedMessageContent content,
-                                 ObjectProvider<EmailIntelligenceService> emailIntelligence) {
+                                 ObjectProvider<EmailIntelligenceService> emailIntelligence,
+                                 @org.springframework.beans.factory.annotation.Autowired(required = false) MaintenanceModeService maintenanceMode) {
         this.db = db;
         this.settings = settings;
         this.mailboxes = mailboxes;
         this.content = content;
         this.emailIntelligence = emailIntelligence;
+        this.maintenanceMode = maintenanceMode != null ? maintenanceMode : new MaintenanceModeService(false);
+    }
+
+    public ManagedInboundService(JdbcTemplate db, ManagedMailSettings settings, ManagedMailboxService mailboxes,
+                                 ManagedMessageContent content,
+                                 ObjectProvider<EmailIntelligenceService> emailIntelligence) {
+        this(db, settings, mailboxes, content, emailIntelligence, new MaintenanceModeService(false));
     }
 
     public ManagedInboundService(JdbcTemplate db, ManagedMailSettings settings, ManagedMailboxService mailboxes,
                                  ManagedMessageContent content) {
-        this(db, settings, mailboxes, content, null);
+        this(db, settings, mailboxes, content, null, new MaintenanceModeService(false));
     }
 
     /**
@@ -121,6 +131,9 @@ public class ManagedInboundService {
     @Transactional
     public Outcome accept(String providerId, InboundMailMessage message, String rejection,
                           String token, Instant signedAt, String payloadSha256) {
+        if (maintenanceMode != null && maintenanceMode.isMaintenanceMode()) {
+            throw new IllegalStateException("Maintenance mode active: inbound delivery paused");
+        }
         String tokenHash = TrackText.sha256(token);
         int fresh = db.update("""
                 insert into managed_mail_webhook_tokens (token_sha256, provider_id, signed_at, payload_sha256)
@@ -193,7 +206,8 @@ public class ManagedInboundService {
                             message.text(),
                             signedAt != null ? signedAt : now,
                             message.envelopeRecipient(),
-                            auth
+                            auth,
+                            message.threadReferences()
                     );
                     intel.ingestFromMailboxConnector(owner.profileId(), connectorMessage);
                 } catch (Exception e) {
