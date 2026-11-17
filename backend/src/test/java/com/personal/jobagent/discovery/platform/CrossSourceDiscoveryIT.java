@@ -148,7 +148,17 @@ class CrossSourceDiscoveryIT {
         var b = ingest(ats2, "lv-b-" + n, "Software Engineer", "Identity team",
                 "https://jobs.lever.co/acme" + n + "/" + UUID.randomUUID(), null);
         assertThat(a.jobId()).isNotEqualTo(b.jobId());
-        assertThat(a.dedupKey()).isEqualTo(b.dedupKey()); // same old title key — and still two jobs
+        // Identity is provider + organisation + external job ID, not employer/title/location.
+        assertThat(a.dedupKey()).isEqualTo(identityKey(ats, "gh-a-" + n)).isNotEqualTo(b.dedupKey());
+        assertThat(b.dedupKey()).isEqualTo(identityKey(ats2, "lv-b-" + n));
+        assertThat(List.of(a.dedupKey(), b.dedupKey()))
+                .doesNotContain(JobDiscoveryService.computeDedupKey("Acme Ltd", "Software Engineer", "London"));
+    }
+
+    private String identityKey(UUID source, String externalId) {
+        Map<String, Object> row = jdbc.queryForMap("select kind, org_identifier from job_sources where id = ?", source);
+        return JobDiscoveryService.computeDedupKey((String) row.get("kind"), (String) row.get("org_identifier"),
+                externalId, null, null, null, null);
     }
 
     @Test
