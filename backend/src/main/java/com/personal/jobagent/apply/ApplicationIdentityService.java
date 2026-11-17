@@ -81,52 +81,51 @@ public class ApplicationIdentityService {
         return com.personal.jobagent.discovery.platform.JobIdentity.atsKey(url);
     }
 
-    /** Normalised URL: lowercase host, no fragment, no tracking parameters, no trailing slash. */
+    /** Normalised URL: delegates to canonical JobIdentity.normalizeUrl. */
     static String normalizeUrl(String url) {
-        if (url == null || url.isBlank()) return null;
-        try {
-            URI uri = URI.create(url.trim());
-            if (uri.getHost() == null) return null;
-            String scheme = uri.getScheme() == null ? "https" : uri.getScheme().toLowerCase(Locale.ROOT);
-            String host = uri.getHost().toLowerCase(Locale.ROOT);
-            int port = uri.getPort();
-            String authority = (port == -1 || ("https".equals(scheme) && port == 443) || ("http".equals(scheme) && port == 80))
-                    ? host : host + ":" + port;
-            String path = uri.getPath() == null ? "" : uri.getPath();
-            while (path.endsWith("/")) path = path.substring(0, path.length() - 1);
-            String query = uri.getRawQuery();
-            StringBuilder kept = new StringBuilder();
-            if (query != null) {
-                java.util.List<String> pairs = new ArrayList<>();
-                for (String pair : query.split("&")) {
-                    if (pair.isBlank()) continue;
-                    String name = pair.split("=", 2)[0].toLowerCase(Locale.ROOT);
-                    if (isTrackingParam(name)) continue;
-                    pairs.add(pair.toLowerCase(Locale.ROOT));
-                }
-                pairs.sort(String::compareTo);
-                for (String pair : pairs) kept.append(kept.isEmpty() ? "" : "&").append(pair);
-            }
-            return scheme + "://" + authority + path + (kept.isEmpty() ? "" : "?" + kept);
-        } catch (IllegalArgumentException e) {
-            return null;
-        }
+        return com.personal.jobagent.discovery.platform.JobIdentity.normalizeUrl(url);
     }
 
-    private static boolean isTrackingParam(String name) {
-        return name.startsWith("utm_") || name.equals("gclid") || name.equals("fbclid") || name.equals("msclkid")
-                || name.equals("ref") || name.equals("source") || name.equals("src") || name.equals("gh_src")
-                || name.startsWith("lever-") || name.equals("tk") || name.equals("tracking") || name.equals("campaign");
+    public static boolean isTrackingParam(String name) {
+        return com.personal.jobagent.discovery.platform.JobIdentity.isTrackingParam(name);
+    }
+
+    /** Pre-Wave-1 legacy identity key used for dual-read duplicate matching. */
+    public String legacyIdentityKey(String canonicalUrl, String applicationUrl, String sourceKind, String externalId) {
+        String fromCanonical = boardIdentity(canonicalUrl);
+        if (fromCanonical != null) return fromCanonical;
+        String fromApplication = boardIdentity(applicationUrl);
+        if (fromApplication != null) return fromApplication;
+        boolean canonicalUsable = canonicalUrl != null && !canonicalUrl.isBlank()
+                && !(com.personal.jobagent.discovery.platform.JobIdentity.isAggregatorUrl(canonicalUrl)
+                     && applicationUrl != null && !applicationUrl.isBlank());
+        String normalized = com.personal.jobagent.discovery.platform.JobIdentity.legacyNormalizeUrl(canonicalUsable ? canonicalUrl : applicationUrl);
+        if (normalized != null) return "url:" + normalized;
+        if (sourceKind != null && externalId != null && !externalId.isBlank()) {
+            return "src:" + sourceKind.toLowerCase(Locale.ROOT) + ":" + externalId.trim();
+        }
+        return null;
+    }
+
+    public String legacyIdentityKeyForJob(UUID jobId) {
+        return db.query("""
+                select j.canonical_url, j.application_url, s.kind, j.external_id
+                from jobs j join job_sources s on s.id = j.source_id
+                where j.id = ?
+                """, (rs, n) -> legacyIdentityKey(rs.getString("canonical_url"), rs.getString("application_url"),
+                rs.getString("kind"), rs.getString("external_id")), jobId)
+                .stream().findFirst().orElse(null);
     }
 
     /**
      * The caller's own live applications that share this job's identity —
      * including legacy rows created before V036 (their key is derived on the
-     * fly). Empty when there is no duplicate or when no identity can be
-     * established.
+     * fly), supporting dual-read matching against both canonical and legacy keys.
+     * Empty when there is no duplicate or when no identity can be established.
      */
     public List<ExistingApplication> findDuplicates(UUID profileId, UUID jobId) {
         String target = identityKeyForJob(jobId);
+        String legacyTarget = legacyIdentityKeyForJob(jobId);
         if (target == null || profileId == null) return List.of();
         List<Map<String, Object>> rows = db.queryForList("""
                 select a.id, a.job_id, a.status, a.identity_key,
@@ -143,7 +142,7 @@ public class ApplicationIdentityService {
             String key = row.get("identity_key") instanceof String stored && !stored.isBlank() ? stored
                     : identityKey((String) row.get("canonical_url"), (String) row.get("application_url"),
                     (String) row.get("source_kind"), (String) row.get("external_id"));
-            if (target.equals(key)) {
+            if (target.equals(key) || (legacyTarget != null && legacyTarget.equals(key))) {
                 duplicates.add(new ExistingApplication((UUID) row.get("id"), existingJob,
                         (String) row.get("status"), key, describeMatch(target)));
             }
@@ -153,12 +152,27 @@ public class ApplicationIdentityService {
 
     public List<ExistingApplication> findByIdentity(UUID profileId, String identityKey) {
         if (profileId == null || identityKey == null) return List.of();
-        return db.query("""
+        String legacyKey = null;
+        if (identityKey.startsWith("url:")) {
+            String leg = com.personal.jobagent.discovery.platform.JobIdentity.legacyNormalizeUrl(identityKey.substring(4));
+            if (leg != null) legacyKey = "url:" + leg;
+        }
+        boolean hasLegacy = legacyKey != null && !legacyKey.equals(identityKey);
+        String sql = hasLegacy
+                ? """
+                select id, job_id, status, identity_key from applications
+                where profile_id = ? and (identity_key = ? or identity_key = ?) and status not in ('FAILED','WITHDRAWN')
+                """
+                : """
                 select id, job_id, status, identity_key from applications
                 where profile_id = ? and identity_key = ? and status not in ('FAILED','WITHDRAWN')
-                """, (rs, n) -> new ExistingApplication((UUID) rs.getObject("id"), (UUID) rs.getObject("job_id"),
+                """;
+        Object[] args = hasLegacy
+                ? new Object[]{profileId, identityKey, legacyKey}
+                : new Object[]{profileId, identityKey};
+        return db.query(sql, (rs, n) -> new ExistingApplication((UUID) rs.getObject("id"), (UUID) rs.getObject("job_id"),
                 rs.getString("status"), rs.getString("identity_key"), describeMatch(identityKey)),
-                profileId, identityKey);
+                args);
     }
 
     /** Owner-scoped: only ever reveals the caller's own duplicate. */

@@ -149,8 +149,10 @@ public class JobDiscoveryService {
 
         List<JobIdentity.Key> keys = JobIdentity.keys(cmd.sourceId(), cmd.externalId(), cmd.canonicalUrl(),
                 applicationUrl, cmd.companyNameRaw(), cmd.requisitionId());
-        lockKeys(keys);
-        Match match = resolve(keys, cmd);
+        List<JobIdentity.Key> lookupKeys = JobIdentity.lookupKeys(cmd.sourceId(), cmd.externalId(), cmd.canonicalUrl(),
+                applicationUrl, cmd.companyNameRaw(), cmd.requisitionId());
+        lockKeys(lookupKeys);
+        Match match = resolve(lookupKeys, cmd);
 
         if (match != null) {
             List<Map<String, Object>> rows = jdbcTemplate.queryForList(

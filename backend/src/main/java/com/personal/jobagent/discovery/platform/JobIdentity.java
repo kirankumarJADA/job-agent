@@ -54,6 +54,29 @@ public final class JobIdentity {
         }
     }
 
+    /**
+     * Identifies aggregator and job-board hosts (Tsenta, Adzuna, Arbeitnow, FreeHire, SEEK, Indeed).
+     * Used for ranking URLs so genuine employer and ATS URLs supersede job boards.
+     */
+    public static boolean isJobBoardUrl(String url) {
+        if (url == null) return false;
+        try {
+            String host = URI.create(url.strip()).getHost();
+            if (host == null) return false;
+            String h = host.toLowerCase(Locale.ROOT);
+            if (h.startsWith("www.")) h = h.substring(4);
+            return isAggregatorUrl(url)
+                    || h.equals("arbeitnow.com") || h.endsWith(".arbeitnow.com")
+                    || h.equals("freehire.co.uk") || h.endsWith(".freehire.co.uk")
+                    || h.equals("freehire.org") || h.endsWith(".freehire.org")
+                    || h.equals("adzuna.com") || h.startsWith("adzuna.") || h.contains(".adzuna.")
+                    || h.equals("seek.com.au") || h.startsWith("seek.") || h.contains(".seek.")
+                    || h.equals("indeed.com") || h.startsWith("indeed.") || h.contains(".indeed.");
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
     /** All identity keys for one ingested posting, strongest first, without duplicates. */
     public static List<Key> keys(UUID sourceId, String externalId, String sourceUrl, String applicationUrl,
                                  String employer, String requisitionId) {
@@ -74,6 +97,23 @@ public final class JobIdentity {
             if (normalized != null) keys.add(new Key(KeyType.URL, normalized));
         }
         return new ArrayList<>(keys);
+    }
+
+    /**
+     * Identity keys including legacy URL normalisation forms for dual-read lookups.
+     * Advisory-locked and queried during identity resolution, but never stored on new rows.
+     */
+    public static List<Key> lookupKeys(UUID sourceId, String externalId, String sourceUrl, String applicationUrl,
+                                       String employer, String requisitionId) {
+        List<Key> canonical = keys(sourceId, externalId, sourceUrl, applicationUrl, employer, requisitionId);
+        Set<Key> all = new LinkedHashSet<>(canonical);
+        for (String url : new String[]{applicationUrl, sourceUrl}) {
+            String legacy = legacyNormalizeUrl(url);
+            if (legacy != null) {
+                all.add(new Key(KeyType.URL, legacy));
+            }
+        }
+        return new ArrayList<>(all);
     }
 
     /**
@@ -114,9 +154,15 @@ public final class JobIdentity {
         int n = s.size();
 
         if ((host.equals("boards.greenhouse.io") || host.equals("job-boards.greenhouse.io")
-                || host.equals("job-boards.eu.greenhouse.io") || host.equals("boards.eu.greenhouse.io"))
-                && n >= 3 && "jobs".equals(s.get(n - 2))) {
-            return "greenhouse:" + s.get(n - 3) + ":" + s.get(n - 1);
+                || host.equals("job-boards.eu.greenhouse.io") || host.equals("boards.eu.greenhouse.io"))) {
+            if (n >= 3 && "jobs".equals(s.get(n - 2))) {
+                return "greenhouse:" + s.get(n - 3) + ":" + s.get(n - 1);
+            }
+            Matcher mFor = Pattern.compile("(?:^|&)for=([^&]+)").matcher(query);
+            Matcher mToken = Pattern.compile("(?:^|&)token=([^&]+)").matcher(query);
+            if (mFor.find() && mToken.find()) {
+                return "greenhouse:" + mFor.group(1).toLowerCase(Locale.ROOT) + ":" + mToken.group(1);
+            }
         }
         if (host.equals("jobs.ashbyhq.com") && n >= 2) {
             String id = s.get(1);
@@ -186,11 +232,72 @@ public final class JobIdentity {
             Matcher m = Pattern.compile("^(\\d+)").matcher(s.get(1));
             if (m.find()) return "teamtailor:" + host + ":" + m.group(1);
         }
+        if (host.endsWith(".recruitee.com")) {
+            int o = s.indexOf("o");
+            if (o >= 0 && n > o + 1) {
+                return "recruitee:" + host.substring(0, host.indexOf('.')).toLowerCase(Locale.ROOT) + ":" + s.get(o + 1).toLowerCase(Locale.ROOT);
+            }
+        }
+        if (host.endsWith(".phenom.com") || host.endsWith(".phenompeople.com")) {
+            int j = s.indexOf("job");
+            if (j >= 0 && n > j + 1) {
+                return "phenom:" + host + ":" + s.get(j + 1).toLowerCase(Locale.ROOT);
+            }
+        }
         return null;
     }
 
-    /** Normalised URL: lowercase scheme/host, default port dropped, no fragment, no tracking params, no trailing slash. */
+    /**
+     * Canonical normalised URL:
+     * - lowercase scheme and host;
+     * - drop default port (80 for http, 443 for https);
+     * - treat http and https as equivalent (normalized to https for identity keys);
+     * - treat leading www. as equivalent (stripped);
+     * - decode RFC 3986 §6.2.2.2 unreserved characters;
+     * - drop fragment and trailing slash;
+     * - filter tracking parameters (including mc_*);
+     * - retain original case of query parameter values;
+     * - sort query parameters by key name.
+     */
     public static String normalizeUrl(String url) {
+        if (url == null || url.isBlank()) return null;
+        try {
+            URI uri = URI.create(url.strip());
+            if (uri.getHost() == null) return null;
+            String rawScheme = uri.getScheme() == null ? "https" : uri.getScheme().toLowerCase(Locale.ROOT);
+            if (!rawScheme.equals("http") && !rawScheme.equals("https")) return null;
+            String host = uri.getHost().toLowerCase(Locale.ROOT);
+            if (host.startsWith("www.")) {
+                host = host.substring(4);
+            }
+            int port = uri.getPort();
+            String authority = (port == -1 || ("https".equals(rawScheme) && port == 443) || ("http".equals(rawScheme) && port == 80))
+                    ? host : host + ":" + port;
+            String path = uri.getRawPath() == null ? "" : uri.getRawPath();
+            while (path.endsWith("/") && !path.isEmpty()) {
+                path = path.substring(0, path.length() - 1);
+            }
+            path = decodeUnreserved(path);
+            List<String> pairs = new ArrayList<>();
+            if (uri.getRawQuery() != null) {
+                for (String pair : uri.getRawQuery().split("&")) {
+                    if (pair.isBlank()) continue;
+                    String[] parts = pair.split("=", 2);
+                    String name = decodeUnreserved(parts[0]).toLowerCase(Locale.ROOT);
+                    if (isTrackingParam(name)) continue;
+                    String val = parts.length > 1 ? decodeUnreserved(parts[1]) : "";
+                    pairs.add(parts.length > 1 ? name + "=" + val : name);
+                }
+            }
+            pairs.sort(String::compareTo);
+            return "https://" + authority + path + (pairs.isEmpty() ? "" : "?" + String.join("&", pairs));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /** Pre-Wave-1 legacy URL normaliser retained for dual-read lookups. */
+    public static String legacyNormalizeUrl(String url) {
         if (url == null || url.isBlank()) return null;
         try {
             URI uri = URI.create(url.strip());
@@ -219,20 +326,50 @@ public final class JobIdentity {
         }
     }
 
+    public static String decodeUnreserved(String s) {
+        if (s == null || !s.contains("%")) return s;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); ) {
+            if (s.charAt(i) == '%' && i + 2 < s.length()) {
+                String hex = s.substring(i + 1, i + 3);
+                try {
+                    int val = Integer.parseInt(hex, 16);
+                    if ((val >= 'A' && val <= 'Z') || (val >= 'a' && val <= 'z')
+                            || (val >= '0' && val <= '9') || val == '-' || val == '.' || val == '_' || val == '~') {
+                        sb.append((char) val);
+                        i += 3;
+                        continue;
+                    }
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            sb.append(s.charAt(i));
+            i++;
+        }
+        return sb.toString();
+    }
+
     public static boolean isTrackingParam(String name) {
-        return name.startsWith("utm_") || name.equals("gclid") || name.equals("fbclid") || name.equals("msclkid")
-                || name.equals("ref") || name.equals("source") || name.equals("src") || name.equals("gh_src")
-                || name.startsWith("lever-") || name.equals("tk") || name.equals("tracking") || name.equals("campaign")
-                || name.equals("in_iframe") || name.equals("oga") || name.equals("trk");
+        if (name == null) return false;
+        String n = name.toLowerCase(Locale.ROOT);
+        return n.startsWith("utm_") || n.startsWith("mc_") || n.startsWith("lever-")
+                || n.equals("gclid") || n.equals("fbclid") || n.equals("msclkid")
+                || n.equals("ref") || n.equals("source") || n.equals("src") || n.equals("gh_src")
+                || n.equals("tk") || n.equals("tracking") || n.equals("campaign")
+                || n.equals("in_iframe") || n.equals("oga") || n.equals("trk");
     }
 
     /**
-     * How good an application URL is: an ATS job URL (3) beats an employer
-     * page (2); aggregator URLs are not application URLs at all (0).
+     * How good an application URL is:
+     * - ATS job URL (3)
+     * - Employer page (2)
+     * - Job board / aggregator (1)
+     * - Pure aggregator (0)
      */
     public static int applicationUrlRank(String url) {
         if (url == null || url.isBlank()) return 0;
         if (isAggregatorUrl(url)) return 0;
+        if (isJobBoardUrl(url)) return 1;
         return atsKey(url) != null ? 3 : 2;
     }
 }
