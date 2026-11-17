@@ -254,19 +254,92 @@ class CrossSourceDiscoveryIT {
     }
 
     @Test
-    void aJobStillListedByAnotherSourceIsNotRemoved() {
+    void aJobStillListedByAnotherAuthoritativeSourceIsNotRemoved() {
         String board = "xs" + unique();
         UUID gem = source("GEM", board);
         Scripted a = new Scripted();
         a.listing = BoardAdapter.ListingResult.complete(List.of(posting(board, "keep")), 1, null);
         boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.MANUAL);
-        // The same posting is also listed by the aggregator.
+        // The same posting is also listed by another authoritative ATS source (LEVER).
         String url = "https://jobs.gem.com/" + board + "/keep";
-        ingest(aggregator, "ts-keep-" + board, "Role keep", "Body", url, "https://tsenta.com/jobs/keep-" + board);
+        ingest(ats2, "lev-keep-" + board, "Role keep", "Body", url, url);
 
         a.listing = BoardAdapter.ListingResult.complete(List.of(), 1, null);
         boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.MANUAL);
         assertThat(deletedAt(gem, "keep")).isNull();
+    }
+
+    @Test
+    void anAggregatorDoesNotKeepAJobAliveOnceAuthoritativeSourceClosesIt() {
+        String board = "xs" + unique();
+        UUID gem = source("GEM", board);
+        Scripted a = new Scripted();
+        a.listing = BoardAdapter.ListingResult.complete(List.of(posting(board, "agg-drop")), 1, null);
+        boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.MANUAL);
+        // The same posting is listed by the aggregator (TSENTA).
+        String url = "https://jobs.gem.com/" + board + "/agg-drop";
+        ingest(aggregator, "ts-drop-" + board, "Role drop", "Body", url, "https://tsenta.com/jobs/drop-" + board);
+
+        // GEM completes a run without the job -> Authoritative source marks it missing
+        a.listing = BoardAdapter.ListingResult.complete(List.of(), 1, null);
+        boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.MANUAL);
+        // P1-1: Aggregator SEEN observation does NOT keep it alive
+        assertThat(deletedAt(gem, "agg-drop")).isNotNull();
+
+        // Aggregator re-ingests the job -> Aggregator does NOT resurrect the closed job
+        ingest(aggregator, "ts-drop-" + board, "Role drop", "Body", url, "https://tsenta.com/jobs/drop-" + board);
+        assertThat(deletedAt(gem, "agg-drop")).isNotNull();
+
+        // Authoritative GEM lists the job again -> Authoritative source RESTORES it
+        a.listing = BoardAdapter.ListingResult.complete(List.of(posting(board, "agg-drop")), 1, null);
+        boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.MANUAL);
+        assertThat(deletedAt(gem, "agg-drop")).isNull();
+    }
+
+    @Test
+    void discoveryRunHistoryIsRecordedInDiscoveryRunsTable() {
+        String board = "xs" + unique();
+        UUID gem = source("GEM", board);
+        Scripted a = new Scripted();
+        a.listing = BoardAdapter.ListingResult.complete(List.of(posting(board, "r1")), 1, null);
+        boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.SCHEDULED);
+
+        List<Map<String, Object>> runs = jdbc.queryForList("""
+                select kind, mode, status, complete, duration_ms, counters
+                from discovery_runs where source_id = ?
+                """, gem);
+        assertThat(runs).hasSize(1);
+        Map<String, Object> run = runs.get(0);
+        assertThat(run.get("kind")).isEqualTo("GEM");
+        assertThat(run.get("mode")).isEqualTo("SCHEDULED");
+        assertThat(run.get("status")).isEqualTo("ok");
+        assertThat(run.get("complete")).isEqualTo(true);
+        assertThat(((Number) run.get("duration_ms")).longValue()).isGreaterThanOrEqualTo(0);
+    }
+
+    @Test
+    void touchedEventsAreRateLimitedWithinInterval() {
+        org.springframework.test.util.ReflectionTestUtils.setField(ingestion, "touchedEventIntervalHours", 24);
+        try {
+            String board = "xs" + unique();
+            UUID gem = source("GEM", board);
+            Scripted a = new Scripted();
+            a.listing = BoardAdapter.ListingResult.complete(List.of(posting(board, "rate-limit")), 1, null);
+            boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.MANUAL);
+
+            int initialDiscoveredEvents = jdbc.queryForObject(
+                    "select count(*)::int from outbox_events where event_type = 'job.discovered'", Integer.class);
+            assertThat(initialDiscoveredEvents).isGreaterThanOrEqualTo(1);
+
+            // Immediate second run with unchanged content -> TOUCHED path
+            boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.MANUAL);
+            int afterSecondRun = jdbc.queryForObject(
+                    "select count(*)::int from outbox_events where event_type = 'job.discovered'", Integer.class);
+            // TOUCHED event within 24 hours should be suppressed
+            assertThat(afterSecondRun).isEqualTo(initialDiscoveredEvents);
+        } finally {
+            org.springframework.test.util.ReflectionTestUtils.setField(ingestion, "touchedEventIntervalHours", 0);
+        }
     }
 
     @Test

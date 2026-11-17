@@ -82,6 +82,8 @@ public class BoardDiscoveryService {
     private final int maxDetails;
     private final int tsentaMaxPages;
     private final int circuitOpenAfter;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.personal.jobagent.discovery.DiscoveryMetrics metrics;
 
     @org.springframework.beans.factory.annotation.Autowired
     public BoardDiscoveryService(JdbcTemplate db, JobDiscoveryService ingestion, PlatformRegistry registry,
@@ -175,6 +177,7 @@ public class BoardDiscoveryService {
         counts.put("pages", listing.pagesFetched());
         String employerName = Normalize.first(employer, listing.employerName());
 
+        boolean authoritative = !kind.isAggregator();
         Set<String> known = knownExternalIds(sourceId);
         int detailsUsed = 0;
         boolean detailBudgetGone = false;
@@ -183,7 +186,7 @@ public class BoardDiscoveryService {
                 if (!entry.needsDetail()) {
                     ingest(sourceId, kind, entry.job(), employerName, counts, ingested);
                 } else if (known.contains(entry.externalId())) {
-                    touch(sourceId, entry.externalId());
+                    touch(sourceId, entry.externalId(), authoritative);
                     bump(counts, "unchanged");
                 } else if (!detailBudgetGone && detailsUsed < detailBudget) {
                     detailsUsed++;
@@ -205,7 +208,7 @@ public class BoardDiscoveryService {
         counts.put("requests", http.requestsMade());
 
         if (listing.complete() && listing.failure() == null) {
-            counts.put("removed", markUnlisted(sourceId, runStart));
+            counts.put("removed", markUnlisted(sourceId, runStart, authoritative));
         }
         return finish(sourceId, kind, correlationId, started, counts, ingested, listing.complete(),
                 listing.failure(), listing.failureDetail(), mode);
@@ -218,7 +221,7 @@ public class BoardDiscoveryService {
             return;
         }
         if (Boolean.FALSE.equals(job.active())) {
-            closeObservation(sourceId, job.externalId());
+            closeObservation(sourceId, job.externalId(), !kind.isAggregator());
             bump(counts, "closed");
             return;
         }
@@ -255,49 +258,87 @@ public class BoardDiscoveryService {
         return known;
     }
 
-    private void touch(UUID sourceId, String externalId) {
+    private void touch(UUID sourceId, String externalId, boolean authoritative) {
         db.update("update job_source_observations set last_seen_at = now() where source_id = ? and external_job_id = ?",
                 sourceId, externalId);
         db.update("""
-                update jobs set last_seen_at = now(), deleted_at = null
+                update jobs set last_seen_at = now(),
+                    deleted_at = case
+                        when ? then null
+                        when exists (
+                            select 1 from job_source_observations o
+                            join job_sources s on s.id = o.source_id
+                            where o.job_id = jobs.id
+                              and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA')
+                              and o.source_status in ('MISSING', 'CLOSED')
+                        ) then deleted_at
+                        else null
+                    end
                 where id in (select job_id from job_source_observations where source_id = ? and external_job_id = ?)
-                """, sourceId, externalId);
+                """, authoritative, sourceId, externalId);
     }
 
     /** The source itself says the posting is closed. */
-    private void closeObservation(UUID sourceId, String externalId) {
+    private void closeObservation(UUID sourceId, String externalId, boolean authoritative) {
         db.update("""
                 update job_source_observations set source_status = 'CLOSED', removed_at = now()
                 where source_id = ? and external_job_id = ? and source_status <> 'CLOSED'
                 """, sourceId, externalId);
-        db.update("""
-                update jobs j set deleted_at = now()
-                where j.deleted_at is null
-                  and j.id in (select job_id from job_source_observations where source_id = ? and external_job_id = ?)
-                  and not exists (select 1 from job_source_observations o
-                                  where o.job_id = j.id and o.source_id is not null and o.source_status = 'SEEN')
-                """, sourceId, externalId);
+        if (authoritative) {
+            db.update("""
+                    update jobs j set deleted_at = now()
+                    where j.deleted_at is null
+                      and j.id in (select job_id from job_source_observations where source_id = ? and external_job_id = ?)
+                      and not exists (select 1 from job_source_observations o
+                                      join job_sources s on s.id = o.source_id
+                                      where o.job_id = j.id
+                                        and o.source_status = 'SEEN'
+                                        and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA'))
+                    """, sourceId, externalId);
+        } else {
+            db.update("""
+                    update jobs j set deleted_at = now()
+                    where j.deleted_at is null
+                      and j.id in (select job_id from job_source_observations where source_id = ? and external_job_id = ?)
+                      and not exists (select 1 from job_source_observations o
+                                      where o.job_id = j.id and o.source_id is not null and o.source_status = 'SEEN')
+                    """, sourceId, externalId);
+        }
     }
 
     /**
      * After a COMPLETE listing: this source's postings not seen since the run
-     * started are no longer listed by it. A job is removed only when no source
-     * still lists it.
+     * started are no longer listed by it. If this source is authoritative,
+     * aggregator observations cannot keep the job alive.
      */
-    private int markUnlisted(UUID sourceId, Instant runStart) {
+    private int markUnlisted(UUID sourceId, Instant runStart, boolean authoritative) {
         java.sql.Timestamp since = java.sql.Timestamp.from(runStart);
         db.update("""
                 update job_source_observations set source_status = 'MISSING', removed_at = now()
                 where source_id = ? and source_status = 'SEEN' and last_seen_at < ?
                 """, sourceId, since);
-        return db.update("""
-                update jobs j set deleted_at = now()
-                where j.deleted_at is null
-                  and exists (select 1 from job_source_observations o
-                              where o.job_id = j.id and o.source_id = ? and o.source_status in ('MISSING','CLOSED'))
-                  and not exists (select 1 from job_source_observations o
-                                  where o.job_id = j.id and o.source_id is not null and o.source_status = 'SEEN')
-                """, sourceId);
+        if (authoritative) {
+            return db.update("""
+                    update jobs j set deleted_at = now()
+                    where j.deleted_at is null
+                      and exists (select 1 from job_source_observations o
+                                  where o.job_id = j.id and o.source_id = ? and o.source_status in ('MISSING','CLOSED'))
+                      and not exists (select 1 from job_source_observations o
+                                      join job_sources s on s.id = o.source_id
+                                      where o.job_id = j.id
+                                        and o.source_status = 'SEEN'
+                                        and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA'))
+                    """, sourceId);
+        } else {
+            return db.update("""
+                    update jobs j set deleted_at = now()
+                    where j.deleted_at is null
+                      and exists (select 1 from job_source_observations o
+                                  where o.job_id = j.id and o.source_id = ? and o.source_status in ('MISSING','CLOSED'))
+                      and not exists (select 1 from job_source_observations o
+                                      where o.job_id = j.id and o.source_id is not null and o.source_status = 'SEEN')
+                    """, sourceId);
+        }
     }
 
     private Instant dbNow() {
@@ -343,6 +384,28 @@ public class BoardDiscoveryService {
                           where id = ?
                           """.formatted(circuitOpenAfter),
                 lastRunJson, toJson(health), sourceId);
+
+        // V055 run history
+        long startedEpochMs = System.currentTimeMillis() - durationMs;
+        UUID runId = com.personal.jobagent.common.UuidV7.generate();
+        try {
+            db.update("""
+                    insert into discovery_runs (id, source_id, kind, mode, started_at, finished_at, duration_ms,
+                                                status, failure_category, detail, counters, complete)
+                    values (?, ?, ?, ?, ?::timestamptz, ?::timestamptz, ?, ?, ?, ?, ?::jsonb, ?)
+                    """, runId, sourceId, kind.name(), mode.name(),
+                    java.sql.Timestamp.from(Instant.ofEpochMilli(startedEpochMs)),
+                    java.sql.Timestamp.from(Instant.now()), durationMs, status,
+                    failure != null ? failure.name() : null, detail != null ? truncate(detail) : null,
+                    lastRunJson, complete);
+        } catch (Exception e) {
+            log.debug("Run history persistence skipped: {}", e.getMessage());
+        }
+
+        if (metrics != null) {
+            metrics.recordRun(kind.name(), mode.name(), status);
+        }
+
         List<String> errors = failure == null ? List.of() : List.of(kind.name().toLowerCase() + ":" + failure.name());
         return new SourceRunReport(correlationId, sourceId, kind.name(), status, complete, counts,
                 failure == null ? null : failure.name(), detail == null ? null : truncate(detail), ingested, errors);
