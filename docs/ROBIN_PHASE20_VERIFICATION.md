@@ -1,8 +1,8 @@
 # ROBIN — Phase 20 Verification Report
 
-**Prepared:** 2026-11-03, updated 2026-11-04 with recruiter-lifecycle integration evidence, CI verification and a production safety audit, then (22:16 UTC) with the Firebase revocation-hardening review, deployment-identity findings and operator probes.  
+**Prepared:** 2026-11-03, updated 2026-11-04 with recruiter-lifecycle integration evidence, CI verification and a production safety audit, then (22:16 UTC) with the Firebase revocation-hardening review, deployment-identity findings and operator probes; later entries record the Worker redeploy (2026-11-04) and the Render deploy and write-failure incident (2026-11-05). Reconciled after the PR #11 merge on 2026-11-17 (§7).  
 **Scope:** Managed-mail (Cloudflare) production readiness, encryption-key safety, Worker/backend reconciliation, email intelligence, application tracking, database cascade/trigger analysis, recruiter communication lifecycle, and revocation-aware authentication.  
-**Verdict:** IMPLEMENTATION COMPLETE AND CI-VERIFIED (run #93 on `131823a`: backend unit + ArchUnit + Testcontainers ITs, worker, frontend, email worker and probe tests all green). First genuine inbound-mail production test PASSED (one message, encrypted, persisted, mailbox ACTIVE). Phase 20 remains **OPEN**: production still runs the 2026-11-03 build without the Firebase revocation hardening (§3.3–§3.4), and live tenant isolation, duplicate-delivery idempotency, application association, employer OTP handling and recruiter communications are not yet verified in production (§5, §6).
+**Verdict:** IMPLEMENTATION COMPLETE AND CI-VERIFIED (run #93 on `131823a`: backend unit + ArchUnit + Testcontainers ITs, worker, frontend, email worker and probe tests all green). First genuine inbound-mail production test PASSED (one message, encrypted, persisted, mailbox ACTIVE). Phase 20 remains **OPEN**: as of the 2026-11-04 22:16 UTC update, production still ran the 2026-11-03 build without the Firebase revocation hardening (§3.3), which reached Render as `f3204f0` on 2026-11-05 (§3.4, historical); live tenant isolation, duplicate-delivery idempotency, application association, employer OTP handling and recruiter communications are not yet verified in production (§5, §6).
 
 ---
 
@@ -74,12 +74,12 @@ No other table, service, or column depends on `APP_SECRETS_KEY`. (Gmail OAuth to
 
 ### 2.2 Do Existing Rows Depend on a Previous Key? — RESOLVED by Pre-Provisioning Baseline Read
 
-**Timeline, as reported by the operator:** A read-only Supabase count query was run against **both** `employer_credentials` and `managed_inbound_messages` *before* the new `APP_SECRETS_KEY` was generated and added to Render. **Both tables returned zero rows at that time.** The operator then generated and deployed the new, independent `APP_SECRETS_KEY`; a real inbound message was subsequently received and stored encrypted (§4.2).
+**Timeline, as reported by the operator:** A read-only Supabase count query was run against **both** `employer_credentials` and `managed_inbound_messages` *before* the new `APP_SECRETS_KEY` was generated and added to Render. **Both tables returned zero rows at that time.** The operator then generated and deployed the new, independent `APP_SECRETS_KEY`; a real inbound message was subsequently received and stored encrypted (§4.1).
 
 This closes the continuity question completely: there is no "previous key" to be orphaned, because **nothing existed to encrypt under one**. Every row either table holds today was necessarily written after the current key was already in place.
 
 - `employer_credentials`: Pre-provisioning count was **0**. Any rows present now were written under the current key, by construction. **No legacy-ciphertext risk exists for this table.**
-- `managed_inbound_messages`: Pre-provisioning count was **0**, consistent with the post-provisioning count of **1** captured in §4.2 (one real message, received and encrypted after the key was live). `content_encrypted` is written inside `ManagedInboundService.accept()`, which is `@Transactional` — if `SecretCipher.encrypt()` throws because no key is configured, the insert never commits, so no partial/corrupted state was ever possible here either way.
+- `managed_inbound_messages`: Pre-provisioning count was **0**, consistent with the post-provisioning count of **1** captured in §4.1 (one real message, received and encrypted after the key was live). `content_encrypted` is written inside `ManagedInboundService.accept()`, which is `@Transactional` — if `SecretCipher.encrypt()` throws because no key is configured, the insert never commits, so no partial/corrupted state was ever possible here either way.
 
 ### 2.3 Explicit Instruction Compliance
 
@@ -89,8 +89,9 @@ No key has been generated, rotated, or changed by any automated session. The `AP
 
 ## 3. Worker / Backend Reconciliation, CI Pipeline & Deployment Identity
 
-<<<<<<< HEAD
-### 3.1 Current merged repository state (2026-11-03)
+### 3.1 Git & CI State (historical snapshots)
+
+#### 2026-11-03 — merged repository state after PR #10
 
 ```
 master = 6c3a72a0150a9fca08df9a21536b88c6ae9a0284
@@ -101,17 +102,20 @@ The merged master baseline contains the Worker configuration reconciliation (`e5
 
 GitHub Actions run #62 for PR #10 completed successfully across all four jobs: backend, browser worker, frontend and Cloudflare email worker. This resolves the former absence of a Cloudflare email-worker CI gate.
 
-The historical local Git snapshot above was superseded by the PR #10 merge. The personal `GEMINI.md` file was not part of these changes.
-=======
-### 3.1 Confirmed Git & CI State (2026-11-04, 22:43 UTC)
+The historical local Git snapshot of 2026-11-03 (three then-unpushed commits: `e56c2a9`, `610d574`, `9e66c7a`) was superseded by the PR #10 merge. The personal `GEMINI.md` file was not part of these changes.
+
+PR #10 does not change Worker runtime code or rotate production secrets. The merge status does not close Phase 20: the live-production items in §5 remain unverified and must not be inferred from code-level integration tests.
+
+#### 2026-11-04, 22:43 UTC — confirmed Git & CI state
 
 - **Branch**: `master`. **Code head**: `131823a4662c7a3d0fd2b55f9058f424b15f5ecc` (reply-thread linking). Every push this session (`484c5c5..b2be7e0`, `..1136997`, `..f93eaa8`, `..dc46f10`, `..131823a`) was followed by a check that local `HEAD`, `origin/master` and `git ls-remote` matched.
 - **CI run #93** (id `41926632187`) on `131823a` — all four jobs **success**: `backend` (`mvn -B verify`: unit + ArchUnit + Testcontainers ITs including lifecycle scenarios 5–6, 22:35:42→22:42:45), `worker`, `frontend`, `cloudflare-email-worker` (worker tests + *Phase 20 operator probe tests*).
 - **Earlier runs this session**: #89 (`b2be7e0`), #90 (`1136997`), #91 (`f93eaa8`), #92 (`dc46f10`) — all four jobs success each. Before: #88 on `484c5c5` success; #87 on `a442f9b` — `backend` failed in `mvn verify`, fixed by `484c5c5`.
 - **Local runs (2026-11-04)**: backend `mvn -o test` — 1,444 tests, 0 failures, 0 errors, 1 skipped; `cloudflare-email-worker` `npm test` — 17/17; `node --test scripts/phase20/*.test.mjs` — 8/8. Testcontainers ITs run only in CI (no Docker daemon locally).
 
+For the repository state after PR #11 merged (2026-11-17), see §7.
+
 ### 3.2 The wrangler.toml Configuration — Reconciled & Pushed
->>>>>>> origin/master
 
 `cloudflare-email-worker/wrangler.toml` is synchronized on `master`:
 
@@ -127,7 +131,7 @@ The dedicated GitHub Actions CI gate (`cloudflare-email-worker`) validates this 
 
 ### 3.3 Render Production Deployment Identity & Build Provenance
 
-Investigation of live backend at `https://job-agent-mwhu.onrender.com`:
+Investigation of live backend at `https://job-agent-mwhu.onrender.com` (historical: observed 2026-11-03 and re-checked 2026-11-04; superseded by the 2026-11-05 deploy in §3.4; not a statement of current production state):
 - **Liveness & Health Status**: `/actuator/health` and `/api/v1/system/health` return HTTP 200 with status `UP`. All subsystems (`db`, `redis`, `diskSpace`, `livenessState`, `readinessState`, `ping`) are healthy.
 - **Routing Instance**: Response header `rndr-id: 7c62f136-86b7-45e1` confirms traffic is handled by Render's production routing tier.
 - **Build Timestamp vs. Git Commit Info**:
@@ -149,11 +153,6 @@ Investigation of live backend at `https://job-agent-mwhu.onrender.com`:
   - **Application Source Parity — no longer holds (corrected 2026-11-04)**: through `373e048` no commit after `dac5c4e` touched `backend/src/main`. Since then `a442f9b` and `484c5c5` (Firebase revocation hardening) and `e3f19c4`/`5cd8238` (this session) changed production code. **The running backend is therefore NOT the code on `master`**: it predates every Firebase revocation change.
   - **Render Deployment State (re-checked 2026-11-04 21:48 UTC)**: `build.time` is still `2026-11-03T21:20:48.844Z` after nine further pushes to `master`, so Render auto-deploy is evidently off and every backend deploy is manual. Render deploy IDs and logs remain dashboard-only.
 
-<<<<<<< HEAD
-PR #10 is merged to `master` as `6c3a72a`. It adds CI coverage for the Cloudflare Email Worker; it does not change Worker runtime code or rotate production secrets. The `wrangler.toml` configuration reconciliation and Workday registry correction are included in the merged master baseline.
-
-The merge status does not close Phase 20. The four production behaviors listed in §4.3 remain unverified and must not be inferred from code-level integration tests.
-=======
 ### 3.4 Firebase Revocation Hardening — Review, Fixes and Deployment
 
 **Reviewed commits:** `a442f9b` (verify ID tokens with `checkRevoked=true`; classify revoked/disabled/expired; verify the bearer even when a session exists; invalidate a session belonging to a different user, or to a revoked/disabled account) and `484c5c5` (fixes two regressions `a442f9b` introduced: a second constructor that stopped Spring from instantiating `FirebaseAdminTokenVerifier` — CI run #87's backend job failed in `mvn verify` — and worker-token requests being routed into Firebase verification). CI run #88 on `484c5c5`: all four jobs passed.
@@ -181,7 +180,6 @@ The permission case matters for the first deploy specifically: `checkRevoked=tru
 5. **Cloudflare Worker** (required for reply-header threading, `131823a`): `cd cloudflare-email-worker` then `npx wrangler deploy`. The Worker now forwards `In-Reply-To`/`References`; until it is redeployed the backend simply receives no reply headers and links exactly as before, so the two deploys can happen in either order.
    **Done 2026-11-04 23:36:30 UTC** (operator-approved, run from the repo at `170af8b` with Wrangler 4.157.0 after a clean `--dry-run`): version `579c2681-dd55-4618-8dac-efccb938c00a`, tag `170af8b`, 100% of traffic; `email` handler, compatibility date `2024-09-23`, secret `CLOUDFLARE_EMAIL_WORKER_SECRET` still bound, the three vars identical to the previous version; Wrangler reported *"Email Routing rules are up to date"*. Previous version `e3098b1d-00f1-4064-8e5c-61b7553807a1` (2026-11-03 17:58 UTC) is the rollback target: `npx wrangler rollback e3098b1d-00f1-4064-8e5c-61b7553807a1`. Not yet observed processing a live message — the next inbound email confirms it.
 6. Optional cut-off check, on the **test** account only: while signed in as it, disable it in the Firebase console (Authentication → Users → ⋮ → Disable account), reload Robin, and confirm the next API request is refused and the session does not survive (`USER_DISABLED` path). Re-enable the account afterwards.
->>>>>>> origin/master
 
 ---
 
@@ -332,59 +330,32 @@ Analysis of Flyway migrations `V001` through `V051` and JPA/JDBC repositories re
 
 ## 5. Phase 20 Exit Criteria — Comprehensive Status Matrix
 
-<<<<<<< HEAD
-| Criterion | Status |
-|---|---|
-| Live backend provider + missing-config understood | ✅ Resolved behaviorally — mailbox reached `ACTIVE` via Cloudflare, so provider/secret must be correctly configured (§1.3) |
-| Encryption-key continuity safe for `managed_inbound_messages` | ✅ Confirmed — pre-provisioning count was 0, post-provisioning is 1/1 encrypted, 0 purged (§2.2, §4.2) |
-| Encryption-key continuity safe for `employer_credentials` | ✅ Resolved — pre-provisioning count was 0, so no row can depend on a lost prior key (§2.2). Current row count was not re-captured and is not claimed. |
-| Worker ↔ backend HMAC config matched | ✅ Names confirmed correct in code; behaviorally confirmed working since a real message was accepted and persisted |
-| Repo config matches intended Worker config | ✅ `e56c2a9` is in the merged master baseline; config (including `addresses`) is confirmed valid against current Wrangler/Cloudflare docs (§3.2) |
-| Genuine inbound test email succeeds | ✅ **Done 2026-11-03** — real Gmail → alias → `ACTIVE` mailbox → message visible in Robin (§4.2) |
-| Encrypted record persisted + visible in Robin | ✅ Confirmed — 1 row, `content_encrypted` populated, visible in recent messages (§4.2) |
-| Candidate ownership / application association correct | ❌ Not proven — code path exists, not confirmed against this specific message (§4.3) |
-| Idempotency / error handling tested | ✅ Unit/integration-tested; ❌ not tested against a live duplicate Cloudflare delivery (§4.3) |
-| Tests/build/regression pass | ✅ GitHub Actions run #62 passed all four jobs, including the new Cloudflare email-worker test job; managed-mail Testcontainers suites also pass locally and in backend CI |
-| Deployment state and GitHub state reconciled | ✅ Repository configuration is merged to master; current Render/Cloudflare dashboard state is based on operator-reported evidence, not an independent live dashboard inspection in this report |
-=======
 | Phase 20 Requirement | Automated Tests (Testcontainers) | Live Production Status |
 |---|---|---|
+| Live backend provider + missing-config understood | — (source analysis, §1.3) | ✅ Resolved behaviorally — mailbox reached `ACTIVE` via Cloudflare, so provider/secret must be correctly configured (§1.3) |
 | Managed mail configuration & credentials | ✅ Managed-mail unit classes pass; full backend unit suite 1,435 tests, 0 failures (local run, 2026-11-04) | ✅ Verified on Render (`APP_SECRETS_KEY` loaded, `ACTIVE` status) |
-| Cloudflare Worker HMAC signing & delivery | ✅ 6 worker tests pass in CI | ✅ Verified live (Gmail → Cloudflare → Render delivered) |
+| Encryption-key continuity (`managed_inbound_messages`, `employer_credentials`) | — (operator-reported counts, §2.2) | ✅ Confirmed for `managed_inbound_messages` — pre-provisioning count was 0, post-provisioning is 1/1 encrypted, 0 purged (§2.2, §4.1). ✅ Resolved for `employer_credentials` — pre-provisioning count was 0, so no row can depend on a lost prior key (§2.2). Current row count was not re-captured and is not claimed. |
+| Cloudflare Worker HMAC signing & delivery | ✅ 6 worker tests pass in CI | ✅ Verified live (Gmail → Cloudflare → Render delivered). Worker ↔ backend HMAC names confirmed correct in code; behaviorally confirmed working since a real message was accepted and persisted |
+| Repo config matches intended Worker config | ✅ Validated by the `cloudflare-email-worker` CI job (§3.2) | ✅ `e56c2a9` is in the merged master baseline; config (including `addresses`) is confirmed valid against current Wrangler/Cloudflare docs (§3.2) |
+| Genuine inbound test email; encrypted record persisted + visible in Robin | ✅ `CloudflareManagedMailIT` (address reservation, `ACTIVE` transition, encryption at rest) | ✅ **Done 2026-11-03** — real Gmail → alias → `ACTIVE` mailbox → message visible in Robin; 1 row, `content_encrypted` populated, visible in recent messages (§4.1) |
 | Firebase revocation-aware authentication | ✅ `FirebaseAdminTokenVerifierTest` (30), `FirebaseAuthenticationFilterTest` (9), `FirebaseSessionExchangeTest` (16) | ✅ **Deployed** `f3204f0` (2026-11-05 00:22 UTC); bearer path verified live with a real session. ❌ Session exchange failing on a database write — P0 in the gap register |
-| Webhook idempotency & replay protection | ✅ Tested in `CloudflareManagedMailIT`; probe contract tested in CI | ❌ **NOT YET VERIFIED IN PRODUCTION** (Procedure in §6.1) |
+| Webhook idempotency & replay protection | ✅ Tested in `CloudflareManagedMailIT`; probe contract tested in CI | ❌ **NOT YET VERIFIED IN PRODUCTION** — unit/integration-tested, but not tested against a live duplicate Cloudflare delivery (Procedure in §6.1) |
 | AES-GCM encryption at rest | ✅ Tested in `CloudflareManagedMailIT` | ✅ Verified in Supabase (`content_encrypted` populated) |
-| Email-to-application association | ✅ Tested in `CloudflareRecruiterLifecycleIT` | ❌ **NOT YET VERIFIED IN PRODUCTION** (Procedure in §6.2) |
+| Email-to-application association | ✅ Tested in `CloudflareRecruiterLifecycleIT` | ❌ **NOT YET VERIFIED IN PRODUCTION** — code path exists, not confirmed against the real 2026-11-03 message (Procedure in §6.2) |
 | Employer OTP extraction & handling | ✅ Tested in `ManagedMailVerificationProviderTest` | ❌ **NOT YET VERIFIED IN PRODUCTION** (Procedure in §6.3) |
-| Recruiter communication & timeline tracking | ✅ Tested in `CloudflareRecruiterLifecycleIT`, including header-only thread replies and thread isolation (scenarios 5–6, `131823a`) | ❌ **NOT YET VERIFIED IN PRODUCTION** (Procedure in §6.4; Worker redeployed 2026-11-04, backend deploy still pending per §3.4) |
+| Recruiter communication & timeline tracking | ✅ Tested in `CloudflareRecruiterLifecycleIT`, including header-only thread replies and thread isolation (scenarios 5–6, `131823a`) | ❌ **NOT YET VERIFIED IN PRODUCTION** (Procedure in §6.4; Worker redeployed 2026-11-04 and backend `f3204f0` deployed 2026-11-05 per §3.4 — historical deployment records) |
 | Candidate multi-tenant isolation | ✅ Tested in `CloudflareRecruiterLifecycleIT` (scenario 3) | ❌ **NOT YET VERIFIED LIVE** — owner-scoped schema and queries are structural evidence only; authenticated check of the dedicated test candidate in §6.0 |
-| CI Pipeline & Build gates | ✅ All 4 jobs green on run #93 (`131823a`) | ⚠️ Backend healthy on Render but serving the 2026-11-03 build, behind `master` (§3.3) |
->>>>>>> origin/master
+| CI Pipeline & Build gates | ✅ All 4 jobs green on run #93 (`131823a`). Earlier, GitHub Actions run #62 passed all four jobs, including the new Cloudflare email-worker test job; managed-mail Testcontainers suites also pass locally and in backend CI | ⚠️ Backend healthy on Render but serving the 2026-11-03 build, behind `master` (§3.3, observed 2026-11-04); superseded by the 2026-11-05 deploy of `f3204f0` (§3.4) |
+| Deployment state and GitHub state reconciled | — | ✅ Repository configuration is merged to master; Render/Cloudflare dashboard state is based on operator-reported evidence, not an independent live dashboard inspection in this report |
 
-**Phase 20 Verdict**: IMPLEMENTATION COMPLETE. Automated coverage is green across all four communication-lifecycle scenarios and the revocation-aware authentication paths. Phase 20 remains **OPEN** until the operator runs, in order: the Render deploy, identity check and Worker redeploy (§3.4) → tenant isolation (§6.0) → duplicate-delivery idempotency (§6.1) → application association (§6.2) → recruiter lifecycle (§6.4). Employer OTP handling (§6.3) triggers a real employer verification email and needs separate explicit authorization; it may be scope-deferred instead, with the reason recorded here.
+Live-production cells record observations made between 2026-11-03 and 2026-11-05 (§3.3–§4.1); they are historical, not a statement of current production state. ❌ means no production verification is recorded in this report as of the 2026-11-17 reconciliation (§7).
+
+**Phase 20 Verdict**: IMPLEMENTATION COMPLETE. Automated coverage is green across all four communication-lifecycle scenarios and the revocation-aware authentication paths. Phase 20 remains **OPEN** until the operator runs, in order: a fresh deployment identity check (§3.4 steps 2–3; the Render deploy and Worker redeploy themselves are recorded as done on 2026-11-05 and 2026-11-04, but those records are historical) → tenant isolation (§6.0) → duplicate-delivery idempotency (§6.1) → application association (§6.2) → recruiter lifecycle (§6.4). Employer OTP handling (§6.3) triggers a real employer verification email and needs separate explicit authorization; it may be scope-deferred instead, with the reason recorded here.
 
 ---
 
 ## 6. Safe Live Verification Procedures (Operator Approval Required)
 
-<<<<<<< HEAD
-1. No additional push is pending for the Phase 20 configuration/evidence commits: PR #10 is merged to `master` as `6c3a72a`.
-2. Before claiming Phase 20 fully closed: exercise or explicitly scope-defer duplicate-delivery idempotency, email-to-application association, OTP extraction, and recruiter-lifecycle verification in production (§4.3). These four are the remaining open items — encryption-key continuity (§2.2), Worker config reconciliation (§3.2), the first real delivery (§4.2), and CI coverage (PR #10) are resolved.
-
-
----
-
-## 7. Repository reconciliation note (2026-11-17)
-
-The historical repository snapshots and deployment references in §§3–6 are retained as evidence of what was observed and reported at the time; they are not a statement of the current `master` SHA or current production deployment.
-
-- PR #10's Cloudflare email-worker CI coverage is merged.
-- Subsequent repository work has changed the `master` baseline, including PR #13 (Master Resume Import) merged on 2026-11-17.
-- PR #11's Phase 21 implementation is still a separate open change at the time of this reconciliation; its final branch head must pass CI before merge.
-- Phase 20's four live-production verification items remain unproven by the evidence recorded in this report: duplicate webhook delivery/idempotency, application association, real employer OTP extraction/use, and the recruiter communication lifecycle.
-
-Do not use the historical SHA, deployment, or test-run details in this report as a substitute for a fresh status check before any production action.
-=======
 > [!IMPORTANT]
 > The following procedures are designed for production safety. No emails, webhooks, or employer portal interactions will be initiated without explicit operator authorization and without establishing a dedicated test identity.
 
@@ -538,4 +509,22 @@ Do not use the historical SHA, deployment, or test-run details in this report as
 - **Procedure (Simulated / Staging)**:
   - Worker automated suite (`npm test` in `cloudflare-email-worker`) executes 6 mock scenarios verifying that `throw new Error()` is executed on non-200/non-406 responses and clean `return` is executed on 406 rejections.
   - Live production verification of Worker retry requires temporarily withholding backend 200 responses, which is **not recommended in production** due to potential delivery delays for real emails. Measured 2026-11-04 (`node --test --experimental-test-coverage`): every line of the response-handling block (200 → return, 406 → `setReject` + return, anything else → throw) executes under the worker tests; `src/index.js` overall was 91.3% lines / 77.3% branches with the post-read size check (lines 37–42) uncovered; a test added for an under-reported `rawSize` raises it to 96.0% / 81.8%, leaving only the random-token fallback (lines 122–126, unused wherever `crypto.randomUUID` exists) uncovered.
->>>>>>> origin/master
+
+### 6.6 Remaining actions before Phase 20 closure
+
+1. No additional push is pending for the Phase 20 configuration/evidence commits: PR #10 is merged to `master` as `6c3a72a`, and the later Phase 20 pushes are recorded in §3.1 and §3.4.
+2. Before claiming Phase 20 fully closed: exercise or explicitly scope-defer, in production, candidate tenant isolation (§6.0), duplicate-delivery idempotency (§6.1), email-to-application association (§6.2), OTP extraction (§6.3) and recruiter-lifecycle verification (§6.4). These are the remaining open items — encryption-key continuity (§2.2), Worker config reconciliation (§3.2), the first real delivery (§4.1), and CI coverage (PR #10) are resolved.
+
+---
+
+## 7. Repository reconciliation note (2026-11-17)
+
+The historical repository snapshots and deployment references in §§3–6 are retained as evidence of what was observed and reported at the time; they are not a statement of the current `master` SHA or current production deployment.
+
+- PR #10's Cloudflare email-worker CI coverage is merged.
+- Subsequent repository work has changed the `master` baseline, including PR #13 (Master Resume Import) merged on 2026-11-17.
+- PR #11's Phase 21 implementation is merged into `master` as merge commit `199e051d908c552ee7bc6db283998fea85a394d6` (2026-11-17). Its final branch head `0825275` passed CI run #122 on all four jobs (backend, browser worker, frontend, Cloudflare email worker). PR #11 changes candidate-document validation and PREP, not the managed-mail chain, so it changes no Phase 20 status in this report.
+- The PR #11 merge carried unresolved Git conflict markers into §3, §5 and §6 of this report. The post-PR #11 documentation cleanup reconciled them, keeping both the 2026-11-03 PR #10 records and the 2026-11-04/05 `master` evidence.
+- Phase 20's four live-production verification items remain unproven by the evidence recorded in this report: duplicate webhook delivery/idempotency, application association, real employer OTP extraction/use, and the recruiter communication lifecycle. The live tenant-isolation check (§6.0), added on 2026-11-04, has no recorded production result either. Phase 20 remains **OPEN**.
+
+Do not use the historical SHA, deployment, or test-run details in this report as a substitute for a fresh status check before any production action.
