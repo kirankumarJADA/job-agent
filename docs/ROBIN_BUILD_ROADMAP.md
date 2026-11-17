@@ -12,7 +12,7 @@ Evidence → Tsenta comparison → prioritisation → implementation → verific
 
 ### Phase 20.1 — Fix Workday capability-registry truthfulness — **DONE**
 
-Commit `610d574` corrects Workday to `SIGN_IN_READINESS_ONLY`; Workday's actual service checks saved credential readiness and does not inspect or fill the multi-step application form. The fix is present in the `master` baseline used by PR #10. Production behavior was not independently re-tested in this pass.
+Commit `610d574` corrects Workday to `SIGN_IN_READINESS_ONLY`; Workday's actual service checks saved credential readiness and does not inspect or fill the multi-step application form. The fix is present in the merged master baseline. Production behavior was not independently re-tested in this pass.
 
 ### Phase 20.2 — Add CI coverage for `cloudflare-email-worker` — **DONE**
 
@@ -26,7 +26,7 @@ PR #10 merged to `master` as `6c3a72a`. The new Node 22 job runs `npm test --pre
 
 **Integrity corrections:** completed-month experience calculation; unit/currency-preserving figure checks; structured right-to-work/sponsorship contradiction checks; employment evidence limited to actual work-history records; expanded candidate evidence context for cover letters; validator-version migration and stale-document handling in API and PREP UI.
 
-**Verification:** PR #11 CI run #75 passed all four jobs. Backend Surefire: 1,397 tests, 0 failures, 6 skipped. Backend Failsafe: 272 tests, 0 failures, 25 skipped. Frontend type-check/tests/build, browser worker and Cloudflare email worker jobs passed. Skipped tests are not counted as executed coverage. The PR is not merged; Phase 21 is not closed until the change is reviewed and merged. See the verification report for limits and test detail.
+**Verification:** PR #11 CI run #75 passed all four jobs on the recorded code head. Backend Surefire: 1,397 tests, 0 failures, 6 skipped. Backend Failsafe: 272 tests, 0 failures, 25 skipped. Frontend type-check/tests/build, browser worker and Cloudflare email worker jobs passed. Skipped tests are not counted as executed coverage. The documentation updates are being reconciled against the newer master baseline; the latest PR head must pass CI before merge. Phase 21 is not closed until the change is reviewed and merged.
 
 ## Phase 22 — Discovery evidence pass (after Phase 21 closes)
 
