@@ -14,6 +14,7 @@ import {
   TextInput,
   Textarea,
 } from '../components/ui';
+import { ResumeImportWizard } from '../components/profile/ResumeImportWizard';
 
 /**
  * Master Profile / Master CV.
@@ -36,6 +37,7 @@ export const ProfilePage: React.FC = () => {
   const [newCertification, setNewCertification] = useState({ name: '', issuer: '', issuedOn: '', credentialId: '' });
   const [showPurge, setShowPurge] = useState(false);
   const [purgePassword, setPurgePassword] = useState('');
+  const [showResumeImport, setShowResumeImport] = useState(false);
 
   const fetchProfile = async () => {
     setLoading(true); setError(null);
@@ -122,6 +124,9 @@ export const ProfilePage: React.FC = () => {
                 {p.setup_status === 'READY' ? 'Setup complete' : 'Setup incomplete'}
               </StatusPill>
               <span className="text-xs text-ink-muted">revision {p.master_revision}</span>
+              <SecondaryButton type="button" onClick={() => setShowResumeImport(true)}>
+                Import from Resume
+              </SecondaryButton>
               <button
                 type="button"
                 onClick={() => setShowPurge(true)}
@@ -176,6 +181,13 @@ export const ProfilePage: React.FC = () => {
             Mark Master Profile complete
           </button>
         </div>
+
+        {showResumeImport && (
+          <ResumeImportWizard
+            onClose={() => setShowResumeImport(false)}
+            onImported={() => { fetchProfile(); setMessage('Resume import applied to your Master Profile.'); }}
+          />
+        )}
 
         {showPurge && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/60 p-4" role="dialog" aria-modal="true" aria-labelledby="purge-title">

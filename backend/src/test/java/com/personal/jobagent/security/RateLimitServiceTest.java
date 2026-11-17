@@ -67,6 +67,8 @@ class RateLimitServiceTest {
         assertThat(limiter.bucketFor("POST", "/api/v1/auth/firebase/session")).isEqualTo("auth");
         assertThat(limiter.bucketFor("POST", "/api/v1/cover-letters/generate")).isEqualTo("llm");
         assertThat(limiter.bucketFor("POST", "/api/v1/applications/abc/re-prepare")).isEqualTo("llm");
+        assertThat(limiter.bucketFor("POST", "/api/v1/profile/resume-import/preview")).isEqualTo("llm");
+        assertThat(limiter.bucketFor("POST", "/api/v1/profile/resume-import/confirm")).isNull();
         assertThat(limiter.bucketFor("POST", "/api/v1/discovery/run")).isEqualTo("discovery");
         assertThat(limiter.bucketFor("POST", "/api/v1/discovery/run-for-me")).isEqualTo("discovery");
         assertThat(limiter.bucketFor("POST", "/api/v1/jobs/seed-uk")).isEqualTo("discovery");

@@ -82,7 +82,7 @@ public class ModelRouter {
 
     private List<String> preferredModels(TaskType task) {
         return switch (task) {
-            case JOB_DESCRIPTION_ANALYSIS, SPONSORSHIP_ANALYSIS, CV_TAILORING, COVER_LETTER -> List.of("nvidia/nemotron-3.5-lightning-30b-a3b", "z-ai/glm-5-3");
+            case JOB_DESCRIPTION_ANALYSIS, SPONSORSHIP_ANALYSIS, CV_TAILORING, COVER_LETTER, PROFILE_EXTRACTION -> List.of("nvidia/nemotron-3.5-lightning-30b-a3b", "z-ai/glm-5-3");
             case JOB_CLASSIFICATION, SKILL_EXTRACTION, HIGH_VOLUME_EXTRACTION -> List.of("z-ai/glm-5-3-flash", "nvidia/nemotron-3.5-lightning-30b-a3b", "openai/gpt-oss-20b");
             case APPLICATION_QA -> List.of("nvidia/nemotron-3.5-lightning-30b-a3b", "z-ai/glm-5-3-flash");
             case TECHNICAL_REASONING -> List.of("qwen/qwen3-next-80b-a3b-thinking", "z-ai/glm-5-3");
