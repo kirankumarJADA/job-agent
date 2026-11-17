@@ -196,3 +196,17 @@ A separate, pre-existing truthfulness bug in `AtsCapabilityRegistry`'s `WORKDAY`
 
 1. No additional push is pending for the Phase 20 configuration/evidence commits: PR #10 is merged to `master` as `6c3a72a`.
 2. Before claiming Phase 20 fully closed: exercise or explicitly scope-defer duplicate-delivery idempotency, email-to-application association, OTP extraction, and recruiter-lifecycle verification in production (§4.3). These four are the remaining open items — encryption-key continuity (§2.2), Worker config reconciliation (§3.2), the first real delivery (§4.2), and CI coverage (PR #10) are resolved.
+
+
+---
+
+## 7. Repository reconciliation note (2026-11-17)
+
+The historical repository snapshots and deployment references in §§3–6 are retained as evidence of what was observed and reported at the time; they are not a statement of the current `master` SHA or current production deployment.
+
+- PR #10's Cloudflare email-worker CI coverage is merged.
+- Subsequent repository work has changed the `master` baseline, including PR #13 (Master Resume Import) merged on 2026-11-17.
+- PR #11's Phase 21 implementation is still a separate open change at the time of this reconciliation; its final branch head must pass CI before merge.
+- Phase 20's four live-production verification items remain unproven by the evidence recorded in this report: duplicate webhook delivery/idempotency, application association, real employer OTP extraction/use, and the recruiter communication lifecycle.
+
+Do not use the historical SHA, deployment, or test-run details in this report as a substitute for a fresh status check before any production action.
