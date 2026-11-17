@@ -150,7 +150,7 @@ Total Tests Run: **445 tests executed across all discovery suites and regression
 ## 10. Commit SHAs
 
 - Commit 1a: `3bd9d6c` (`discovery: canonical URL normalisation, ATS keys and dual-read identity`)
-- Commit 1b: *(pending commit)*
+- Commit 1b: `8d14072` (`discovery: source-aware removal authority, run history and churn reduction`)
 
 ---
 
