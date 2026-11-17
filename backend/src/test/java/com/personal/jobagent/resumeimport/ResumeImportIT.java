@@ -24,6 +24,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -65,6 +66,7 @@ class ResumeImportIT {
     @Autowired private MockMvc mockMvc;
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private PasswordEncoder passwordEncoder;
+    @Autowired private com.personal.jobagent.resume.ResumeAtsIntelligenceService resumeIntelligenceService;
 
     private MockHttpSession session;
     private MockHttpSession otherSession;
@@ -487,5 +489,100 @@ class ResumeImportIT {
                 .isZero();
         assertThat(jdbcTemplate.queryForObject("select email::text from users where email = 'dev@example.local'", String.class))
                 .isEqualTo(emailBefore);
+    }
+
+    @Test
+    @Order(16)
+    void datePrecisionPreservesYearOnlyAndMonthDatesThroughConfirmDatabaseProfileRetrievalAndResumeGeneration() throws Exception {
+        String previewToken = JsonPath.read(runPreview().getResponse().getContentAsString(), "$.previewToken");
+        String body = """
+                {"previewToken": "%s",
+                 "personalFieldUpdates": {},
+                 "experiences": [
+                   {"action": "ADD", "matchedExistingId": null, "company": "Year Precision Corp", "title": "Lead Architect",
+                    "location": "London", "startMonth": "2021", "endMonth": "2023",
+                    "responsibilities": ["Designed event system"], "achievements": ["Zero downtime"]},
+                   {"action": "ADD", "matchedExistingId": null, "company": "Month Precision Ltd", "title": "Senior Engineer",
+                    "location": "Remote", "startMonth": "2019-05", "endMonth": "2020-11",
+                    "responsibilities": ["Built REST APIs"], "achievements": ["Cut latency by 40%%"]}
+                 ],
+                 "education": [],
+                 "projects": [],
+                 "skills": [],
+                 "certifications": [
+                   {"action": "ADD", "matchedExistingId": null, "name": "AWS Certified Architect", "issuer": "Amazon",
+                    "issuedOn": "2022", "credentialId": "AWS-1234"},
+                   {"action": "ADD", "matchedExistingId": null, "name": "CKA Kubernetes", "issuer": "CNCF",
+                    "issuedOn": "2023-04", "credentialId": "CKA-5678"}
+                 ]}
+                """.formatted(previewToken);
+
+        mockMvc.perform(post("/api/v1/profile/resume-import/confirm").with(csrf()).session(login())
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.added").value(4));
+
+        // 1. Direct database check: metadata columns in PostgreSQL
+        var yearExpDb = jdbcTemplate.queryForMap(
+                "select start_month, end_month, start_date_precision, end_date_precision from work_experiences where company = 'Year Precision Corp'");
+        assertThat(yearExpDb.get("start_date_precision")).isEqualTo("YEAR");
+        assertThat(yearExpDb.get("end_date_precision")).isEqualTo("YEAR");
+        assertThat(String.valueOf(yearExpDb.get("start_month"))).isEqualTo("2021-01-01");
+        assertThat(String.valueOf(yearExpDb.get("end_month"))).isEqualTo("2023-01-01");
+
+        var monthExpDb = jdbcTemplate.queryForMap(
+                "select start_month, end_month, start_date_precision, end_date_precision from work_experiences where company = 'Month Precision Ltd'");
+        assertThat(monthExpDb.get("start_date_precision")).isEqualTo("MONTH");
+        assertThat(monthExpDb.get("end_date_precision")).isEqualTo("MONTH");
+        assertThat(String.valueOf(monthExpDb.get("start_month"))).isEqualTo("2019-05-01");
+        assertThat(String.valueOf(monthExpDb.get("end_month"))).isEqualTo("2020-11-01");
+
+        var yearCertDb = jdbcTemplate.queryForMap(
+                "select issued_on, issued_on_precision from certifications where name = 'AWS Certified Architect'");
+        assertThat(yearCertDb.get("issued_on_precision")).isEqualTo("YEAR");
+        assertThat(String.valueOf(yearCertDb.get("issued_on"))).isEqualTo("2022-01-01");
+
+        var monthCertDb = jdbcTemplate.queryForMap(
+                "select issued_on, issued_on_precision from certifications where name = 'CKA Kubernetes'");
+        assertThat(monthCertDb.get("issued_on_precision")).isEqualTo("MONTH");
+        assertThat(String.valueOf(monthCertDb.get("issued_on"))).isEqualTo("2023-04-01");
+
+        // 2. Profile retrieval check: GET /api/v1/profile
+        String profileJson = mockMvc.perform(get("/api/v1/profile").session(login()))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+
+        assertThat(JsonPath.<List<String>>read(profileJson, "$.experiences[?(@.company=='Year Precision Corp')].startDatePrecision").get(0))
+                .isEqualTo("YEAR");
+        assertThat(JsonPath.<List<String>>read(profileJson, "$.experiences[?(@.company=='Year Precision Corp')].endDatePrecision").get(0))
+                .isEqualTo("YEAR");
+        assertThat(JsonPath.<List<String>>read(profileJson, "$.experiences[?(@.company=='Month Precision Ltd')].startDatePrecision").get(0))
+                .isEqualTo("MONTH");
+        assertThat(JsonPath.<List<String>>read(profileJson, "$.experiences[?(@.company=='Month Precision Ltd')].endDatePrecision").get(0))
+                .isEqualTo("MONTH");
+
+        assertThat(JsonPath.<List<String>>read(profileJson, "$.certifications[?(@.name=='AWS Certified Architect')].issuedOnPrecision").get(0))
+                .isEqualTo("YEAR");
+        assertThat(JsonPath.<List<String>>read(profileJson, "$.certifications[?(@.name=='CKA Kubernetes')].issuedOnPrecision").get(0))
+                .isEqualTo("MONTH");
+
+        // 3. Resume-generation formatting check
+        UUID profileId = UUID.fromString(JsonPath.read(profileJson, "$.profile.id"));
+        var source = resumeIntelligenceService.loadSource(profileId);
+        String resumeMarkdown = resumeIntelligenceService.render(source, Set.of());
+
+        // Year-only must format as "2021 – 2023", NEVER inventing "Jan 2021"
+        assertThat(resumeMarkdown).contains("### Lead Architect — Year Precision Corp\n2021 – 2023 · London");
+        assertThat(resumeMarkdown).doesNotContain("Jan 2021 – Dec 2023 · London");
+
+        // Month-level must format with month name
+        assertThat(resumeMarkdown).contains("### Senior Engineer — Month Precision Ltd\nMay 2019 – Nov 2020 · Remote");
+
+        // Certification year-only must format as "(2022)", NEVER inventing "(Jan 2022)"
+        assertThat(resumeMarkdown).contains("- AWS Certified Architect — Amazon (2022)");
+        assertThat(resumeMarkdown).doesNotContain("AWS Certified Architect — Amazon (Jan 2022)");
+
+        // Certification month-level must format as "(Apr 2023)"
+        assertThat(resumeMarkdown).contains("- CKA Kubernetes — CNCF (Apr 2023)");
     }
 }

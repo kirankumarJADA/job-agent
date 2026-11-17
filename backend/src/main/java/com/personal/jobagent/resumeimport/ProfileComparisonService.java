@@ -31,8 +31,8 @@ public class ProfileComparisonService {
 
         for (WorkExperienceRecord e : existing) {
             if (normalize(e.company()).equals(company) && normalize(e.title()).equals(title)) {
-                boolean sameDates = datesMatch(e.startMonth(), candidate.startMonth())
-                        && datesMatch(e.endMonth(), candidate.endMonth());
+                boolean sameDates = datesMatch(e.startMonth(), e.startDatePrecision(), candidate.startMonth())
+                        && datesMatch(e.endMonth(), e.endDatePrecision(), candidate.endMonth());
                 return new MatchResult(sameDates ? MatchStatus.EXISTING : MatchStatus.CONFLICT, e.id());
             }
         }
@@ -118,6 +118,10 @@ public class ProfileComparisonService {
     }
 
     static boolean datesMatch(java.time.LocalDate existing, String candidateDate) {
+        return datesMatch(existing, "MONTH", candidateDate);
+    }
+
+    static boolean datesMatch(java.time.LocalDate existing, String existingPrecision, String candidateDate) {
         if (existing == null && (candidateDate == null || candidateDate.isBlank())) {
             return true;
         }
@@ -125,6 +129,12 @@ public class ProfileComparisonService {
             return false;
         }
         String s = candidateDate.strip();
+        if ("YEAR".equalsIgnoreCase(existingPrecision)) {
+            if (s.matches("\\d{4}")) {
+                return existing.getYear() == Integer.parseInt(s);
+            }
+            return false;
+        }
         if (s.matches("\\d{4}")) {
             return existing.getYear() == Integer.parseInt(s);
         }

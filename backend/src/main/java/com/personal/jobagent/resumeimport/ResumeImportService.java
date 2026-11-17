@@ -223,6 +223,8 @@ public class ResumeImportService {
             if (d.action() == null || d.action() == ImportAction.SKIP) { tally.skip(null); continue; }
             LocalDate start = toStorageDate(d.startMonth());
             LocalDate end = toStorageDate(d.endMonth());
+            String startPrecision = datePrecision(d.startMonth());
+            String endPrecision = d.endMonth() == null ? null : datePrecision(d.endMonth());
             if (isBlank(d.company()) || isBlank(d.title()) || start == null) {
                 tally.skip("Skipped a work experience entry: company, title and a start date are required.");
                 continue;
@@ -236,7 +238,7 @@ public class ResumeImportService {
                     continue;
                 }
                 profiles.updateExperience(d.matchedExistingId(), profileId, d.company(), d.title(),
-                        start, end, d.location(), bullets, target.get().sortOrder());
+                        start, end, d.location(), bullets, target.get().sortOrder(), startPrecision, endPrecision);
                 tally.replaced++;
                 continue;
             }
@@ -247,9 +249,9 @@ public class ResumeImportService {
                 continue;
             }
             UUID id = profiles.insertExperience(profileId, d.company(), d.title(), start, end,
-                    d.location(), bullets, sortOrder);
+                    d.location(), bullets, sortOrder, startPrecision, endPrecision);
             current.add(new WorkExperienceRecord(id, profileId, d.company(), d.title(), start, end,
-                    d.location(), bullets, sortOrder++));
+                    d.location(), bullets, sortOrder++, startPrecision, endPrecision));
             tally.added++;
         }
     }
@@ -381,12 +383,13 @@ public class ResumeImportService {
                 continue;
             }
             LocalDate issuedOnDate = toStorageDate(d.issuedOn());
+            String issuedPrecision = d.issuedOn() == null ? null : datePrecision(d.issuedOn());
             if (d.action() == ImportAction.REPLACE) {
                 if (current.stream().noneMatch(c -> c.id().equals(d.matchedExistingId()))) {
                     tally.skip("Could not replace certification \"" + d.name() + "\": the matched record no longer exists.");
                     continue;
                 }
-                profiles.updateCertification(d.matchedExistingId(), profileId, d.name(), d.issuer(), issuedOnDate, d.credentialId());
+                profiles.updateCertification(d.matchedExistingId(), profileId, d.name(), d.issuer(), issuedOnDate, d.credentialId(), issuedPrecision);
                 tally.replaced++;
                 continue;
             }
@@ -396,8 +399,8 @@ public class ResumeImportService {
                 tally.skip("Certification \"" + d.name() + "\" is already in your profile, so it was not added again.");
                 continue;
             }
-            UUID id = profiles.insertCertification(profileId, d.name(), d.issuer(), issuedOnDate, d.credentialId());
-            current.add(new CertificationRecord(id, profileId, d.name(), d.issuer(), issuedOnDate, d.credentialId()));
+            UUID id = profiles.insertCertification(profileId, d.name(), d.issuer(), issuedOnDate, d.credentialId(), issuedPrecision);
+            current.add(new CertificationRecord(id, profileId, d.name(), d.issuer(), issuedOnDate, d.credentialId(), issuedPrecision));
             tally.added++;
         }
     }
@@ -415,6 +418,15 @@ public class ResumeImportService {
             return LocalDate.parse(s);
         }
         return null;
+    }
+
+    static String datePrecision(String dateStr) {
+        if (dateStr == null || dateStr.isBlank()) return null;
+        String s = dateStr.strip();
+        if (s.matches("\\d{4}")) {
+            return "YEAR";
+        }
+        return "MONTH";
     }
 
     /**

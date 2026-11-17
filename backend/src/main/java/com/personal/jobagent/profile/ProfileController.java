@@ -134,7 +134,12 @@ public class ProfileController {
     // ---- experiences ----
 
     public record ExperienceRequest(String company, String title, LocalDate startMonth, LocalDate endMonth,
-                                     String location, List<Map<String, Object>> bullets, int sortOrder) {
+                                     String location, List<Map<String, Object>> bullets, int sortOrder,
+                                     String startDatePrecision, String endDatePrecision) {
+        public ExperienceRequest(String company, String title, LocalDate startMonth, LocalDate endMonth,
+                                 String location, List<Map<String, Object>> bullets, int sortOrder) {
+            this(company, title, startMonth, endMonth, location, bullets, sortOrder, null, null);
+        }
     }
 
     @GetMapping("/experiences")
@@ -146,14 +151,16 @@ public class ProfileController {
     public ResponseEntity<?> addExperience(@RequestBody ExperienceRequest request) {
         UUID id = profileRepository.insertExperience(currentProfileId(), request.company(), request.title(),
                 request.startMonth(), request.endMonth(), request.location(),
-                request.bullets() != null ? request.bullets() : List.of(), request.sortOrder());
+                request.bullets() != null ? request.bullets() : List.of(), request.sortOrder(),
+                request.startDatePrecision(), request.endDatePrecision());
         return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("id", id));
     }
 
     @PutMapping("/experiences/{id}")
     public ResponseEntity<?> updateExperience(@PathVariable UUID id, @RequestBody ExperienceRequest request) {
         boolean updated = profileRepository.updateExperience(id, currentProfileId(), request.company(), request.title(),
-                request.startMonth(), request.endMonth(), request.location(), request.bullets(), request.sortOrder());
+                request.startMonth(), request.endMonth(), request.location(), request.bullets(), request.sortOrder(),
+                request.startDatePrecision(), request.endDatePrecision());
         return updated ? ResponseEntity.ok(Map.of("id", id)) : ResponseEntity.notFound().build();
     }
 
@@ -227,7 +234,11 @@ public class ProfileController {
 
     // ---- certifications ----
 
-    public record CertificationRequest(String name, String issuer, LocalDate issuedOn, String credentialId) {
+    public record CertificationRequest(String name, String issuer, LocalDate issuedOn, String credentialId,
+                                       String issuedOnPrecision) {
+        public CertificationRequest(String name, String issuer, LocalDate issuedOn, String credentialId) {
+            this(name, issuer, issuedOn, credentialId, null);
+        }
     }
 
     @GetMapping("/certifications")
@@ -238,14 +249,14 @@ public class ProfileController {
     @PostMapping("/certifications")
     public ResponseEntity<?> addCertification(@RequestBody CertificationRequest request) {
         UUID id = profileRepository.insertCertification(currentProfileId(), request.name(), request.issuer(),
-                request.issuedOn(), request.credentialId());
+                request.issuedOn(), request.credentialId(), request.issuedOnPrecision());
         return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("id", id));
     }
 
     @PutMapping("/certifications/{id}")
     public ResponseEntity<?> updateCertification(@PathVariable UUID id, @RequestBody CertificationRequest request) {
         boolean updated = profileRepository.updateCertification(id, currentProfileId(), request.name(), request.issuer(),
-                request.issuedOn(), request.credentialId());
+                request.issuedOn(), request.credentialId(), request.issuedOnPrecision());
         return updated ? ResponseEntity.ok(Map.of("id", id)) : ResponseEntity.notFound().build();
     }
 

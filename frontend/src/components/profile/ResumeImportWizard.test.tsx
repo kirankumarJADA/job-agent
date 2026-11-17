@@ -114,9 +114,30 @@ describe('ResumeImportWizard', () => {
     // Shown and edited as a month, stored as the first of that month.
     expect(body.experiences[0].startMonth).toBe('2021-01-01');
     expect(body.skills).toHaveLength(1);
+    expect(body.skills[0].name).toBe('Java');
+    expect(body.skills[0].category).toBe('Technical');
 
     expect(await screen.findByText(/Import complete: 2 added/)).toBeTruthy();
     expect(onImported).toHaveBeenCalled();
+  });
+
+  it('exposes extracted skill category in review UI, allows editing it, and submits the edited category', async () => {
+    mockedApiFetch.mockResolvedValueOnce(PREVIEW_RESPONSE as any);
+    mockedApiFetch.mockResolvedValueOnce({ added: 2, replaced: 0, skipped: 0, warnings: [] } as any);
+    render(React.createElement(ResumeImportWizard, { onClose: vi.fn(), onImported: vi.fn() }));
+    await uploadFile();
+    await screen.findByText(/2 new/);
+
+    const categoryInput = screen.getByLabelText('Category for skill Java') as HTMLInputElement;
+    expect(categoryInput.value).toBe('Technical');
+    fireEvent.change(categoryInput, { target: { value: 'Backend Development' } });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Import selected' }));
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(2));
+
+    const body = JSON.parse((mockedApiFetch.mock.calls[1][1] as any).body);
+    expect(body.skills[0].name).toBe('Java');
+    expect(body.skills[0].category).toBe('Backend Development');
   });
 
   it('shows months, not invented days, and sends an edited month as the first of that month', async () => {

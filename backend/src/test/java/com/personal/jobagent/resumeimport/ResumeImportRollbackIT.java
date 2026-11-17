@@ -80,7 +80,7 @@ class ResumeImportRollbackIT {
         // Experiences are written before certifications, so the experience insert
         // has already happened (and bumped the revision) when this fails.
         Mockito.doThrow(new DataAccessResourceFailureException("injected certification-write failure"))
-                .when(profileRepository).insertCertification(any(), any(), any(), any(), any());
+                .when(profileRepository).insertCertification(any(), any(), any(), any(), any(), any());
 
         String body = """
                 {"previewToken": "%s", "personalFieldUpdates": {"headline": "Rolled Back Headline"},

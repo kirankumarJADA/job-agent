@@ -446,18 +446,62 @@ export const ResumeImportWizard: React.FC<{ onClose: () => void; onImported: () 
               </ReviewSection>
 
               <ReviewSection title={`Skills (${skillRows.length})`}>
-                <div className="flex flex-wrap gap-2">
+                <div className="grid gap-2 sm:grid-cols-2">
                   {skillRows.map((row, idx) => (
-                    <label key={row.candidate.clientId} className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs ${row.candidate.matchStatus === 'EXISTING' ? 'border-line bg-cream-50 text-ink-muted' : 'border-forest-300 bg-forest-50 text-forest-800'}`}>
-                      <input type="checkbox" checked={row.include} disabled={row.candidate.matchStatus === 'EXISTING'}
-                        onChange={(e) => setSkillRows((rows) => rows.map((r, i) => (i === idx ? withInclude(r, e.target.checked) : r)))}
-                        aria-label={`Include skill ${row.edited.name}`} />
-                      {row.edited.name}
-                      {!row.candidate.data.sourceVerified && (
-                        <span className="rounded bg-amber-100 px-1 py-0.2 text-[9px] font-medium text-amber-800">Unverified</span>
-                      )}
-                      {row.candidate.matchStatus === 'EXISTING' && <span className="text-[10px]">(already have this)</span>}
-                    </label>
+                    <div
+                      key={row.candidate.clientId}
+                      className={`flex flex-col gap-1.5 rounded-lg border p-2.5 text-xs ${
+                        row.candidate.matchStatus === 'EXISTING'
+                          ? 'border-line bg-cream-50 text-ink-muted'
+                          : 'border-line bg-white'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="flex items-center gap-1.5 font-medium text-ink">
+                          <input
+                            type="checkbox"
+                            checked={row.include}
+                            disabled={row.candidate.matchStatus === 'EXISTING'}
+                            onChange={(e) =>
+                              setSkillRows((rows) =>
+                                rows.map((r, i) => (i === idx ? withInclude(r, e.target.checked) : r))
+                              )
+                            }
+                            aria-label={`Include skill ${row.edited.name}`}
+                          />
+                          <span className={row.candidate.matchStatus === 'EXISTING' ? 'text-ink-muted' : 'text-ink'}>
+                            {row.edited.name}
+                          </span>
+                        </label>
+                        <div className="flex items-center gap-1.5">
+                          {!row.candidate.data.sourceVerified && (
+                            <span className="rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-800">
+                              Unverified
+                            </span>
+                          )}
+                          {row.candidate.matchStatus === 'EXISTING' && (
+                            <span className="text-[10px] text-ink-muted">(already have this)</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-ink-muted whitespace-nowrap">Category:</span>
+                        <TextInput
+                          aria-label={`Category for skill ${row.edited.name}`}
+                          placeholder="Category (e.g. Languages, Cloud)"
+                          value={row.edited.category ?? ''}
+                          disabled={row.candidate.matchStatus === 'EXISTING'}
+                          onChange={(e) =>
+                            setSkillRows((rows) =>
+                              rows.map((r, i) =>
+                                i === idx ? { ...r, edited: { ...r.edited, category: e.target.value } } : r
+                              )
+                            )
+                          }
+                          className="py-1 text-xs"
+                        />
+                      </div>
+                    </div>
                   ))}
                 </div>
                 {skillRows.length === 0 && <EmptySection text="No skills detected." />}
