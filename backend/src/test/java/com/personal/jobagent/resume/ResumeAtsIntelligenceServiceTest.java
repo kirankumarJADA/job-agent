@@ -234,4 +234,35 @@ class ResumeAtsIntelligenceServiceTest {
                     .doesNotContain("Certifications");
         }
     }
+
+    @Test
+    void rendersYearOnlyPrecisionWithoutInventingMonths() {
+        UUID profileId = UUID.randomUUID();
+        ProfileRecord profile = new ProfileRecord(profileId, UUID.randomUUID(), null, null, null,
+                Map.of(), Map.of(), null, Map.of(), 1, "READY");
+        ContactRecord contact = new ContactRecord("Candidate", "c@example.test");
+        WorkExperienceRecord yearJob = new WorkExperienceRecord(UUID.randomUUID(), profileId, "Company Y", "Role Y",
+                LocalDate.of(2021, 1, 1), LocalDate.of(2023, 1, 1), "London", List.of(), 0, "YEAR", "YEAR");
+        WorkExperienceRecord monthJob = new WorkExperienceRecord(UUID.randomUUID(), profileId, "Company M", "Role M",
+                LocalDate.of(2019, 5, 1), LocalDate.of(2020, 11, 1), "Remote", List.of(), 1, "MONTH", "MONTH");
+        CertificationRecord yearCert = new CertificationRecord(UUID.randomUUID(), profileId, "Cert Y", "Issuer Y",
+                LocalDate.of(2022, 1, 1), "ID-Y", "YEAR");
+        CertificationRecord monthCert = new CertificationRecord(UUID.randomUUID(), profileId, "Cert M", "Issuer M",
+                LocalDate.of(2023, 4, 1), "ID-M", "MONTH");
+
+        ResumeAtsIntelligenceService.Source source = new ResumeAtsIntelligenceService.Source(
+                profile, contact, List.of(), List.of(yearJob, monthJob), List.of(), List.of(), List.of(yearCert, monthCert));
+
+        ResumeAtsIntelligenceService service = new ResumeAtsIntelligenceService(
+                mock(JobRepository.class), mock(ProfileRepository.class), mock(ResumeAtsRepository.class),
+                mock(NotificationService.class), new CvArtifactService());
+        String markdown = service.render(source, Set.of());
+
+        assertThat(markdown).contains("2021 – 2023");
+        assertThat(markdown).doesNotContain("Jan 2021");
+        assertThat(markdown).contains("May 2019 – Nov 2020");
+        assertThat(markdown).contains("Cert Y — Issuer Y (2022)");
+        assertThat(markdown).doesNotContain("(Jan 2022)");
+        assertThat(markdown).contains("Cert M — Issuer M (Apr 2023)");
+    }
 }

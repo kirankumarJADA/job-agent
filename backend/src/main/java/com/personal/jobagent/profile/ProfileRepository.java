@@ -128,15 +128,28 @@ public class ProfileRepository {
     // ---- work experiences ----
 
     private RowMapper<WorkExperienceRecord> experienceRowMapper() {
-        return (rs, rowNum) -> new WorkExperienceRecord(
-                (UUID) rs.getObject("id"), (UUID) rs.getObject("profile_id"),
-                rs.getString("company"), rs.getString("title"),
-                rs.getDate("start_month") != null ? rs.getDate("start_month").toLocalDate() : null,
-                rs.getDate("end_month") != null ? rs.getDate("end_month").toLocalDate() : null,
-                rs.getString("location"),
-                readBulletsList(rs, "bullets"),
-                rs.getInt("sort_order")
-        );
+        return (rs, rowNum) -> {
+            String startDatePrecision = rs.getString("start_date_precision");
+            if (startDatePrecision == null) {
+                startDatePrecision = "MONTH";
+            }
+            LocalDate endMonth = rs.getDate("end_month") != null ? rs.getDate("end_month").toLocalDate() : null;
+            String endDatePrecision = rs.getString("end_date_precision");
+            if (endDatePrecision == null && endMonth != null) {
+                endDatePrecision = "MONTH";
+            }
+            return new WorkExperienceRecord(
+                    (UUID) rs.getObject("id"), (UUID) rs.getObject("profile_id"),
+                    rs.getString("company"), rs.getString("title"),
+                    rs.getDate("start_month") != null ? rs.getDate("start_month").toLocalDate() : null,
+                    endMonth,
+                    rs.getString("location"),
+                    readBulletsList(rs, "bullets"),
+                    rs.getInt("sort_order"),
+                    startDatePrecision,
+                    endDatePrecision
+            );
+        };
     }
 
     @SuppressWarnings("unchecked")
@@ -161,25 +174,57 @@ public class ProfileRepository {
     public UUID insertExperience(UUID profileId, String company, String title,
                                   LocalDate startMonth, LocalDate endMonth, String location,
                                   List<Map<String, Object>> bullets, int sortOrder) {
+        return insertExperience(profileId, company, title, startMonth, endMonth, location, bullets, sortOrder, "MONTH", endMonth != null ? "MONTH" : null);
+    }
+
+    public UUID insertExperience(UUID profileId, String company, String title,
+                                  LocalDate startMonth, LocalDate endMonth, String location,
+                                  List<Map<String, Object>> bullets, int sortOrder,
+                                  String startDatePrecision, String endDatePrecision) {
         UUID id = UuidV7.generate();
         jdbcTemplate.update("""
-                        insert into work_experiences (id, profile_id, company, title, start_month, end_month, location, bullets, sort_order)
-                        values (?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
+                        insert into work_experiences (id, profile_id, company, title, start_month, end_month, location, bullets, sort_order, start_date_precision, end_date_precision)
+                        values (?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?)
                         """,
                 id, profileId, company, title,
                 Date.valueOf(startMonth), endMonth != null ? Date.valueOf(endMonth) : null, location,
-                JdbcConversions.toJson(bullets, objectMapper), sortOrder);
+                JdbcConversions.toJson(bullets, objectMapper), sortOrder,
+                startDatePrecision != null ? startDatePrecision : "MONTH",
+                endMonth != null ? (endDatePrecision != null ? endDatePrecision : "MONTH") : null);
         return id;
     }
 
     public boolean updateExperience(UUID id, UUID profileId, String company, String title,
                                     LocalDate startMonth, LocalDate endMonth, String location,
                                     List<Map<String, Object>> bullets, int sortOrder) {
+        return updateExperience(id, profileId, company, title, startMonth, endMonth, location, bullets, sortOrder, null, null);
+    }
+
+    public boolean updateExperience(UUID id, UUID profileId, String company, String title,
+                                    LocalDate startMonth, LocalDate endMonth, String location,
+                                    List<Map<String, Object>> bullets, int sortOrder,
+                                    String startDatePrecision, String endDatePrecision) {
         return jdbcTemplate.update("""
-                update work_experiences set company=?, title=?, start_month=?, end_month=?, location=?,
-                    bullets=?::jsonb, sort_order=? where id=? and profile_id=?
-                """, company, title, Date.valueOf(startMonth), endMonth == null ? null : Date.valueOf(endMonth),
-                location, JdbcConversions.toJson(bullets == null ? List.of() : bullets, objectMapper), sortOrder, id, profileId) > 0;
+                update work_experiences set
+                    company = coalesce(?, company),
+                    title = coalesce(?, title),
+                    start_month = coalesce(?, start_month),
+                    end_month = ?,
+                    location = ?,
+                    bullets = ?::jsonb,
+                    sort_order = ?,
+                    start_date_precision = coalesce(?::text, start_date_precision, 'MONTH'),
+                    end_date_precision = case
+                        when (?::date) is null then null
+                        else coalesce(?::text, end_date_precision, 'MONTH')
+                    end
+                where id = ? and profile_id = ?
+                """, company, title, startMonth == null ? null : Date.valueOf(startMonth),
+                endMonth == null ? null : Date.valueOf(endMonth),
+                location, JdbcConversions.toJson(bullets == null ? List.of() : bullets, objectMapper), sortOrder,
+                startDatePrecision,
+                endMonth == null ? null : Date.valueOf(endMonth), endDatePrecision,
+                id, profileId) > 0;
     }
 
     public boolean deleteExperience(UUID id, UUID profileId) {
@@ -326,12 +371,20 @@ public class ProfileRepository {
     // ---- certifications ----
 
     private RowMapper<CertificationRecord> certificationRowMapper() {
-        return (rs, rowNum) -> new CertificationRecord(
-                (UUID) rs.getObject("id"), (UUID) rs.getObject("profile_id"),
-                rs.getString("name"), rs.getString("issuer"),
-                rs.getDate("issued_on") != null ? rs.getDate("issued_on").toLocalDate() : null,
-                rs.getString("credential_id")
-        );
+        return (rs, rowNum) -> {
+            LocalDate issuedOn = rs.getDate("issued_on") != null ? rs.getDate("issued_on").toLocalDate() : null;
+            String issuedOnPrecision = rs.getString("issued_on_precision");
+            if (issuedOnPrecision == null && issuedOn != null) {
+                issuedOnPrecision = "MONTH";
+            }
+            return new CertificationRecord(
+                    (UUID) rs.getObject("id"), (UUID) rs.getObject("profile_id"),
+                    rs.getString("name"), rs.getString("issuer"),
+                    issuedOn,
+                    rs.getString("credential_id"),
+                    issuedOnPrecision
+            );
+        };
     }
 
     public List<CertificationRecord> findCertifications(UUID profileId) {
@@ -339,21 +392,42 @@ public class ProfileRepository {
     }
 
     public UUID insertCertification(UUID profileId, String name, String issuer, LocalDate issuedOn, String credentialId) {
+        return insertCertification(profileId, name, issuer, issuedOn, credentialId, issuedOn != null ? "MONTH" : null);
+    }
+
+    public UUID insertCertification(UUID profileId, String name, String issuer, LocalDate issuedOn, String credentialId,
+                                    String issuedOnPrecision) {
         UUID id = UuidV7.generate();
         jdbcTemplate.update("""
-                        insert into certifications (id, profile_id, name, issuer, issued_on, credential_id)
-                        values (?, ?, ?, ?, ?, ?)
+                        insert into certifications (id, profile_id, name, issuer, issued_on, credential_id, issued_on_precision)
+                        values (?, ?, ?, ?, ?, ?, ?)
                         """,
-                id, profileId, name, issuer, issuedOn != null ? Date.valueOf(issuedOn) : null, credentialId);
+                id, profileId, name, issuer, issuedOn != null ? Date.valueOf(issuedOn) : null, credentialId,
+                issuedOn != null ? (issuedOnPrecision != null ? issuedOnPrecision : "MONTH") : null);
         return id;
     }
 
     public boolean updateCertification(UUID id, UUID profileId, String name, String issuer,
                                        LocalDate issuedOn, String credentialId) {
+        return updateCertification(id, profileId, name, issuer, issuedOn, credentialId, null);
+    }
+
+    public boolean updateCertification(UUID id, UUID profileId, String name, String issuer,
+                                       LocalDate issuedOn, String credentialId, String issuedOnPrecision) {
         return jdbcTemplate.update("""
-                update certifications set name=?, issuer=?, issued_on=?, credential_id=?
-                where id=? and profile_id=?
-                """, name, issuer, issuedOn == null ? null : Date.valueOf(issuedOn), credentialId, id, profileId) > 0;
+                update certifications set
+                    name = coalesce(?, name),
+                    issuer = coalesce(?, issuer),
+                    issued_on = ?,
+                    credential_id = ?,
+                    issued_on_precision = case
+                        when (?::date) is null then null
+                        else coalesce(?::text, issued_on_precision, 'MONTH')
+                    end
+                where id = ? and profile_id = ?
+                """, name, issuer, issuedOn == null ? null : Date.valueOf(issuedOn), credentialId,
+                issuedOn == null ? null : Date.valueOf(issuedOn), issuedOnPrecision,
+                id, profileId) > 0;
     }
 
     public boolean deleteCertification(UUID id, UUID profileId) {

@@ -12,6 +12,20 @@ spring:
       ddl-auto: validate   # schema owned by Flyway, never by Hibernate
     open-in-view: false
 
+  servlet:
+    multipart:
+      # Resume import (feat/master-resume-import) is the only endpoint that
+      # accepts a file upload from an end user, and allows resumes up to 10 MB
+      # (Spring's per-file default is 1 MB). max-request-size has a little
+      # headroom over max-file-size for multipart framing; the default total
+      # was already 10 MB. These limits are global, so they also apply to the
+      # Mailgun inbound webhook, which ignores attachments: a message with a
+      # single 1-10 MB attachment is now stored (text only) instead of being
+      # refused with 406. Parts are spooled to Tomcat's temp directory and
+      # deleted by Spring's multipart cleanup when the request ends.
+      max-file-size: 10MB
+      max-request-size: 11MB
+
   flyway:
     enabled: true
     locations: classpath:db/migration

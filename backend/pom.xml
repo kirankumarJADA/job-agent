@@ -138,6 +138,16 @@
       <version>3.0.3</version>
     </dependency>
 
+    <!-- Master Resume Import (feat/master-resume-import): .docx text extraction.
+         poi-ooxml pulls in poi + xmlbeans transitively. ZIP-bomb protection
+         (entry-count/inflate-ratio guards) is provided by POI's own
+         ZipSecureFile, used internally by OPCPackage/XWPFDocument. -->
+    <dependency>
+      <groupId>org.apache.poi</groupId>
+      <artifactId>poi-ooxml</artifactId>
+      <version>5.3.0</version>
+    </dependency>
+
     <!-- Observability -->
     <dependency>
       <groupId>org.springframework.boot</groupId>

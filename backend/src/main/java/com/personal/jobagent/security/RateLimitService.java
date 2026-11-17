@@ -83,7 +83,9 @@ public class RateLimitService {
         if (path.equals("/api/v1/auth/login") || path.equals("/api/v1/auth/firebase/session")) return "auth";
         if (path.equals("/api/v1/cover-letters/generate")
                 || path.equals("/api/v1/resume-intelligence/tailor")
-                || path.equals("/api/v1/application-answers/draft")) return "llm";
+                || path.equals("/api/v1/application-answers/draft")
+                // Resume import preview: document parsing plus an AI extraction call.
+                || path.equals("/api/v1/profile/resume-import/preview")) return "llm";
         if (path.matches("/api/v1/applications/[^/]+/re-prepare")) return "llm";
         if (path.equals("/api/v1/discovery/run")
                 || path.equals("/api/v1/discovery/run-for-me")

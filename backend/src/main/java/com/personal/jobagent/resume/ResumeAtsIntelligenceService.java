@@ -243,7 +243,7 @@ public class ResumeAtsIntelligenceService {
      * is invented and nothing is copied from the job description. Job
      * relevance only changes ORDER (relevant verified skills first).
      */
-    String render(Source s, Set<String> requiredNormalized) {
+    public String render(Source s, Set<String> requiredNormalized) {
         ProfileRecord profile = s.profile();
         StringBuilder b = new StringBuilder("# ")
                 .append(blankToNull(s.contact().displayName()) != null ? s.contact().displayName().strip() : "Curriculum Vitae")
@@ -283,7 +283,10 @@ public class ResumeAtsIntelligenceService {
             for (WorkExperienceRecord x : s.experiences()) {
                 b.append("### ").append(x.title()).append(" — ").append(x.company()).append('\n');
                 List<String> meta = new ArrayList<>();
-                if (x.startMonth() != null) meta.add(month(x.startMonth()) + " – " + (x.endMonth() == null ? "Present" : month(x.endMonth())));
+                if (x.startMonth() != null) {
+                    meta.add(formatExperienceDate(x.startMonth(), x.startDatePrecision()) + " – "
+                            + (x.endMonth() == null ? "Present" : formatExperienceDate(x.endMonth(), x.endDatePrecision())));
+                }
                 if (blankToNull(x.location()) != null) meta.add(x.location().strip());
                 if (!meta.isEmpty()) b.append(String.join(" · ", meta)).append('\n');
                 DocumentFactValidator.bullets(x.bullets()).forEach(t -> b.append("- ").append(t).append('\n'));
@@ -321,11 +324,27 @@ public class ResumeAtsIntelligenceService {
             for (CertificationRecord c : s.certifications()) {
                 b.append("- ").append(c.name());
                 if (blankToNull(c.issuer()) != null) b.append(" — ").append(c.issuer().strip());
-                if (c.issuedOn() != null) b.append(" (").append(month(c.issuedOn())).append(')');
+                if (c.issuedOn() != null) b.append(" (").append(formatCertificationDate(c.issuedOn(), c.issuedOnPrecision())).append(')');
                 b.append('\n');
             }
         }
         return b.toString();
+    }
+
+    private static String formatExperienceDate(LocalDate date, String precision) {
+        if (date == null) return "";
+        if ("YEAR".equalsIgnoreCase(precision)) {
+            return String.valueOf(date.getYear());
+        }
+        return month(date);
+    }
+
+    private static String formatCertificationDate(LocalDate date, String precision) {
+        if (date == null) return "";
+        if ("YEAR".equalsIgnoreCase(precision)) {
+            return String.valueOf(date.getYear());
+        }
+        return month(date);
     }
 
     private static String month(LocalDate date) { return MONTH.format(date); }

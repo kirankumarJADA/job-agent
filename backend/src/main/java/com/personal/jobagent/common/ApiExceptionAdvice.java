@@ -33,7 +33,11 @@ import java.util.NoSuchElementException;
 @RestControllerAdvice
 public class ApiExceptionAdvice {
 
-    /** The only multipart endpoint (MailgunInboundController.PATH; kept literal so common stays a leaf). */
+    /**
+     * The one multipart endpoint with special handling (MailgunInboundController.PATH; kept
+     * literal so common stays a leaf). Every other multipart endpoint — including resume
+     * import — falls through to the conventional 413/400 handling below.
+     */
     private static final String MAILGUN_INBOUND_PATH = "/api/v1/managed-mail/inbound/mailgun";
 
     @ExceptionHandler(NoSuchElementException.class)
