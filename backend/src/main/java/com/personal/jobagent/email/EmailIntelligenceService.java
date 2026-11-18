@@ -103,7 +103,7 @@ public class EmailIntelligenceService {
      * provider classes in {@code identity/ExternalMailboxProviders} refuse to
      * poll), so in production this boundary is exercised only by tests.
      */
-    public record ConnectorMessage(String providerId, String messageId, String from, String to, String subject,
+    public record ConnectorMessage(String providerId, String messageId, String threadId, String from, String to, String subject,
                                    String body, Instant receivedAt, String mailboxAddress,
                                    SenderAuthentication authentication, List<String> threadReferences) {
 
@@ -111,11 +111,17 @@ public class EmailIntelligenceService {
             threadReferences = threadReferences == null ? List.of() : List.copyOf(threadReferences);
         }
 
+        public ConnectorMessage(String providerId, String messageId, String from, String to, String subject,
+                                String body, Instant receivedAt, String mailboxAddress,
+                                SenderAuthentication authentication, List<String> threadReferences) {
+            this(providerId, messageId, null, from, to, subject, body, receivedAt, mailboxAddress, authentication, threadReferences);
+        }
+
         /** A message whose connector reports no In-Reply-To/References (e.g. Gmail, keyed by its own ids). */
         public ConnectorMessage(String providerId, String messageId, String from, String to, String subject,
                                 String body, Instant receivedAt, String mailboxAddress,
                                 SenderAuthentication authentication) {
-            this(providerId, messageId, from, to, subject, body, receivedAt, mailboxAddress, authentication, List.of());
+            this(providerId, messageId, null, from, to, subject, body, receivedAt, mailboxAddress, authentication, List.of());
         }
     }
 
@@ -173,7 +179,7 @@ public class EmailIntelligenceService {
     public IngestResult ingest(UUID ownerProfileId, String messageId, String from, String to,
                                String subject, String body, Instant received, UUID applicationId) {
         Objects.requireNonNull(ownerProfileId, "ownerProfileId is required to ingest an email");
-        return process(ownerProfileId, messageId, from, to, subject, body, received, applicationId,
+        return process(ownerProfileId, messageId, null, from, to, subject, body, received, applicationId,
                 Channel.CANDIDATE_FORWARDED, null, null, List.of());
     }
 
@@ -182,7 +188,7 @@ public class EmailIntelligenceService {
     public IngestResult ingestFromMailboxConnector(UUID ownerProfileId, ConnectorMessage message) {
         Objects.requireNonNull(ownerProfileId, "ownerProfileId is required to ingest an email");
         Objects.requireNonNull(message, "message");
-        return process(ownerProfileId, message.messageId(), message.from(), message.to(), message.subject(),
+        return process(ownerProfileId, message.messageId(), message.threadId(), message.from(), message.to(), message.subject(),
                 message.body(), message.receivedAt(), null, Channel.MAILBOX_CONNECTOR,
                 message.authentication() == null ? SenderAuthentication.none() : message.authentication(),
                 message.mailboxAddress(), message.threadReferences());
@@ -193,24 +199,29 @@ public class EmailIntelligenceService {
      * linked to (LINKED or CONFIRMED). Scoped to the owner on both tables, so a
      * thread id that also exists in another account's mail reveals nothing.
      */
-    private Set<UUID> threadApplications(UUID ownerProfileId, List<String> references) {
-        if (references == null || references.isEmpty()) return Set.of();
-        List<String> ids = references.stream().filter(Objects::nonNull).map(String::trim)
-                .filter(id -> !id.isEmpty() && id.length() <= 255).distinct().limit(MAX_THREAD_REFERENCES).toList();
+    private Set<UUID> threadApplications(UUID ownerProfileId, String threadId, List<String> references) {
+        List<String> ids = references == null ? new ArrayList<>() : new ArrayList<>(references.stream()
+                .filter(Objects::nonNull).map(String::trim)
+                .filter(id -> !id.isEmpty() && id.length() <= 255).distinct().limit(MAX_THREAD_REFERENCES).toList());
+        if (threadId != null && !threadId.isBlank() && !ids.contains(threadId.trim())) {
+            ids.add(threadId.trim());
+        }
         if (ids.isEmpty()) return Set.of();
         List<Object> args = new ArrayList<>();
         args.add(ownerProfileId);
         args.addAll(ids);
+        args.addAll(ids);
+        String placeholders = String.join(",", Collections.nCopies(ids.size(), "?"));
         return new LinkedHashSet<>(db.query("""
                 select distinct l.application_id from emails e
                 join email_application_links l on l.email_id = e.id and l.profile_id = e.profile_id
                 where e.profile_id = ? and l.application_id is not null and l.status in ('LINKED', 'CONFIRMED')
-                  and e.message_id in (%s)
-                """.formatted(String.join(",", Collections.nCopies(ids.size(), "?"))),
+                  and (e.message_id in (%1$s) or (e.thread_id is not null and e.thread_id in (%1$s)))
+                """.formatted(placeholders),
                 (rs, n) -> (UUID) rs.getObject(1), args.toArray()));
     }
 
-    private IngestResult process(UUID ownerProfileId, String messageId, String from, String to, String subject,
+    private IngestResult process(UUID ownerProfileId, String messageId, String threadId, String from, String to, String subject,
                                  String body, Instant received, UUID assertedApplicationId, Channel channel,
                                  SenderAuthentication authentication, String mailboxAddress,
                                  List<String> threadReferences) {
@@ -234,7 +245,7 @@ public class EmailIntelligenceService {
         EmailCategory category = classification.category();
         MessageEvidence messageEvidence = MessageEvidence.of(from, subject, body);
         Association association = matcher.match(messageEvidence, track.ownedApplicationsForMatching(ownerProfileId),
-                assertedApplicationId, category, threadApplications(ownerProfileId, threadReferences));
+                assertedApplicationId, category, threadApplications(ownerProfileId, threadId, threadReferences));
         String contentFingerprint = TrackText.sha256(TrackText.lower(from) + "|" + TrackText.lower(subject) + "|"
                 + (receivedTimeKnown ? receivedAt.getEpochSecond() : "unknown") + "|" + TrackText.sha256(body));
         boolean retainBody = category == EmailCategory.VERIFICATION_CODE;
@@ -245,15 +256,15 @@ public class EmailIntelligenceService {
 
         UUID emailId = UuidV7.generate();
         List<UUID> inserted = db.query("""
-                        insert into emails(id,message_id,from_address,to_address,subject,body_text,received_at,
+                        insert into emails(id,message_id,thread_id,from_address,to_address,subject,body_text,received_at,
                                            application_id,classification,classification_confidence,classification_reason,
                                            profile_id,channel,content_fingerprint,body_retained,processing_version,
                                            sender_authentication,received_time_known)
-                        values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?::jsonb,?)
+                        values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?::jsonb,?)
                         on conflict do nothing
                         returning id
                         """, (rs, n) -> (UUID) rs.getObject(1),
-                emailId, messageId, from == null ? "" : TrackText.cap(from, 320), TrackText.cap(to, 320),
+                emailId, messageId, threadId, from == null ? "" : TrackText.cap(from, 320), TrackText.cap(to, 320),
                 subject == null ? "" : TrackText.cap(subject, 500),
                 retainBody ? TrackText.cap(body == null ? "" : body, TrackText.MAX_RETAINED_BODY_CHARS) : "",
                 Timestamp.from(receivedAt), linkedApplication, category.name(), classification.confidence(),

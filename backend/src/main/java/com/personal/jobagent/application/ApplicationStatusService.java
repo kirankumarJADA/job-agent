@@ -43,12 +43,16 @@ public class ApplicationStatusService {
             "READY_TO_APPLY", Set.of("APPLICATION_STARTED", "FAILED", "WITHDRAWN"),
             "APPLICATION_STARTED", Set.of("OTP_PENDING", "APPLICATION_SUBMITTED", "FAILED", "WITHDRAWN"),
             "OTP_PENDING", Set.of("APPLICATION_STARTED", "APPLICATION_SUBMITTED", "FAILED", "WITHDRAWN"),
-            "APPLICATION_SUBMITTED", Set.of("CONFIRMATION_RECEIVED", "RECRUITER_CONTACT", "INTERVIEW", "ASSESSMENT", "REJECTED", "OFFER"),
-            "CONFIRMATION_RECEIVED", Set.of("RECRUITER_CONTACT", "INTERVIEW", "ASSESSMENT", "REJECTED", "OFFER"),
-            "RECRUITER_CONTACT", Set.of("INTERVIEW", "ASSESSMENT", "REJECTED", "OFFER"),
-            "INTERVIEW", Set.of("ASSESSMENT", "REJECTED", "OFFER"),
-            "ASSESSMENT", Set.of("REJECTED", "OFFER")
+            "APPLICATION_SUBMITTED", Set.of("CONFIRMATION_RECEIVED", "RECRUITER_CONTACT", "INTERVIEW", "ASSESSMENT", "REJECTED", "OFFER", "WITHDRAWN"),
+            "CONFIRMATION_RECEIVED", Set.of("RECRUITER_CONTACT", "INTERVIEW", "ASSESSMENT", "REJECTED", "OFFER", "WITHDRAWN"),
+            "RECRUITER_CONTACT", Set.of("INTERVIEW", "ASSESSMENT", "REJECTED", "OFFER", "WITHDRAWN"),
+            "INTERVIEW", Set.of("ASSESSMENT", "REJECTED", "OFFER", "WITHDRAWN"),
+            "ASSESSMENT", Set.of("INTERVIEW", "REJECTED", "OFFER", "WITHDRAWN")
     );
+
+    public static boolean isAllowed(String current, String target) {
+        return ALLOWED.getOrDefault(current, Set.of()).contains(target);
+    }
     private final JdbcTemplate db;
     private final ObjectMapper json;
     private final AuditLogWriter audit;
@@ -68,7 +72,14 @@ public class ApplicationStatusService {
         String current = currentRows.get(0);
         if (already.isPresent()) return new TransitionResult(applicationId,current,current,false,true);
         if (current.equals(target)) throw new IllegalStateException("duplicate status transition is not allowed");
-        if (!ALLOWED.getOrDefault(current, Set.of()).contains(target)) throw new IllegalStateException("invalid application transition " + current + " -> " + target);
+        if (!ALLOWED.getOrDefault(current, Set.of()).contains(target)) {
+            audit.write(new AuditEntry(actor == null ? "SYSTEM" : actor, "ILLEGAL_APPLICATION_TRANSITION_REJECTED",
+                    "APPLICATION", applicationId,
+                    Map.of("currentStatus", current),
+                    Map.of("targetStatus", target, "eventKey", eventKey),
+                    null, UuidV7.generate()));
+            throw new IllegalStateException("invalid application transition " + current + " -> " + target);
+        }
         Map<String,Object> payload = new LinkedHashMap<>(); payload.put("event_key",eventKey); payload.put("from",current); payload.put("to",target); if(context!=null) payload.putAll(context);
         try {
             db.update("update applications set status=?,updated_at=now() where id=? and profile_id=? and status=?", target, applicationId, ownerProfileId, current);
