@@ -115,7 +115,8 @@ public class HardFilterService {
         for (String allowed : expandedAllowed) {
             if (allowed == null || allowed.isBlank()) continue;
             String allowedClean = normalizeTitle(allowed);
-            if (jobTitleClean.contains(allowedClean)) {
+            String wordRegex = "\\b" + java.util.regex.Pattern.quote(allowedClean) + "\\b";
+            if (java.util.regex.Pattern.compile(wordRegex).matcher(jobTitleClean).find()) {
                 return true;
             }
             String[] tokens = allowedClean.split("\\s+");
