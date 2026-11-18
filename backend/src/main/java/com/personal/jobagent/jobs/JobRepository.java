@@ -293,8 +293,18 @@ public class JobRepository {
             params.add(status);
         }
         if (query != null && !query.isBlank()) {
-            conditions.add("j.search_vector @@ plainto_tsquery('english', ?)");
-            params.add(query);
+            List<String> queryVariants = TitleSynonymRegistry.expandQueryVariants(query);
+            if (queryVariants.size() <= 1) {
+                conditions.add("j.search_vector @@ plainto_tsquery('english', ?)");
+                params.add(query);
+            } else {
+                List<String> orClauses = new ArrayList<>();
+                for (String variant : queryVariants) {
+                    orClauses.add("j.search_vector @@ plainto_tsquery('english', ?)");
+                    params.add(variant);
+                }
+                conditions.add("(" + String.join(" or ", orClauses) + ")");
+            }
         }
         if (filters.location() != null) {
             conditions.add("(lower(j.city) = lower(?) or lower(j.country) = lower(?) or lower(j.location_raw) like '%'||lower(?)||'%')");
