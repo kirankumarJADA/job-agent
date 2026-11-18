@@ -1,0 +1,254 @@
+{
+  "benchmark_version": "2.0.0",
+  "description": "Reproducible benchmark dataset for evaluating multi-stage ranking in Robin vs baseline",
+  "candidates": [
+    {
+      "id": "c1-senior-java-backend",
+      "name": "Senior Java Backend Engineer",
+      "skills": ["Java", "Spring Boot", "PostgreSQL", "Docker", "REST APIs", "Microservices"],
+      "titles": ["Backend Engineer", "Software Engineer", "Java Developer", "Platform Engineer"],
+      "locations": ["London", "UK"],
+      "remoteTypes": ["HYBRID", "REMOTE"],
+      "salaryMin": 75000,
+      "experienceLevels": ["SENIOR", "LEAD"]
+    },
+    {
+      "id": "c2-mid-frontend-react",
+      "name": "Mid-Level Frontend React Developer",
+      "skills": ["React", "TypeScript", "JavaScript", "HTML5", "CSS", "Next.js", "Redux"],
+      "titles": ["Frontend Engineer", "Frontend Developer", "Web Developer", "UI Engineer"],
+      "locations": ["UK"],
+      "remoteTypes": ["REMOTE", "HYBRID"],
+      "salaryMin": 50000,
+      "experienceLevels": ["MID", "SENIOR"]
+    },
+    {
+      "id": "c3-lead-platform-sre",
+      "name": "Lead Platform / SRE Engineer",
+      "skills": ["Kubernetes", "AWS", "Terraform", "Docker", "Linux", "Go", "CI/CD"],
+      "titles": ["Platform Engineer", "Site Reliability Engineer", "DevOps Engineer", "Cloud Engineer"],
+      "locations": ["London", "UK"],
+      "remoteTypes": ["HYBRID", "REMOTE"],
+      "salaryMin": 90000,
+      "experienceLevels": ["LEAD", "STAFF", "PRINCIPAL"]
+    }
+  ],
+  "jobs": [
+    {
+      "id": "job-01",
+      "title": "Senior Backend Engineer - Java / Spring",
+      "company": "Fintech Alpha",
+      "skills": ["Java", "Spring Boot", "PostgreSQL", "Kafka", "Microservices"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 80000,
+      "salaryMax": 95000,
+      "experienceLevel": "SENIOR",
+      "relevance": {
+        "c1-senior-java-backend": 3,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0
+      }
+    },
+    {
+      "id": "job-02",
+      "title": "Lead Java Platform Engineer",
+      "company": "Cloudscale UK",
+      "skills": ["Java", "Docker", "Kubernetes", "Spring Boot", "AWS"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 90000,
+      "salaryMax": 110000,
+      "experienceLevel": "LEAD",
+      "relevance": {
+        "c1-senior-java-backend": 3,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 2
+      }
+    },
+    {
+      "id": "job-03",
+      "title": "Mid Frontend Developer (React & TypeScript)",
+      "company": "E-Commerce Direct",
+      "skills": ["React", "TypeScript", "Next.js", "CSS", "REST APIs"],
+      "location": "Manchester, UK",
+      "city": "Manchester",
+      "country": "GB",
+      "remoteType": "REMOTE",
+      "salaryMin": 52000,
+      "salaryMax": 65000,
+      "experienceLevel": "MID",
+      "relevance": {
+        "c1-senior-java-backend": 0,
+        "c2-mid-frontend-react": 3,
+        "c3-lead-platform-sre": 0
+      }
+    },
+    {
+      "id": "job-04",
+      "title": "Senior Frontend Engineer - Design Systems",
+      "company": "SaaS Platform",
+      "skills": ["React", "TypeScript", "Storybook", "HTML5", "CSS"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 70000,
+      "salaryMax": 85000,
+      "experienceLevel": "SENIOR",
+      "relevance": {
+        "c1-senior-java-backend": 0,
+        "c2-mid-frontend-react": 3,
+        "c3-lead-platform-sre": 0
+      }
+    },
+    {
+      "id": "job-05",
+      "title": "Principal SRE / Cloud Architect",
+      "company": "Global Infrastructure Ltd",
+      "skills": ["Kubernetes", "AWS", "Terraform", "Go", "Docker", "Linux"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 100000,
+      "salaryMax": 130000,
+      "experienceLevel": "PRINCIPAL",
+      "relevance": {
+        "c1-senior-java-backend": 1,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 3
+      }
+    },
+    {
+      "id": "job-06",
+      "title": "Staff DevOps Engineer",
+      "company": "Fintech Alpha",
+      "skills": ["AWS", "Terraform", "CI/CD", "Kubernetes", "Linux"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "REMOTE",
+      "salaryMin": 95000,
+      "salaryMax": 115000,
+      "experienceLevel": "STAFF",
+      "relevance": {
+        "c1-senior-java-backend": 1,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 3
+      }
+    },
+    {
+      "id": "job-07",
+      "title": "Junior Python Developer",
+      "company": "Data Insights",
+      "skills": ["Python", "Pandas", "SQL"],
+      "location": "Bristol, UK",
+      "city": "Bristol",
+      "country": "GB",
+      "remoteType": "ONSITE",
+      "salaryMin": 30000,
+      "salaryMax": 35000,
+      "experienceLevel": "ENTRY",
+      "relevance": {
+        "c1-senior-java-backend": 0,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0
+      }
+    },
+    {
+      "id": "job-08",
+      "title": "Nurse Practitioner",
+      "company": "NHS Trust",
+      "skills": ["Healthcare", "Patient Care", "Clinical"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "ONSITE",
+      "salaryMin": 45000,
+      "salaryMax": 50000,
+      "experienceLevel": "MID",
+      "relevance": {
+        "c1-senior-java-backend": 0,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0
+      }
+    },
+    {
+      "id": "job-09",
+      "title": "Full Stack Java & React Engineer",
+      "company": "Enterprise Media",
+      "skills": ["Java", "Spring Boot", "React", "TypeScript", "PostgreSQL"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 75000,
+      "salaryMax": 90000,
+      "experienceLevel": "SENIOR",
+      "relevance": {
+        "c1-senior-java-backend": 2,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 1
+      }
+    },
+    {
+      "id": "job-10",
+      "title": "Staff Platform Engineer",
+      "company": "CloudNative Co",
+      "skills": ["Go", "Kubernetes", "Linux", "Docker", "Terraform"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "REMOTE",
+      "salaryMin": 92000,
+      "salaryMax": 110000,
+      "experienceLevel": "LEAD",
+      "relevance": {
+        "c1-senior-java-backend": 1,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 3
+      }
+    },
+    {
+      "id": "job-11",
+      "title": "Senior Java Developer - Low Latency",
+      "company": "Trading Firm",
+      "skills": ["Java", "Microservices", "REST APIs", "Docker"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 85000,
+      "salaryMax": 120000,
+      "experienceLevel": "SENIOR",
+      "relevance": {
+        "c1-senior-java-backend": 3,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0
+      }
+    },
+    {
+      "id": "job-12",
+      "title": "Marketing Manager",
+      "company": "Consumer Brand",
+      "skills": ["SEO", "Campaign Management", "Content"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 50000,
+      "salaryMax": 60000,
+      "experienceLevel": "MID",
+      "relevance": {
+        "c1-senior-java-backend": 0,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0
+      }
+    }
+  ]
+}
