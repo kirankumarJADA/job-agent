@@ -136,6 +136,7 @@ public class JobMatchService {
         List<String> allowedRemoteTypes = preferences == null ? List.of() : preferences.remoteTypes();
         List<String> allowedExperienceLevels = preferences == null ? List.of() : preferences.experienceLevels();
         List<String> allowedLocations = preferences == null ? List.of() : preferences.locationsAllowed();
+        List<String> allowedTitles = preferences == null ? List.of() : preferences.titles();
         String sponsorshipPolicy = preferences == null ? null : preferences.sponsorshipPolicy();
         Number desiredSalaryMin = preferences == null ? null : preferences.salaryMinGbp();
 
@@ -186,7 +187,7 @@ public class JobMatchService {
                     overall,
                     recommendation,
                     breakdownJson(job, overall, recommendation, skillOverlap, remoteFit, salaryFit,
-                            desiredSalaryMin, allowedRemoteTypes, experience, visa, location, categories));
+                            desiredSalaryMin, allowedRemoteTypes, allowedTitles, experience, visa, location, categories));
 
             // Catalogue-level marker only: "this posting has been evaluated".
             // Shared on purpose and carrying no candidate data, which is why it
@@ -350,6 +351,12 @@ public class JobMatchService {
         }
         String jobLevel = job.experienceLevel();
         if (jobLevel == null || jobLevel.isBlank()) {
+            SeniorityClassifier.Level fromTitle = SeniorityClassifier.classifyText(job.title());
+            if (fromTitle != null) {
+                boolean matched = allowedExperienceLevels.stream()
+                        .anyMatch(level -> SeniorityClassifier.parseLevel(level) == fromTitle);
+                return CategoryScore.applicable("experience", weight, matched ? 1.0 : 0.0);
+            }
             return CategoryScore.applicable("experience", weight, 0.5);
         }
         boolean matched = allowedExperienceLevels.stream().anyMatch(level -> level.equalsIgnoreCase(jobLevel));
@@ -431,6 +438,22 @@ public class JobMatchService {
         return Math.max(0.0, Math.min(1.0, (ratio - 0.8) / 0.2)); // 0 below 80%, 1 at 100%
     }
 
+    public static double computeTitleFit(JobRecord job, List<String> allowedTitles) {
+        if (allowedTitles == null || allowedTitles.isEmpty()) return 1.0;
+        String jobTitle = job.title();
+        if (jobTitle == null || jobTitle.isBlank()) return 0.5;
+        if (HardFilterService.matchesAnyTitle(jobTitle, allowedTitles)) {
+            return 1.0;
+        }
+        String canJob = TitleSynonymRegistry.canonicalise(jobTitle);
+        for (String allowed : allowedTitles) {
+            if (TitleSynonymRegistry.canonicalise(allowed).equals(canJob)) {
+                return 0.85;
+            }
+        }
+        return 0.25;
+    }
+
     /**
      * Persisted, human-readable decision record. Scoring itself is untouched
      * here — this adds the evidence trail the product requires: which
@@ -444,6 +467,7 @@ public class JobMatchService {
     private String breakdownJson(JobRecord job, int overall, String recommendation,
                                  SkillOverlap skillOverlap, double remoteFit, double salaryFit,
                                  Number desiredSalaryMin, List<String> allowedRemoteTypes,
+                                 List<String> allowedTitles,
                                  CategoryScore experience, CategoryScore visa, CategoryScore location,
                                  List<CategoryScore> categories) {
         StringBuilder why = new StringBuilder();
@@ -564,7 +588,18 @@ public class JobMatchService {
             weights.put(category.key(), category.weight());
             applicable.put(category.key(), category.score() != null);
         }
+        double titleFit = computeTitleFit(job, allowedTitles);
+        if (allowedTitles != null && !allowedTitles.isEmpty()) {
+            if (titleFit >= 0.8) {
+                highlights.add("Job title aligns with your target roles (" + job.title() + ")");
+            } else if (titleFit < 0.4) {
+                concerns.add("Job title differs from target roles (" + job.title() + ")");
+            }
+        }
+
         Map<String, Object> breakdown = new LinkedHashMap<>();
+        breakdown.put("title_fit", Math.round(titleFit * 100));
+        breakdown.put("seniority_level", SeniorityClassifier.classifyJob(job.experienceLevel(), job.title()).name());
         breakdown.put("skill_overlap", Math.round(skillOverlap.ratio() * 100));
         breakdown.put("remote_fit", Math.round(remoteFit * 100));
         breakdown.put("salary_fit", Math.round(salaryFit * 100));
