@@ -14,7 +14,6 @@ import com.personal.jobagent.profile.ProfileRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -22,6 +21,9 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.time.Instant;
 import java.util.List;
@@ -46,34 +48,27 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * actually depends on.
  *
  * <h2>Running it</h2>
- * Disabled unless a PostgreSQL URL is supplied, because a build machine without a
- * database must not fail on it:
+ * Runs on every {@code mvn verify}, against a throwaway Testcontainers
+ * PostgreSQL 16, the same pattern as the other ITs. Flyway migrates the empty
+ * container on context startup, so this also exercises the migrations.
  *
- * <pre>
- * mvn -f backend/pom.xml verify -Dit.postgres.url=jdbc:postgresql://127.0.0.1:5432/jobagent
- * </pre>
- *
- * Optional: {@code -Dit.postgres.username} (default {@code jobagent}),
- * {@code -Dit.postgres.password} (default empty). The schema is expected to be
- * migrated already — Flyway runs on context startup, so pointing this at an empty
- * database also verifies the migrations themselves.
- *
- * <p>{@code @Testcontainers} is deliberately not used: the CI path for this
- * project already supplies a database URL, and Testcontainers would make the
- * class unrunnable precisely where a real PostgreSQL is available.
+ * <p>Wave 1 (Agent 5): the earlier {@code -Dit.postgres.url} switch was removed on
+ * purpose. CI never set it, so the class was always skipped, and it allowed the
+ * suite to be pointed at a real database, where its seed rows would persist.
+ * This class only ever talks to its own container.
  */
 @SpringBootTest(properties = "app.discovery.scheduler-enabled=false")
-@EnabledIfSystemProperty(named = "it.postgres.url", matches = ".+",
-        disabledReason = "Set -Dit.postgres.url to run the PostgreSQL isolation tests")
+@Testcontainers
 class UserDataIsolationIT {
+
+    @Container
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
 
     @DynamicPropertySource
     static void datasource(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url", () -> System.getProperty("it.postgres.url"));
-        registry.add("spring.datasource.username",
-                () -> System.getProperty("it.postgres.username", "jobagent"));
-        registry.add("spring.datasource.password",
-                () -> System.getProperty("it.postgres.password", ""));
+        registry.add("spring.datasource.url", postgres::getJdbcUrl);
+        registry.add("spring.datasource.username", postgres::getUsername);
+        registry.add("spring.datasource.password", postgres::getPassword);
         // Background sweeps are irrelevant here and would add noise.
         registry.add("app.events.dispatch-interval-ms", () -> "600000");
     }
