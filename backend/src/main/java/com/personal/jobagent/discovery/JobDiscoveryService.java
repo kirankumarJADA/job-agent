@@ -149,12 +149,14 @@ public class JobDiscoveryService {
 
         List<JobIdentity.Key> keys = JobIdentity.keys(cmd.sourceId(), cmd.externalId(), cmd.canonicalUrl(),
                 applicationUrl, cmd.companyNameRaw(), cmd.requisitionId());
-        lockKeys(keys);
-        Match match = resolve(keys, cmd);
+        List<JobIdentity.Key> lookupKeys = JobIdentity.lookupKeys(cmd.sourceId(), cmd.externalId(), cmd.canonicalUrl(),
+                applicationUrl, cmd.companyNameRaw(), cmd.requisitionId());
+        lockKeys(lookupKeys);
+        Match match = resolve(lookupKeys, cmd);
 
         if (match != null) {
             List<Map<String, Object>> rows = jdbcTemplate.queryForList(
-                    "select content_hash, source_id, application_url, canonical_url from jobs where id = ?", match.jobId());
+                    "select content_hash, source_id, application_url, canonical_url, last_discovered_event_at from jobs where id = ?", match.jobId());
             Map<String, Object> row = rows.isEmpty() ? Map.of() : rows.get(0);
             UUID existingId = match.jobId();
             UUID primarySource = (UUID) row.get("source_id");
@@ -162,32 +164,92 @@ public class JobDiscoveryService {
             String prevHash = (String) row.get("content_hash");
             improveUrls(existingId, (String) row.get("application_url"), (String) row.get("canonical_url"),
                     applicationUrl, cmd.canonicalUrl());
+
+            String incomingKind = sourceKind(cmd.sourceId());
+            boolean authoritative = incomingKind != null && !"TSENTA".equals(incomingKind)
+                    && !"FREEHIRE".equals(incomingKind) && !"ARBEITNOW".equals(incomingKind) && !"ADZUNA".equals(incomingKind);
+
             String action;
             if (crossSource && promoteFromAggregator(existingId, primarySource, cmd, contentHash)) {
                 action = "UPDATED";
             } else if (crossSource || contentHash.equals(prevHash)) {
                 // Seen again (or seen through another source): freshness only.
+                // Aggregator cannot resurrect a job closed by an authoritative source.
                 if (postedAtTs == null || crossSource) {
-                    jdbcTemplate.update("update jobs set last_seen_at = now(), deleted_at = null where id = ?", existingId);
+                    jdbcTemplate.update("""
+                            update jobs set last_seen_at = now(),
+                                deleted_at = case
+                                    when ? then null
+                                    when exists (
+                                        select 1 from job_source_observations o
+                                        join job_sources s on s.id = o.source_id
+                                        where o.job_id = jobs.id
+                                          and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA')
+                                          and o.source_status in ('MISSING', 'CLOSED')
+                                    ) then deleted_at
+                                    else null
+                                end
+                            where id = ?
+                            """, authoritative, existingId);
                 } else {
-                    jdbcTemplate.update("update jobs set last_seen_at = now(), deleted_at = null, posted_at = ?::timestamptz, "
-                                    + "posted_date_source = 'EXPLICIT' where id = ?", postedAtTs, existingId);
+                    jdbcTemplate.update("""
+                            update jobs set last_seen_at = now(),
+                                posted_at = ?::timestamptz,
+                                posted_date_source = 'EXPLICIT',
+                                deleted_at = case
+                                    when ? then null
+                                    when exists (
+                                        select 1 from job_source_observations o
+                                        join job_sources s on s.id = o.source_id
+                                        where o.job_id = jobs.id
+                                          and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA')
+                                          and o.source_status in ('MISSING', 'CLOSED')
+                                    ) then deleted_at
+                                    else null
+                                end
+                            where id = ?
+                            """, postedAtTs, authoritative, existingId);
                 }
                 action = "TOUCHED";
             } else {
                 // Repost or content updated by the job's own source.
                 jdbcTemplate.update("""
                         update jobs set content_hash = ?, title = ?, description_text = ?,
-                            repost_count = repost_count + 1, last_seen_at = now(), deleted_at = null,
+                            repost_count = repost_count + 1, last_seen_at = now(),
+                            deleted_at = case
+                                when ? then null
+                                when exists (
+                                    select 1 from job_source_observations o
+                                    join job_sources s on s.id = o.source_id
+                                    where o.job_id = jobs.id
+                                      and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA')
+                                      and o.source_status in ('MISSING', 'CLOSED')
+                                ) then deleted_at
+                                else null
+                            end,
                             posted_at = coalesce(?::timestamptz, posted_at),
                             posted_date_source = case when ?::timestamptz is null then posted_date_source else 'EXPLICIT' end
                         where id = ?
-                        """, contentHash, cmd.title(), cmd.descriptionText(), postedAtTs, postedAtTs, existingId);
+                        """, contentHash, cmd.title(), cmd.descriptionText(), authoritative, postedAtTs, postedAtTs, existingId);
                 action = "UPDATED";
             }
             storeKeys(existingId, keys, cmd.sourceId());
             recordObservation(existingId, cmd, contentHash);
-            emitDiscovered(existingId, action, cmd.sourceId());
+
+            boolean shouldEmit = true;
+            if ("TOUCHED".equals(action) && touchedEventIntervalHours > 0) {
+                Object lastEventObj = row.get("last_discovered_event_at");
+                if (lastEventObj instanceof java.sql.Timestamp lastTs) {
+                    long hours = java.time.Duration.between(lastTs.toInstant(), Instant.now()).toHours();
+                    if (hours < touchedEventIntervalHours) {
+                        shouldEmit = false;
+                    }
+                }
+            }
+            if (shouldEmit) {
+                emitDiscovered(existingId, action, cmd.sourceId());
+                jdbcTemplate.update("update jobs set last_discovered_event_at = now() where id = ?", existingId);
+            }
             return new IngestResult(existingId, action, dedupKey, contentHash, match.matchedBy(), crossSource);
         }
 
@@ -200,9 +262,9 @@ public class JobDiscoveryService {
                                   experience_level, salary_min, salary_max, salary_currency, salary_period,
                                   description_text, skills_extracted, application_url, canonical_url,
                                   posted_at, posted_date_source, first_seen_at, last_seen_at,
-                                  repost_count, content_hash, status)
+                                  repost_count, content_hash, status, last_discovered_event_at)
                 values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz,
-                        case when ?::timestamptz is null then 'UNKNOWN' else 'EXPLICIT' end, now(), now(), 0, ?, 'DISCOVERED')
+                        case when ?::timestamptz is null then 'UNKNOWN' else 'EXPLICIT' end, now(), now(), 0, ?, 'DISCOVERED', now())
                 """,
                 id, cmd.sourceId(), cmd.externalId(), dedupKey, cmd.companyId(), cmd.companyNameRaw(),
                 cmd.title(), cmd.locationRaw(), cmd.city(), cmd.country(), cmd.remoteType(), cmd.employmentType(),
@@ -340,11 +402,41 @@ public class JobDiscoveryService {
     @Value("${app.discovery.maintenance-enabled:true}")
     private boolean maintenanceEnabled = true;
 
+    @Value("${app.discovery.touched-event-interval-hours:0}")
+    private int touchedEventIntervalHours = 0;
+
+    @Value("${app.discovery.aggregator-observation-ttl-days:7}")
+    private int aggregatorTtlDays = 7;
+
     @Scheduled(cron = "0 0 * * * *") // hourly scheduled refresh for source health and stale jobs
     public void scheduledDiscoveryMaintenance() {
         if (!maintenanceEnabled || maintenanceMode.isMaintenanceMode()) {
             return;
         }
+
+        // Expire stale aggregator observations older than aggregatorTtlDays (P1-1)
+        int expiredObs = jdbcTemplate.update("""
+                update job_source_observations set source_status = 'MISSING', removed_at = now()
+                where source_status = 'SEEN'
+                  and last_seen_at < now() - make_interval(days => ?)
+                  and (
+                      source_id in (select id from job_sources where kind in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA'))
+                      or source_type = 'WEB'
+                      or source_id is null
+                  )
+                """, aggregatorTtlDays);
+        if (expiredObs > 0) {
+            jdbcTemplate.update("""
+                    update jobs j set deleted_at = now()
+                    where j.deleted_at is null
+                      and not exists (
+                          select 1 from job_source_observations o
+                          where o.job_id = j.id and o.source_status = 'SEEN'
+                      )
+                    """);
+            log.info("Expired {} stale aggregator observations older than {} days", expiredObs, aggregatorTtlDays);
+        }
+
         // Mark jobs not seen in 30 days as ARCHIVED
         int archived = jdbcTemplate.update("""
                 update jobs set status = 'ARCHIVED'

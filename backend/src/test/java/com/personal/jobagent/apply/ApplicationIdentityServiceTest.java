@@ -106,4 +106,39 @@ class ApplicationIdentityServiceTest {
                 org.mockito.ArgumentMatchers.contains("a.profile_id = ?"),
                 org.mockito.ArgumentMatchers.eq(profile));
     }
+
+    @Test
+    void dualReadFindDuplicatesRecognisesLegacyStoredIdentityKey() {
+        org.springframework.jdbc.core.JdbcTemplate db = org.mockito.Mockito.mock(org.springframework.jdbc.core.JdbcTemplate.class);
+        var service = new ApplicationIdentityService(db);
+        UUID profile = UUID.randomUUID();
+        UUID targetJob = UUID.randomUUID();
+        UUID existingJob = UUID.randomUUID();
+        UUID existingAppId = UUID.randomUUID();
+
+        // Target job yields canonical key url:https://example.com/apply?token=ABC
+        org.mockito.Mockito.when(db.query(org.mockito.ArgumentMatchers.contains("from jobs j join job_sources"),
+                        org.mockito.ArgumentMatchers.any(org.springframework.jdbc.core.RowMapper.class),
+                        org.mockito.ArgumentMatchers.eq(targetJob)))
+                .thenReturn(List.of("url:https://example.com/apply?token=ABC"),
+                        List.of("url:http://www.example.com/apply?token=abc"));
+
+        // Existing application in DB has stored legacy key
+        org.mockito.Mockito.when(db.queryForList(org.mockito.ArgumentMatchers.contains("where a.profile_id = ?"),
+                        org.mockito.ArgumentMatchers.eq(profile)))
+                .thenReturn(List.of(java.util.Map.of(
+                        "id", existingAppId,
+                        "job_id", existingJob,
+                        "status", "APPLIED",
+                        "identity_key", "url:http://www.example.com/apply?token=abc",
+                        "canonical_url", "http://www.example.com/apply?token=abc",
+                        "application_url", "http://www.example.com/apply?token=abc",
+                        "source_kind", "WEB",
+                        "external_id", "ext-1"
+                )));
+
+        List<ApplicationIdentityService.ExistingApplication> dups = service.findDuplicates(profile, targetJob);
+        assertThat(dups).hasSize(1);
+        assertThat(dups.get(0).applicationId()).isEqualTo(existingAppId);
+    }
 }
