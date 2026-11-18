@@ -137,6 +137,19 @@ class BoardDiscoveryServiceTest {
     }
 
     @Test
+    void anEmptyCompleteListingNeverRemovesExistingJobsSafeDeletionGuard() {
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(List.of(), 1, null);
+
+        var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.SCHEDULED);
+
+        assertThat(report.ok()).isTrue();
+        assertThat(report.counts()).containsEntry("listed", 0);
+        verify(db, never()).update(contains("source_status = 'MISSING'"), any(Object[].class));
+        verify(db, never()).update(contains("set deleted_at = now()"), any(Object[].class));
+    }
+
+    @Test
     void aPartialByDesignListingIsHealthyButStillNeverRemoves() {
         Scripted a = new Scripted();
         a.listing = ListingResult.partial(List.of(full("1")), 1, null, "feed is not exhaustive", null);

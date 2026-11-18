@@ -22,4 +22,16 @@ public class DiscoveryMetrics {
             registry.counter("app.discovery.runs", "kind", kind, "mode", mode, "status", status).increment();
         }
     }
+
+    public void recordJobIngestion(String kind, String action, boolean crossSource) {
+        if (registry != null) {
+            registry.counter("app.discovery.jobs", "kind", kind, "action", action, "cross_source", String.valueOf(crossSource)).increment();
+        }
+    }
+
+    public void recordFreshness(String kind, String freshnessCategory) {
+        if (registry != null) {
+            registry.counter("app.discovery.freshness", "kind", kind, "freshness", freshnessCategory).increment();
+        }
+    }
 }

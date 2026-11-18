@@ -207,8 +207,11 @@ public class BoardDiscoveryService {
         }
         counts.put("requests", http.requestsMade());
 
-        if (listing.complete() && listing.failure() == null) {
+        // Safe deletion guard: empty or failed board discovery runs must never mark active jobs as deleted_at
+        if (listing.complete() && listing.failure() == null && !listing.entries().isEmpty()) {
             counts.put("removed", markUnlisted(sourceId, runStart, authoritative));
+        } else if (listing.complete() && listing.failure() == null && listing.entries().isEmpty()) {
+            log.warn("Safe deletion guard activated: listing completed with 0 jobs for source {}; skipping markUnlisted", sourceId);
         }
         return finish(sourceId, kind, correlationId, started, counts, ingested, listing.complete(),
                 listing.failure(), listing.failureDetail(), mode);
@@ -244,6 +247,9 @@ public class BoardDiscoveryService {
             default -> bump(counts, "unchanged");
         }
         if (result.crossSource()) bump(counts, "duplicates");
+        if (metrics != null) {
+            metrics.recordJobIngestion(kind.name(), result.action(), result.crossSource());
+        }
     }
 
     private Set<String> knownExternalIds(UUID sourceId) {
@@ -373,16 +379,20 @@ public class BoardDiscoveryService {
                         ? """
                           update job_sources set last_run_at = now(), last_attempted_at = now(), last_success_at = now(),
                               failure_streak = 0, last_run = ?::jsonb,
-                              health = ?::jsonb || jsonb_build_object('failure_streak', 0, 'circuit', 'closed')
+                              health = ?::jsonb || jsonb_build_object('failure_streak', 0, 'circuit', 'closed'),
+                              health_status = 'HEALTHY', consecutive_failures = 0, last_successful_run_at = now(), error_summary = null
                           where id = ?
                           """
                         : """
                           update job_sources set last_run_at = now(), last_attempted_at = now(),
                               failure_streak = failure_streak + 1, last_run = ?::jsonb,
                               health = ?::jsonb || jsonb_build_object('failure_streak', failure_streak + 1,
-                                  'circuit', case when failure_streak + 1 >= %d then 'open' else 'closed' end)
+                                  'circuit', case when failure_streak + 1 >= %d then 'open' else 'closed' end),
+                              health_status = case when failure_streak + 1 >= %d then 'UNHEALTHY' else 'DEGRADED' end,
+                              consecutive_failures = consecutive_failures + 1,
+                              error_summary = (?::jsonb)->>'error'
                           where id = ?
-                          """.formatted(circuitOpenAfter),
+                          """.formatted(circuitOpenAfter, circuitOpenAfter),
                 lastRunJson, toJson(health), sourceId);
 
         // V055 run history
