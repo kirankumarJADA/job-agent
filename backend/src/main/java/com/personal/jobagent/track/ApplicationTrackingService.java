@@ -24,8 +24,10 @@ import com.personal.jobagent.track.TrackVocabulary.EventClassification;
 import com.personal.jobagent.track.TrackVocabulary.EvidenceType;
 import com.personal.jobagent.track.TrackVocabulary.LinkStatus;
 import com.personal.jobagent.track.TrackVocabulary.ReportKind;
+import com.personal.jobagent.track.TrackVocabulary.Stage;
 import com.personal.jobagent.track.TrackVocabulary.TimePrecision;
 import com.personal.jobagent.track.TrackVocabulary.Verification;
+import com.personal.jobagent.track.TrackModels.MessageRecord;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -143,8 +145,50 @@ public class ApplicationTrackingService {
                           + "messages yourself; they are recorded as added by you and cannot be verified."));
         out.put("versions", Map.of("reconciler", ApplicationReconciler.VERSION, "receiptPolicy", ReceiptVerificationPolicy.VERSION,
                 "classifier", TrackEmailClassifier.VERSION, "matcher", EmailApplicationMatcher.VERSION));
+        out.put("threads", repository.threadsForApplication(profileId, applicationId));
+
+        Instant createdAt = header.createdAt();
+        boolean hasEmployerResponse = !parts.messages().getOrDefault(applicationId, List.of()).isEmpty()
+                || state.status() == Stage.INTERVIEW || state.status() == Stage.OFFER || state.status() == Stage.REJECTED;
+        Map<String, Object> followUp = new LinkedHashMap<>();
+        if (state.status() == Stage.WITHDRAWN || state.status() == Stage.REJECTED || state.status() == Stage.OFFER) {
+            followUp.put("due", false);
+            followUp.put("dueDate", null);
+            followUp.put("status", "NOT_NEEDED");
+        } else if (hasEmployerResponse) {
+            followUp.put("due", false);
+            followUp.put("dueDate", null);
+            followUp.put("status", "NOT_NEEDED");
+        } else if (createdAt != null) {
+            Instant dueAt = createdAt.plus(java.time.Duration.ofDays(14));
+            boolean isDue = Instant.now().isAfter(dueAt);
+            followUp.put("due", isDue);
+            followUp.put("dueDate", dueAt.toString());
+            followUp.put("status", isDue ? "DUE" : "PENDING");
+        } else {
+            followUp.put("due", false);
+            followUp.put("dueDate", null);
+            followUp.put("status", "NONE");
+        }
+        out.put("followUp", followUp);
         out.put("computedAt", Instant.now().toString());
         return Optional.of(out);
+    }
+
+    private String followUpStatus(ApplicationHeader header, TrackState state, List<MessageRecord> messages) {
+        if (state.status() == Stage.WITHDRAWN || state.status() == Stage.REJECTED || state.status() == Stage.OFFER) {
+            return "NOT_NEEDED";
+        }
+        if (messages != null && !messages.isEmpty()) {
+            return "NOT_NEEDED";
+        }
+        if (state.status() == Stage.INTERVIEW) {
+            return "NOT_NEEDED";
+        }
+        if (header.createdAt() != null && Instant.now().isAfter(header.createdAt().plus(java.time.Duration.ofDays(14)))) {
+            return "DUE";
+        }
+        return "PENDING";
     }
 
     /** Compact per-application status for the applications list, keyed by application id. */
@@ -163,6 +207,7 @@ public class ApplicationTrackingService {
             summary.put("needsReview", state.needsReview());
             summary.put("attentionCount", state.attention().size() + state.conflicts().size());
             summary.put("pending", state.pending() == null ? null : state.pending().label());
+            summary.put("followUpStatus", followUpStatus(header, state, parts.messages().get(header.id())));
             out.put(header.id(), summary);
         }
         return out;

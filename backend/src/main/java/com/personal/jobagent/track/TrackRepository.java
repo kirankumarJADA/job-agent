@@ -252,6 +252,35 @@ public class TrackRepository {
                         """, decision, note, receiptId, applicationId, profileId, expectedVersion) == 1;
     }
 
+    /**
+     * Groups email messages for an application into threads using e.thread_id.
+     */
+    public List<Map<String, Object>> threadsForApplication(UUID profileId, UUID applicationId) {
+        if (profileId == null || applicationId == null) return List.of();
+        return db.query("""
+                select coalesce(e.thread_id, e.id::text) as thread_id,
+                       coalesce(max(e.subject), 'No Subject') as subject,
+                       count(*) as message_count,
+                       max(e.received_at) as last_message_at,
+                       coalesce(max(coalesce(l.confirmed_category, l.inferred_category)), 'UNCLASSIFIED') as latest_classification
+                from email_application_links l
+                join emails e on e.id = l.email_id and e.profile_id = l.profile_id
+                where l.profile_id = ? and l.application_id = ?
+                  and l.status in ('LINKED', 'CONFIRMED')
+                group by coalesce(e.thread_id, e.id::text)
+                order by max(e.received_at) desc nulls last
+                """, (rs, n) -> {
+            Map<String, Object> thread = new LinkedHashMap<>();
+            thread.put("threadId", rs.getString("thread_id"));
+            thread.put("subject", rs.getString("subject"));
+            thread.put("messageCount", rs.getInt("message_count"));
+            java.sql.Timestamp ts = rs.getTimestamp("last_message_at");
+            thread.put("lastMessageAt", ts == null ? null : ts.toInstant().toString());
+            thread.put("latestClassification", rs.getString("latest_classification"));
+            return thread;
+        }, profileId, applicationId);
+    }
+
     // ── applications ─────────────────────────────────────────────────────
 
     /** The owner's applications with the identity data a message is matched against. */
