@@ -240,7 +240,7 @@ class JobDiscoveryServiceTest {
         row.put("application_url", applicationUrl);
         row.put("canonical_url", canonicalUrl);
         doReturn(List.of(row)).when(jdbcTemplate)
-                .queryForList(contains("select content_hash, source_id, application_url, canonical_url from jobs"), eq(id));
+                .queryForList(contains("select content_hash, source_id, application_url, canonical_url"), eq(id));
     }
 
     private static JobDiscoveryService.IngestJobCommand command(UUID sourceId, String externalId, String company,
