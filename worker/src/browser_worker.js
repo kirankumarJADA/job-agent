@@ -207,6 +207,9 @@ export class BrowserWorker {
           if (step.type === StepType.ASHBY_SUBMIT_CLICK && prior.submitResult) {
             this.lastAshbySubmitResult = prior.submitResult;
           }
+          if (step.type === StepType.WORKDAY_SUBMIT_CLICK && prior.submitResult) {
+            this.lastWorkdaySubmitResult = prior.submitResult;
+          }
           continue;
         }
         // A REAL_SUBMIT_CLICK attempt that was durably marked ATTEMPTING
