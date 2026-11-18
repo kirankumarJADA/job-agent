@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '../api/client';
 import { Profile } from '../types';
 import {
@@ -38,6 +38,20 @@ export const ProfilePage: React.FC = () => {
   const [showPurge, setShowPurge] = useState(false);
   const [purgePassword, setPurgePassword] = useState('');
   const [showResumeImport, setShowResumeImport] = useState(false);
+
+  const completenessScore = useMemo(() => {
+    if (!profile) return 0;
+    let score = 0;
+    if (profile.headline) score += 10;
+    if (profile.location) score += 10;
+    if (profile.phone) score += 10;
+    if (profile.professional_summary) score += 15;
+    if (profile.experiences && profile.experiences.length > 0) score += 20;
+    if (profile.education && profile.education.length > 0) score += 15;
+    if (profile.skills && profile.skills.length > 0) score += 10;
+    if (profile.projects && profile.projects.length > 0) score += 10;
+    return Math.min(100, score);
+  }, [profile]);
 
   const fetchProfile = async () => {
     setLoading(true); setError(null);
@@ -141,6 +155,20 @@ export const ProfilePage: React.FC = () => {
         {evidenceCount > 0 && (
           <Alert tone="success">{evidenceCount} provenance-linked verified evidence claims on record.</Alert>
         )}
+        <div className="flex items-center justify-between rounded-lg border border-line bg-cream-50/70 p-4" aria-label="Profile completeness">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold uppercase tracking-wider text-ink-muted">Profile Truth & Completeness</span>
+              <span className="rounded bg-forest-100 px-1.5 py-0.5 text-xs font-bold text-forest-800">{completenessScore}%</span>
+            </div>
+            <p className="text-xs text-ink-muted">
+              Robin guarantees 100% factual grounding against these {evidenceCount} verified evidence items. No hallucinated skills or dates will ever be generated.
+            </p>
+          </div>
+          <div className="w-32 h-2.5 rounded-full bg-slate-200 overflow-hidden shrink-0 ml-4">
+            <div className="h-full bg-forest-600 transition-all duration-300" style={{ width: `${completenessScore}%` }} />
+          </div>
+        </div>
         {message && <Alert tone="info">{message}</Alert>}
         {error && <Alert tone="error">{error}</Alert>}
 

@@ -46,6 +46,7 @@ export interface Job {
   match_score?: number | null;
   match_recommendation?: 'APPLY' | 'REVIEW' | 'SKIP' | null;
   match_breakdown?: MatchBreakdown | null;
+  bookmarked?: boolean;
 }
 
 export interface MatchBreakdown {
@@ -1126,6 +1127,18 @@ export interface ApplicationTrack {
   reviews: TrackReviewItem[];
   mailbox: { connected: boolean; note: string };
   versions?: Record<string, string>;
+  threads?: Array<{
+    threadId: string;
+    subject: string;
+    messageCount: number;
+    lastMessageAt: string | null;
+    latestClassification: string;
+  }>;
+  followUp?: {
+    due: boolean;
+    dueDate: string | null;
+    status: 'NONE' | 'PENDING' | 'DUE' | 'NOT_NEEDED';
+  };
   computedAt: string;
   replayed?: boolean;
 }
