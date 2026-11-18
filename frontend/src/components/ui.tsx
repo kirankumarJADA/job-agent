@@ -476,7 +476,8 @@ export const JobCard: React.FC<{
   footer?: React.ReactNode;
   actions?: React.ReactNode;
   atsCapabilities?: import('../types').AtsCapabilityRow[] | null;
-}> = ({ job, footer, actions, atsCapabilities }) => {
+  onBookmark?: (jobId: string, current: boolean) => void;
+}> = ({ job, footer, actions, atsCapabilities, onBookmark }) => {
   // Some imported postings have no usable timestamps; never render "Invalid Date".
   // Missing data is shown as missing — never replaced with an assumed
   // location, currency or "Competitive" salary.
@@ -510,6 +511,22 @@ export const JobCard: React.FC<{
           <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
             <WorkplacePill type={job.remote_type} />
             <JobStatusPill status={job.status} />
+            {onBookmark && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onBookmark(job.id, Boolean(job.bookmarked));
+                }}
+                className={`p-1 rounded hover:bg-cream-100 transition-colors ${job.bookmarked ? 'text-amber-500' : 'text-slate-400 hover:text-slate-600'}`}
+                aria-label={job.bookmarked ? 'Remove bookmark' : 'Bookmark job'}
+              >
+                <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
+                  <path d="M5 4a2 2 0 012-2h6a2 2 0 012 2v14l-5-3.125L5 18V4z" />
+                </svg>
+              </button>
+            )}
           </div>
         </div>
 

@@ -236,6 +236,21 @@ export const JobsFeedPage: React.FC = () => {
     }
   };
 
+  const handleBookmark = async (jobId: string, currentlyBookmarked: boolean) => {
+    try {
+      if (currentlyBookmarked) {
+        await apiFetch(`/jobs/${jobId}/bookmark`, { method: 'DELETE' });
+      } else {
+        await apiFetch(`/jobs/${jobId}/bookmark`, { method: 'POST' });
+      }
+      setJobs((current) =>
+        current.map((j) => (j.id === jobId ? { ...j, bookmarked: !currentlyBookmarked } : j))
+      );
+    } catch {
+      // ignore transient error
+    }
+  };
+
   // Debounced: every filter change (typing or a dropdown) lands here, the URL
   // is synced, and the actual fetch fires once input settles — multiple rapid
   // changes collapse into a single request, and the AbortController above
@@ -470,6 +485,7 @@ export const JobsFeedPage: React.FC = () => {
                   key={job.id}
                   job={job}
                   atsCapabilities={atsCapabilities}
+                  onBookmark={handleBookmark}
                   actions={<span className="inline-flex items-center gap-1 text-xs font-semibold text-forest-700">View match details →</span>}
                   footer={
                     job.skills_extracted && job.skills_extracted.length > 6 ? (
