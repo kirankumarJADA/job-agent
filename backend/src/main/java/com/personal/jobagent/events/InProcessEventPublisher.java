@@ -64,7 +64,7 @@ public class InProcessEventPublisher implements EventPublisher {
     private void markConsumed(java.util.UUID eventId, String consumer) {
         jdbcTemplate.update(
                 "insert into consumed_events (event_id, consumer, processed_at) values (?, ?, ?) "
-                        + "on conflict (event_id, consumer) do nothing",
+                        + "on conflict do nothing",
                 eventId, consumer, Timestamp.from(Instant.now()));
     }
 }

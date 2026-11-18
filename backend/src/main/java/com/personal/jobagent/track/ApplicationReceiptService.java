@@ -233,9 +233,15 @@ public class ApplicationReceiptService {
                 selectedIndex == plans.size() - 1, summaries));
     }
 
-    public List<AttemptSummary> getAttempts(UUID profileId, UUID applicationId) {
+    public Optional<List<AttemptSummary>> getAttempts(UUID profileId, UUID applicationId) {
         if (profileId == null || applicationId == null) {
-            return List.of();
+            return Optional.empty();
+        }
+        Integer appCount = db.queryForObject(
+                "select count(*) from applications where id = ? and profile_id = ?",
+                Integer.class, applicationId, profileId);
+        if (appCount == null || appCount == 0) {
+            return Optional.empty();
         }
         List<PlanRow> plans = db.query("""
                 select p.id, p.application_id, p.target_url, p.status, p.plan::text as plan_json,
@@ -275,7 +281,7 @@ public class ApplicationReceiptService {
                     isLatest
             ));
         }
-        return summaries;
+        return Optional.of(summaries);
     }
 
     @SuppressWarnings("unchecked")
