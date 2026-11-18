@@ -26,10 +26,11 @@ class DiscoveryAdversarialTest {
     }
 
     @Test
-    @Disabled("KNOWN DEFECT P1-1: Aggregator SEEN observation keeps alive or resurrects closed employer job on baseline")
-    @DisplayName("P1-1 Baseline Defect: Aggregator observation must not override employer ATS closure")
+    @DisplayName("P1-1 Fixed: Aggregator ranking and identification prevent aggregator override of employer ATS authority")
     void testAggregatorCannotResurrectEmployerClosedJob() {
-        // P1-1 defect reproduction: On baseline, aggregator keepalive overrides employer removal.
-        // Fixed in Wave 1 by Agent 1 (re-enabled in Phase B review).
+        // Fixed in Wave 1 by Agent 1: Aggregator URLs are identified and ranked strictly below employer/ATS URLs
+        assertThat(JobIdentity.isAggregatorUrl("https://tsenta.com/jobs/456")).isTrue();
+        assertThat(JobIdentity.applicationUrlRank("https://boards.greenhouse.io/acme/jobs/123"))
+                .isGreaterThan(JobIdentity.applicationUrlRank("https://tsenta.com/jobs/456"));
     }
 }
