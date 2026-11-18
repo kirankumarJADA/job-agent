@@ -132,7 +132,7 @@ class BoardDiscoveryServiceTest {
         verify(db, never()).update(contains("source_status = 'MISSING'"), any(Object[].class));
         verify(db, never()).update(contains("set deleted_at = now()"), any(Object[].class));
         ArgumentCaptor<String> health = ArgumentCaptor.forClass(String.class);
-        verify(db).update(contains("failure_streak = failure_streak + 1"), anyString(), health.capture(), eq(SOURCE));
+        verify(db).update(contains("failure_streak = failure_streak + 1"), anyString(), health.capture(), any(), eq(SOURCE));
         assertThat(health.getValue()).contains("UPSTREAM_ERROR");
     }
 
@@ -311,7 +311,7 @@ class BoardDiscoveryServiceTest {
         a.listFailure = new IllegalStateException("bug");
         var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL);
         assertThat(report.failureCategory()).isEqualTo("MALFORMED_RESPONSE");
-        verify(db).update(contains("failure_streak = failure_streak + 1"), anyString(), anyString(), eq(SOURCE));
+        verify(db).update(contains("failure_streak = failure_streak + 1"), anyString(), anyString(), any(), eq(SOURCE));
     }
 
     @Test
@@ -357,7 +357,7 @@ class BoardDiscoveryServiceTest {
         a.listing = ListingResult.partial(List.of(), 0, FailureCategory.ACCESS_DENIED, "HTTP 403", null);
         service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL);
         ArgumentCaptor<String> lastRun = ArgumentCaptor.forClass(String.class);
-        verify(db).update(contains("last_run = ?::jsonb"), lastRun.capture(), anyString(), eq(SOURCE));
+        verify(db).update(contains("last_run = ?::jsonb"), lastRun.capture(), anyString(), any(), eq(SOURCE));
         assertThat(lastRun.getValue()).contains("\"failure_category\":\"ACCESS_DENIED\"", "\"duration_ms\"", "\"mode\":\"MANUAL\"")
                 .doesNotContainIgnoringCase("token").doesNotContainIgnoringCase("password");
     }
