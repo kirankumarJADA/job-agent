@@ -150,6 +150,67 @@ class BoardDiscoveryServiceTest {
     }
 
     @Test
+    void noModeMayRemoveJobsWhenACompleteListingReturnsZeroEntries() {
+        // C1 regression: an empty-but-complete listing is indistinguishable from a silent upstream
+        // failure, so no mode - present or future - may treat it as authoritative. This loops every
+        // Mode so that adding one cannot quietly reintroduce the bypass.
+        for (BoardDiscoveryService.Mode mode : BoardDiscoveryService.Mode.values()) {
+            org.mockito.Mockito.reset(db);
+            Scripted a = new Scripted();
+            a.listing = ListingResult.complete(List.of(), 1, null);
+
+            var report = service.run(SOURCE, a, "acme", null, mode);
+
+            assertThat(report.ok()).as("run stays healthy in %s mode", mode).isTrue();
+            assertThat(report.counts()).as("nothing listed in %s mode", mode).containsEntry("listed", 0);
+            assertThat(report.counts()).as("zero removals in %s mode", mode).containsEntry("removed", 0);
+            verify(db, never()).update(contains("source_status = 'MISSING'"), any(Object[].class));
+            verify(db, never()).update(contains("set deleted_at = now()"), any(Object[].class));
+        }
+    }
+
+    @Test
+    void aFailedListingInManualModeRemovesNothing() {
+        Scripted a = new Scripted();
+        a.listing = ListingResult.failed(FailureCategory.TIMEOUT, "timed out");
+
+        var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL);
+
+        assertThat(report.status()).isEqualTo("failed");
+        assertThat(report.counts()).containsEntry("removed", 0);
+        verify(db, never()).update(contains("source_status = 'MISSING'"), any(Object[].class));
+        verify(db, never()).update(contains("set deleted_at = now()"), any(Object[].class));
+    }
+
+    @Test
+    void anIncompleteListingInManualModeRemovesNothing() {
+        Scripted a = new Scripted();
+        a.listing = ListingResult.partial(List.of(full("1")), 2, FailureCategory.UPSTREAM_ERROR, "HTTP 503", null);
+
+        var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL);
+
+        assertThat(report.complete()).isFalse();
+        assertThat(report.counts()).containsEntry("removed", 0);
+        verify(db, never()).update(contains("source_status = 'MISSING'"), any(Object[].class));
+        verify(db, never()).update(contains("set deleted_at = now()"), any(Object[].class));
+    }
+
+    @Test
+    void aCompleteNonEmptyListingInManualModeStillPerformsSynchronisation() {
+        // The guard must not cost legitimate manual synchronisation: a complete listing that
+        // actually returned entries still reconciles missing postings.
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(List.of(full("1"), full("2")), 1, null);
+
+        var report = service.run(SOURCE, a, "acme", "Acme Ltd", BoardDiscoveryService.Mode.MANUAL);
+
+        assertThat(report.ok()).isTrue();
+        assertThat(report.counts()).containsEntry("listed", 2);
+        verify(db).update(contains("source_status = 'MISSING'"), eq(SOURCE), any(java.sql.Timestamp.class));
+        verify(db).update(contains("update jobs j set deleted_at = now()"), eq(SOURCE));
+    }
+
+    @Test
     void aPartialByDesignListingIsHealthyButStillNeverRemoves() {
         Scripted a = new Scripted();
         a.listing = ListingResult.partial(List.of(full("1")), 1, null, "feed is not exhaustive", null);

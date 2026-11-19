@@ -1,5 +1,6 @@
 package com.personal.jobagent.security;
 
+import com.personal.jobagent.config.FlywayTestSupport;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -113,7 +114,7 @@ class SeededDevCredentialMigrationIT {
         if (target != null) {
             configuration = configuration.target(target);
         }
-        return configuration.load();
+        return FlywayTestSupport.load(configuration);
     }
 
     /** The V024 script with its placeholder substituted, as Flyway would run it. */

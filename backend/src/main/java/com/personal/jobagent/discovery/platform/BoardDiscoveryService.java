@@ -207,13 +207,17 @@ public class BoardDiscoveryService {
         }
         counts.put("requests", http.requestsMade());
 
-        // Safe deletion guard: scheduled discovery sweeps returning 0 jobs must not wipe active jobs.
-        // In scheduled mode, an empty listing does not remove existing active inventory.
-        // In manual mode (admin-triggered or integration test sync), an empty listing is authoritative.
-        if (listing.complete() && listing.failure() == null && (!listing.entries().isEmpty() || mode == Mode.MANUAL)) {
+        // Safe deletion guard: a complete listing that returned 0 entries must NEVER remove or
+        // unlist active jobs, in any mode. An empty result is indistinguishable from a silent
+        // upstream failure - a board emptied by mistake, lapsed auth, a changed feed shape - so it
+        // is never treated as authoritative, not even for an admin-triggered manual sync.
+        // Removal requires a complete, non-failed listing that actually returned entries.
+        // Do not reintroduce a mode-based bypass here: see C1 in docs/ROBIN_WAVE2_RELEASE_READINESS.md.
+        if (listing.complete() && listing.failure() == null && !listing.entries().isEmpty()) {
             counts.put("removed", markUnlisted(sourceId, runStart, authoritative));
         } else if (listing.complete() && listing.failure() == null && listing.entries().isEmpty()) {
-            log.warn("Safe deletion guard activated: scheduled listing returned 0 jobs for source {}; skipping markUnlisted", sourceId);
+            log.warn("Safe deletion guard activated: listing completed with 0 jobs for source {} in {} mode; skipping markUnlisted",
+                    sourceId, mode);
         }
         return finish(sourceId, kind, correlationId, started, counts, ingested, listing.complete(),
                 listing.failure(), listing.failureDetail(), mode);

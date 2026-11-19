@@ -280,8 +280,9 @@ class CrossSourceDiscoveryIT {
         String url = "https://jobs.gem.com/" + board + "/agg-drop";
         ingest(aggregator, "ts-drop-" + board, "Role drop", "Body", url, "https://tsenta.com/jobs/drop-" + board);
 
-        // GEM completes a run without the job -> Authoritative source marks it missing
-        a.listing = BoardAdapter.ListingResult.complete(List.of(), 1, null);
+        // GEM completes a non-empty run without the job -> authoritative source marks it missing.
+        // (An empty listing is never authoritative in any mode: C1, safe-deletion guard.)
+        a.listing = BoardAdapter.ListingResult.complete(List.of(posting(board, "agg-keep")), 1, null);
         boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.MANUAL);
         // P1-1: Aggregator SEEN observation does NOT keep it alive
         assertThat(deletedAt(gem, "agg-drop")).isNotNull();

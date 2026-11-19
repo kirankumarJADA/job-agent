@@ -1,5 +1,6 @@
 package com.personal.jobagent.gmail;
 
+import com.personal.jobagent.config.FlywayTestSupport;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -36,11 +37,10 @@ class GmailConnectionStoreIT {
 
     @BeforeAll
     static void migrate() {
-        Flyway.configure()
+        FlywayTestSupport.load(Flyway.configure()
                 .dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
                 .locations("classpath:db/migration")
-                .placeholders(Map.of("remove_seed_dev_account", "false"))
-                .load()
+                .placeholders(Map.of("remove_seed_dev_account", "false")))
                 .migrate();
         jdbc = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(),
                 postgres.getPassword()));

@@ -68,14 +68,14 @@ class ExternalDatabaseFlywayIT {
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
 
         switch (action) {
-            case "validate" -> validate(configure(dataSource).load(), jdbc);
+            case "validate" -> validate(FlywayTestSupport.load(configure(dataSource)), jdbc);
             // Only pending migrations are tolerated; "future" ones (applied in the database
             // but unknown to this build) are no longer ignored, so they fail validation.
             case "validate-restore" -> validateRestore(
-                    configure(dataSource).ignoreMigrationPatterns("*:pending").load(), jdbc);
-            case "migrate" -> migrateDryRunSource(url, dataSource, configure(dataSource).load(), jdbc);
-            case "migrate-restore" -> migrateRestoredCopy(url, dataSource, configure(dataSource).load(), jdbc);
-            case "migrate-clean" -> migrateClean(url, dataSource, configure(dataSource).load(), jdbc);
+                    FlywayTestSupport.load(configure(dataSource).ignoreMigrationPatterns("*:pending")), jdbc);
+            case "migrate" -> migrateDryRunSource(url, dataSource, FlywayTestSupport.load(configure(dataSource)), jdbc);
+            case "migrate-restore" -> migrateRestoredCopy(url, dataSource, FlywayTestSupport.load(configure(dataSource)), jdbc);
+            case "migrate-clean" -> migrateClean(url, dataSource, FlywayTestSupport.load(configure(dataSource)), jdbc);
             default -> throw new IllegalArgumentException("Unknown robin.flyway.external.action: " + action);
         }
     }
@@ -145,6 +145,9 @@ class ExternalDatabaseFlywayIT {
         return fromEnv != null && !fromEnv.isEmpty() ? fromEnv : System.getProperty("robin.flyway.external.password", "");
     }
 
+    // Every caller loads this through FlywayTestSupport.load(...), which adds the application's
+    // session-level PostgreSQL lock (spring.flyway.postgresql.transactional-lock=false), so this
+    // operator tool keeps configuring Flyway the way the application does.
     private static FluentConfiguration configure(DriverManagerDataSource dataSource) {
         return Flyway.configure()
                 .dataSource(dataSource)

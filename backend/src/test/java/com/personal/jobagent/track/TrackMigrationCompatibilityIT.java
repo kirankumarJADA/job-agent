@@ -1,6 +1,7 @@
 package com.personal.jobagent.track;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.personal.jobagent.config.FlywayTestSupport;
 import com.personal.jobagent.track.TrackModels.TrackSnapshot;
 import com.personal.jobagent.track.TrackVocabulary.Stage;
 import org.flywaydb.core.Flyway;
@@ -32,12 +33,11 @@ class TrackMigrationCompatibilityIT {
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
 
     private static Flyway flyway(String target) {
-        return Flyway.configure()
+        return FlywayTestSupport.load(Flyway.configure()
                 .dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
                 .locations("classpath:db/migration")
                 .placeholders(Map.of("remove_seed_dev_account", "false"))
-                .target(target)
-                .load();
+                .target(target));
     }
 
     @Test
