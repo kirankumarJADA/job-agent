@@ -2,9 +2,10 @@
 
 **Role:** Agent 0 — Principal Architect & Multi-Agent Orchestrator  
 **Branch:** `integration/wave-2`  
-**Code Commit:** `51961ba`  
-**Documentation Commit:** `01c78fa` — verified documentation-only relative to `51961ba` (one file, `docs/agents/WAVE2_FINAL_REPORT.md`, +119/−218)  
-**Review Status:** **REVISED AT THE FINAL APPROVAL GATE, 19 NOVEMBER 2026 — AWAITING APPROVAL. NOT APPROVED, NOT MERGED, NOT DEPLOYED.**  
+**Code Commit (Wave 2 integration):** `51961ba`  
+**Documentation Commit at the 19 November gate:** `01c78fa` — verified documentation-only relative to `51961ba` (one file, `docs/agents/WAVE2_FINAL_REPORT.md`, +119/−218)  
+**C1 + C2 resolution:** `f609e9fe8cfa726a14d0e809fc003c7160d4f553`; QA F1 test correction `7108e49748c1e86135d11e72928d0ce72cc79b04`; release candidate `ed01408..7108e49`; independent QA PASS  
+**Review Status:** **UPDATED 20 NOVEMBER 2026 — C1 AND C2 RESOLVED; FULL VERIFICATION AND INDEPENDENT QA PASSED. NOT RELEASED: F9 IS AN OPEN RELEASE RISK. NOT MERGED, NOT PUSHED, NOT DEPLOYED.**  
 **Verdict of record:** see `docs/ROBIN_WAVE2_RELEASE_READINESS.md`  
 
 ---
@@ -31,6 +32,15 @@ documented in place:
 
 One scope limit was also found: Agent 6's sign-off predates a production change to `BoardDiscoveryService`
 that relaxes the safe-deletion guard in `MANUAL` mode and is not covered by any test (§6.1).
+
+**Update, 20 November 2026.** Both conditions the gate set have since been met, in `f609e9f`. C1 reverted that
+relaxation (Option B). C2 moved the `applications_follow_up_idx` build out of V063 into V064, a separate,
+non-transactional `CREATE INDEX CONCURRENTLY` migration (Option C). A test-only follow-up, `7108e49`, corrected an
+integration test that independent QA found had stopped testing anything. The candidate `ed01408..7108e49` passed
+a full `mvn -B clean verify` (exit code 0), read-only validation against PostgreSQL 17.11, and two rounds of
+independent QA (PASS); see §2.2. The recovery guidance in §5.3 has been corrected. One new risk, F9, remains
+open, so this report does not record a release approval; see `docs/ROBIN_WAVE2_RELEASE_READINESS.md`.
+
 ---
 
 ## 2. Reconciled Unique Test Count (No Double-Counting)
@@ -91,6 +101,27 @@ are operator tools needing an **external database URL**, not an API key:
 Every one of the 13 is an **environment gate, not a defect**: none is `@Disabled`, and none was skipped
 because it fails. Note that the Failsafe skip count depends on Docker being available — with the Docker
 daemon running, the Testcontainers integration tests execute and only these 7 externally gated tests skip.
+
+### 2.2 Final verification of the release candidate (`7108e49`, 20 November 2026)
+
+The tables above describe the Wave 2 code at `51961ba`. The release candidate `7108e49` was verified with one
+complete `mvn -B clean verify` of the exact committed tree (commit `7108e49`, tree
+`c60a3d3d3c6e50a2e32b9b2d4569da9dfa64876e`, clean working tree before and after the run):
+
+| Runner | Tests | Failures | Errors | Skipped |
+| :--- | :--- | :--- | :--- | :--- |
+| Backend Surefire | 1,644 | 0 | 0 | 6 |
+| Backend Failsafe | 327 | 0 | 0 | 7 |
+
+- Maven exit code **0**, `BUILD SUCCESS`, total time **16m33s**. All **52 of 52** integration classes completed,
+  and every report was written by that run.
+- Surefire grew by eight tests: four C1 regression tests and four Flyway lock-guard tests. The skipped tests are
+  the same 13 environment gates listed in §2.1.
+- The read-only validation against disposable PostgreSQL 17.11 then passed 1/1 (`applied=63`, `current=064`,
+  `pending=0`, `invalid=0`).
+- The frontend, worker and email-worker suites (439, 262 and 17 tests) passed on 19 November against the same
+  frontend and worker code; neither later commit touches them.
+- Independent QA reviewed both commits and returned PASS.
 
 ---
 
@@ -192,6 +223,11 @@ Post-migration object verification on the same instance:
 - `job_bookmarks` present; `job_sources_health_idx`, `applications_follow_up_idx` and
   `job_bookmarks_profile_idx` all created.
 
+**Update, 20 November 2026.** After C2 the chain is V001–V064: 63 migrations, with V058 still a gap. It was
+rehearsed again on PostgreSQL 17.11 — fresh install, upgrade from the Wave 1 schema at V060, recovery from an
+interrupted index build and from a failed non-transactional migration — and the candidate was validated
+read-only against it (`applied=63`, `current=064`). The results are in §3 of the readiness report.
+
 ### 5.2 Measured Migration Locking Behaviour
 
 Flyway runs each migration inside a single transaction — no `*.sql.conf` file disables it, so
@@ -234,7 +270,23 @@ SQL, migrations or configuration:
   was integrated; that is a historical observation from this branch's integration, not a live check of
   production.
 
+**Update, 20 November 2026 (C2).** The second recommendation was implemented in `f609e9f`. V063 now contains only
+its two `ADD COLUMN` statements, and V064 builds `applications_follow_up_idx` with `CREATE INDEX CONCURRENTLY`
+outside a transaction. That also required `spring.flyway.postgresql.transactional-lock=false`: without it,
+Flyway's own idle-in-transaction lock connection blocks the concurrent build indefinitely. Locks measured after
+the change:
+
+| Migration | Lock held | Effect |
+| :--- | :--- | :--- |
+| `V063` | `AccessExclusiveLock` only | Brief, with no rewrite — but acquiring it waits behind in-flight transactions, and later queries on `applications` queue behind it (F5) |
+| `V064` | `ShareUpdateExclusiveLock` | Reads and writes continue; a concurrent `INSERT` succeeded during a 3,000,000-row build. The build waits for every older transaction in the database (F3) |
+
+`lock_timeout` remains unapplied. The operational handling for F3 and F5 is in §6 of the readiness report.
+
 ### 5.3 Recovery Procedure: Forward-Fix Only
+
+*Corrected 20 November 2026: items 1, 3 and 4 below were revised. The earlier wording overlooked the
+application's startup migration check and predated V064.*
 
 The destructive down-migration script published in the previous revision has been **removed**. It dropped
 `job_bookmarks`, the `applications.follow_up_*` columns and the `job_sources` health columns, and deleted rows
@@ -244,16 +296,22 @@ history — and it named an index this release never creates (`idx_applications_
 
 Recovery for this release is **forward-fix**:
 
-1. **Roll back the application, not the schema.** `V061`–`V063` are purely additive: new nullable columns, two
-   NOT NULL columns with constant defaults, one new table, three indexes. Nothing pre-existing is altered or
-   removed, so the previous build runs unchanged against a `V063` schema. Redeploying the prior commit is the
-   first and normally the only recovery step.
+1. **Redeploying the previous build is not a recovery step for this application** (corrected 20 November 2026).
+   This item previously said to roll back the application rather than the schema, because "the previous build
+   runs unchanged against a `V063` schema". That is wrong. `V061`–`V064` are purely additive, so the earlier
+   *code* would cope with the new schema, but at startup `FlywayBootstrapRecoveryPolicy` (`isUnbrokenPrefix`)
+   refuses to run against a database whose applied migrations are not a prefix of the ones the jar ships. A
+   build that ships only up to V060 therefore will not start once V061–V064 are applied. A fail-safe rollback
+   build — the earlier code packaged with the V061–V064 files — should start, but it has never been built or
+   tested (readiness report, §5).
 2. **Disable the feature in the application layer, not with DDL,** if a Wave 2 feature misbehaves while the
    schema stays in place.
-3. **Correct forward.** A wrong column, default or index is fixed by a new migration (`V064`+).
+3. **Correct forward.** A wrong column, default or index is fixed by a new migration, numbered **V065 or later**
+   (V064 is taken).
    `flyway_schema_history` stays append-only; never `DELETE` from it.
-4. **A harmful index** can be removed by a `V064` using `DROP INDEX CONCURRENTLY` with
-   `executeInTransaction=false`. An index is a derived object, so dropping it loses no candidate data.
+4. **A harmful index** can be removed by a new migration numbered **V065 or later** (V064 now builds
+   `applications_follow_up_idx`), using `DROP INDEX CONCURRENTLY` with `executeInTransaction=false` and the
+   session-level Flyway lock. An index is a derived object, so dropping it loses no candidate data.
 5. **Candidate and operator data must survive recovery.** `job_bookmarks` rows, `applications.follow_up_*`
    state and the `job_sources` health counters are user-visible data, not disposable scratch.
 6. **Confirm a current verified backup exists before applying** the migrations, under the project's existing
@@ -311,9 +369,19 @@ The production change does two distinct things, neither covered by Agent 6's ver
 This is recorded as an open item in the release-readiness report
 (`docs/ROBIN_WAVE2_RELEASE_READINESS.md`), not as a defect fixed here: this gate is documentation-only.
 
+**Update, 20 November 2026.** Resolved. C1 (Option B) reverted the relaxation in `f609e9f` and added four
+regression tests. Independent QA reviewed `f609e9f` and `7108e49`, including this `BoardDiscoveryService`
+change, and returned PASS.
+
 ---
 
 ## 7. Branch Status and Production Guards
+
+**Update, 20 November 2026.** `integration/wave-2` now carries `f609e9f` (C1 + C2) and `7108e49` (QA F1) on top
+of `ed01408`, followed by the documentation commit that carries this update. It exists only locally: no upstream
+is configured, and nothing has been pushed or merged. It is 0 commits behind the locally known `origin/master`
+(`779a6be2`); no fetch was made, so newer remote commits would not show here. The bullets below are as recorded
+on 19 November.
 
 - **Active branch:** `integration/wave-2`
 - **Code commit:** `51961ba` — **documentation commit:** `01c78fa` (docs-only, verified; §Gate 1 of the
@@ -342,5 +410,6 @@ Wave 2 and must not be inferred from these results.
 **Verdict of record.** The previous closing line ("Agent 0 confirms Wave 2 is fully hardened, verified, and
 ready for user merge approval") is superseded. The gate found that three of its supporting claims were wrong
 or unsupported, and that one safety-relevant production change post-dates independent QA sign-off. The
-standing verdict, with its two outstanding conditions, is in
-**`docs/ROBIN_WAVE2_RELEASE_READINESS.md`**. Wave 2 is **not approved for merge** until those are cleared.
+standing verdict is in **`docs/ROBIN_WAVE2_RELEASE_READINESS.md`**. The two conditions it set, C1 and C2, are
+now cleared (`f609e9f`, `7108e49`, independent QA PASS), but Wave 2 is **not approved for release**: F9 is an
+open release risk that needs its own investigation and decision.
