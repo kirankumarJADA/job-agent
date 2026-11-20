@@ -115,6 +115,11 @@ class CrossSourceDiscoveryIT {
         var closedHistoryJob = ingest(ats2, "closed-" + n, "Closed historical role", "Historical body",
                 "https://jobs.lever.co/acme/closed-" + n,
                 "https://jobs.lever.co/acme/closed-" + n);
+        String sharedAtsUrl = "https://boards.greenhouse.io/acme/jobs/shared-" + n;
+        var crossSourceJob = ingest(ats, "shared-ats-" + n, "Cross-source live role", "ATS body",
+                sharedAtsUrl, sharedAtsUrl);
+        ingest(aggregator, "shared-ts-" + n, "Cross-source live role", "Aggregator body",
+                sharedAtsUrl, "https://tsenta.com/jobs/shared-" + n);
 
         // Reproduce the four-row F9 pool: a legacy job with no observations,
         // one stale aggregator observation, one currently active ATS posting,
@@ -125,6 +130,11 @@ class CrossSourceDiscoveryIT {
                 set last_seen_at = now() - interval '8 days'
                 where job_id = ?
                 """, staleAggregatorJob.jobId());
+        jdbc.update("""
+                update job_source_observations
+                set last_seen_at = now() - interval '8 days'
+                where job_id = ? and source_id = ?
+                """, crossSourceJob.jobId(), aggregator);
         jdbc.update("""
                 update job_source_observations
                 set source_status = 'CLOSED', removed_at = now()
@@ -141,6 +151,14 @@ class CrossSourceDiscoveryIT {
                 Object.class, activeAtsJob.jobId())).isNull();
         assertThat(jdbc.queryForObject("select deleted_at from jobs where id = ?",
                 Object.class, closedHistoryJob.jobId())).isNull();
+        assertThat(jdbc.queryForObject("select deleted_at from jobs where id = ?",
+                Object.class, crossSourceJob.jobId())).isNull();
+        assertThat(jdbc.queryForObject("""
+                select source_status from job_source_observations where job_id = ? and source_id = ?
+                """, String.class, crossSourceJob.jobId(), aggregator)).isEqualTo("MISSING");
+        assertThat(jdbc.queryForObject("""
+                select source_status from job_source_observations where job_id = ? and source_id = ?
+                """, String.class, crossSourceJob.jobId(), ats)).isEqualTo("SEEN");
         assertThat(jdbc.queryForObject("""
                 select source_status from job_source_observations where job_id = ?
                 """, String.class, staleAggregatorJob.jobId())).isEqualTo("MISSING");
