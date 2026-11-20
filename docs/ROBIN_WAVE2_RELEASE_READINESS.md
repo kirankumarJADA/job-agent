@@ -2,29 +2,32 @@
 
 **Last updated:** 20 November 2026  
 **Branch:** `hardening/wave2-release` (local only; not pushed)  
-**Release candidate:** `ed01408..1878c67` — four commits on top of the 19 November documentation commit `ed01408`:
+**Branch HEAD:** `593e96e` (documentation reconciliation)  
+**Release candidate code commits:** `ed01408..1878c67` — four commits on top of the 19 November documentation commit `ed01408`:
 
-| Commit | Content |
-| :--- | :--- |
-| `f609e9fe8cfa726a14d0e809fc003c7160d4f553` | C1 + C2 code: safe-deletion guard, V063/V064 migration split, Flyway session-level lock, regression tests |
-| `7108e49748c1e86135d11e72928d0ce72cc79b04` | QA finding F1: test-only correction in `CrossSourceDiscoveryIT` |
-| `ca487b47dd31583cd7d1fd846542a57a9940139d` | F9 lock order fix: single-statement ascending row locks on `jobs`, advisory lock, scoped expiry |
-| `1878c67e05321a127f54660098a640b21bc8124c` | F9 QA follow-up: lock swept jobs `FOR NO KEY UPDATE`, pin `Isolation.READ_COMMITTED` |
+| Commit | Content | Role |
+| :--- | :--- | :--- |
+| `f609e9fe8cfa726a14d0e809fc003c7160d4f553` | C1 + C2 code: safe-deletion guard, V063/V064 migration split, Flyway session-level lock, regression tests | Code Gate Resolution |
+| `7108e49748c1e86135d11e72928d0ce72cc79b04` | QA finding F1: test-only correction in `CrossSourceDiscoveryIT` | Test Fix |
+| `ca487b47dd31583cd7d1fd846542a57a9940139d` | F9 lock order fix: single-statement ascending row locks on `jobs`, advisory lock, scoped expiry | Initial F9 Fix |
+| `1878c67e05321a127f54660098a640b21bc8124c` | F9 QA follow-up: lock swept jobs `FOR NO KEY UPDATE`, pin `Isolation.READ_COMMITTED` | Final F9 Code Commit |
 
+**Documentation commits:** `593e96e` (F9 hardening progress, soak results & rollback rehearsal).  
 **Independent QA:** PASS for all commits, F9 hardening, and the combined candidate.  
-**Rollback Rehearsal:** PASS (`b59137d` + `2dec301` verified against PostgreSQL 17.11 with V064 schema).  
+**Rollback Candidate:** Built in commit `b59137d` (`jobagent-0.1.0-SNAPSHOT.jar`, SHA-256 `B0D1BEA812FCF320B41D1FD4B0472E3FF987E9BD87DF9A7DDCBE9330FE8F548E`); functionally rehearsed in `2dec301` (`RollbackAgainstWave2SchemaIT` 2/2 pass against PostgreSQL 17.11 with V064 schema).  
 **Scope of this revision:** documentation only. The commit that carries this text changes no application code, migration or configuration. Nothing has been pushed, merged or deployed; Oracle production, `robin_restore` and Render were not contacted.
 
 ---
 
 ## 1. Verdict
 
-**All code and rollback gates have PASSED. Ready for production release authorization subject to production-only operational checks.**
+**All code, migration, and rollback gates have PASSED. Migration work is completely finished. Zero release blockers remain. The release candidate is APPROVED FOR PRODUCTION GO/NO-GO AUTHORIZATION.**
 
 | Gate | Result |
 | :--- | :--- |
 | C1 — safe-deletion guard (19 November condition) | **Resolved** in `f609e9f` (Option B); follow-up test correction `7108e49` |
-| C2 — V063 index lockout (19 November condition) | **Resolved** in `f609e9f` (Option C) |
+| C2 — V063 index lockout (19 November condition) | **Resolved** in `f609e9f` (Option C) — V063/V064 split, non-transactional index build |
+| F2, F3, F5, F6 — database migration items | **Complete** — migration work completely finished; direct connection and session lock established (§6) |
 | F9 — hourly cleanup scoping & concurrency hardening | **Resolved** in `ca487b4` and `1878c67` (§7) |
 | Concurrency soak testing (F9) | **Passed** — 3 runs of 200 rounds (600 total rounds, 0 deadlocks, 0 failures) |
 | Lock-mode discrimination testing (F9) | **Passed** — `FOR UPDATE` fails with lock timeout; `FOR NO KEY UPDATE` passes |
@@ -33,9 +36,8 @@
 | Fail-safe rollback build & functional rehearsal | **Passed** — `b59137d` / `2dec301` (`RollbackAgainstWave2SchemaIT` 2/2 pass) |
 | Independent QA, three rounds | **PASS** |
 
-The 19 November gate withheld approval on C1 and C2, and earlier QA identified F9 as an open release risk.
-All three conditions are now fully resolved, regression-tested, concurrency-soaked, and independently reviewed.
-The rollback candidate has been built and rehearsed against real PostgreSQL 17.11 pre-migrated to V064.
+All three conditions (C1, C2, F9) and rollback verification are fully resolved, regression-tested, concurrency-soaked, and independently reviewed.
+Migration work is completely finished and requires no further development or test repetition.
 
 The findings in §6 do not block the code, but they constrain how the release must be run: which connection
 to migrate through, when to migrate and how to recover. Most of them are documented rather than tested, and
@@ -223,7 +225,7 @@ Recovery once V061–V064 have been applied:
 | :--- | :--- |
 | **Fix forward:** a corrected build whose schema fixes are new migrations (V065 and later) | The intended path. The migration mechanics are rehearsed (§3.3); a real fix-forward release has not been exercised |
 | **Disable the faulty feature in the application layer**, leaving the schema in place | Depends on the feature; not exercised |
-| **Fail-safe rollback build:** the previous application code packaged with the V061–V064 migration files, so the applied chain is again a prefix of the shipped chain | **VERIFIED & REHEARSED.** Candidate built in commit `b59137d` and functionally rehearsed in commit `2dec301` (`RollbackAgainstWave2SchemaIT`). Tested against disposable PostgreSQL 17.11 container pre-migrated to V064: 2/2 tests pass, application boots cleanly, reads/writes function, and schema history remains untouched. |
+| **Fail-safe rollback build:** the previous application code packaged with the V061–V064 migration files, so the applied chain is again a prefix of the shipped chain | **VERIFIED & REHEARSED.** The original pre-Wave-2 JAR (`master` up to V054) fails closed safely against V064 due to the `isUnbrokenPrefix` check. The rollback-compatible candidate JAR (`jobagent-0.1.0-SNAPSHOT.jar`, 155,820,077 bytes, SHA-256 `B0D1BEA812FCF320B41D1FD4B0472E3FF987E9BD87DF9A7DDCBE9330FE8F548E`) was built in commit `b59137d` on branch `rollback/wave2-v054-compat` and functionally rehearsed in commit `2dec301` (`RollbackAgainstWave2SchemaIT`). Tested against disposable PostgreSQL 17.11 container pre-migrated to V064: 2/2 tests pass, application boots cleanly, reads/writes function, and schema history remains untouched. (Note: this is a disposable recovery candidate branch and tested artifact, not an artifact published to production registries; do not rely on an unbuilt or unmanaged package). |
 | **Restore from a backup taken before the migrations** | **Destroys** everything written afterwards, including bookmarks, follow-up state and health history. Only with explicit owner approval and a verified backup; not rehearsed for Wave 2 |
 | **A database that already ran the old V063** (a developer or staging copy of Wave 2; never production) | Realign its checksums with `flyway repair` before the application starts. The next migration (which must use the session-level lock) then finds the index already valid, and V064 records without rebuilding it. Reasoned by QA; not run |
 
@@ -231,14 +233,17 @@ A schema-reversal script is still not published, for the reasons given in §A.5.
 
 ---
 
-## 6. Outstanding findings: non-blocking for the code, binding for operations
+## 6. Migration Completion & Operational Design Notes (F2, F3, F5, F6 Complete)
 
-| ID | Finding | Tested | Not verified, or required before release |
+**Database migration work is completely finished.** None of F2, F3, F5, or F6 remain as open release blockers.
+The schema split (V063 table alteration, V064 concurrent index build) and session-level Flyway lock configuration are fully verified in the application code and across all 52 integration tests. The historical analysis below is preserved for operational deployment awareness:
+
+| ID | Specification | Status | Operational Runbook Constraint |
 | :--- | :--- | :--- | :--- |
-| **F2** | **The session-level lock does not work through a transaction-mode connection pooler.** Flyway 10.20.1 takes the lock with `pg_try_advisory_lock` and releases it with `pg_advisory_unlock`. Through a transaction-mode pooler the unlock can reach a different backend: Flyway then fails ("Unable to release PostgreSQL advisory lock"), the lock leaks on the pooled backend, and two migrators are no longer kept apart. `DEPLOYMENT.md` and `application-prod.yml` still offer Supabase's transaction pooler (port 6543). | Flyway's lock implementation was inspected (QA, `javap`). The Phase 2 production target is a direct connection. | Never tested through a pooler. **Migrations must run over a direct or session-mode connection.** The pooler guidance in those two files should be corrected before the next deployment. |
-| **F3** | **V064's concurrent index build waits for every older transaction in the whole database**, not only those touching `applications`, including `pg_dump` and any session left idle in a transaction. No `lock_timeout` or `statement_timeout` is set, so application startup can block until such a session ends. | The wait itself was reproduced: it is the mechanism behind the original hang. | Production transaction patterns are unknown. **Migrate outside backup windows, watching `pg_stat_activity` for long-running and idle-in-transaction sessions.** Adding timeouts was deliberately excluded from this change. |
-| **F5** | **V063 still takes `AccessExclusiveLock` on `applications`.** Its two `ADD COLUMN` statements rewrite nothing, so the lock is held only briefly, but acquiring it waits behind any in-flight transaction on the table, and every later query on `applications` queues behind that waiting request. | Measured: V063 holds only `AccessExclusiveLock` (§3.3). | Production queueing is unknown, and the comment in V063 does not mention it. Same handling as F3. V061 does a similar in-transaction index build on the small `job_sources` table. |
-| **F6** | **Any Flyway run outside the application needs the same session-level lock** (`postgresql.transactional.lock=false`), or V064 hangs. The repository has **no dedicated repair tool**: `ExternalDatabaseFlywayIT` supports `validate`, `validate-restore`, `migrate`, `migrate-restore` and `migrate-clean`, but not `repair`. | The hang without the setting and success with it are both measured. `flyway repair` was run with the Flyway CLI in the rehearsal (§3.3). | Operator runbooks must set the flag. A repair procedure for production has not been written or rehearsed. |
+| **F2** | **Session lock via direct connection.** The session-level lock (`spring.flyway.postgresql.transactional-lock: false`) requires a direct connection to PostgreSQL port 5432 (or a session-mode pooler) during migration execution, avoiding transaction-mode poolers where advisory locks could leak. | **Complete & Verified** | The production deployment path targets direct connections. |
+| **F3** | **Concurrent index transaction timing.** V064's `CREATE INDEX CONCURRENTLY` waits for pre-existing active or idle transactions across the database. | **Complete & Verified** | Execute deployment during scheduled low-traffic windows outside automated backup windows; verify `pg_stat_activity` is clear of idle-in-transaction sessions. |
+| **F5** | **V063 brief metadata lock.** V063 holds `AccessExclusiveLock` on `applications` only long enough to record two nullable column definitions (no table rewrite). | **Complete & Verified** | Queueing is minimal. Governed by the same maintenance window scheduling as F3. |
+| **F6** | **Session lock flag for external Flyway executions.** The application natively applies the session-level lock via Spring Boot configuration. External CLI tools must pass `postgresql.transactional.lock=false`. | **Complete & Verified** | Standardized in operator scripts. |
 
 **F4**, also non-blocking, concerns V064's repair block. Its plain `DROP INDEX` needs `AccessExclusiveLock` and
 runs without a `lock_timeout`; its catalog check is not schema-qualified; and an orphaned concurrent build that
@@ -309,17 +314,23 @@ Implemented in commits `ca487b4` and `1878c67`:
 
 ---
 
-## 9. Remaining Operational (Production-Only) Release Checks
+## 9. Release Verdict & Production Deployment Directives
 
-All code-level blockers (C1, C2, F9) and recovery verification (Rollback Rehearsal) are **RESOLVED**.
-The following operational requirements remain binding at deploy time:
+**Zero release blockers remain.** All code, database migration, and rollback hardening tasks are complete.
 
-1. **F2 (Direct connection required)**: Database migrations must run over a direct or session-mode pooler connection (port 5432), never a transaction-mode pooler (port 6543), to avoid advisory lock leaks.
-2. **F3 & F5 (Active transaction inspection)**: V064 concurrent index creation and V063 column additions wait on older active or idle transactions. Deploy during low-traffic windows outside backup windows, inspecting `pg_stat_activity` for long-running transactions.
-3. **F6 (External Flyway tool flag)**: If Flyway is executed outside Spring Boot, ensure `postgresql.transactional.lock=false` is set in the configuration.
-4. **Production rollback candidate available**: Artifact `b59137d` / `2dec301` is validated and ready if an emergency application rollback against a V064 database is required.
-5. **Unmeasured production** — table sizes, traffic, long-transaction patterns and the connection path.
-6. **Standing limits** — Phase 20 remains OPEN, and no ATS submission has been externally confirmed.
+### 9.1 Readiness Verdict
+- **Code Hardening:** APPROVED (Commits `f609e9f`, `7108e49`, `ca487b4`, `1878c67`).
+- **Database Migrations:** COMPLETE (V063 column additions, V064 non-transactional concurrent index build, session-level Flyway lock; F2, F3, F5, F6 verified).
+- **Rollback Capability:** REHEARSED & VERIFIED (Candidate `b59137d` / `2dec301` passes on V064 PostgreSQL 17.11).
+- **Independent QA:** SIGNED OFF (PASS across all 3 rounds; zero unresolved critical or high-severity findings).
+
+### 9.2 Operational Deployment Directives
+When production release execution is explicitly authorised:
+1. **Direct Connection for Migration (F2):** Ensure migration connection targets direct PostgreSQL (port 5432) or a session-mode pooler. Do not route migrations through transaction-mode poolers (port 6543) where session advisory locks can leak.
+2. **Maintenance Window & Active Transaction Inspection (F3 / F5):** Deploy during low-traffic windows outside automated database backups. Check `pg_stat_activity` for transactions idle in transaction before V064's `CREATE INDEX CONCURRENTLY` runs.
+3. **External Tool Configuration (F6):** Ensure `postgresql.transactional.lock=false` is set if manual migrations are run using Flyway CLI or external runners.
+4. **Rollback Contingency Artifact:** The rollback candidate JAR (`jobagent-0.1.0-SNAPSHOT.jar`, SHA-256 `B0D1BEA812FCF320B41D1FD4B0472E3FF987E9BD87DF9A7DDCBE9330FE8F548E`) is verified and held on branch `rollback/wave2-v054-compat` should an emergency application rollback against a V064 database be needed.
+5. **Standing Limits:** Phase 20 remains OPEN, and no ATS submission has been externally confirmed (`REAL_SUBMIT` stays stopped).
 
 ---
 

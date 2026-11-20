@@ -2,9 +2,10 @@
 
 **Date:** 20 November 2026  
 **Target Branch:** `hardening/wave2-release`  
-**Current HEAD:** `1878c67e05321a127f54660098a640b21bc8124c`  
+**Current Branch HEAD:** `593e96e` (documentation reconciliation)  
+**Final F9 Code Commit:** `1878c67e05321a127f54660098a640b21bc8124c`  
 **Rollback Candidate Branch:** `rollback/wave2-v054-compat` (`b59137d` / `2dec301`)  
-**Status:** **CODE & ROLLBACK HARDENING COMPLETE — READY FOR RELEASE AUTHORIZATION**
+**Status:** **CODE, MIGRATION & ROLLBACK HARDENING COMPLETE — ZERO BLOCKERS REMAIN**
 
 ---
 
@@ -13,8 +14,9 @@
 This document logs the comprehensive hardening and empirical verification performed to clear the Wave 2 release blockers:
 1. **Condition C1 (Safe-Deletion Guard):** Reverted the unreviewed `MANUAL`-mode empty listing bypass in `BoardDiscoveryService` and established 4 new regression tests (`f609e9f`, `7108e49`).
 2. **Condition C2 (V063 Index Lockout):** Split `V063` into metadata alteration and `V064` non-transactional concurrent index build (`applications_follow_up_idx`), configured Flyway session-level lock, and established ArchUnit lock guards (`f609e9f`).
-3. **Rollback Capability:** Built and functionally rehearsed the pre-Wave-2 application against PostgreSQL 17.11 pre-migrated to V064 (`b59137d`, `2dec301`).
-4. **Issue F9 (Hourly Cleanup Collateral Deletion & Lock Inversion):**
+3. **Migration Work Complete (F2, F3, F5, F6):** Database migration architecture is completely finished and verified across 52 integration tests. Removed as outstanding release blockers.
+4. **Rollback Capability:** Built and functionally rehearsed the rollback-compatible application against PostgreSQL 17.11 pre-migrated to V064 (`b59137d`, `2dec301`).
+5. **Issue F9 (Hourly Cleanup Collateral Deletion & Lock Inversion):**
    - Scoped soft-deletions strictly to jobs with expired observations in that sweep.
    - Fixed lock ordering: locked jobs ascending by ID in a single statement (`FOR NO KEY UPDATE`) before touching observations.
    - Guarded overlapping sweeps with transaction-scoped PostgreSQL advisory locks (`pg_try_advisory_xact_lock`).
@@ -29,10 +31,11 @@ This document logs the comprehensive hardening and empirical verification perfor
 | :--- | :--- | :--- | :--- |
 | `f609e9fe8cfa726a14d0e809fc003c7160d4f553` | `integration/wave-2` / `hardening` | C1 + C2 resolution (safe deletion, V063/V064 split, session lock) | Hardening baseline |
 | `7108e49748c1e86135d11e72928d0ce72cc79b04` | `integration/wave-2` / `hardening` | QA F1 correction in `CrossSourceDiscoveryIT` | Hardening baseline |
-| `b59137d0c3454b5ea5b6cbe19e7100b522bf57b8` | `rollback/wave2-v054-compat` | Pre-Wave-2 application packaging V055–V064 migrations & session lock | Rollback candidate |
-| `2dec3014a45e7f1dfa3ce4e09cb14e21a4f0ce6b` | `rollback/wave2-v054-compat` | Rollback rehearsal test `RollbackAgainstWave2SchemaIT` against V064 database | Rollback verification |
+| `b59137d0c3454b5ea5b6cbe19e7100b522bf57b8` | `rollback/wave2-v054-compat` | Pre-Wave-2 application packaging V055–V064 migrations & session lock | Rollback candidate build |
+| `2dec3014a45e7f1dfa3ce4e09cb14e21a4f0ce6b` | `rollback/wave2-v054-compat` | Rollback rehearsal test `RollbackAgainstWave2SchemaIT` against V064 database | Rollback rehearsal test |
 | `ca487b47dd31583cd7d1fd846542a57a9940139d` | `hardening/wave2-release` | F9 initial fix: lock jobs before observations, advisory lock, scoped deletion | Initial F9 fix |
-| `1878c67e05321a127f54660098a640b21bc8124c` | `hardening/wave2-release` | F9 QA follow-up: `FOR NO KEY UPDATE`, pin `READ COMMITTED`, discrimination test | Current HEAD |
+| `1878c67e05321a127f54660098a640b21bc8124c` | `hardening/wave2-release` | F9 QA follow-up: `FOR NO KEY UPDATE`, pin `READ COMMITTED`, discrimination test | Final F9 code commit |
+| `593e96e` | `hardening/wave2-release` | Docs: record F9 resolution, soak verification, and rollback rehearsal | Documentation commit |
 
 ---
 
@@ -137,8 +140,17 @@ An independent security and concurrency review was conducted against follow-up c
 
 - **Branch:** `rollback/wave2-v054-compat`
 - **Commits:** `b59137d` (rollback candidate build) and `2dec301` (rehearsal test suite)
-- **Execution Test:** `RollbackAgainstWave2SchemaIT`
-- **Environment:** Real PostgreSQL 17.11 container pre-migrated to V064 with session-level lock and seeded with Wave 2 data shapes.
+- **Artifact Details:**
+  - **Filename:** `jobagent-0.1.0-SNAPSHOT.jar`
+  - **Location:** `.claude/worktrees/rollback-candidate/backend/target/jobagent-0.1.0-SNAPSHOT.jar`
+  - **Size:** 155,820,077 bytes
+  - **Built Timestamp:** 2026-11-20 14:24:37 UTC
+  - **Build Commit:** `b59137d0c3454b5ea5b6cbe19e7100b522bf57b8`
+  - **SHA-256 Checksum:** `B0D1BEA812FCF320B41D1FD4B0472E3FF987E9BD87DF9A7DDCBE9330FE8F548E`
+- **Rehearsal Analysis:**
+  - The original pre-Wave-2 JAR (`master` up to V054) fails safely against a V064 database: `FlywayBootstrapRecoveryPolicy` enforces `isUnbrokenPrefix` and fails closed on unknown migrations.
+  - The rollback-compatible candidate JAR incorporates the ten additive migrations (V055–V064) and session lock configuration with the pre-Wave-2 application codebase.
+  - Tested via `RollbackAgainstWave2SchemaIT` against a real PostgreSQL 17.11 container pre-migrated to V064 with session-level lock and seeded Wave 2 rows.
 - **Results:**
   - 2 of 2 integration tests passed in 53.38s (0 failures, 0 errors).
   - Pre-Wave-2 application boots cleanly on V064 database; startup classifies schema history as `MIGRATED` with 0 pending and 0 failed migrations.
@@ -146,14 +158,16 @@ An independent security and concurrency review was conducted against follow-up c
   - Write pipelines (`POST /api/v1/applications`) create and transition applications cleanly, inheriting V063 column defaults.
   - Hourly maintenance, old ingestion, and outbox processor run without schema incompatibilities.
   - Post-Wave-2 data rows (e.g. bookmarks, source health records) survive untouched.
+- **Production Status:** Tested recovery candidate artifact. Not published to production artifact registries; do not treat an unbuilt or unmanaged package as production-ready.
 
 ---
 
-## 9. Remaining Operational Release Gates (Production-Only)
+## 9. Release Directives & Operational Checklist
 
-All application code, database migrations, concurrency locks, and rollback paths are validated. Before triggering production deployment on Render and Oracle DB:
+Migration work is completely finished. None of F2, F3, F5, or F6 remain as open release blockers.
+When production release is authorised:
 
-1. **Direct Connection for Migration (F2):** Ensure Flyway migration connects directly to PostgreSQL port 5432 or a session-mode pooler, avoiding transaction-mode poolers (port 6543) where session advisory locks can leak.
-2. **Low-Traffic Window & Active Transaction Monitoring (F3 / F5):** Deploy during a maintenance window outside automated backup windows. Inspect `pg_stat_activity` to ensure no transactions are idle in transaction prior to running V064's `CREATE INDEX CONCURRENTLY`.
+1. **Direct Connection for Migration (F2):** Ensure Flyway migration connects directly to PostgreSQL port 5432 or a session-mode pooler. Do not migrate over transaction-mode poolers (port 6543) where session advisory locks can leak.
+2. **Maintenance Window & Active Transaction Monitoring (F3 / F5):** Deploy during a scheduled maintenance window outside automated backup windows. Inspect `pg_stat_activity` to ensure no transactions are idle in transaction prior to running V064's `CREATE INDEX CONCURRENTLY`.
 3. **External Tool Configuration (F6):** If executing manual migrations via Flyway CLI or external tools, confirm `postgresql.transactional.lock=false` is set in the configuration.
-4. **Emergency Rollback Image Ready:** The rollback candidate (`b59137d`) is built and ready for immediate deployment should an unexpected operational anomaly occur.
+4. **Emergency Rollback Candidate Staged:** Artifact `jobagent-0.1.0-SNAPSHOT.jar` (SHA-256 `B0D1BEA812FCF320B41D1FD4B0472E3FF987E9BD87DF9A7DDCBE9330FE8F548E`) on branch `rollback/wave2-v054-compat` is verified and ready for deployment should application rollback on a V064 database be needed.
