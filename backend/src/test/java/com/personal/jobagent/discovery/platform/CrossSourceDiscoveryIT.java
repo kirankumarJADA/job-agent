@@ -264,7 +264,10 @@ class CrossSourceDiscoveryIT {
         String url = "https://jobs.gem.com/" + board + "/keep";
         ingest(ats2, "lev-keep-" + board, "Role keep", "Body", url, url);
 
-        a.listing = BoardAdapter.ListingResult.complete(List.of(), 1, null);
+        // GEM completes a NON-EMPTY run without "keep" (an empty listing is never authoritative under
+        // C1 and would stop at the safe-deletion guard), so markUnlisted really runs here and "keep"
+        // must survive only because LEVER, another authoritative source, still lists it.
+        a.listing = BoardAdapter.ListingResult.complete(List.of(posting(board, "other")), 1, null);
         boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.MANUAL);
         assertThat(deletedAt(gem, "keep")).isNull();
     }
