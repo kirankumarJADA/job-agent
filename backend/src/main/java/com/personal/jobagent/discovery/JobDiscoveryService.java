@@ -408,46 +408,103 @@ public class JobDiscoveryService {
     @Value("${app.discovery.aggregator-observation-ttl-days:7}")
     private int aggregatorTtlDays = 7;
 
+    /**
+     * Hourly cleanup: expires stale aggregator observations, soft-deletes only the jobs whose observations this
+     * sweep expired and that have no remaining live observation (F9), then archives jobs unseen for 30 days.
+     *
+     * <p><b>Lock order (F9).</b> {@link #ingestJob} locks a job row and then that job's observation. This sweep
+     * therefore locks every job row it may modify first, in ascending id order and in a single statement, before
+     * it touches any observation, so both workflows take locks in the same order (job, then observation) and
+     * cannot deadlock. PostgreSQL applies {@code ORDER BY} before the {@code FOR UPDATE} locking clause, so the
+     * row locks are acquired in ascending id order. Observations are then expired only for jobs this sweep
+     * already holds (or for observations with no job), so no job lock is ever requested while an observation
+     * lock is held.
+     *
+     * <p>Taking the job locks in their own statement also matters for correctness: every later statement in this
+     * READ COMMITTED transaction starts with a fresh snapshot that already includes any ingestion this sweep
+     * waited for, so an observation committed concurrently cannot be missed by the deletion check.
+     *
+     * <p>Only one sweep runs at a time. A second concurrent sweep (another instance) returns immediately instead
+     * of queueing behind the first. The whole sweep is one transaction: any failure rolls back every step.
+     */
     @Transactional
     @Scheduled(cron = "0 0 * * * *") // hourly scheduled refresh for source health and stale jobs
     public void scheduledDiscoveryMaintenance() {
         if (!maintenanceEnabled || maintenanceMode.isMaintenanceMode()) {
             return;
         }
+        Boolean acquired = jdbcTemplate.queryForObject(
+                "select pg_try_advisory_xact_lock(hashtextextended('job-discovery-maintenance', 0))", Boolean.class);
+        if (!Boolean.TRUE.equals(acquired)) {
+            log.info("Discovery maintenance skipped: another sweep is already running");
+            return;
+        }
 
-        // The affected-job set is materialised inside this transaction. This
-        // keeps deletion scoped to observations expired by this sweep, while
-        // the following statement sees their new MISSING status and can still
-        // preserve jobs with another live observation.
+        jdbcTemplate.execute("""
+                create temporary table if not exists maintenance_locked_job_ids (
+                    job_id uuid primary key
+                ) on commit drop
+                """);
         jdbcTemplate.execute("""
                 create temporary table if not exists expired_job_ids (
                     job_id uuid
                 ) on commit drop
                 """);
+        jdbcTemplate.update("truncate table maintenance_locked_job_ids");
         jdbcTemplate.update("truncate table expired_job_ids");
 
+        // 1. Lock every job this sweep may modify - jobs with an expirable aggregator observation, and jobs due
+        //    for archiving - in ascending id order, before any observation is touched.
+        jdbcTemplate.update("""
+                with locked as (
+                    select j.id from jobs j
+                    where j.id in (
+                        select o.job_id from job_source_observations o
+                        where o.job_id is not null
+                          and o.source_status = 'SEEN'
+                          and o.last_seen_at < now() - make_interval(days => ?)
+                          and (
+                              o.source_id in (select id from job_sources where kind in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA'))
+                              or o.source_type = 'WEB'
+                              or o.source_id is null
+                          )
+                        union
+                        select a.id from jobs a
+                        where a.status = 'DISCOVERED' and a.last_seen_at < now() - interval '30 days'
+                    )
+                    order by j.id
+                    for update
+                )
+                insert into maintenance_locked_job_ids(job_id)
+                select id from locked
+                """, aggregatorTtlDays);
+
+        // 2. Expire stale aggregator observations (P1-1), only for jobs locked above or with no job at all.
         int expiredObs = jdbcTemplate.update("""
                 with expired as (
-                    update job_source_observations
+                    update job_source_observations o
                     set source_status = 'MISSING', removed_at = now()
-                    where source_status = 'SEEN'
-                      and last_seen_at < now() - make_interval(days => ?)
+                    where o.source_status = 'SEEN'
+                      and o.last_seen_at < now() - make_interval(days => ?)
                       and (
-                          source_id in (select id from job_sources where kind in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA'))
-                          or source_type = 'WEB'
-                          or source_id is null
+                          o.source_id in (select id from job_sources where kind in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA'))
+                          or o.source_type = 'WEB'
+                          or o.source_id is null
                       )
-                    returning job_id
+                      and (o.job_id is null or o.job_id in (select job_id from maintenance_locked_job_ids))
+                    returning o.job_id
                 )
                 insert into expired_job_ids(job_id)
                 select job_id from expired
                 """, aggregatorTtlDays);
 
+        // 3. Soft-delete only the jobs whose observations this sweep expired and that have no live observation left.
         if (expiredObs > 0) {
             int deletedJobs = jdbcTemplate.update("""
                     update jobs j set deleted_at = now()
                     where j.deleted_at is null
                       and j.id in (select job_id from expired_job_ids)
+                      and j.id in (select job_id from maintenance_locked_job_ids)
                       and not exists (
                           select 1 from job_source_observations o
                           where o.job_id = j.id and o.source_status = 'SEEN'
@@ -457,10 +514,11 @@ public class JobDiscoveryService {
                     expiredObs, aggregatorTtlDays, deletedJobs);
         }
 
-        // Mark jobs not seen in 30 days as ARCHIVED
+        // 4. Mark jobs not seen in 30 days as ARCHIVED; every candidate was locked in step 1.
         int archived = jdbcTemplate.update("""
                 update jobs set status = 'ARCHIVED'
                 where status = 'DISCOVERED' and last_seen_at < now() - interval '30 days'
+                  and id in (select job_id from maintenance_locked_job_ids)
                 """);
         if (archived > 0) {
             log.info("Archived {} stale jobs older than 30 days", archived);
