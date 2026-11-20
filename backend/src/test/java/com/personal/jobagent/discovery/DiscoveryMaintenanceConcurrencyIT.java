@@ -18,6 +18,7 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -42,7 +43,9 @@ import static org.assertj.core.api.Assertions.fail;
  * blocked on a lock, and they read the lock order directly with {@code FOR UPDATE NOWAIT} probes.
  */
 @SpringBootTest(properties = {"spring.flyway.placeholders.remove_seed_dev_account=false",
-        "app.discovery.scheduler-enabled=false"})
+        "app.discovery.scheduler-enabled=false",
+        // No outbox dispatch: the pipeline it would run takes locks on the test jobs and only adds noise.
+        "app.events.dispatch-enabled=false"})
 @Testcontainers
 class DiscoveryMaintenanceConcurrencyIT {
 
@@ -71,7 +74,8 @@ class DiscoveryMaintenanceConcurrencyIT {
     private record Posting(UUID jobId, UUID sourceId, String externalId, String canonicalUrl, String title) {}
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws InterruptedException {
+        stayClearOfTheHourlyRun();
         ats = source("GREENHOUSE", "f9-ats-" + unique());
         aggregator = source("TSENTA", "f9-agg-" + unique());
         pool = Executors.newFixedThreadPool(4);
@@ -265,6 +269,46 @@ class DiscoveryMaintenanceConcurrencyIT {
         assertThat(deletedAt(p.jobId())).as("the first cleanup did the work").isNotNull();
     }
 
+    @Test
+    void anInsertThatOnlyReferencesALockedJobIsNotHeldUpByTheCleanup() throws Exception {
+        // The cleanup locks the lower id, then waits for the higher one, which a blocker holds.
+        Posting first = staleAggregatorPosting();
+        Posting second = staleAggregatorPosting();
+        List<UUID> ordered = jdbc.queryForList("select id from jobs where id in (?, ?) order by id", UUID.class,
+                first.jobId(), second.jobId());
+        UUID held = ordered.get(0);
+        UUID blocked = ordered.get(1);
+        UUID profile = jdbc.queryForObject(
+                "select p.id from profiles p join users u on u.id = p.user_id where u.email = 'dev@example.local'",
+                UUID.class);
+
+        Throwable sweepFailure;
+        try (Connection blocker = rawTransaction(); Connection probe = rawTransaction();
+             Connection writer = rawTransaction()) {
+            exec(blocker, "select id from jobs where id = ? for update", blocked);
+            Future<?> sweep = pool.submit(() -> ingestion.scheduledDiscoveryMaintenance());
+            awaitLockWaiter();
+            assertThat(lockableNow(probe, "select id from jobs where id = ? for update nowait", held))
+                    .as("the cleanup holds the lower job while it waits for the higher one").isFalse();
+
+            // Matches, applications, bookmarks and notifications reference a job only through a foreign key, whose
+            // check takes KEY SHARE on the job row. The cleanup's row lock must not make them wait.
+            exec(writer, "set local lock_timeout = '3s'");
+            exec(writer, "insert into job_bookmarks (id, profile_id, job_id, created_at) values (?, ?, ?, now())",
+                    UuidV7.generate(), profile, held);
+            writer.commit();
+
+            blocker.rollback();
+            sweepFailure = failureOf(sweep);
+        }
+
+        assertThat(sweepFailure).as("cleanup").isNull();
+        assertThat(jdbc.queryForObject("select count(*)::int from job_bookmarks where job_id = ?", Integer.class, held))
+                .as("the insert went through while the cleanup held the job").isEqualTo(1);
+        assertThat(deletedAt(held)).as("the cleanup still did its work").isNotNull();
+        assertThat(deletedAt(blocked)).isNotNull();
+    }
+
     // ---------------------------------------------------------------------------------------------------------------
 
     private UUID source(String kind, String org) {
@@ -274,6 +318,18 @@ class DiscoveryMaintenanceConcurrencyIT {
                 values (?, ?, ?, ?, '{"discovery": true}', 'DISCOVERY_ONLY')
                 """, id, kind, org, org + " (" + kind + ")");
         return id;
+    }
+
+    /**
+     * The production schedule ({@code @Scheduled(cron = "0 0 * * * *")}) also runs this cleanup in the test context.
+     * A test that straddled the top of the hour could meet that run, so each test starts clear of it.
+     */
+    private static void stayClearOfTheHourlyRun() throws InterruptedException {
+        LocalTime now = LocalTime.now();
+        int secondsLeftInHour = 3600 - (now.getMinute() * 60 + now.getSecond());
+        if (secondsLeftInHour <= 45) {
+            Thread.sleep((secondsLeftInHour + 5) * 1000L);
+        }
     }
 
     private static String unique() {
@@ -341,13 +397,19 @@ class DiscoveryMaintenanceConcurrencyIT {
                 "h", "h", 1.0, p.sourceId());
     }
 
-    /** Waits (polling, not sleeping blindly) until some backend in this database is blocked on a lock. */
+    /**
+     * Waits (polling, not sleeping blindly) until the cleanup itself is blocked on a lock. Only the cleanup's own
+     * statements count: they are the only ones that use its temporary tables (this version's
+     * {@code maintenance_locked_job_ids}, and {@code expired_job_ids}, which the previous version also used), so no
+     * other backend waiting on a lock can end the wait early.
+     */
     private void awaitLockWaiter() throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
         while (System.nanoTime() < deadline) {
             Integer waiting = jdbc.queryForObject("""
                     select count(*)::int from pg_stat_activity
-                    where datname = current_database() and wait_event_type = 'Lock'
+                    where datname = current_database() and pid <> pg_backend_pid() and wait_event_type = 'Lock'
+                      and (query like '%maintenance_locked_job_ids%' or query like '%expired_job_ids%')
                     """, Integer.class);
             if (waiting != null && waiting > 0) {
                 return;

@@ -12,6 +12,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
@@ -415,19 +416,25 @@ public class JobDiscoveryService {
      * <p><b>Lock order (F9).</b> {@link #ingestJob} locks a job row and then that job's observation. This sweep
      * therefore locks every job row it may modify first, in ascending id order and in a single statement, before
      * it touches any observation, so both workflows take locks in the same order (job, then observation) and
-     * cannot deadlock. PostgreSQL applies {@code ORDER BY} before the {@code FOR UPDATE} locking clause, so the
-     * row locks are acquired in ascending id order. Observations are then expired only for jobs this sweep
-     * already holds (or for observations with no job), so no job lock is ever requested while an observation
-     * lock is held.
+     * cannot deadlock. PostgreSQL applies {@code ORDER BY} before the locking clause, so the row locks are acquired
+     * in ascending id order. Observations are then expired only for jobs this sweep already holds, so no job lock
+     * is ever requested while an observation lock is held.
      *
-     * <p>Taking the job locks in their own statement also matters for correctness: every later statement in this
+     * <p>The job rows are locked {@code FOR NO KEY UPDATE}, the strength of the sweep's own updates, which change
+     * no key column. That conflicts with ingestion's update of the same job, so ingestion waits for the sweep. It
+     * does not conflict with the {@code KEY SHARE} locks that foreign-key checks take, so inserts that only
+     * reference a locked job (matches, applications, bookmarks, notifications) are not held up for the length of
+     * the sweep.
+     *
+     * <p>Taking the job locks in their own statement also matters for correctness. Every later statement in this
      * READ COMMITTED transaction starts with a fresh snapshot that already includes any ingestion this sweep
-     * waited for, so an observation committed concurrently cannot be missed by the deletion check.
+     * waited for, so the deletion check cannot miss an observation committed concurrently. The isolation level is
+     * pinned for that reason: under REPEATABLE READ every statement would share the first snapshot.
      *
      * <p>Only one sweep runs at a time. A second concurrent sweep (another instance) returns immediately instead
      * of queueing behind the first. The whole sweep is one transaction: any failure rolls back every step.
      */
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     @Scheduled(cron = "0 0 * * * *") // hourly scheduled refresh for source health and stale jobs
     public void scheduledDiscoveryMaintenance() {
         if (!maintenanceEnabled || maintenanceMode.isMaintenanceMode()) {
@@ -454,7 +461,7 @@ public class JobDiscoveryService {
         jdbcTemplate.update("truncate table expired_job_ids");
 
         // 1. Lock every job this sweep may modify - jobs with an expirable aggregator observation, and jobs due
-        //    for archiving - in ascending id order, before any observation is touched.
+        //    for archiving - in ascending id order, before any observation is touched (FOR NO KEY UPDATE: see above).
         jdbcTemplate.update("""
                 with locked as (
                     select j.id from jobs j
@@ -473,13 +480,13 @@ public class JobDiscoveryService {
                         where a.status = 'DISCOVERED' and a.last_seen_at < now() - interval '30 days'
                     )
                     order by j.id
-                    for update
+                    for no key update
                 )
                 insert into maintenance_locked_job_ids(job_id)
                 select id from locked
                 """, aggregatorTtlDays);
 
-        // 2. Expire stale aggregator observations (P1-1), only for jobs locked above or with no job at all.
+        // 2. Expire stale aggregator observations (P1-1), only for jobs locked above (job_id is NOT NULL, V018).
         int expiredObs = jdbcTemplate.update("""
                 with expired as (
                     update job_source_observations o
@@ -491,7 +498,7 @@ public class JobDiscoveryService {
                           or o.source_type = 'WEB'
                           or o.source_id is null
                       )
-                      and (o.job_id is null or o.job_id in (select job_id from maintenance_locked_job_ids))
+                      and o.job_id in (select job_id from maintenance_locked_job_ids)
                     returning o.job_id
                 )
                 insert into expired_job_ids(job_id)
