@@ -414,27 +414,49 @@ public class JobDiscoveryService {
             return;
         }
 
-        // Expire stale aggregator observations older than aggregatorTtlDays (P1-1)
-        int expiredObs = jdbcTemplate.update("""
-                update job_source_observations set source_status = 'MISSING', removed_at = now()
-                where source_status = 'SEEN'
-                  and last_seen_at < now() - make_interval(days => ?)
-                  and (
-                      source_id in (select id from job_sources where kind in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA'))
-                      or source_type = 'WEB'
-                      or source_id is null
-                  )
-                """, aggregatorTtlDays);
-        if (expiredObs > 0) {
-            jdbcTemplate.update("""
+        // Expire stale aggregator observations and soft-delete only jobs whose
+        // observations were changed by this exact sweep. A global NOT EXISTS
+        // would also delete legacy jobs with no observations and unrelated
+        // historical jobs whose observations were already CLOSED/MISSING.
+        Map<String, Object> cleanup = jdbcTemplate.queryForMap("""
+                with expired_observations as (
+                    update job_source_observations
+                    set source_status = 'MISSING', removed_at = now()
+                    where source_status = 'SEEN'
+                      and last_seen_at < now() - make_interval(days => ?)
+                      and (
+                          source_id in (select id from job_sources where kind in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA'))
+                          or source_type = 'WEB'
+                          or source_id is null
+                      )
+                    returning id, job_id
+                ),
+                expired_jobs as (
                     update jobs j set deleted_at = now()
                     where j.deleted_at is null
+                      and j.id in (select distinct job_id from expired_observations)
                       and not exists (
-                          select 1 from job_source_observations o
-                          where o.job_id = j.id and o.source_status = 'SEEN'
+                          select 1
+                          from job_source_observations o
+                          where o.job_id = j.id
+                            and o.source_status = 'SEEN'
+                            and not exists (
+                                select 1
+                                from expired_observations expired
+                                where expired.id = o.id
+                            )
                       )
-                    """);
-            log.info("Expired {} stale aggregator observations older than {} days", expiredObs, aggregatorTtlDays);
+                    returning j.id
+                )
+                select
+                    (select count(*) from expired_observations) as expired_observations,
+                    (select count(*) from expired_jobs) as deleted_jobs
+                """, aggregatorTtlDays);
+        int expiredObs = ((Number) cleanup.get("expired_observations")).intValue();
+        int deletedJobs = ((Number) cleanup.get("deleted_jobs")).intValue();
+        if (expiredObs > 0) {
+            log.info("Expired {} stale aggregator observations older than {} days; soft-deleted {} affected jobs with no remaining live observation",
+                    expiredObs, aggregatorTtlDays, deletedJobs);
         }
 
         // Mark jobs not seen in 30 days as ARCHIVED
