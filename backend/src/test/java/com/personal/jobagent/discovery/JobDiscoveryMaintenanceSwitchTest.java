@@ -31,6 +31,9 @@ class JobDiscoveryMaintenanceSwitchTest {
 
         service.scheduledDiscoveryMaintenance();
 
+        verify(jdbc).execute(contains("create temporary table if not exists expired_job_ids"));
+        verify(jdbc).update("truncate table expired_job_ids");
+        verify(jdbc).update(contains("insert into expired_job_ids"), 7);
         verify(jdbc).update(contains("status = 'ARCHIVED'"));
     }
 
