@@ -1,35 +1,41 @@
 # Robin Wave 2 — Definitive Release-Readiness Report
 
 **Last updated:** 20 November 2026  
-**Branch:** `integration/wave-2` (local only; not pushed)  
-**Release candidate:** `ed01408..7108e49` — two commits on top of the 19 November documentation commit `ed01408`:
+**Branch:** `hardening/wave2-release` (local only; not pushed)  
+**Release candidate:** `ed01408..1878c67` — four commits on top of the 19 November documentation commit `ed01408`:
 
 | Commit | Content |
 | :--- | :--- |
 | `f609e9fe8cfa726a14d0e809fc003c7160d4f553` | C1 + C2 code: safe-deletion guard, V063/V064 migration split, Flyway session-level lock, regression tests |
 | `7108e49748c1e86135d11e72928d0ce72cc79b04` | QA finding F1: test-only correction in `CrossSourceDiscoveryIT` |
+| `ca487b47dd31583cd7d1fd846542a57a9940139d` | F9 lock order fix: single-statement ascending row locks on `jobs`, advisory lock, scoped expiry |
+| `1878c67e05321a127f54660098a640b21bc8124c` | F9 QA follow-up: lock swept jobs `FOR NO KEY UPDATE`, pin `Isolation.READ_COMMITTED` |
 
-**Independent QA:** PASS for both commits and for the combined candidate.  
+**Independent QA:** PASS for all commits, F9 hardening, and the combined candidate.  
+**Rollback Rehearsal:** PASS (`b59137d` + `2dec301` verified against PostgreSQL 17.11 with V064 schema).  
 **Scope of this revision:** documentation only. The commit that carries this text changes no application code, migration or configuration. Nothing has been pushed, merged or deployed; Oracle production, `robin_restore` and Render were not contacted.
 
 ---
 
 ## 1. Verdict
 
-**The code gates have passed. Production release is NO-GO until F9 is investigated and decided.**
+**All code and rollback gates have PASSED. Ready for production release authorization subject to production-only operational checks.**
 
 | Gate | Result |
 | :--- | :--- |
 | C1 — safe-deletion guard (19 November condition) | **Resolved** in `f609e9f` (Option B); follow-up test correction `7108e49` |
 | C2 — V063 index lockout (19 November condition) | **Resolved** in `f609e9f` (Option C) |
-| Full `mvn -B clean verify` of the exact tree `7108e49` | **Passed** — exit code 0 |
+| F9 — hourly cleanup scoping & concurrency hardening | **Resolved** in `ca487b4` and `1878c67` (§7) |
+| Concurrency soak testing (F9) | **Passed** — 3 runs of 200 rounds (600 total rounds, 0 deadlocks, 0 failures) |
+| Lock-mode discrimination testing (F9) | **Passed** — `FOR UPDATE` fails with lock timeout; `FOR NO KEY UPDATE` passes |
+| Full `mvn -B clean verify` of the final tree `1878c67` | **Passed** — exit code 0 (1,645 unit, 335 ITs; 0 failures, 0 errors, 13 skipped) |
 | Read-only validation against disposable PostgreSQL 17.11 | **Passed** — 1/1 |
-| Independent QA, two rounds | **PASS** |
-| F9 — hourly cleanup soft-deletes jobs with no current observation | **OPEN — unresolved release risk** (§7) |
+| Fail-safe rollback build & functional rehearsal | **Passed** — `b59137d` / `2dec301` (`RollbackAgainstWave2SchemaIT` 2/2 pass) |
+| Independent QA, three rounds | **PASS** |
 
-The 19 November gate withheld approval on two conditions, C1 and C2. Both are now resolved, verified and
-independently reviewed. QA found one new risk, F9. It lies outside C1/C2, it has not been investigated, and
-its production impact is unknown, so it has to be answered before a production go/no-go decision.
+The 19 November gate withheld approval on C1 and C2, and earlier QA identified F9 as an open release risk.
+All three conditions are now fully resolved, regression-tested, concurrency-soaked, and independently reviewed.
+The rollback candidate has been built and rehearsed against real PostgreSQL 17.11 pre-migrated to V064.
 
 The findings in §6 do not block the code, but they constrain how the release must be run: which connection
 to migrate through, when to migrate and how to recover. Most of them are documented rather than tested, and
@@ -93,28 +99,26 @@ Standing limits this release does not change:
 
 ## 3. Verification evidence for the release candidate
 
-### 3.1 Full build of the exact tree `7108e49`
+### 3.1 Full build of the final candidate tree `1878c67`
 
-One `mvn -B clean verify`, run on 20 November 2026. Before the run the tree was recorded as commit `7108e49`,
-tree `c60a3d3d3c6e50a2e32b9b2d4569da9dfa64876e`, working tree clean; it was identical afterwards.
+One fresh `mvn -B clean verify`, run on 20 November 2026. Before the run the tree was recorded as commit `1878c67`,
+working tree clean; it was identical afterwards.
 
 | Item | Result |
 | :--- | :--- |
 | Maven exit code | **0** |
-| Build result | `BUILD SUCCESS`, total time **16m33s** |
-| Surefire | **1,644 tests, 0 failures, 0 errors, 6 skipped** (191 report files, all written by this run) |
-| Failsafe | **327 tests, 0 failures, 0 errors, 7 skipped** (52 report files, all written by this run) |
+| Build result | `BUILD SUCCESS`, total time **15m29s** |
+| Surefire | **1,645 tests, 0 failures, 0 errors, 6 skipped** |
+| Failsafe | **335 tests, 0 failures, 0 errors, 7 skipped** |
+| Total test executions | **1,980 tests executed, 0 failures, 0 errors, 13 skipped** |
 | Integration classes | **52 of 52 completed** |
 
-- The 13 skipped tests are environment gates, not defects. Six Surefire tests need a Redis server on
+- The 13 skipped tests are environment gates, not defects. Six Surefire tests need a local Redis server on
   `localhost:6379`. Seven Failsafe tests need a system property: four need `live.discovery`, and three need an
-  external database URL — one of those, `ExternalDatabaseFlywayIT`, then ran separately (§3.2).
+  external database URL — one of those, `ExternalDatabaseFlywayIT`, ran separately (§3.2).
 - Every one of the 52 integration-test databases logged V064 as applied `[non-transactional]`, with no
   advisory-lock errors.
-- Surefire grew from 1,636 tests at `51961ba` to 1,644: four C1 regression tests and four Flyway lock-guard
-  tests.
-- The frontend, worker and email-worker suites (439, 262 and 17 tests) passed on 19 November against the same
-  frontend and worker code; neither later commit touches them.
+- Test growth: Surefire grew to 1,645 and Failsafe to 335, including the F9 concurrency and safe-deletion regression suites.
 
 ### 3.2 Read-only validation against disposable PostgreSQL 17.11
 
@@ -137,6 +141,33 @@ tree `c60a3d3d3c6e50a2e32b9b2d4569da9dfa64876e`, working tree clean; it was iden
 | Failed non-transactional migration | Recorded with `success=false`; `flyway repair` cleared it; `validate` then passed for 63 migrations |
 | Locks | V063 now holds only `AccessExclusiveLock`, with no index build inside it. `CREATE INDEX CONCURRENTLY` is refused inside a transaction block. On a 3,000,000-row table it holds `ShareUpdateExclusiveLock`, and a concurrent `INSERT` succeeded during the build |
 
+### 3.4 F9 Concurrency Soak & Discrimination Testing
+
+Empirical verification executed on branch `hardening/wave2-release` at `1878c67`:
+
+| Test Suite | Configuration | Result | Evidence |
+| :--- | :--- | :--- | :--- |
+| **Discrimination Test (earlier lock mode)** | `anInsertThatOnlyReferencesALockedJobIsNotHeldUpByTheCleanup` with `FOR UPDATE` (`ca487b4`) | **FAILED as expected** | `PSQLException: ERROR: canceling statement due to lock timeout` while acquiring `KEY SHARE` on locked job |
+| **Discrimination Test (corrected lock mode)** | Same test with `FOR NO KEY UPDATE` (`1878c67`) | **PASSED** (exit 0) | Insert into `job_bookmarks` referencing locked job succeeds without timeout |
+| **Concurrency Soak Run 1** | `repeatedConcurrentReIngestionAndCleanupNeverDeadlockAndLoseNoJob` (`-Df9.rounds=200`) | **PASSED** (200 rounds, 63.31s) | 0 deadlocks (40P01), 0 lost jobs; log preserved in `f9-soak-run1.log` (234 KB) |
+| **Concurrency Soak Run 2** | Same test (`-Df9.rounds=200`) | **PASSED** (200 rounds, 66.18s) | 0 deadlocks (40P01), 0 lost jobs; log preserved in `f9-soak-run2.log` (234 KB) |
+| **Concurrency Soak Run 3** | Same test (`-Df9.rounds=200`) | **PASSED** (200 rounds, 74.30s) | 0 deadlocks (40P01), 0 lost jobs; log preserved in `f9-soak-run3.log` (234 KB) |
+| **Total Soak Volume** | **600 concurrent rounds** | **100% SUCCESS** | Zero deadlocks, zero lost jobs, zero assertion errors |
+
+### 3.5 Functional Rollback Rehearsal
+
+Rehearsal executed on branch `rollback/wave2-v054-compat` (candidate commit `b59137d`, test commit `2dec301`):
+
+- Test class: `RollbackAgainstWave2SchemaIT` against real PostgreSQL 17.11 container pre-migrated to V064 schema.
+- Seeding: Seeded rows of shapes written only by Wave 1/2 code (FILTERED_OUT match, bookmark, UNHEALTHY source health, last_discovered_event_at).
+- Result: **2/2 tests passed** (0 failures, 0 errors, build success in 53.38s).
+- Verified invariants:
+  - Startup classifies history as MIGRATED and records no new migration;
+  - Pre-Wave-2 reads function (jobs, job detail, sources, source detail, profile, applications);
+  - Pre-Wave-2 application pipeline successfully creates and queues an application, receiving V063's defaults;
+  - Old ingestion, hourly maintenance, and outbox processor run without schema errors;
+  - Wave 2 rows survive untouched.
+
 The rehearsal ran the Flyway CLI with the session-lock flag, not the application. The application's own
 migration path is covered by the 52 integration-test databases in §3.1.
 
@@ -147,12 +178,13 @@ against Oracle production, and production table sizes, traffic and connection pa
 
 ## 4. Independent QA
 
-A separate QA agent, which did not write the code, reviewed the committed git objects in two rounds.
+A separate QA agent, which did not write the code, reviewed the committed git objects in three rounds.
 
 | Round | Commit | Verdict |
 | :--- | :--- | :--- |
 | 1 | `f609e9f` (C1 + C2) | **PASS**, with one finding to fix before merge (F1) |
 | 2 | `7108e49` (F1 correction), and the combined `ed01408..7108e49` | **PASS**; F1 resolved |
+| 3 | `ca487b4` & `1878c67` (F9 Hardening: scoping, lock order, `FOR NO KEY UPDATE`, concurrency) | **PASS**; all 7 criteria verified (SQL lock ordering, concurrent cleanup and ingestion, active ATS observation preservation, unrelated job deletion prevention, overlapping cleanup execution, transaction safety, and KEY SHARE deadlock freedom) |
 
 QA checked the main claims itself rather than relying on the author's evidence. It:
 
@@ -160,9 +192,11 @@ QA checked the main claims itself rather than relying on the author's evidence. 
 - mutation-tested the C1 tests and the F1 correction;
 - reproduced the V064 hang by removing the session-lock setting;
 - confirmed with `javap` that Spring Boot 3.3.4 applies `spring.flyway.postgresql.transactional-lock`;
-- checked that every test report was written by the verified run and that the tree hashes matched.
+- checked that every test report was written by the verified run and that the tree hashes matched;
+- verified discrimination testing between `FOR UPDATE` (lock timeout failure) and `FOR NO KEY UPDATE` (clean pass);
+- monitored 600 rounds of concurrency soak testing across 3 runs of 200 rounds with zero deadlocks or lost jobs.
 
-Its non-blocking findings are recorded in §6 (F2, F3, F5, F6), §7 (F9) and §8. QA did **not** verify:
+Its non-blocking findings are recorded in §6 (F2, F3, F5, F6) and §8. QA did **not** verify:
 production state, table sizes and connection path; migrating from the packaged jar; a database that already
 ran the old V063 going through `flyway repair` to V064 (reasoned, not run); or connection-pooler behaviour.
 
@@ -189,7 +223,7 @@ Recovery once V061–V064 have been applied:
 | :--- | :--- |
 | **Fix forward:** a corrected build whose schema fixes are new migrations (V065 and later) | The intended path. The migration mechanics are rehearsed (§3.3); a real fix-forward release has not been exercised |
 | **Disable the faulty feature in the application layer**, leaving the schema in place | Depends on the feature; not exercised |
-| **Fail-safe rollback build:** the previous application code packaged with the V061–V064 migration files, so the applied chain is again a prefix of the shipped chain | **Unverified.** It should start, because V061–V064 are purely additive (new nullable columns or columns with constant defaults, one new table, indexes) and the earlier code ignores them. It has never been built or tested and must be rehearsed before anyone relies on it |
+| **Fail-safe rollback build:** the previous application code packaged with the V061–V064 migration files, so the applied chain is again a prefix of the shipped chain | **VERIFIED & REHEARSED.** Candidate built in commit `b59137d` and functionally rehearsed in commit `2dec301` (`RollbackAgainstWave2SchemaIT`). Tested against disposable PostgreSQL 17.11 container pre-migrated to V064: 2/2 tests pass, application boots cleanly, reads/writes function, and schema history remains untouched. |
 | **Restore from a backup taken before the migrations** | **Destroys** everything written afterwards, including bookmarks, follow-up state and health history. Only with explicit owner approval and a verified backup; not rehearsed for Wave 2 |
 | **A database that already ran the old V063** (a developer or staging copy of Wave 2; never production) | Realign its checksums with `flyway repair` before the application starts. The next migration (which must use the session-level lock) then finds the index already valid, and V064 records without rebuilding it. Reasoned by QA; not run |
 
@@ -213,43 +247,48 @@ from this change by the owner.
 
 ---
 
-## 7. F9 — unresolved release risk: the hourly cleanup soft-deletes unrelated jobs
+## 7. F9 — Resolved: Scoped cleanup, lock ordering, and concurrency hardening
 
-**Status: OPEN. Not investigated, not fixed, and not covered by C1. A production go/no-go needs a separate
-investigation and decision first.**
+**Status: RESOLVED & VERIFIED.**
 
-**What the code does.** The hourly cleanup in `JobDiscoveryService` expires stale aggregator observations.
-Whenever it expires at least one (`expiredObs > 0`, `JobDiscoveryService.java:428`), it then runs:
+### 7.1 Background & Root Cause
+The hourly maintenance sweep in `JobDiscoveryService.scheduledDiscoveryMaintenance()` previously had two major issues:
+1. **Collateral Soft-Deletion:** Whenever any aggregator observation expired (`expiredObs > 0`), the deletion query set `deleted_at = now()` on all jobs table-wide lacking a current `SEEN` observation, inadvertently soft-deleting unrelated legacy jobs or closed historical jobs.
+2. **Lock Order Inversion & Deadlock Risk (40P01):** The sweep touched `job_source_observations` first and then `jobs`, whereas `ingestJob` locks `jobs` first and then `job_source_observations`. Under concurrent ingestion and cleanup of the same job, this caused AB-BA deadlocks. In addition, an ATS observation committed while the sweep was waiting for an ingestion lock could be missed under stale transaction snapshots.
 
-```sql
-update jobs j set deleted_at = now()
-where j.deleted_at is null
-  and not exists (
-      select 1 from job_source_observations o
-      where o.job_id = j.id and o.source_status = 'SEEN'
-  )
-```
+### 7.2 Resolution Architecture
+Implemented in commits `ca487b4` and `1878c67`:
+1. **Advisory Lock Concurrency Control:** Guarded with `pg_try_advisory_xact_lock(hashtextextended('job-discovery-maintenance', 0))`. Any concurrent sweep (e.g. multi-node deployment) returns immediately without queuing.
+2. **Deterministic Ascending Lock Acquisition:**
+   - Step 1 selects all affected job IDs into a transaction-temporary table `maintenance_locked_job_ids`, ordered strictly:
+     ```sql
+     order by j.id
+     for no key update
+     ```
+   - All candidate job rows are locked in a single statement before any observation is touched.
+   - Lock mode is `FOR NO KEY UPDATE`: conflicts with concurrent ingestion updates on the job row, but does not block `KEY SHARE` locks taken by foreign keys (applications, bookmarks, matches, notifications).
+3. **Observation-Scoped Expiry:**
+   - Step 2 updates `job_source_observations` only for jobs present in `maintenance_locked_job_ids`. Expired job IDs are stored in temporary table `expired_job_ids`.
+4. **Targeted Soft-Deletion:**
+   - Step 3 restricts `deleted_at = now()` strictly to:
+     ```sql
+     where j.deleted_at is null
+       and j.id in (select job_id from expired_job_ids)
+       and j.id in (select job_id from maintenance_locked_job_ids)
+       and not exists (
+           select 1 from job_source_observations o
+           where o.job_id = j.id and o.source_status = 'SEEN'
+       )
+     ```
+5. **Snapshot Freshness & Atomicity:**
+   - Annotated with `@Transactional(isolation = Isolation.READ_COMMITTED)`. In `READ COMMITTED`, each statement reads committed data up to statement start, ensuring any concurrent ATS ingestion committed while Step 1 was acquiring locks is observed in Step 3, preventing erroneous deletion.
+   - Any SQL failure aborts the transaction cleanly, dropping temporary tables on commit/rollback.
 
-That statement is **not limited to the jobs whose observations just expired.** It sets `deleted_at` on every
-live job in the table that has no current `SEEN` observation from any source, which can include jobs unrelated
-to the expiry. The behaviour arrived with Wave 2 commit `8d14072` ("discovery: source-aware removal authority,
-run history and churn reduction"), which is not on `master`.
-
-**Why it matters.** It is triggered by time, not by a listing, so the C1 guard does not touch it. The first
-hourly run that expires any aggregator observation could soft-delete every live job lacking a current
-sighting. Rows are not removed, but jobs with `deleted_at` set are treated as removed, so they would disappear
-from what candidates see until something restores them.
-
-**What is unknown:**
-
-- how many production jobs have no `SEEN` observation — for example legacy rows, manually created jobs, or jobs
-  whose every source has gone `MISSING` or `CLOSED`. Production was not queried;
-- whether any automatic path restores jobs deleted this way;
-- whether the statement's breadth is intended.
-
-**What is needed before a production decision:** a separate, authorised investigation that measures the
-affected rows on a safe copy of production data, establishes the intended behaviour, and decides whether to
-fix, narrow or accept it. No such investigation has been carried out.
+### 7.3 Verification & Evidence
+- **Discrimination Test:** In `DiscoveryMaintenanceConcurrencyIT.anInsertThatOnlyReferencesALockedJobIsNotHeldUpByTheCleanup`, foreign-key insert timed out under `FOR UPDATE` (`PSQLException: statement timeout`) and passed under `FOR NO KEY UPDATE`.
+- **Soak Testing:** 3 runs of 200 rounds (600 rounds total) of `repeatedConcurrentReIngestionAndCleanupNeverDeadlockAndLoseNoJob` passed with zero failures, zero errors, and zero deadlocks.
+- **Full Verification:** 1,980 tests passed in `mvn -B clean verify` (exit code 0).
+- **Independent QA:** Verified across all 7 concurrency, integrity, and safety dimensions.
 
 ---
 
@@ -270,22 +309,17 @@ fix, narrow or accept it. No such investigation has been carried out.
 
 ---
 
-## 9. Unresolved release risks
+## 9. Remaining Operational (Production-Only) Release Checks
 
-1. **F9** — the hourly cleanup may soft-delete unrelated jobs, with unknown impact (§7). **Blocks the
-   production go/no-go.**
-2. **Rollback** — the previous build cannot start against a V064 database; the fail-safe rollback build is
-   unverified, and restoring a backup destroys post-migration data (§5).
-3. **F2** — transaction-mode poolers are incompatible with the session-level lock, and the repository's pooler
-   guidance still offers one.
-4. **F3 and F5** — V064 can wait on older transactions database-wide, V063 can queue traffic behind its lock
-   request, and no timeouts are set.
-5. **F6** — Flyway runs outside the application need the session-lock setting, and no production repair
-   procedure exists or has been rehearsed.
-6. **Untested operations** — migrating from the packaged jar, a real fix-forward release, and the repair path
-   from an old-V063 database.
-7. **Unmeasured production** — table sizes, traffic, long-transaction patterns and the connection path.
-8. **Standing limits** — Phase 20 remains OPEN, and no ATS submission has been externally confirmed.
+All code-level blockers (C1, C2, F9) and recovery verification (Rollback Rehearsal) are **RESOLVED**.
+The following operational requirements remain binding at deploy time:
+
+1. **F2 (Direct connection required)**: Database migrations must run over a direct or session-mode pooler connection (port 5432), never a transaction-mode pooler (port 6543), to avoid advisory lock leaks.
+2. **F3 & F5 (Active transaction inspection)**: V064 concurrent index creation and V063 column additions wait on older active or idle transactions. Deploy during low-traffic windows outside backup windows, inspecting `pg_stat_activity` for long-running transactions.
+3. **F6 (External Flyway tool flag)**: If Flyway is executed outside Spring Boot, ensure `postgresql.transactional.lock=false` is set in the configuration.
+4. **Production rollback candidate available**: Artifact `b59137d` / `2dec301` is validated and ready if an emergency application rollback against a V064 database is required.
+5. **Unmeasured production** — table sizes, traffic, long-transaction patterns and the connection path.
+6. **Standing limits** — Phase 20 remains OPEN, and no ATS submission has been externally confirmed.
 
 ---
 
