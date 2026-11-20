@@ -6,6 +6,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -33,7 +34,7 @@ class JobDiscoveryMaintenanceSwitchTest {
 
         verify(jdbc).execute(contains("create temporary table if not exists expired_job_ids"));
         verify(jdbc).update("truncate table expired_job_ids");
-        verify(jdbc).update(contains("insert into expired_job_ids"), 7);
+        verify(jdbc).update(contains("insert into expired_job_ids"), eq(7));
         verify(jdbc).update(contains("status = 'ARCHIVED'"));
     }
 
