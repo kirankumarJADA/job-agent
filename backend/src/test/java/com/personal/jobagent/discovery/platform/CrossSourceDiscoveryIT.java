@@ -123,7 +123,9 @@ class CrossSourceDiscoveryIT {
 
         // Reproduce the four-row F9 pool: a legacy job with no observations,
         // one stale aggregator observation, one currently active ATS posting,
-        // and one unrelated historical posting already marked CLOSED.
+        // and one unrelated historical posting already marked CLOSED. The
+        // additional cross-source row proves a live ATS sighting still keeps
+        // a job visible after its stale aggregator observation expires.
         jdbc.update("delete from job_source_observations where job_id = ?", legacyJob.jobId());
         jdbc.update("""
                 update job_source_observations
