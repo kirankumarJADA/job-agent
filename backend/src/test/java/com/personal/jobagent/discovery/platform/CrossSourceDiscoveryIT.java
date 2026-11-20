@@ -101,6 +101,52 @@ class CrossSourceDiscoveryIT {
     }
 
     @Test
+    void aggregatorExpiryOnlySoftDeletesJobsWhoseObservationsExpiredInThatSweep() {
+        String n = unique();
+
+        var staleAggregatorJob = ingest(aggregator, "ts-expired-" + n, "Expired aggregator role", "Aggregator body",
+                null, "https://tsenta.com/jobs/expired-" + n);
+        var legacyJob = ingest(ats, "legacy-" + n, "Legacy role", "Legacy body",
+                "https://boards.greenhouse.io/acme/jobs/legacy-" + n,
+                "https://boards.greenhouse.io/acme/jobs/legacy-" + n);
+        var activeAtsJob = ingest(ats, "active-" + n, "Active ATS role", "Active body",
+                "https://boards.greenhouse.io/acme/jobs/active-" + n,
+                "https://boards.greenhouse.io/acme/jobs/active-" + n);
+        var closedHistoryJob = ingest(ats2, "closed-" + n, "Closed historical role", "Historical body",
+                "https://jobs.lever.co/acme/closed-" + n,
+                "https://jobs.lever.co/acme/closed-" + n);
+
+        // Reproduce the four-row F9 pool: a legacy job with no observations,
+        // one stale aggregator observation, one currently active ATS posting,
+        // and one unrelated historical posting already marked CLOSED.
+        jdbc.update("delete from job_source_observations where job_id = ?", legacyJob.jobId());
+        jdbc.update("""
+                update job_source_observations
+                set last_seen_at = now() - interval '8 days'
+                where job_id = ?
+                """, staleAggregatorJob.jobId());
+        jdbc.update("""
+                update job_source_observations
+                set source_status = 'CLOSED', removed_at = now()
+                where job_id = ?
+                """, closedHistoryJob.jobId());
+
+        ingestion.scheduledDiscoveryMaintenance();
+
+        assertThat(jdbc.queryForObject("select deleted_at from jobs where id = ?",
+                Object.class, staleAggregatorJob.jobId())).isNotNull();
+        assertThat(jdbc.queryForObject("select deleted_at from jobs where id = ?",
+                Object.class, legacyJob.jobId())).isNull();
+        assertThat(jdbc.queryForObject("select deleted_at from jobs where id = ?",
+                Object.class, activeAtsJob.jobId())).isNull();
+        assertThat(jdbc.queryForObject("select deleted_at from jobs where id = ?",
+                Object.class, closedHistoryJob.jobId())).isNull();
+        assertThat(jdbc.queryForObject("""
+                select source_status from job_source_observations where job_id = ?
+                """, String.class, staleAggregatorJob.jobId())).isEqualTo("MISSING");
+    }
+
+    @Test
     void anAggregatorListingAndTheAtsPostingBecomeOneJobWithBothProvenances() {
         String n = unique();
         String gh = "https://boards.greenhouse.io/acme" + n + "/jobs/4" + n.hashCode();
