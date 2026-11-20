@@ -91,4 +91,22 @@ public final class RankingMetrics {
         }
         return Math.min(1.0, (double) relevantFound / totalRelevant);
     }
+
+    /**
+     * Mean Reciprocal Rank (MRR): 1 / rank of the first relevant item (1-indexed).
+     *
+     * @param relevance binary relevance indicator for ranked items
+     * @return reciprocal rank (0.0 if no item is relevant)
+     */
+    public static double reciprocalRank(List<Boolean> relevance) {
+        if (relevance == null || relevance.isEmpty()) {
+            return 0.0;
+        }
+        for (int i = 0; i < relevance.size(); i++) {
+            if (Boolean.TRUE.equals(relevance.get(i))) {
+                return 1.0 / (i + 1);
+            }
+        }
+        return 0.0;
+    }
 }

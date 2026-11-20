@@ -4,8 +4,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.common.AutomationMetrics;
 import com.personal.jobagent.common.JdbcConversions;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.jobs.rerank.MultiStageReranker;
+import com.personal.jobagent.jobs.rerank.RerankResult;
 import com.personal.jobagent.notifications.NotificationEvents;
 import com.personal.jobagent.notifications.NotificationService;
+import org.springframework.beans.factory.annotation.Autowired;
 import com.personal.jobagent.preferences.PreferenceSetRecord;
 import com.personal.jobagent.preferences.ScoringWeights;
 import com.personal.jobagent.profile.ProfileRepository;
@@ -68,6 +71,7 @@ public class JobMatchService {
     private final AutomationMetrics metrics;
     private final SemanticSkillMatcher semanticSkillMatcher;
     private final ObjectMapper objectMapper;
+    private final MultiStageReranker multiStageReranker;
 
     public JobMatchService(JobRepository jobRepository,
                            SemanticSkillMatcher semanticSkillMatcher,
@@ -77,6 +81,21 @@ public class JobMatchService {
                            PlatformTransactionManager transactionManager,
                            AutomationMetrics metrics,
                            ObjectMapper objectMapper) {
+        this(jobRepository, semanticSkillMatcher, profileRepository, jdbcTemplate,
+                notificationService, transactionManager, metrics, objectMapper,
+                new MultiStageReranker(profileRepository, semanticSkillMatcher));
+    }
+
+    @Autowired
+    public JobMatchService(JobRepository jobRepository,
+                           SemanticSkillMatcher semanticSkillMatcher,
+                           ProfileRepository profileRepository,
+                           JdbcTemplate jdbcTemplate,
+                           NotificationService notificationService,
+                           PlatformTransactionManager transactionManager,
+                           AutomationMetrics metrics,
+                           ObjectMapper objectMapper,
+                           MultiStageReranker multiStageReranker) {
         this.jobRepository = jobRepository;
         this.profileRepository = profileRepository;
         this.jdbcTemplate = jdbcTemplate;
@@ -85,6 +104,7 @@ public class JobMatchService {
         this.metrics = metrics;
         this.semanticSkillMatcher = semanticSkillMatcher;
         this.objectMapper = objectMapper;
+        this.multiStageReranker = multiStageReranker;
     }
 
     public record MatchResult(UUID jobId, int overall, String recommendation,
@@ -166,6 +186,10 @@ public class JobMatchService {
         String recommendation = overall >= APPLY_THRESHOLD ? "APPLY"
                 : overall >= REVIEW_THRESHOLD ? "REVIEW" : "SKIP";
 
+        RerankResult rerankResult = multiStageReranker != null
+                ? multiStageReranker.rerank(job, profileId, preferences)
+                : null;
+
         // Persist the decision + emit the event atomically.
         boolean notified = Boolean.TRUE.equals(transactionTemplate.execute(tx -> {
             // The decision belongs to (job, profile) — it is a function of THIS
@@ -187,7 +211,7 @@ public class JobMatchService {
                     overall,
                     recommendation,
                     breakdownJson(job, overall, recommendation, skillOverlap, remoteFit, salaryFit,
-                            desiredSalaryMin, allowedRemoteTypes, allowedTitles, experience, visa, location, categories));
+                            desiredSalaryMin, allowedRemoteTypes, allowedTitles, experience, visa, location, categories, rerankResult));
 
             // Catalogue-level marker only: "this posting has been evaluated".
             // Shared on purpose and carrying no candidate data, which is why it
@@ -469,7 +493,8 @@ public class JobMatchService {
                                  Number desiredSalaryMin, List<String> allowedRemoteTypes,
                                  List<String> allowedTitles,
                                  CategoryScore experience, CategoryScore visa, CategoryScore location,
-                                 List<CategoryScore> categories) {
+                                 List<CategoryScore> categories,
+                                 RerankResult rerank) {
         StringBuilder why = new StringBuilder();
         if (skillOverlap.listedSkills() == 0) {
             why.append("The job lists no skills, so skill match was scored neutral (50%). ");
@@ -615,6 +640,10 @@ public class JobMatchService {
         breakdown.put("concerns", concerns);
         breakdown.put("why", why.toString());
         breakdown.put("decision", decision);
+        if (rerank != null) {
+            breakdown.put("stage_scores", rerank.stageScores());
+            breakdown.put("rerank_narrative", rerank.narrativeWhy());
+        }
         return JdbcConversions.toJson(breakdown, objectMapper);
     }
 }

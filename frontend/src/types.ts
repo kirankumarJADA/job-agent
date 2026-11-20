@@ -71,6 +71,23 @@ export interface MatchBreakdown {
   concerns?: string[];
   why?: string;
   decision?: string;
+  stage_scores?: Record<string, number>;
+  rerank_narrative?: string;
+}
+
+export interface SearchPlan {
+  id: string;
+  profile_id?: string;
+  name: string;
+  target_titles: string[];
+  query_facets: Record<string, any>;
+  target_sources: string[];
+  search_frequency: 'HOURLY' | 'DAILY' | 'WEEKLY' | 'MANUAL';
+  max_results_per_run: number;
+  active: boolean;
+  last_run_at?: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface JobDetailResponse {
