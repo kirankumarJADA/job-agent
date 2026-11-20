@@ -408,18 +408,26 @@ public class JobDiscoveryService {
     @Value("${app.discovery.aggregator-observation-ttl-days:7}")
     private int aggregatorTtlDays = 7;
 
+    @Transactional
     @Scheduled(cron = "0 0 * * * *") // hourly scheduled refresh for source health and stale jobs
     public void scheduledDiscoveryMaintenance() {
         if (!maintenanceEnabled || maintenanceMode.isMaintenanceMode()) {
             return;
         }
 
-        // Expire stale aggregator observations and soft-delete only jobs whose
-        // observations were changed by this exact sweep. A global NOT EXISTS
-        // would also delete legacy jobs with no observations and unrelated
-        // historical jobs whose observations were already CLOSED/MISSING.
-        Map<String, Object> cleanup = jdbcTemplate.queryForMap("""
-                with expired_observations as (
+        // The affected-job set is materialised inside this transaction. This
+        // keeps deletion scoped to observations expired by this sweep, while
+        // the following statement sees their new MISSING status and can still
+        // preserve jobs with another live observation.
+        jdbcTemplate.execute("""
+                create temporary table if not exists expired_job_ids (
+                    job_id uuid
+                ) on commit drop
+                """);
+        jdbcTemplate.update("truncate table expired_job_ids");
+
+        int expiredObs = jdbcTemplate.update("""
+                with expired as (
                     update job_source_observations
                     set source_status = 'MISSING', removed_at = now()
                     where source_status = 'SEEN'
@@ -429,32 +437,22 @@ public class JobDiscoveryService {
                           or source_type = 'WEB'
                           or source_id is null
                       )
-                    returning id, job_id
-                ),
-                expired_jobs as (
+                    returning job_id
+                )
+                insert into expired_job_ids(job_id)
+                select job_id from expired
+                """, aggregatorTtlDays);
+
+        if (expiredObs > 0) {
+            int deletedJobs = jdbcTemplate.update("""
                     update jobs j set deleted_at = now()
                     where j.deleted_at is null
-                      and j.id in (select distinct job_id from expired_observations)
+                      and j.id in (select job_id from expired_job_ids)
                       and not exists (
-                          select 1
-                          from job_source_observations o
-                          where o.job_id = j.id
-                            and o.source_status = 'SEEN'
-                            and not exists (
-                                select 1
-                                from expired_observations expired
-                                where expired.id = o.id
-                            )
+                          select 1 from job_source_observations o
+                          where o.job_id = j.id and o.source_status = 'SEEN'
                       )
-                    returning j.id
-                )
-                select
-                    (select count(*) from expired_observations) as expired_observations,
-                    (select count(*) from expired_jobs) as deleted_jobs
-                """, aggregatorTtlDays);
-        int expiredObs = ((Number) cleanup.get("expired_observations")).intValue();
-        int deletedJobs = ((Number) cleanup.get("deleted_jobs")).intValue();
-        if (expiredObs > 0) {
+                    """);
             log.info("Expired {} stale aggregator observations older than {} days; soft-deleted {} affected jobs with no remaining live observation",
                     expiredObs, aggregatorTtlDays, deletedJobs);
         }
