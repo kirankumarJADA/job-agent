@@ -8,7 +8,8 @@ import java.util.UUID;
 /**
  * Domain entity and wire contract for configurable candidate search plans.
  * A search plan specifies multi-source retrieval criteria, title/skill facets,
- * cadence controls, and execution outcome tracking scoped to a candidate profile.
+ * cadence controls, execution outcome tracking, and database-backed lease coordination
+ * scoped to a candidate profile.
  */
 public record SearchPlanRecord(
         UUID id,
@@ -24,6 +25,8 @@ public record SearchPlanRecord(
         String lastExecutionStatus,
         String lastExecutionError,
         int lastExecutionResults,
+        UUID executionOwnerToken,
+        Instant executionLeaseExpiresAt,
         Instant createdAt,
         Instant updatedAt
 ) {
@@ -42,6 +45,19 @@ public record SearchPlanRecord(
     }
 
     /**
+     * Backward-compatible 15-parameter constructor (prior to execution lease tokens).
+     */
+    public SearchPlanRecord(UUID id, UUID profileId, String name, List<String> targetTitles,
+                            Map<String, Object> queryFacets, List<String> targetSources,
+                            String searchFrequency, int maxResultsPerRun, boolean active,
+                            Instant lastRunAt, String lastExecutionStatus, String lastExecutionError,
+                            int lastExecutionResults, Instant createdAt, Instant updatedAt) {
+        this(id, profileId, name, targetTitles, queryFacets, targetSources, searchFrequency,
+                maxResultsPerRun, active, lastRunAt, lastExecutionStatus, lastExecutionError,
+                lastExecutionResults, null, null, createdAt, updatedAt);
+    }
+
+    /**
      * Backward-compatible 12-parameter constructor for existing callers and fixtures.
      */
     public SearchPlanRecord(UUID id, UUID profileId, String name, List<String> targetTitles,
@@ -49,6 +65,6 @@ public record SearchPlanRecord(
                             String searchFrequency, int maxResultsPerRun, boolean active,
                             Instant lastRunAt, Instant createdAt, Instant updatedAt) {
         this(id, profileId, name, targetTitles, queryFacets, targetSources, searchFrequency,
-                maxResultsPerRun, active, lastRunAt, null, null, 0, createdAt, updatedAt);
+                maxResultsPerRun, active, lastRunAt, null, null, 0, null, null, createdAt, updatedAt);
     }
 }

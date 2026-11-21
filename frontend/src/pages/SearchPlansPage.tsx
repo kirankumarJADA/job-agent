@@ -20,7 +20,6 @@ import {
   PageShell,
   PrimaryButton,
   SecondaryButton,
-  SectionCard,
   Select,
   StatusPill,
   TextInput,
@@ -380,6 +379,20 @@ export const SearchPlansPage: React.FC = () => {
                     <li key={i}>{err}</li>
                   ))}
                 </ul>
+              </div>
+            )}
+
+            {executionSummary.providerFacetSupport && Object.keys(executionSummary.providerFacetSupport).length > 0 && (
+              <div className="mt-3 rounded-lg border border-line bg-surface p-3 text-xs text-ink-muted">
+                <p className="font-semibold text-ink">Provider Capability & Facet Routing:</p>
+                <div className="mt-1.5 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                  {Object.entries(executionSummary.providerFacetSupport).map(([key, val]) => (
+                    <div key={key} className="rounded bg-surface-raised p-2 border border-line/60">
+                      <span className="font-semibold text-ink-soft">{key}: </span>
+                      <span>{val}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
 

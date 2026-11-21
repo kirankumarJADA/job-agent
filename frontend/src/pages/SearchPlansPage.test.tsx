@@ -1,9 +1,7 @@
 // @vitest-environment jsdom
-import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 
 import { SearchPlansPage } from './SearchPlansPage';
 import * as client from '../api/client';

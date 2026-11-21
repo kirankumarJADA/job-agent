@@ -4,7 +4,6 @@ import com.personal.jobagent.common.MaintenanceModeService;
 import com.personal.jobagent.discovery.JobDiscoveryService;
 import com.personal.jobagent.discovery.platform.BoardDiscoveryService;
 import com.personal.jobagent.jobs.JobMatchService;
-import com.personal.jobagent.jobs.JobRecord;
 import com.personal.jobagent.jobs.JobRepository;
 import com.personal.jobagent.preferences.PreferenceSetRecord;
 import com.personal.jobagent.preferences.PreferenceSetRepository;
@@ -21,7 +20,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
-@DisplayName("Phase 2 Deliverable A: SearchPlanExecutionCoordinator Unit Tests")
+@DisplayName("Phase 2A Hardened: SearchPlanExecutionCoordinator Unit Tests")
 class SearchPlanExecutionCoordinatorTest {
 
     private SearchPlanRepository repository;
@@ -55,22 +54,23 @@ class SearchPlanExecutionCoordinatorTest {
                 jobMatchService, preferenceSetRepository, jdbcTemplate, 45000L, maintenanceMode
         );
 
-        // Default: advisory lock acquired successfully
-        when(jdbcTemplate.queryForObject(contains("pg_try_advisory_lock"), eq(Boolean.class), any()))
-                .thenReturn(Boolean.TRUE);
+        // Default: exclusive lease claimed successfully and completed with fencing
+        when(repository.claimExecutionLease(eq(planId), any(UUID.class), anyLong()))
+                .thenReturn(true);
+        when(repository.completeExecution(eq(planId), any(UUID.class), anyString(), any(), anyInt()))
+                .thenReturn(true);
     }
 
     @Test
-    @DisplayName("Executes plan successfully, respects per-plan limit, and triggers match reranker")
+    @DisplayName("Executes plan successfully, passes query params to Adzuna, and triggers match reranker")
     void executePlan_success() {
         SearchPlanRecord plan = new SearchPlanRecord(
                 planId, profileId, "Senior Java Plan",
-                List.of("Java Engineer"), Map.of("skills", List.of("Java", "Spring Boot")),
+                List.of("Java Engineer"), Map.of("skills", List.of("Java", "Spring Boot"), "locations", List.of("London")),
                 List.of("ADZUNA"), "DAILY", 10, true, null, Instant.now(), Instant.now()
         );
         when(repository.findByIdAndProfileId(planId, profileId)).thenReturn(Optional.of(plan));
 
-        // Mock job sources in DB
         when(jdbcTemplate.queryForList(contains("FROM job_sources"))).thenReturn(List.of(
                 Map.of("id", sourceId1, "kind", "ADZUNA", "display_name", "Adzuna UK", "org_identifier", "gb")
         ));
@@ -78,7 +78,6 @@ class SearchPlanExecutionCoordinatorTest {
         UUID jobId1 = UUID.randomUUID();
         UUID jobId2 = UUID.randomUUID();
 
-        // Mock board discovery report
         BoardDiscoveryService.SourceRunReport report = new BoardDiscoveryService.SourceRunReport(
                 "corr-1", sourceId1, "ADZUNA", "OK", true, Map.of(), null, null,
                 List.of(
@@ -87,7 +86,7 @@ class SearchPlanExecutionCoordinatorTest {
                 ),
                 List.of()
         );
-        when(boardDiscoveryService.run(eq(sourceId1), eq(BoardDiscoveryService.Mode.SCHEDULED))).thenReturn(report);
+        when(boardDiscoveryService.run(eq(sourceId1), eq(BoardDiscoveryService.Mode.SCHEDULED), anyMap())).thenReturn(report);
 
         PreferenceSetRecord prefs = new PreferenceSetRecord(
                 UUID.randomUUID(), profileId, List.of("Java Engineer"), List.of(), List.of(),
@@ -105,12 +104,17 @@ class SearchPlanExecutionCoordinatorTest {
         assertThat(summary.jobsMatched()).isEqualTo(2);
         assertThat(summary.errors()).isEmpty();
 
+        // Verify Adzuna received query parameters
+        verify(boardDiscoveryService).run(eq(sourceId1), eq(BoardDiscoveryService.Mode.SCHEDULED), argThat(params ->
+                params.containsKey("what") && params.containsKey("where") && params.get("where").equals("London")
+        ));
+
         // Verify match evaluation was called for both jobs
         verify(jobMatchService).evaluateMatch(eq(jobId1), eq(profileId), eq(prefs));
         verify(jobMatchService).evaluateMatch(eq(jobId2), eq(profileId), eq(prefs));
 
-        // Verify repository recorded execution outcome
-        verify(repository).recordExecution(eq(planId), eq("SUCCESS"), isNull(), eq(2));
+        // Verify repository completed execution with fencing token
+        verify(repository).completeExecution(eq(planId), any(UUID.class), eq("SUCCESS"), isNull(), eq(2));
     }
 
     @Test
@@ -128,7 +132,6 @@ class SearchPlanExecutionCoordinatorTest {
                 Map.of("id", sourceId2, "kind", "ARBEITNOW", "display_name", "Arbeitnow Global", "org_identifier", "global")
         ));
 
-        // First source already yields 2 jobs (matching ceiling 2)
         BoardDiscoveryService.SourceRunReport report1 = new BoardDiscoveryService.SourceRunReport(
                 "corr-1", sourceId1, "ADZUNA", "OK", true, Map.of(), null, null,
                 List.of(
@@ -137,16 +140,16 @@ class SearchPlanExecutionCoordinatorTest {
                 ),
                 List.of()
         );
-        when(boardDiscoveryService.run(eq(sourceId1), eq(BoardDiscoveryService.Mode.SCHEDULED))).thenReturn(report1);
+        when(boardDiscoveryService.run(eq(sourceId1), eq(BoardDiscoveryService.Mode.SCHEDULED), anyMap())).thenReturn(report1);
 
         SearchPlanExecutionCoordinator.ExecutionSummary summary = coordinator.executePlan(planId, profileId, false);
 
         assertThat(summary.status()).isEqualTo("SUCCESS");
         assertThat(summary.jobsIngested()).isEqualTo(2);
-        assertThat(summary.sourcesQueried()).isEqualTo(1); // second source was not queried because cap reached
+        assertThat(summary.sourcesQueried()).isEqualTo(1);
         assertThat(summary.notes()).anyMatch(n -> n.contains("Reached per-plan result cap"));
 
-        verify(boardDiscoveryService, times(1)).run(any(), any());
+        verify(boardDiscoveryService, times(1)).run(any(), any(), any());
     }
 
     @Test
@@ -164,20 +167,18 @@ class SearchPlanExecutionCoordinatorTest {
                 Map.of("id", sourceId2, "kind", "FREEHIRE", "display_name", "FreeHire Tech", "org_identifier", "tech")
         ));
 
-        // Source 1 succeeds
         BoardDiscoveryService.SourceRunReport report1 = new BoardDiscoveryService.SourceRunReport(
                 "corr-1", sourceId1, "ADZUNA", "OK", true, Map.of(), null, null,
                 List.of(new JobDiscoveryService.IngestResult(UUID.randomUUID(), "INSERTED", "key1", "hash1")),
                 List.of()
         );
-        when(boardDiscoveryService.run(eq(sourceId1), eq(BoardDiscoveryService.Mode.SCHEDULED))).thenReturn(report1);
+        when(boardDiscoveryService.run(eq(sourceId1), eq(BoardDiscoveryService.Mode.SCHEDULED), anyMap())).thenReturn(report1);
 
-        // Source 2 fails
         BoardDiscoveryService.SourceRunReport report2 = new BoardDiscoveryService.SourceRunReport(
                 "corr-2", sourceId2, "FREEHIRE", "FAILED", false, Map.of(),
                 "RATE_LIMITED", "HTTP 429 Too Many Requests", List.of(), List.of("Rate limited")
         );
-        when(boardDiscoveryService.run(eq(sourceId2), eq(BoardDiscoveryService.Mode.SCHEDULED))).thenReturn(report2);
+        when(boardDiscoveryService.run(eq(sourceId2), eq(BoardDiscoveryService.Mode.SCHEDULED), anyMap())).thenReturn(report2);
 
         SearchPlanExecutionCoordinator.ExecutionSummary summary = coordinator.executePlan(planId, profileId, false);
 
@@ -188,28 +189,46 @@ class SearchPlanExecutionCoordinatorTest {
         assertThat(summary.jobsIngested()).isEqualTo(1);
         assertThat(summary.errors()).anyMatch(e -> e.contains("RATE_LIMITED"));
 
-        verify(repository).recordExecution(eq(planId), eq("PARTIAL"), contains("RATE_LIMITED"), eq(1));
+        verify(repository).completeExecution(eq(planId), any(UUID.class), eq("PARTIAL"), contains("RATE_LIMITED"), eq(1));
     }
 
     @Test
-    @DisplayName("Prevents overlapping execution when advisory lock is held")
+    @DisplayName("Prevents overlapping execution when execution lease is held by another worker")
     void executePlan_overlappingExecutionPrevented() {
         SearchPlanRecord plan = new SearchPlanRecord(
                 planId, profileId, "Plan", List.of(), Map.of(), List.of(), "HOURLY", 50, true, null, Instant.now(), Instant.now()
         );
         when(repository.findByIdAndProfileId(planId, profileId)).thenReturn(Optional.of(plan));
 
-        // Advisory lock returns false (another process has the lock)
-        when(jdbcTemplate.queryForObject(contains("pg_try_advisory_lock"), eq(Boolean.class), any()))
-                .thenReturn(Boolean.FALSE);
+        // Lease claim returns false (another process has the lease)
+        when(repository.claimExecutionLease(eq(planId), any(UUID.class), anyLong()))
+                .thenReturn(false);
 
         SearchPlanExecutionCoordinator.ExecutionSummary summary = coordinator.executePlan(planId, profileId, false);
 
         assertThat(summary.status()).isEqualTo("SKIPPED");
         assertThat(summary.notes()).anyMatch(n -> n.contains("already active"));
 
-        // No board discovery should have been run
         verifyNoInteractions(boardDiscoveryService);
+    }
+
+    @Test
+    @DisplayName("Catches unexpected execution runtime exception and persists FAILED status")
+    void executePlan_handlesUnexpectedExceptionAndPersistsFailed() {
+        SearchPlanRecord plan = new SearchPlanRecord(
+                planId, profileId, "Plan", List.of("Crash Engineer"), Map.of(), List.of("ADZUNA"), "DAILY", 50, true, null, Instant.now(), Instant.now()
+        );
+        when(repository.findByIdAndProfileId(planId, profileId)).thenReturn(Optional.of(plan));
+
+        when(jdbcTemplate.queryForList(contains("FROM job_sources"))).thenThrow(new RuntimeException("Simulated DB connection failure"));
+
+        SearchPlanExecutionCoordinator.ExecutionSummary summary = coordinator.executePlan(planId, profileId, false);
+
+        assertThat(summary.status()).isEqualTo("FAILED");
+        assertThat(summary.errors()).anyMatch(e -> e.contains("Simulated DB connection failure"));
+
+        // Verifies FAILED status is persisted with the owner token
+        verify(repository).completeExecution(eq(planId), any(UUID.class), eq("FAILED"), contains("Simulated DB connection failure"), eq(0));
     }
 
     @Test

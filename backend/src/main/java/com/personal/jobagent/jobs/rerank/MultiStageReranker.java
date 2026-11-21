@@ -128,12 +128,57 @@ public class MultiStageReranker {
         // ─────────────────────────────────────────────────────────────
         double salaryScore = computeSalaryFit(job.salaryMax(), salaryMinGbp);
 
-        // Weights: Skills 35%, Title 25%, Seniority 20%, Salary 10%, Location/Remote 10%
-        double compositeScore = (skillScore * 0.35)
-                + (titleScore * 0.25)
-                + (seniorityScore * 0.20)
-                + (salaryScore * 0.10)
-                + (1.0 * 0.10); // Location/Remote passed hard filter
+        // Normalize weights over applicable categories.
+        // Default weights: Skills 35%, Title 25%, Seniority 20%, Salary 10%, Location/Remote 10%
+        // When candidate specifies customized scoring_weights, honor them.
+        // When a dimension is unconstrained (e.g. no target titles or experience levels set),
+        // exclude it from the weighted average rather than artificially inflating the score.
+        Map<String, Object> configuredWeights = preferences != null ? preferences.scoringWeights() : null;
+        double wSkill = 35.0;
+        double wTitle = 25.0;
+        double wSeniority = 20.0;
+        double wSalary = 10.0;
+        double wLocation = 10.0;
+
+        if (configuredWeights != null && !configuredWeights.isEmpty()) {
+            if (configuredWeights.get("skill") instanceof Number n) wSkill = n.doubleValue();
+            if (configuredWeights.get("experience") instanceof Number n) wSeniority = n.doubleValue();
+            if (configuredWeights.get("salary") instanceof Number n) wSalary = n.doubleValue();
+            if (configuredWeights.get("location") instanceof Number n) wLocation = n.doubleValue();
+            if (configuredWeights.get("title") instanceof Number n) wTitle = n.doubleValue();
+        }
+
+        boolean titleApplicable = !allowedTitles.isEmpty();
+        boolean seniorityApplicable = !allowedExperienceLevels.isEmpty();
+        boolean locationApplicable = !allowedLocations.isEmpty() || !allowedRemoteTypes.isEmpty();
+        boolean salaryApplicable = salaryMinGbp != null && salaryMinGbp > 0;
+        boolean skillApplicable = true;
+
+        double totalWeight = 0.0;
+        double weightedSum = 0.0;
+
+        if (skillApplicable) {
+            totalWeight += wSkill;
+            weightedSum += wSkill * skillScore;
+        }
+        if (titleApplicable) {
+            totalWeight += wTitle;
+            weightedSum += wTitle * titleScore;
+        }
+        if (seniorityApplicable) {
+            totalWeight += wSeniority;
+            weightedSum += wSeniority * seniorityScore;
+        }
+        if (salaryApplicable) {
+            totalWeight += wSalary;
+            weightedSum += wSalary * salaryScore;
+        }
+        if (locationApplicable) {
+            totalWeight += wLocation;
+            weightedSum += wLocation * 1.0; // Passed hard filter
+        }
+
+        double compositeScore = totalWeight > 0.0 ? (weightedSum / totalWeight) : 0.5;
 
         int overall = (int) Math.round(compositeScore * 100);
         String recommendation = overall >= APPLY_THRESHOLD ? "APPLY"

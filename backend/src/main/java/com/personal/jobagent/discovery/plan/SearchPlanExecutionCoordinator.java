@@ -15,20 +15,20 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.*;
 
 /**
- * Phase 2 Deliverables A & B: Search Plan Execution Coordinator.
+ * Phase 2A Hardened: Search Plan Execution Coordinator.
  * <p>
  * Orchestrates candidate-scoped discovery search plans:
  * 1. Expands plan intents into concrete facets via {@link SearchPlanQueryExpander}.
- * 2. Resolves applicable enabled {@code job_sources}.
- * 3. Enforces mutual exclusion via PostgreSQL advisory locks to prevent duplicate/overlapping executions.
+ * 2. Enforces mutual exclusion via database-backed execution leases with owner tokens and fencing protection.
+ * 3. Routes query parameters to query-capable providers (Adzuna) and harvests company boards (Greenhouse/Lever).
  * 4. Executes provider discovery bounded by per-plan result limits ({@code maxResultsPerRun}).
- * 5. Handles provider failures, timeouts, and rate limits gracefully.
- * 6. Triggers immediate {@link JobMatchService} evaluation and 5-stage reranking on discovered jobs.
- * 7. Records execution outcome, errors, and metrics in {@code search_plans}.
+ * 5. Handles provider failures, timeouts, and rate limits gracefully with fail-closed semantics.
+ * 6. Triggers immediate {@link JobMatchService} evaluation and authoritative multi-stage reranking on discovered jobs.
+ * 7. Records execution outcome, errors, and metrics in {@code search_plans} with fencing protection.
  */
 @Service
 public class SearchPlanExecutionCoordinator {
@@ -95,7 +95,7 @@ public class SearchPlanExecutionCoordinator {
     }
 
     /**
-     * Executes a search plan by ID and profile ID.
+     * Executes a search plan by ID and profile ID using database-backed execution leases.
      *
      * @param planId search plan identifier
      * @param profileId candidate profile identifier
@@ -122,29 +122,49 @@ public class SearchPlanExecutionCoordinator {
             return ExecutionSummary.skipped(planId, plan.name(), "Search plan is disabled/inactive");
         }
 
-        // Mutual exclusion: acquire PostgreSQL session advisory lock on plan ID hash
-        boolean locked = tryAcquireAdvisoryLock(planId);
-        if (!locked) {
-            log.warn("Search plan {} is already executing in another process; overlapping execution prevented", planId);
+        // Mutual exclusion: atomically claim database-backed execution lease with owner token and expiry
+        UUID ownerToken = UUID.randomUUID();
+        long leaseDurationMs = Math.max(perSourceTimeoutMs * 4, 300000L); // at least 5 minutes lease
+
+        boolean claimed;
+        try {
+            claimed = repository.claimExecutionLease(planId, ownerToken, leaseDurationMs);
+        } catch (Exception e) {
+            log.error("Failed to claim execution lease for search plan {} (failing closed): {}", planId, e.getMessage(), e);
+            return ExecutionSummary.skipped(planId, plan.name(), "Could not acquire execution lease: " + e.getMessage());
+        }
+
+        if (!claimed) {
+            log.warn("Search plan {} is already executing with active lease; overlapping execution prevented", planId);
             return ExecutionSummary.skipped(planId, plan.name(), "Another execution is already active for this search plan");
         }
 
         try {
-            repository.markExecutionStatus(planId, "RUNNING");
-            return doExecute(plan);
-        } finally {
-            releaseAdvisoryLock(planId);
+            return doExecute(plan, ownerToken);
+        } catch (Exception e) {
+            log.error("Unhandled execution exception for search plan {}: {}", planId, e.getMessage(), e);
+            repository.completeExecution(planId, ownerToken, "FAILED", "Execution exception: " + e.getMessage(), 0);
+            return new ExecutionSummary(
+                    plan.id(),
+                    plan.name(),
+                    "FAILED",
+                    0, 0, 0, 0, 0,
+                    List.of("Execution failure: " + e.getMessage()),
+                    List.of("Execution aborted due to unexpected exception"),
+                    null,
+                    Map.of()
+            );
         }
     }
 
-    private ExecutionSummary doExecute(SearchPlanRecord plan) {
+    private ExecutionSummary doExecute(SearchPlanRecord plan, UUID ownerToken) {
         SearchPlanQueryExpander.ExpandedQueryPlan expanded = queryExpander.expand(plan);
         Map<String, String> facetSupport = evaluateFacetSupport(expanded);
 
         List<SourceCandidate> matchingSources = resolveMatchingSources(expanded.targetSources());
         if (matchingSources.isEmpty()) {
             String note = "No enabled discovery sources matched target sources: " + expanded.targetSources();
-            repository.recordExecution(plan.id(), "SUCCESS", null, 0);
+            repository.completeExecution(plan.id(), ownerToken, "SUCCESS", null, 0);
             return new ExecutionSummary(
                     plan.id(), plan.name(), "SUCCESS", 0, 0, 0, 0, 0,
                     List.of(), List.of(note), expanded, facetSupport
@@ -166,9 +186,23 @@ public class SearchPlanExecutionCoordinator {
             }
 
             sourcesQueried++;
+
+            // Provider Query Routing: Build query params for query-capable providers (Adzuna)
+            Map<String, String> queryParams = new LinkedHashMap<>();
+            if ("ADZUNA".equalsIgnoreCase(source.kind())) {
+                if (!expanded.primaryKeywords().isEmpty()) {
+                    queryParams.put("what", String.join(" ", expanded.primaryKeywords()));
+                } else if (!expanded.expandedTitles().isEmpty()) {
+                    queryParams.put("what", expanded.expandedTitles().get(0));
+                }
+                if (!expanded.targetLocations().isEmpty()) {
+                    queryParams.put("where", expanded.targetLocations().get(0));
+                }
+            }
+
             try {
                 BoardDiscoveryService.SourceRunReport report = boardDiscoveryService.run(
-                        source.id(), BoardDiscoveryService.Mode.SCHEDULED);
+                        source.id(), BoardDiscoveryService.Mode.SCHEDULED, queryParams);
 
                 if (report.ok()) {
                     sourcesSucceeded++;
@@ -197,7 +231,7 @@ public class SearchPlanExecutionCoordinator {
             }
         }
 
-        // Trigger matching & 5-stage reranking on newly ingested jobs
+        // Trigger matching & authoritative multi-stage reranking on newly ingested jobs
         int jobsMatched = 0;
         PreferenceSetRecord preferences = preferenceSetRepository.findActiveByProfileId(plan.profileId()).orElse(null);
         if (preferences != null && !ingestedJobIds.isEmpty()) {
@@ -214,7 +248,13 @@ public class SearchPlanExecutionCoordinator {
         String overallStatus = determineStatus(sourcesQueried, sourcesSucceeded, sourcesFailed);
         String errorSummary = errors.isEmpty() ? null : String.join("; ", errors);
 
-        repository.recordExecution(plan.id(), overallStatus, errorSummary, totalIngested);
+        // Fencing release: complete execution only if lease owner token still matches
+        boolean fenced = repository.completeExecution(plan.id(), ownerToken, overallStatus, errorSummary, totalIngested);
+        if (!fenced) {
+            log.warn("Search plan {} execution completed by token {} was fenced out (lease expired and claimed by another worker)",
+                    plan.id(), ownerToken);
+            notes.add("Warning: execution took longer than lease deadline; completed with fencing protection");
+        }
 
         notes.add(String.format("Ingested %d jobs across %d sources; evaluated %d matches with multi-stage reranker",
                 totalIngested, sourcesQueried, jobsMatched));
@@ -280,36 +320,15 @@ public class SearchPlanExecutionCoordinator {
 
     private Map<String, String> evaluateFacetSupport(SearchPlanQueryExpander.ExpandedQueryPlan plan) {
         Map<String, String> support = new LinkedHashMap<>();
-        support.put("targetSources", "Natively routed to registered job board and aggregator adapters");
-        support.put("maxResults", "Natively bounded by execution coordinator ingestion ceiling");
-        support.put("titles", "Expanded to synonyms; filtered downstream via MultiStageReranker Stage 1 & Stage 4");
-        support.put("skills", "Canonicalised; scored via SemanticSkillMatcher in MultiStageReranker Stage 2");
-        support.put("seniority", "Classified and aligned via MultiStageReranker Stage 3 trajectory curve");
-        support.put("locations", "Enforced via MultiStageReranker Stage 1 Hard Eligibility Gate");
-        support.put("remoteTypes", "Enforced via MultiStageReranker Stage 1 Hard Eligibility Gate");
-        support.put("negativeKeywords", "Filtered via Stage 1 title/description constraint check");
+        support.put("targetSources", "Adzuna: targeted query sent natively. ATS (Greenhouse, Lever, Ashby, Workday, Rippling): company board harvest with candidate query filtering applied downstream during matching.");
+        support.put("keywords", "Adzuna: sent natively via 'what' search parameter. ATS: evaluated downstream during skills overlap & title matching.");
+        support.put("locations", "Adzuna: sent natively via 'where' search parameter. ATS: enforced downstream via Stage 1 Hard Eligibility Gate.");
+        support.put("maxResults", "Natively bounded by execution coordinator ingestion ceiling.");
+        support.put("titles", "Expanded to synonyms; filtered downstream via MultiStageReranker Stage 1 & Stage 4.");
+        support.put("skills", "Canonicalised; scored via SemanticSkillMatcher in MultiStageReranker Stage 2.");
+        support.put("seniority", "Classified and aligned via MultiStageReranker Stage 3 trajectory curve.");
+        support.put("remoteTypes", "Enforced downstream via MultiStageReranker Stage 1 Hard Eligibility Gate.");
+        support.put("negativeKeywords", "Filtered downstream via MultiStageReranker Stage 1 Hard Eligibility Gate.");
         return support;
-    }
-
-    private boolean tryAcquireAdvisoryLock(UUID planId) {
-        try {
-            Boolean locked = jdbcTemplate.queryForObject(
-                    "SELECT pg_try_advisory_lock(hashtext('search_plan_exec_' || ?))",
-                    Boolean.class, planId.toString());
-            return Boolean.TRUE.equals(locked);
-        } catch (Exception e) {
-            log.warn("PostgreSQL advisory lock check failed (fallback to true): {}", e.getMessage());
-            return true;
-        }
-    }
-
-    private void releaseAdvisoryLock(UUID planId) {
-        try {
-            jdbcTemplate.queryForObject(
-                    "SELECT pg_advisory_unlock(hashtext('search_plan_exec_' || ?))",
-                    Boolean.class, planId.toString());
-        } catch (Exception e) {
-            log.warn("PostgreSQL advisory unlock failed: {}", e.getMessage());
-        }
     }
 }

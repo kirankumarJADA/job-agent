@@ -12,11 +12,12 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * Phase 2 Deliverable A: Autonomous Search Plan Scheduler.
+ * Phase 2A Hardened: Autonomous Search Plan Scheduler.
  * <p>
  * Periodically polls the database for due active search plans based on their declared
- * frequency (HOURLY, DAILY, WEEKLY). Invokes {@link SearchPlanExecutionCoordinator}
- * to execute provider queries, update timestamps, and evaluate candidate matching.
+ * frequency (HOURLY, DAILY, WEEKLY). Automatically recovers stale/crashed executions
+ * whose leases expired, and invokes {@link SearchPlanExecutionCoordinator} under atomic
+ * execution lease protection to eliminate multi-instance scheduler races.
  */
 @Component
 public class SearchPlanScheduler {
@@ -50,6 +51,18 @@ public class SearchPlanScheduler {
         }
 
         Instant now = Instant.now();
+
+        // Step 1: Recover abandoned or crashed executions whose lease expired
+        try {
+            int recovered = repository.recoverStaleExecutions(now);
+            if (recovered > 0) {
+                log.warn("Recovered {} stale search plan execution(s) whose leases had expired", recovered);
+            }
+        } catch (Exception e) {
+            log.error("Failed to run stale execution recovery: {}", e.getMessage(), e);
+        }
+
+        // Step 2: Sweep due active search plans (excluding MANUAL and currently running plans)
         List<SearchPlanRecord> duePlans = repository.findDuePlans(now);
         if (duePlans.isEmpty()) {
             return;

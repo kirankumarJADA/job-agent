@@ -119,8 +119,13 @@ public class BoardDiscoveryService {
         return PlatformKind.lookup(kind).flatMap(registry::adapter).isPresent();
     }
 
-    /** Run a persisted source by id. */
+    /** Run a persisted source by id with default/empty query params. */
     public SourceRunReport run(UUID sourceId, Mode mode) {
+        return run(sourceId, mode, Map.of());
+    }
+
+    /** Run a persisted source by id with targeted query params. */
+    public SourceRunReport run(UUID sourceId, Mode mode, Map<String, String> queryParams) {
         List<Map<String, Object>> rows = db.queryForList("""
                 select s.kind, s.org_identifier, s.enabled, s.policy, c.name as company_name
                 from job_sources s left join companies c on c.id = s.company_id
@@ -138,10 +143,14 @@ public class BoardDiscoveryService {
                 kind.displayName() + " discovery is " + kind.readiness().name().toLowerCase() + ": " + kind.configHint(), false));
         String org = row.get("org_identifier") == null ? "" : String.valueOf(row.get("org_identifier"));
         String employer = row.get("company_name") == null ? null : String.valueOf(row.get("company_name"));
-        return run(sourceId, adapter, org, employer, mode);
+        return run(sourceId, adapter, org, employer, mode, queryParams);
     }
 
     SourceRunReport run(UUID sourceId, BoardAdapter adapter, String orgIdentifier, String employer, Mode mode) {
+        return run(sourceId, adapter, orgIdentifier, employer, mode, Map.of());
+    }
+
+    SourceRunReport run(UUID sourceId, BoardAdapter adapter, String orgIdentifier, String employer, Mode mode, Map<String, String> queryParams) {
         String correlationId = UUID.randomUUID().toString();
         long started = System.nanoTime();
         Instant runStart = dbNow();
@@ -152,6 +161,11 @@ public class BoardDiscoveryService {
         BoardAdapter.BoardRef board;
         try {
             board = adapter.parseIdentifier(orgIdentifier);
+            if (queryParams != null && !queryParams.isEmpty()) {
+                Map<String, String> merged = new LinkedHashMap<>(board.params() != null ? board.params() : Map.of());
+                merged.putAll(queryParams);
+                board = new BoardAdapter.BoardRef(board.kind(), board.identifier(), merged);
+            }
         } catch (BoardConfigException e) {
             return finish(sourceId, kind, correlationId, started, counts, ingested, false,
                     FailureCategory.CONFIGURATION, e.getMessage(), mode);

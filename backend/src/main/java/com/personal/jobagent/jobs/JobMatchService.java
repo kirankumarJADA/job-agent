@@ -82,8 +82,7 @@ public class JobMatchService {
                            AutomationMetrics metrics,
                            ObjectMapper objectMapper) {
         this(jobRepository, semanticSkillMatcher, profileRepository, jdbcTemplate,
-                notificationService, transactionManager, metrics, objectMapper,
-                new MultiStageReranker(profileRepository, semanticSkillMatcher));
+                notificationService, transactionManager, metrics, objectMapper, null);
     }
 
     @Autowired
@@ -190,6 +189,24 @@ public class JobMatchService {
                 ? multiStageReranker.rerank(job, profileId, preferences)
                 : null;
 
+        // Authoritative decision: when MultiStageReranker is available, its multi-stage
+        // evaluation is authoritative for score, recommendation, and eligibility.
+        // An absolutely ineligible job (Stage 1 failed) is strictly forced to score 0 and SKIP.
+        final int finalScore;
+        final String finalRecommendation;
+        if (rerankResult != null) {
+            if (!rerankResult.eligible()) {
+                finalScore = 0;
+                finalRecommendation = "SKIP";
+            } else {
+                finalScore = rerankResult.overallScore();
+                finalRecommendation = rerankResult.recommendation();
+            }
+        } else {
+            finalScore = overall;
+            finalRecommendation = recommendation;
+        }
+
         // Persist the decision + emit the event atomically.
         boolean notified = Boolean.TRUE.equals(transactionTemplate.execute(tx -> {
             // The decision belongs to (job, profile) — it is a function of THIS
@@ -208,9 +225,9 @@ public class JobMatchService {
                     """,
                     profileId,
                     jobId,
-                    overall,
-                    recommendation,
-                    breakdownJson(job, overall, recommendation, skillOverlap, remoteFit, salaryFit,
+                    finalScore,
+                    finalRecommendation,
+                    breakdownJson(job, finalScore, finalRecommendation, skillOverlap, remoteFit, salaryFit,
                             desiredSalaryMin, allowedRemoteTypes, allowedTitles, experience, visa, location, categories, rerankResult));
 
             // Catalogue-level marker only: "this posting has been evaluated".
@@ -221,7 +238,7 @@ public class JobMatchService {
                     where id = ? and status in ('DISCOVERED','ANALYSED')
                     """, jobId);
 
-            if (!"APPLY".equals(recommendation)) {
+            if (!"APPLY".equals(finalRecommendation)) {
                 return false;
             }
 
@@ -234,11 +251,11 @@ public class JobMatchService {
             payload.put("profile_id", profileId.toString());
             payload.put("job_title", job.title());
             payload.put("company", job.companyNameRaw() != null ? job.companyNameRaw() : "");
-            payload.put("score", overall);
-            payload.put("recommendation", recommendation);
+            payload.put("score", finalScore);
+            payload.put("recommendation", finalRecommendation);
             payload.put("message", "New job match — " + job.title()
                     + (job.companyNameRaw() != null ? " at " + job.companyNameRaw() : ""));
-            payload.put("detail", "Scored " + overall + "/100 (skills "
+            payload.put("detail", "Scored " + finalScore + "/100 (skills "
                     + Math.round(skillOverlap.ratio() * 100) + "%, remote " + Math.round(remoteFit * 100)
                     + "%, salary " + Math.round(salaryFit * 100) + "%)");
 
@@ -252,9 +269,9 @@ public class JobMatchService {
             return true;
         }));
 
-        metrics.matchRecorded(recommendation);
-        log.info("Job {} matched: score={} recommendation={} notified={}", jobId, overall, recommendation, notified);
-        return new MatchResult(jobId, overall, recommendation, skillOverlap.ratio(), remoteFit, salaryFit,
+        metrics.matchRecorded(finalRecommendation);
+        log.info("Job {} matched: score={} recommendation={} notified={}", jobId, finalScore, finalRecommendation, notified);
+        return new MatchResult(jobId, finalScore, finalRecommendation, skillOverlap.ratio(), remoteFit, salaryFit,
                 experience.score() == null ? 0.5 : experience.score(),
                 visa.score() == null ? 0.5 : visa.score(),
                 location.score() == null ? 0.5 : location.score(),

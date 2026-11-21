@@ -30,6 +30,8 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.personal.jobagent.jobs.rerank.MultiStageReranker;
+import com.personal.jobagent.jobs.rerank.RerankResult;
 import com.personal.jobagent.llm.ModelRouter;
 
 /**
@@ -402,5 +404,61 @@ class JobMatchServiceTest {
         // 40-point applicable total) — identical to the plain-salary-floor
         // case in highMatchExplainsWhyAndDefersToTheDecisionRulesWithoutClaimingAnApplication.
         assertThat(result.overall()).isEqualTo(100);
+    }
+
+    @Test
+    void multiStageRerankerDisqualifiesIneligibleJobToScoreZeroAndSkip() {
+        MultiStageReranker reranker = mock(MultiStageReranker.class);
+        PlatformTransactionManager tm = mock(PlatformTransactionManager.class);
+        when(tm.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
+        SemanticSkillMatcher semanticMatcher = new SemanticSkillMatcher(mock(JdbcTemplate.class), mock(ModelRouter.class));
+        JobMatchService rerankService = new JobMatchService(jobRepository, semanticMatcher,
+                profileRepository, jdbc, notifications, tm,
+                new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()),
+                new com.fasterxml.jackson.databind.ObjectMapper(), reranker);
+
+        when(jobRepository.findById(JOB)).thenReturn(Optional.of(job(List.of("Java"), 60000)));
+        profileSkills("Java");
+
+        when(reranker.rerank(any(), any(), any())).thenReturn(new RerankResult(
+                JOB, "Engineer", false, 0, "SKIP",
+                Map.of("hard_eligibility", 0.0), List.of(), List.of(), List.of(),
+                List.of("Title disqualified"), "Disqualified", "Failed hard eligibility gate"));
+
+        var result = rerankService.evaluateMatch(JOB, PROFILE, preferencesWithSalaryMin(50000L));
+
+        assertThat(result.overall()).isEqualTo(0);
+        assertThat(result.recommendation()).isEqualTo("SKIP");
+        assertThat(result.notified()).isFalse();
+        verify(notifications, never()).emit(any());
+        verify(jdbc).update(contains("job_matches"), eq(PROFILE), eq(JOB), eq(0), eq("SKIP"), anyString());
+    }
+
+    @Test
+    void multiStageRerankerOverridesWithAuthoritativeScoreAndRecommendation() {
+        MultiStageReranker reranker = mock(MultiStageReranker.class);
+        PlatformTransactionManager tm = mock(PlatformTransactionManager.class);
+        when(tm.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
+        SemanticSkillMatcher semanticMatcher = new SemanticSkillMatcher(mock(JdbcTemplate.class), mock(ModelRouter.class));
+        JobMatchService rerankService = new JobMatchService(jobRepository, semanticMatcher,
+                profileRepository, jdbc, notifications, tm,
+                new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()),
+                new com.fasterxml.jackson.databind.ObjectMapper(), reranker);
+
+        when(jobRepository.findById(JOB)).thenReturn(Optional.of(job(List.of("Java"), 60000)));
+        profileSkills("Java");
+
+        when(reranker.rerank(any(), any(), any())).thenReturn(new RerankResult(
+                JOB, "Engineer", true, 88, "APPLY",
+                Map.of("hard_eligibility", 1.0, "skills_overlap", 0.9), List.of("Java"), List.of(),
+                List.of("High skill match"), List.of(), "Scored 88", "Recommended"));
+
+        var result = rerankService.evaluateMatch(JOB, PROFILE, preferencesWithSalaryMin(50000L));
+
+        assertThat(result.overall()).isEqualTo(88);
+        assertThat(result.recommendation()).isEqualTo("APPLY");
+        assertThat(result.notified()).isTrue();
+        verify(notifications).emit(any());
+        verify(jdbc).update(contains("job_matches"), eq(PROFILE), eq(JOB), eq(88), eq("APPLY"), anyString());
     }
 }

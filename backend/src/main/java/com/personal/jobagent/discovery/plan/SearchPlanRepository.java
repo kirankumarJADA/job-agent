@@ -10,6 +10,7 @@ import org.springframework.stereotype.Repository;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -29,6 +30,7 @@ public class SearchPlanRepository {
     private RowMapper<SearchPlanRecord> rowMapper() {
         return (rs, rowNum) -> {
             Timestamp lastRun = rs.getTimestamp("last_run_at");
+            Timestamp leaseExpires = rs.getTimestamp("execution_lease_expires_at");
             Timestamp created = rs.getTimestamp("created_at");
             Timestamp updated = rs.getTimestamp("updated_at");
 
@@ -46,6 +48,8 @@ public class SearchPlanRepository {
                     rs.getString("last_execution_status"),
                     rs.getString("last_execution_error"),
                     rs.getInt("last_execution_results"),
+                    (UUID) rs.getObject("execution_owner_token"),
+                    leaseExpires != null ? leaseExpires.toInstant() : null,
                     created != null ? created.toInstant() : Instant.now(),
                     updated != null ? updated.toInstant() : Instant.now()
             );
@@ -80,16 +84,119 @@ public class SearchPlanRepository {
 
     public List<SearchPlanRecord> findDuePlans(Instant now) {
         Timestamp ts = Timestamp.from(now);
+        Timestamp hourlyCutoff = Timestamp.from(now.minus(Duration.ofHours(1)));
+        Timestamp dailyCutoff = Timestamp.from(now.minus(Duration.ofDays(1)));
+        Timestamp weeklyCutoff = Timestamp.from(now.minus(Duration.ofDays(7)));
         return jdbcTemplate.query("""
                 SELECT * FROM search_plans
                 WHERE active = true
                   AND (
-                      (search_frequency = 'HOURLY' AND (last_run_at IS NULL OR last_run_at <= ? - INTERVAL '1 hour'))
-                   OR (search_frequency = 'DAILY' AND (last_run_at IS NULL OR last_run_at <= ? - INTERVAL '1 day'))
-                   OR (search_frequency = 'WEEKLY' AND (last_run_at IS NULL OR last_run_at <= ? - INTERVAL '7 days'))
+                      last_execution_status IS NULL
+                      OR last_execution_status <> 'RUNNING'
+                      OR execution_lease_expires_at IS NULL
+                      OR execution_lease_expires_at < ?
+                  )
+                  AND (
+                      (search_frequency = 'HOURLY' AND (last_run_at IS NULL OR last_run_at <= ?))
+                   OR (search_frequency = 'DAILY' AND (last_run_at IS NULL OR last_run_at <= ?))
+                   OR (search_frequency = 'WEEKLY' AND (last_run_at IS NULL OR last_run_at <= ?))
                   )
                 ORDER BY last_run_at ASC NULLS FIRST
-                """, rowMapper(), ts, ts, ts);
+                """, rowMapper(), ts, hourlyCutoff, dailyCutoff, weeklyCutoff);
+    }
+
+    /**
+     * Atomically claims an exclusive execution lease on a search plan.
+     * Prevents overlapping executions across threads and application cluster instances.
+     *
+     * @param planId plan identifier
+     * @param ownerToken unique worker instance token
+     * @param leaseDurationMs maximum duration of the lease before it expires
+     * @return true if the lease was claimed successfully; false if another execution holds an active unexpired lease
+     */
+    public boolean claimExecutionLease(UUID planId, UUID ownerToken, long leaseDurationMs) {
+        long duration = leaseDurationMs > 0 ? leaseDurationMs : 600000L; // default 10 minutes
+        int updated = jdbcTemplate.update("""
+                UPDATE search_plans
+                SET last_execution_status = 'RUNNING',
+                    execution_owner_token = ?,
+                    execution_lease_expires_at = now() + (INTERVAL '1 millisecond' * ?),
+                    updated_at = now()
+                WHERE id = ?
+                  AND active = true
+                  AND (
+                      last_execution_status IS NULL
+                      OR last_execution_status <> 'RUNNING'
+                      OR execution_lease_expires_at IS NULL
+                      OR execution_lease_expires_at < now()
+                  )
+                """, ownerToken, duration, planId);
+        return updated > 0;
+    }
+
+    /**
+     * Completes an execution and releases the lease with fencing protection.
+     * If the worker was expired and another execution took over, the update affects 0 rows.
+     *
+     * @param planId plan identifier
+     * @param ownerToken worker owner token
+     * @param status final execution status (SUCCESS, PARTIAL, FAILED)
+     * @param error error detail or null
+     * @param resultsCount number of ingested results
+     * @return true if the execution was completed by this token; false if fenced out
+     */
+    public boolean completeExecution(UUID planId, UUID ownerToken, String status, String error, int resultsCount) {
+        int updated = jdbcTemplate.update("""
+                UPDATE search_plans
+                SET last_run_at = now(),
+                    last_execution_status = ?,
+                    last_execution_error = ?,
+                    last_execution_results = ?,
+                    execution_owner_token = NULL,
+                    execution_lease_expires_at = NULL,
+                    updated_at = now()
+                WHERE id = ?
+                  AND execution_owner_token = ?
+                """, status, error, resultsCount, planId, ownerToken);
+        return updated > 0;
+    }
+
+    /**
+     * Releases an execution lease without marking terminal run outcome (e.g. on early abort).
+     */
+    public boolean releaseExecutionLease(UUID planId, UUID ownerToken) {
+        int updated = jdbcTemplate.update("""
+                UPDATE search_plans
+                SET execution_owner_token = NULL,
+                    execution_lease_expires_at = NULL,
+                    updated_at = now()
+                WHERE id = ?
+                  AND execution_owner_token = ?
+                """, planId, ownerToken);
+        return updated > 0;
+    }
+
+    /**
+     * Recovers abandoned or crashed executions whose lease has expired.
+     *
+     * @param now current timestamp
+     * @return count of recovered plans
+     */
+    public int recoverStaleExecutions(Instant now) {
+        Timestamp ts = Timestamp.from(now);
+        return jdbcTemplate.update("""
+                UPDATE search_plans
+                SET last_execution_status = 'FAILED',
+                    last_execution_error = 'Execution lease expired or worker terminated unexpectedly',
+                    last_run_at = now(),
+                    execution_owner_token = NULL,
+                    execution_lease_expires_at = NULL,
+                    updated_at = now()
+                WHERE active = true
+                  AND last_execution_status = 'RUNNING'
+                  AND execution_lease_expires_at IS NOT NULL
+                  AND execution_lease_expires_at < ?
+                """, ts);
     }
 
     public SearchPlanRecord create(SearchPlanRecord plan) {
@@ -100,8 +207,9 @@ public class SearchPlanRepository {
                         id, profile_id, name, target_titles, query_facets,
                         target_sources, search_frequency, max_results_per_run,
                         active, last_execution_status, last_execution_error,
-                        last_execution_results, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, now(), now())
+                        last_execution_results, execution_owner_token,
+                        execution_lease_expires_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), now())
                     """);
             ps.setObject(1, id);
             ps.setObject(2, plan.profileId());
@@ -115,6 +223,8 @@ public class SearchPlanRepository {
             ps.setString(10, plan.lastExecutionStatus());
             ps.setString(11, plan.lastExecutionError());
             ps.setInt(12, plan.lastExecutionResults());
+            ps.setObject(13, plan.executionOwnerToken());
+            ps.setTimestamp(14, plan.executionLeaseExpiresAt() != null ? Timestamp.from(plan.executionLeaseExpiresAt()) : null);
             return ps;
         });
 
@@ -168,6 +278,8 @@ public class SearchPlanRepository {
                     last_execution_status = ?,
                     last_execution_error = ?,
                     last_execution_results = ?,
+                    execution_owner_token = NULL,
+                    execution_lease_expires_at = NULL,
                     updated_at = now()
                 WHERE id = ?
                 """, status, error, resultsCount, id);
