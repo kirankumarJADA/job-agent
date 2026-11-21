@@ -8,7 +8,7 @@ import java.util.UUID;
 /**
  * Domain entity and wire contract for configurable candidate search plans.
  * A search plan specifies multi-source retrieval criteria, title/skill facets,
- * and cadence controls scoped to a candidate profile.
+ * cadence controls, and execution outcome tracking scoped to a candidate profile.
  */
 public record SearchPlanRecord(
         UUID id,
@@ -21,6 +21,9 @@ public record SearchPlanRecord(
         int maxResultsPerRun,
         boolean active,
         Instant lastRunAt,
+        String lastExecutionStatus,
+        String lastExecutionError,
+        int lastExecutionResults,
         Instant createdAt,
         Instant updatedAt
 ) {
@@ -33,5 +36,19 @@ public record SearchPlanRecord(
         if (maxResultsPerRun <= 0) {
             maxResultsPerRun = 50;
         }
+        if (lastExecutionResults < 0) {
+            lastExecutionResults = 0;
+        }
+    }
+
+    /**
+     * Backward-compatible 12-parameter constructor for existing callers and fixtures.
+     */
+    public SearchPlanRecord(UUID id, UUID profileId, String name, List<String> targetTitles,
+                            Map<String, Object> queryFacets, List<String> targetSources,
+                            String searchFrequency, int maxResultsPerRun, boolean active,
+                            Instant lastRunAt, Instant createdAt, Instant updatedAt) {
+        this(id, profileId, name, targetTitles, queryFacets, targetSources, searchFrequency,
+                maxResultsPerRun, active, lastRunAt, null, null, 0, createdAt, updatedAt);
     }
 }

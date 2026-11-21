@@ -65,8 +65,14 @@ public class DiscoveryIntelligenceBenchmarkSuiteTest {
         double totalBaselineNdcg5 = 0.0;
         double totalMultiStageNdcg5 = 0.0;
 
-        double totalBaselinePrecision = 0.0;
-        double totalMultiStagePrecision = 0.0;
+        double totalBaselinePrecision10 = 0.0;
+        double totalMultiStagePrecision10 = 0.0;
+
+        double totalBaselinePrecision5 = 0.0;
+        double totalMultiStagePrecision5 = 0.0;
+
+        double totalMultiStageRecall10 = 0.0;
+        double totalMultiStageRecall5 = 0.0;
 
         double totalBaselineMrr = 0.0;
         double totalMultiStageMrr = 0.0;
@@ -105,6 +111,8 @@ public class DiscoveryIntelligenceBenchmarkSuiteTest {
             List<ScoredEvaluation> wave2Ranked = new ArrayList<>();
             List<ScoredEvaluation> multiStageRanked = new ArrayList<>();
 
+            int totalRelevantInPool = 0;
+
             for (JsonNode jobNode : jobsNode) {
                 String jobId = jobNode.get("id").asText();
                 String title = jobNode.get("title").asText();
@@ -115,7 +123,11 @@ public class DiscoveryIntelligenceBenchmarkSuiteTest {
                         ? jobNode.get("relevance").get(candidate.id()).asDouble()
                         : 0.0;
 
-                // 1. Baseline scoring
+                if (groundTruth >= 2.0) {
+                    totalRelevantInPool++;
+                }
+
+                // 1. Baseline scoring (unweighted keyword overlap)
                 long matchedSkillsBaseline = jobSkills.stream().filter(candidate.skills()::contains).count();
                 double baselineScore = jobSkills.isEmpty() ? 0.5 : (double) matchedSkillsBaseline / jobSkills.size();
                 baselineRanked.add(new ScoredEvaluation(jobId, title, baselineScore, groundTruth, true));
@@ -185,8 +197,14 @@ public class DiscoveryIntelligenceBenchmarkSuiteTest {
             List<Boolean> baselineRel = baselineRanked.stream().map(j -> j.groundTruthRelevance() >= 2.0).toList();
             List<Boolean> multiStageRel = multiStageRanked.stream().map(j -> j.groundTruthRelevance() >= 2.0).toList();
 
-            double bPrec = RankingMetrics.precisionAtK(baselineRel, 10);
-            double mPrec = RankingMetrics.precisionAtK(multiStageRel, 10);
+            double bPrec10 = RankingMetrics.precisionAtK(baselineRel, 10);
+            double mPrec10 = RankingMetrics.precisionAtK(multiStageRel, 10);
+
+            double bPrec5 = RankingMetrics.precisionAtK(baselineRel, 5);
+            double mPrec5 = RankingMetrics.precisionAtK(multiStageRel, 5);
+
+            double mRecall10 = RankingMetrics.recallAtK(multiStageRel, totalRelevantInPool, 10);
+            double mRecall5 = RankingMetrics.recallAtK(multiStageRel, totalRelevantInPool, 5);
 
             double bMrr = RankingMetrics.reciprocalRank(baselineRel);
             double mMrr = RankingMetrics.reciprocalRank(multiStageRel);
@@ -198,16 +216,22 @@ public class DiscoveryIntelligenceBenchmarkSuiteTest {
             totalBaselineNdcg5 += bNdcg5;
             totalMultiStageNdcg5 += mNdcg5;
 
-            totalBaselinePrecision += bPrec;
-            totalMultiStagePrecision += mPrec;
+            totalBaselinePrecision10 += bPrec10;
+            totalMultiStagePrecision10 += mPrec10;
+
+            totalBaselinePrecision5 += bPrec5;
+            totalMultiStagePrecision5 += mPrec5;
+
+            totalMultiStageRecall10 += mRecall10;
+            totalMultiStageRecall5 += mRecall5;
 
             totalBaselineMrr += bMrr;
             totalMultiStageMrr += mMrr;
 
             perCandidateMultiStageNdcg.put(candidate.id(), mNdcg10);
 
-            System.out.printf("Candidate %s [%s]: Baseline nDCG@10=%.4f | Wave2=%.4f | MultiStage=%.4f | P@10=%.4f | MRR=%.4f%n",
-                    candidate.id(), candidate.name(), bNdcg10, wNdcg10, mNdcg10, mPrec, mMrr);
+            System.out.printf("Candidate %s [%s]: Baseline nDCG@10=%.4f | Wave2=%.4f | MultiStage=%.4f | P@10=%.4f | R@10=%.4f | MRR=%.4f%n",
+                    candidate.id(), candidate.name(), bNdcg10, wNdcg10, mNdcg10, mPrec10, mRecall10, mMrr);
         }
 
         int n = candidates.size();
@@ -218,20 +242,30 @@ public class DiscoveryIntelligenceBenchmarkSuiteTest {
         double avgBaselineNdcg5 = totalBaselineNdcg5 / n;
         double avgMultiStageNdcg5 = totalMultiStageNdcg5 / n;
 
-        double avgBaselinePrec = totalBaselinePrecision / n;
-        double avgMultiStagePrec = totalMultiStagePrecision / n;
+        double avgBaselinePrec10 = totalBaselinePrecision10 / n;
+        double avgMultiStagePrec10 = totalMultiStagePrecision10 / n;
+
+        double avgBaselinePrec5 = totalBaselinePrecision5 / n;
+        double avgMultiStagePrec5 = totalMultiStagePrecision5 / n;
+
+        double avgMultiStageRecall10 = totalMultiStageRecall10 / n;
+        double avgMultiStageRecall5 = totalMultiStageRecall5 / n;
 
         double avgBaselineMrr = totalBaselineMrr / n;
         double avgMultiStageMrr = totalMultiStageMrr / n;
 
         System.out.println("================= MULTI-STAGE DISCOVERY BENCHMARK SUMMARY =================");
-        System.out.printf("nDCG@10: Baseline = %.4f -> Wave 2 = %.4f -> Multi-Stage = %.4f%n",
+        System.out.printf("nDCG@10:    Baseline = %.4f -> Wave 2 = %.4f -> Multi-Stage = %.4f%n",
                 avgBaselineNdcg10, avgWave2Ndcg10, avgMultiStageNdcg10);
-        System.out.printf("nDCG@5:  Baseline = %.4f -> Multi-Stage = %.4f%n",
+        System.out.printf("nDCG@5:     Baseline = %.4f -> Multi-Stage = %.4f%n",
                 avgBaselineNdcg5, avgMultiStageNdcg5);
-        System.out.printf("P@10:    Baseline = %.4f -> Multi-Stage = %.4f%n",
-                avgBaselinePrec, avgMultiStagePrec);
-        System.out.printf("MRR:     Baseline = %.4f -> Multi-Stage = %.4f%n",
+        System.out.printf("P@10:       Baseline = %.4f -> Multi-Stage = %.4f%n",
+                avgBaselinePrec10, avgMultiStagePrec10);
+        System.out.printf("P@5:        Baseline = %.4f -> Multi-Stage = %.4f%n",
+                avgBaselinePrec5, avgMultiStagePrec5);
+        System.out.printf("Recall@10:  Multi-Stage = %.4f%n", avgMultiStageRecall10);
+        System.out.printf("Recall@5:   Multi-Stage = %.4f%n", avgMultiStageRecall5);
+        System.out.printf("MRR:        Baseline = %.4f -> Multi-Stage = %.4f%n",
                 avgBaselineMrr, avgMultiStageMrr);
         System.out.println("===========================================================================");
 
@@ -241,9 +275,73 @@ public class DiscoveryIntelligenceBenchmarkSuiteTest {
         // 2. MultiStage nDCG@5 must be strong (>= 0.95)
         assertThat(avgMultiStageNdcg5).isGreaterThanOrEqualTo(0.95);
         // 3. Precision@10 must not regress below baseline
-        assertThat(avgMultiStagePrec).isGreaterThanOrEqualTo(avgBaselinePrec);
-        // 4. MRR must be 1.0 (top ranked item is always relevant)
+        assertThat(avgMultiStagePrec10).isGreaterThanOrEqualTo(avgBaselinePrec10);
+        // 4. Precision@5 must be strong
+        assertThat(avgMultiStagePrec5).isGreaterThanOrEqualTo(0.40);
+        // 5. MRR must be 1.0 (top ranked item is always relevant)
         assertThat(avgMultiStageMrr).isEqualTo(1.0);
+    }
+
+    @Test
+    @DisplayName("Validation: Junior career trajectory protection prevents mid/senior roles from leapfrogging entry roles")
+    void assertJuniorCareerTrajectoryProtection() {
+        // Candidate targeting entry-level QA roles
+        double entryAlignment = MultiStageReranker.computeCalibratedSeniority(
+                SeniorityClassifier.Level.ENTRY, List.of("ENTRY", "JUNIOR"));
+        double midAlignment = MultiStageReranker.computeCalibratedSeniority(
+                SeniorityClassifier.Level.MID, List.of("ENTRY", "JUNIOR"));
+        double seniorAlignment = MultiStageReranker.computeCalibratedSeniority(
+                SeniorityClassifier.Level.SENIOR, List.of("ENTRY", "JUNIOR"));
+
+        // Exact ENTRY foundation receives 1.0
+        assertThat(entryAlignment).isEqualTo(1.0);
+        // MID receives distance penalty (0.70 because distance is 1 step from preferred set)
+        assertThat(midAlignment).isEqualTo(0.70);
+        // SENIOR receives deeper distance penalty (0.40)
+        assertThat(seniorAlignment).isEqualTo(0.40);
+
+        assertThat(entryAlignment).isGreaterThan(midAlignment);
+        assertThat(midAlignment).isGreaterThan(seniorAlignment);
+    }
+
+    @Test
+    @DisplayName("Validation: Hard eligibility filters cannot be overridden by high skill match")
+    void assertEligibilityFiltersAreAbsolute() {
+        ProfileRepository profileRepo = mock(ProfileRepository.class);
+        SemanticSkillMatcher semanticMatcher = new SemanticSkillMatcher(mock(JdbcTemplate.class), null);
+        MultiStageReranker reranker = new MultiStageReranker(profileRepo, semanticMatcher);
+
+        UUID profileId = UUID.randomUUID();
+        // Candidate has perfect skills for Java
+        when(profileRepo.findSkills(profileId)).thenReturn(List.of(
+                new SkillRecord(UUID.randomUUID(), profileId, "Java", "CORE", 5, null, null),
+                new SkillRecord(UUID.randomUUID(), profileId, "Spring Boot", "CORE", 5, null, null),
+                new SkillRecord(UUID.randomUUID(), profileId, "Postgres", "CORE", 5, null, null)
+        ));
+
+        // Job has 100% skill match, but title is "Nurse Practitioner" (violates title filter)
+        JobRecord disqualifiedJob = new JobRecord(
+                UUID.randomUUID(), UUID.randomUUID(), "ext-1", null, "Hospital",
+                "Nurse Practitioner", "London", "London", "UK", "ONSITE", "FULL_TIME",
+                "SENIOR", BigDecimal.valueOf(80000), BigDecimal.valueOf(90000), "GBP",
+                "Nursing care", List.of("Java", "Spring Boot", "Postgres"),
+                "https://example.com/apply", "https://example.com/job", Instant.now(), "DISCOVERED"
+        );
+
+        PreferenceSetRecord prefs = new PreferenceSetRecord(
+                UUID.randomUUID(), profileId, List.of("Backend Engineer", "Software Developer"),
+                List.of(), List.of(), List.of("Java"), List.of("London"), List.of("HYBRID"),
+                List.of(), List.of("SENIOR"), 70000L, "NONE", List.of(), List.of(), "MANUAL",
+                Map.of(), Map.of(), true
+        );
+
+        RerankResult result = reranker.rerank(disqualifiedJob, profileId, prefs);
+
+        // Verification: Hard filter MUST disqualify regardless of 100% skills overlap
+        assertThat(result.eligible()).isFalse();
+        assertThat(result.overallScore()).isEqualTo(0);
+        assertThat(result.recommendation()).isEqualTo("SKIP");
+        assertThat(result.concerns()).anyMatch(c -> c.contains("does not match target roles"));
     }
 
     private static List<String> toStringList(JsonNode node) {

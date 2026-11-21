@@ -13,6 +13,9 @@ CREATE TABLE search_plans (
     max_results_per_run INTEGER NOT NULL DEFAULT 50 CHECK (max_results_per_run >= 1 AND max_results_per_run <= 500),
     active BOOLEAN NOT NULL DEFAULT true,
     last_run_at TIMESTAMPTZ,
+    last_execution_status TEXT CHECK (last_execution_status IS NULL OR last_execution_status IN ('SUCCESS', 'FAILED', 'PARTIAL', 'RUNNING', 'SKIPPED')),
+    last_execution_error TEXT,
+    last_execution_results INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

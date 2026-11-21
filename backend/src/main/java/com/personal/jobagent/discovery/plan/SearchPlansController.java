@@ -22,13 +22,16 @@ import java.util.UUID;
 public class SearchPlansController {
 
     private final SearchPlanService service;
+    private final SearchPlanExecutionCoordinator coordinator;
     private final JdbcTemplate jdbcTemplate;
     private final AuditLogWriter auditLogWriter;
 
     public SearchPlansController(SearchPlanService service,
+                                 SearchPlanExecutionCoordinator coordinator,
                                  JdbcTemplate jdbcTemplate,
                                  AuditLogWriter auditLogWriter) {
         this.service = service;
+        this.coordinator = coordinator;
         this.jdbcTemplate = jdbcTemplate;
         this.auditLogWriter = auditLogWriter;
     }
@@ -110,6 +113,17 @@ public class SearchPlansController {
         return service.expandPlan(id, profileId)
                 .<ResponseEntity<?>>map(ResponseEntity::ok)
                 .orElseGet(() -> notFound(request, "Search plan not found: " + id));
+    }
+
+    @PostMapping("/{id}/run")
+    public ResponseEntity<?> runPlan(@PathVariable UUID id, HttpServletRequest request) {
+        UUID profileId = currentProfileId();
+        if (profileId == null) {
+            return unauthorized(request, "Authentication required");
+        }
+        SearchPlanExecutionCoordinator.ExecutionSummary summary = coordinator.executePlan(id, profileId, true);
+        audit("SEARCH_PLAN_EXECUTED", id, Map.of(), Map.of("status", summary.status(), "jobsIngested", summary.jobsIngested()), request);
+        return ResponseEntity.ok(summary);
     }
 
     private void audit(String action, UUID targetId, Map<String, Object> before, Map<String, Object> after, HttpServletRequest request) {
