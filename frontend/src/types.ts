@@ -1350,7 +1350,6 @@ export interface HandoffSession {
   status: HandoffStatus;
   blockReason: HandoffBlockReason;
   targetUrl: string;
-  handoffToken: string;
   expiresAt: string;
   completedAt?: string | null;
   cancelledAt?: string | null;

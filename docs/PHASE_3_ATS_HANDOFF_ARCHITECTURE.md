@@ -130,12 +130,16 @@ stateDiagram-v2
    - If an invalid transition occurs, the transaction rolls back completely, preserving `PENDING` session and `HANDOFF_REQUIRED` plan states.
 10. **Plan Terminal Completion**:
     The automation plan transitions directly to terminal `COMPLETED` with an explicit `EXTERNAL_SUBMISSION_ATTESTATION` result, clearing heartbeats and execution leases. The Playwright worker is never resumed.
+11. **Public DTO Token Redaction**:
+    `HandoffSessionResponse` separates the public REST contract from the internal `HandoffSessionRecord` persistence model. `handoffToken` is never serialized over candidate-facing endpoints or written to audit logs, preventing secret exposure while maintaining database integrity.
+12. **Accurate Audit Transition Metadata**:
+    `expireStaleSessions()` records the precise transition source in `audit_logs` (`HANDOFF_REQUIRED -> FAILED` or `BLOCKED_ANTI_BOT -> FAILED`). Idempotent sweeps for already-`FAILED` plans skip false audit generation, and unexpected states throw `IllegalStateException` to enforce transactional rollback.
 
 ---
 
 ## 5. Verification Test Suite Coverage
 
-All 16 scenarios are rigorously validated across PostgreSQL Testcontainers, Node worker test suites, and Vitest frontend suites:
+All required scenarios are rigorously validated across PostgreSQL Testcontainers, Node worker test suites, and Vitest frontend suites:
 
 | # | Required Scenario | Test Implementation | Result |
 |---|---|---|---|
@@ -163,11 +167,12 @@ All 16 scenarios are rigorously validated across PostgreSQL Testcontainers, Node
 | 22 | Expire stale sessions idempotent when already FAILED | `AtsHandoffIntegrationIT.testExpireStaleSessionsIdempotentWhenPlanAlreadyFailed` | **PASSED** |
 | 23 | Expire stale sessions rolls back to PENDING on unexpected plan state | `AtsHandoffIntegrationIT.testExpireStaleSessionsThrowsAndRollsBackSessionWhenPlanInUnexpectedState` | **PASSED** |
 | 24 | Expire stale sessions atomic rollback across multiple plans | `AtsHandoffIntegrationIT.testExpireStaleSessionsAtomicAcrossMultiplePlans` | **PASSED** |
+| 25 | Handoff responses and audit records never expose handoffToken secret | `AtsHandoffIntegrationIT.testHandoffEndpointsAndAuditNeverExposeHandoffToken` | **PASSED** |
 
 ### Test Execution Summary:
-- **Backend Tests (`AtsHandoffIntegrationIT`, `AtsHandoffServiceTest`, `HandoffControllerTest`, `AutomationRecoverySchedulerMaintenanceTest`)**: 57 passed, 0 failures, 0 errors in 02:15 min (`BUILD SUCCESS`).
-- **Worker Tests (`worker/test/*.test.js`)**: 267 passed, 0 failures, 0 errors in 66.98 s (with obsolete worker-resumption polling code removed).
-- **Frontend Tests (`vitest run`)**: 454 passed across 46 test files in 35.68 s.
-- **Cloudflare Email Worker Tests (`npm test`)**: 17 passed, 0 failures in 223 ms.
-- **Frontend Production Build (`npm run build`)**: 97 modules transformed, built in 4.62 s.
-- **Total Tests Passing**: **795 passed, 0 failures across all layers**.
+- **Backend Tests (`AtsHandoffIntegrationIT`, `AtsHandoffServiceTest`, `HandoffControllerTest`, `AutomationRecoverySchedulerMaintenanceTest`)**: 61 passed, 0 failures, 0 errors in 01:51 min (`BUILD SUCCESS`).
+- **Worker Tests (`worker/test/*.test.js`)**: 267 passed, 0 failures, 0 errors in 55.99 s.
+- **Frontend Tests (`vitest run`)**: 454 passed across 46 test files in 42.37 s.
+- **Cloudflare Email Worker Tests (`npm test`)**: 17 passed, 0 failures in 589 ms.
+- **Frontend Production Build (`npm run build`)**: 97 modules transformed, built in 5.50 s.
+- **Total Tests Passing**: **799 passed, 0 failures across all layers**.

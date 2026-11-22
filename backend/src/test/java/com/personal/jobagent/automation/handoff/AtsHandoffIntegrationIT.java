@@ -176,7 +176,7 @@ class AtsHandoffIntegrationIT {
                 .andExpect(jsonPath("$.applicationId").value(seeded.applicationId().toString()))
                 .andReturn();
 
-        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
         UUID sessionId = session.id();
 
         // Verify plan transitioned to HANDOFF_REQUIRED
@@ -232,7 +232,7 @@ class AtsHandoffIntegrationIT {
                 .andExpect(jsonPath("$.blockReason").value("MFA"))
                 .andReturn();
 
-        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         // Candidate completes MFA verification and attests external submission
         mockMvc.perform(post("/api/v1/handoff/{id}/complete", session.id())
@@ -263,7 +263,7 @@ class AtsHandoffIntegrationIT {
                 .andExpect(status().isCreated())
                 .andReturn();
 
-        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         // Force session expiration in database
         jdbc.update("UPDATE automation_handoff_sessions SET expires_at = clock_timestamp() - interval '1 minute' WHERE id = ?", session.id());
@@ -277,6 +277,18 @@ class AtsHandoffIntegrationIT {
 
         // Plan is transitioned to FAILED (not resumed to RUNNING or READY_TO_SUBMIT)
         assertThat(planRepository.findById(seeded.planId()).get().status()).isEqualTo("FAILED");
+
+        // Verify audit log recorded exact transition from HANDOFF_REQUIRED to FAILED
+        String beforeState = jdbc.queryForObject(
+                "SELECT before_state#>>'{}' FROM audit_logs WHERE action = 'ATS_HANDOFF_EXPIRED' AND entity_id = ?",
+                String.class, seeded.planId()
+        );
+        String afterState = jdbc.queryForObject(
+                "SELECT after_state#>>'{}' FROM audit_logs WHERE action = 'ATS_HANDOFF_EXPIRED' AND entity_id = ?",
+                String.class, seeded.planId()
+        );
+        assertThat(beforeState).isEqualTo("HANDOFF_REQUIRED");
+        assertThat(afterState).isEqualTo("FAILED");
     }
 
     @Test
@@ -297,7 +309,7 @@ class AtsHandoffIntegrationIT {
                 .andExpect(status().isCreated())
                 .andReturn();
 
-        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         // Candidate cancels handoff
         mockMvc.perform(post("/api/v1/handoff/{id}/cancel", session.id())
@@ -327,7 +339,7 @@ class AtsHandoffIntegrationIT {
                 .andExpect(status().isCreated())
                 .andReturn();
 
-        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         // First completion succeeds
         mockMvc.perform(post("/api/v1/handoff/{id}/complete", session.id())
@@ -362,7 +374,7 @@ class AtsHandoffIntegrationIT {
                 .andExpect(status().isCreated())
                 .andReturn();
 
-        HandoffSessionRecord sessionA = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse sessionA = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         // Candidate B tries to read Candidate A's active handoff -> 404
         mockMvc.perform(get("/api/v1/handoff/applications/{id}", seededA.applicationId())
@@ -400,7 +412,7 @@ class AtsHandoffIntegrationIT {
                 .andExpect(status().isCreated())
                 .andReturn();
 
-        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         // Simulate worker process exit (nothing active)
         // Verify state is fully preserved in Postgres:
@@ -480,7 +492,7 @@ class AtsHandoffIntegrationIT {
                 .andExpect(status().isCreated())
                 .andReturn();
 
-        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         // Force session to past
         jdbc.update("UPDATE automation_handoff_sessions SET expires_at = clock_timestamp() - interval '2 minutes' WHERE id = ?", session.id());
@@ -513,7 +525,7 @@ class AtsHandoffIntegrationIT {
                         .content(json.writeValueAsString(initiateReq)))
                 .andExpect(status().isCreated())
                 .andReturn();
-        HandoffSessionRecord session1 = json.readValue(firstResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session1 = json.readValue(firstResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         // Second duplicate call
         MvcResult secondResult = mockMvc.perform(post("/api/v1/handoff/initiate")
@@ -522,11 +534,23 @@ class AtsHandoffIntegrationIT {
                         .content(json.writeValueAsString(initiateReq)))
                 .andExpect(status().isCreated())
                 .andReturn();
-        HandoffSessionRecord session2 = json.readValue(secondResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session2 = json.readValue(secondResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         // Must return identical session ID without recreating
         assertThat(session2.id()).isEqualTo(session1.id());
-        assertThat(session2.handoffToken()).isEqualTo(session1.handoffToken());
+        assertThat(firstResult.getResponse().getContentAsString())
+                .doesNotContain("handoffToken")
+                .doesNotContain("handoff_token");
+        assertThat(secondResult.getResponse().getContentAsString())
+                .doesNotContain("handoffToken")
+                .doesNotContain("handoff_token");
+
+        // Verify underlying database record retained the persistent token
+        UUID dbToken = jdbc.queryForObject(
+                "SELECT handoff_token FROM automation_handoff_sessions WHERE id = ?",
+                UUID.class, session1.id()
+        );
+        assertThat(dbToken).isNotNull();
     }
 
     @Test
@@ -550,7 +574,7 @@ class AtsHandoffIntegrationIT {
                         .content(json.writeValueAsString(initiateReq)))
                 .andExpect(status().isCreated())
                 .andReturn();
-        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         // Complete handoff via candidate session
         mockMvc.perform(post("/api/v1/handoff/{id}/complete", session.id())
@@ -581,7 +605,7 @@ class AtsHandoffIntegrationIT {
                         .content(json.writeValueAsString(initiateReq)))
                 .andExpect(status().isCreated())
                 .andReturn();
-        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         // Case 1: Missing body entirely
         mockMvc.perform(post("/api/v1/handoff/{id}/complete", session.id())
@@ -645,7 +669,7 @@ class AtsHandoffIntegrationIT {
                                     .content(reqBody))
                             .andExpect(status().isCreated())
                             .andReturn();
-                    HandoffSessionRecord rec = json.readValue(res.getResponse().getContentAsString(), HandoffSessionRecord.class);
+                    HandoffSessionResponse rec = json.readValue(res.getResponse().getContentAsString(), HandoffSessionResponse.class);
                     return rec.id();
                 } catch (Exception e) {
                     throw new RuntimeException(e);
@@ -689,7 +713,7 @@ class AtsHandoffIntegrationIT {
                         .content(json.writeValueAsString(initiateReq)))
                 .andExpect(status().isCreated())
                 .andReturn();
-        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         // Complete handoff
         mockMvc.perform(post("/api/v1/handoff/{id}/complete", session.id())
@@ -722,7 +746,7 @@ class AtsHandoffIntegrationIT {
                         .content(json.writeValueAsString(initiateReq)))
                 .andExpect(status().isCreated())
                 .andReturn();
-        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         // Set application to WITHDRAWN status, which cannot transition to APPLICATION_SUBMITTED
         jdbc.update("UPDATE applications SET status = 'WITHDRAWN' WHERE id = ?", seeded.applicationId());
@@ -769,7 +793,7 @@ class AtsHandoffIntegrationIT {
                         .content(json.writeValueAsString(initiateReq)))
                 .andExpect(status().isCreated())
                 .andReturn();
-        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         // 2. Worker token attempts to complete session -> rejected with 401 or 403
         mockMvc.perform(post("/api/v1/handoff/{id}/complete", session.id())
@@ -815,7 +839,7 @@ class AtsHandoffIntegrationIT {
                         .content(json.writeValueAsString(initiateReq)))
                 .andExpect(status().isCreated())
                 .andReturn();
-        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         // Precondition: plan is in HANDOFF_REQUIRED, application is READY_TO_APPLY, session is PENDING
         assertThat(planRepository.findById(seeded.planId()).get().status()).isEqualTo("HANDOFF_REQUIRED");
@@ -906,12 +930,12 @@ class AtsHandoffIntegrationIT {
                 .andExpect(status().isCreated())
                 .andReturn();
 
-        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
         assertThat(session.blockReason()).isEqualTo(HandoffBlockReason.EMPLOYER_SECURITY_CHECK);
 
-        // Plan is now in HANDOFF_REQUIRED
-        String currentPlanStatus = jdbc.queryForObject("SELECT status FROM automation_plans WHERE id = ?", String.class, seeded.planId());
-        assertThat(currentPlanStatus).isEqualTo("HANDOFF_REQUIRED");
+        // Plan was placed in HANDOFF_REQUIRED by initiate; now set to BLOCKED_ANTI_BOT
+        // to exercise the fallback transition path in expireStaleSessions
+        jdbc.update("UPDATE automation_plans SET status = 'BLOCKED_ANTI_BOT' WHERE id = ?", seeded.planId());
 
         // Expire the session in database
         jdbc.update("UPDATE automation_handoff_sessions SET expires_at = clock_timestamp() - interval '1 second' WHERE id = ?", session.id());
@@ -923,6 +947,18 @@ class AtsHandoffIntegrationIT {
         // Verify plan transitioned to terminal FAILED
         String expiredPlanStatus = jdbc.queryForObject("SELECT status FROM automation_plans WHERE id = ?", String.class, seeded.planId());
         assertThat(expiredPlanStatus).isEqualTo("FAILED");
+
+        // Verify audit log recorded exact fallback transition from BLOCKED_ANTI_BOT to FAILED
+        String beforeState = jdbc.queryForObject(
+                "SELECT before_state#>>'{}' FROM audit_logs WHERE action = 'ATS_HANDOFF_EXPIRED' AND entity_id = ?",
+                String.class, seeded.planId()
+        );
+        String afterState = jdbc.queryForObject(
+                "SELECT after_state#>>'{}' FROM audit_logs WHERE action = 'ATS_HANDOFF_EXPIRED' AND entity_id = ?",
+                String.class, seeded.planId()
+        );
+        assertThat(beforeState).isEqualTo("BLOCKED_ANTI_BOT");
+        assertThat(afterState).isEqualTo("FAILED");
     }
 
     @Test
@@ -940,7 +976,7 @@ class AtsHandoffIntegrationIT {
                         .content(json.writeValueAsString(initiateReq)))
                 .andExpect(status().isCreated())
                 .andReturn();
-        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         // Precondition: plan is in HANDOFF_REQUIRED; session is PENDING
         // Now force the plan into FAILED directly
@@ -993,7 +1029,7 @@ class AtsHandoffIntegrationIT {
                         .content(json.writeValueAsString(initiateReq)))
                 .andExpect(status().isCreated())
                 .andReturn();
-        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         try {
             // Force plan into unexpected RUNNING state
@@ -1048,7 +1084,7 @@ class AtsHandoffIntegrationIT {
                         .content(json.writeValueAsString(req1)))
                 .andExpect(status().isCreated())
                 .andReturn();
-        HandoffSessionRecord session1 = json.readValue(res1.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session1 = json.readValue(res1.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         // Initiate handoff for plan 2
         var req2 = new HandoffController.InitiateRequest(
@@ -1061,7 +1097,7 @@ class AtsHandoffIntegrationIT {
                         .content(json.writeValueAsString(req2)))
                 .andExpect(status().isCreated())
                 .andReturn();
-        HandoffSessionRecord session2 = json.readValue(res2.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        HandoffSessionResponse session2 = json.readValue(res2.getResponse().getContentAsString(), HandoffSessionResponse.class);
 
         try {
             // Plan 1 is valid HANDOFF_REQUIRED; force Plan 2 into unexpected state PREPARED
@@ -1101,5 +1137,64 @@ class AtsHandoffIntegrationIT {
         } finally {
             jdbc.update("DELETE FROM automation_handoff_sessions WHERE id IN (?, ?)", session1.id(), session2.id());
         }
+    }
+
+    @Test
+    @DisplayName("Handoff responses and audit records never expose handoffToken secret")
+    void testHandoffEndpointsAndAuditNeverExposeHandoffToken() throws Exception {
+        SeededApplication seeded = seedPlan(PROFILE_A, "LEVER", "lever-token-secret-test");
+
+        var initiateReq = new HandoffController.InitiateRequest(
+                seeded.planId(), seeded.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-token-secret-test", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+
+        // 1. Initiate response must not leak token
+        MvcResult initResult = mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(initiateReq)))
+                .andExpect(status().isCreated())
+                .andReturn();
+
+        String initBody = initResult.getResponse().getContentAsString();
+        assertThat(initBody).doesNotContain("handoffToken");
+        assertThat(initBody).doesNotContain("handoff_token");
+
+        HandoffSessionResponse session = json.readValue(initBody, HandoffSessionResponse.class);
+
+        // 2. Application query endpoint must not leak token
+        MvcResult appResult = mockMvc.perform(get("/api/v1/handoff/applications/{id}", seeded.applicationId())
+                        .session(sessionA))
+                .andExpect(status().isOk())
+                .andReturn();
+        String appBody = appResult.getResponse().getContentAsString();
+        assertThat(appBody).doesNotContain("handoffToken");
+        assertThat(appBody).doesNotContain("handoff_token");
+
+        // 3. Plan query endpoint must not leak token
+        MvcResult planResult = mockMvc.perform(get("/api/v1/handoff/plans/{id}", seeded.planId())
+                        .session(sessionA))
+                .andExpect(status().isOk())
+                .andReturn();
+        String planBody = planResult.getResponse().getContentAsString();
+        assertThat(planBody).doesNotContain("handoffToken");
+        assertThat(planBody).doesNotContain("handoff_token");
+
+        // 4. Audit log must not leak token in after_state jsonb
+        String auditAfter = jdbc.queryForObject(
+                "SELECT after_state::text FROM audit_logs WHERE action = 'ATS_HANDOFF_INITIATED' AND entity_id = ?",
+                String.class, seeded.planId()
+        );
+        assertThat(auditAfter).isNotNull();
+        assertThat(auditAfter).doesNotContain("handoffToken");
+        assertThat(auditAfter).doesNotContain("handoff_token");
+
+        // 5. Database itself DOES preserve the token internally
+        UUID dbToken = jdbc.queryForObject(
+                "SELECT handoff_token FROM automation_handoff_sessions WHERE id = ?",
+                UUID.class, session.id()
+        );
+        assertThat(dbToken).isNotNull();
     }
 }

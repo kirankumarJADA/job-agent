@@ -82,7 +82,7 @@ public class AtsHandoffService {
                     "AUTOMATION_PLAN",
                     planId,
                     null,
-                    session,
+                    HandoffSessionResponse.from(session),
                     null,
                     null
             ));
@@ -263,9 +263,11 @@ public class AtsHandoffService {
                     "reason", "HANDOFF_EXPIRED",
                     "message", "Handoff session expired without candidate attestation"
             ));
-            boolean transitioned = planRepository.transitionWithResult(planId, "HANDOFF_REQUIRED", "FAILED", errorResult);
+            String previousState = "HANDOFF_REQUIRED";
+            boolean transitioned = planRepository.transitionWithResult(planId, previousState, "FAILED", errorResult);
             if (!transitioned) {
-                transitioned = planRepository.transitionWithResult(planId, "BLOCKED_ANTI_BOT", "FAILED", errorResult);
+                previousState = "BLOCKED_ANTI_BOT";
+                transitioned = planRepository.transitionWithResult(planId, previousState, "FAILED", errorResult);
             }
             if (transitioned) {
                 if (audit != null) {
@@ -274,7 +276,7 @@ public class AtsHandoffService {
                             "ATS_HANDOFF_EXPIRED",
                             "AUTOMATION_PLAN",
                             planId,
-                            "HANDOFF_REQUIRED",
+                            previousState,
                             "FAILED",
                             null,
                             null

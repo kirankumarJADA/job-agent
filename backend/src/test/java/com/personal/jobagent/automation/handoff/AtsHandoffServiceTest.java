@@ -58,7 +58,8 @@ class AtsHandoffServiceTest {
 
         assertThat(created).isEqualTo(record);
         verify(planRepository).transition(planId, "RUNNING", "HANDOFF_REQUIRED");
-        verify(audit).write(argThat(entry -> "ATS_HANDOFF_INITIATED".equals(entry.action())));
+        verify(audit).write(argThat(entry -> "ATS_HANDOFF_INITIATED".equals(entry.action())
+                && HandoffSessionResponse.from(record).equals(entry.afterState())));
     }
 
     @Test
@@ -235,7 +236,9 @@ class AtsHandoffServiceTest {
 
         assertThat(expiredCount).isEqualTo(1);
         verify(planRepository).transitionWithResult(eq(planId), eq("HANDOFF_REQUIRED"), eq("FAILED"), anyList());
-        verify(audit).write(argThat(entry -> "ATS_HANDOFF_EXPIRED".equals(entry.action())));
+        verify(audit).write(argThat(entry -> "ATS_HANDOFF_EXPIRED".equals(entry.action())
+                && "HANDOFF_REQUIRED".equals(entry.beforeState())
+                && "FAILED".equals(entry.afterState())));
     }
 
     @Test
@@ -250,7 +253,9 @@ class AtsHandoffServiceTest {
         assertThat(expiredCount).isEqualTo(1);
         verify(planRepository).transitionWithResult(eq(planId), eq("HANDOFF_REQUIRED"), eq("FAILED"), anyList());
         verify(planRepository).transitionWithResult(eq(planId), eq("BLOCKED_ANTI_BOT"), eq("FAILED"), anyList());
-        verify(audit).write(argThat(entry -> "ATS_HANDOFF_EXPIRED".equals(entry.action())));
+        verify(audit).write(argThat(entry -> "ATS_HANDOFF_EXPIRED".equals(entry.action())
+                && "BLOCKED_ANTI_BOT".equals(entry.beforeState())
+                && "FAILED".equals(entry.afterState())));
     }
 
     @Test

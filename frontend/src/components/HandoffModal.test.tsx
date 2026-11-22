@@ -19,7 +19,6 @@ describe('HandoffModal', () => {
     status: 'PENDING',
     blockReason: 'CAPTCHA',
     targetUrl: 'https://jobs.lever.co/example/apply',
-    handoffToken: 'test-token-abc',
     expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),

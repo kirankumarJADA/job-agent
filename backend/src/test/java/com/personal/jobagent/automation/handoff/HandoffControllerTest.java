@@ -1,5 +1,6 @@
 package com.personal.jobagent.automation.handoff;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.security.OwnerContext;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -19,6 +20,7 @@ class HandoffControllerTest {
     private AtsHandoffService handoffService;
     private OwnerContext ownerContext;
     private HandoffController controller;
+    private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
 
     private final UUID profileId = UUID.randomUUID();
     private final UUID applicationId = UUID.randomUUID();
@@ -49,7 +51,7 @@ class HandoffControllerTest {
         ResponseEntity<?> response = controller.getActiveHandoff(applicationId);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(response.getBody()).isEqualTo(record);
+        assertThat(response.getBody()).isEqualTo(HandoffSessionResponse.from(record));
     }
 
     @Test
@@ -220,7 +222,7 @@ class HandoffControllerTest {
         ResponseEntity<?> response = controller.initiateHandoff(req);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(response.getBody()).isEqualTo(record);
+        assertThat(response.getBody()).isEqualTo(HandoffSessionResponse.from(record));
     }
 
     @Test
@@ -273,6 +275,74 @@ class HandoffControllerTest {
         ResponseEntity<?> response = controller.initiateHandoff(req);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        assertThat(response.getBody()).isEqualTo(record);
+        assertThat(response.getBody()).isEqualTo(HandoffSessionResponse.from(record));
+    }
+
+    @Test
+    @DisplayName("getActiveHandoff excludes handoffToken from JSON response")
+    void testGetActiveHandoffExcludesHandoffTokenFromJson() throws Exception {
+        UUID secretToken = UUID.randomUUID();
+        HandoffSessionRecord record = new HandoffSessionRecord(
+                sessionId, planId, applicationId, profileId,
+                HandoffStatus.PENDING, HandoffBlockReason.CAPTCHA,
+                "https://jobs.lever.co/example", secretToken,
+                Instant.now().plusSeconds(900), null, null, Instant.now(), Instant.now()
+        );
+        when(handoffService.getActiveHandoffForApplication(profileId, applicationId)).thenReturn(Optional.of(record));
+
+        ResponseEntity<?> response = controller.getActiveHandoff(applicationId);
+        String json = objectMapper.writeValueAsString(response.getBody());
+
+        assertThat(json).doesNotContain("handoffToken");
+        assertThat(json).doesNotContain("handoff_token");
+        assertThat(json).doesNotContain(secretToken.toString());
+    }
+
+    @Test
+    @DisplayName("getActiveHandoffForPlan excludes handoffToken from JSON response")
+    void testGetActiveHandoffForPlanExcludesHandoffTokenFromJson() throws Exception {
+        UUID secretToken = UUID.randomUUID();
+        HandoffSessionRecord record = new HandoffSessionRecord(
+                sessionId, planId, applicationId, profileId,
+                HandoffStatus.PENDING, HandoffBlockReason.CAPTCHA,
+                "https://jobs.lever.co/example", secretToken,
+                Instant.now().plusSeconds(900), null, null, Instant.now(), Instant.now()
+        );
+        when(handoffService.getActiveHandoffForPlan(profileId, planId)).thenReturn(Optional.of(record));
+
+        ResponseEntity<?> response = controller.getActiveHandoffForPlan(planId);
+        String json = objectMapper.writeValueAsString(response.getBody());
+
+        assertThat(json).doesNotContain("handoffToken");
+        assertThat(json).doesNotContain("handoff_token");
+        assertThat(json).doesNotContain(secretToken.toString());
+    }
+
+    @Test
+    @DisplayName("initiateHandoff excludes handoffToken from JSON response")
+    void testInitiateHandoffExcludesHandoffTokenFromJson() throws Exception {
+        when(ownerContext.isWorkerRequest()).thenReturn(true);
+        when(handoffService.resolveProfileId(planId, applicationId)).thenReturn(Optional.of(profileId));
+
+        UUID secretToken = UUID.randomUUID();
+        HandoffSessionRecord record = new HandoffSessionRecord(
+                sessionId, planId, applicationId, profileId,
+                HandoffStatus.PENDING, HandoffBlockReason.CAPTCHA,
+                "https://jobs.lever.co/example", secretToken,
+                Instant.now().plusSeconds(900), null, null, Instant.now(), Instant.now()
+        );
+        when(handoffService.initiateHandoff(eq(profileId), eq(planId), eq(applicationId), any(), any(), eq(15)))
+                .thenReturn(record);
+
+        var req = new HandoffController.InitiateRequest(
+                planId, applicationId, "LEVER", "https://jobs.lever.co/example",
+                "LEVER_CAPTCHA_PRESENT", "evidence/screenshot.png", 15
+        );
+        ResponseEntity<?> response = controller.initiateHandoff(req);
+        String json = objectMapper.writeValueAsString(response.getBody());
+
+        assertThat(json).doesNotContain("handoffToken");
+        assertThat(json).doesNotContain("handoff_token");
+        assertThat(json).doesNotContain(secretToken.toString());
     }
 }

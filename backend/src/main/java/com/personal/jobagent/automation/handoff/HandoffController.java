@@ -51,6 +51,7 @@ public class HandoffController {
         }
 
         return handoffService.getActiveHandoffForApplication(profileId, applicationId)
+                .map(HandoffSessionResponse::from)
                 .<ResponseEntity<?>>map(ResponseEntity::ok)
                 .orElseGet(() -> ResponseEntity.notFound().build());
     }
@@ -70,6 +71,7 @@ public class HandoffController {
         }
 
         return handoffService.getActiveHandoffForPlan(profileId, planId)
+                .map(HandoffSessionResponse::from)
                 .<ResponseEntity<?>>map(ResponseEntity::ok)
                 .orElseGet(() -> ResponseEntity.notFound().build());
     }
@@ -206,6 +208,6 @@ public class HandoffController {
                 profileId, req.planId(), req.applicationId(), req.targetUrl(), reason, ttl
         );
 
-        return ResponseEntity.status(HttpStatus.CREATED).body(session);
+        return ResponseEntity.status(HttpStatus.CREATED).body(HandoffSessionResponse.from(session));
     }
 }

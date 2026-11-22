@@ -1,5 +1,6 @@
 package com.personal.jobagent.automation.handoff;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import java.time.Instant;
 import java.util.UUID;
 
@@ -14,7 +15,7 @@ public record HandoffSessionRecord(
         HandoffStatus status,
         HandoffBlockReason blockReason,
         String targetUrl,
-        UUID handoffToken,
+        @JsonIgnore UUID handoffToken,
         Instant expiresAt,
         Instant completedAt,
         Instant cancelledAt,
