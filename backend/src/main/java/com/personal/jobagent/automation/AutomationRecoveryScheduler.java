@@ -36,22 +36,32 @@ public class AutomationRecoveryScheduler {
     private final long stalePlanMinutes;
     private final AutomationMetrics metrics;
     private final MaintenanceModeService maintenanceMode;
+    private final com.personal.jobagent.automation.handoff.AtsHandoffService handoffService;
 
     @Autowired
     public AutomationRecoveryScheduler(AutomationPlanRepository plans,
                                        @Value("${app.automation.stale-plan-minutes:15}") long stalePlanMinutes,
                                        AutomationMetrics metrics,
-                                       @Autowired(required = false) MaintenanceModeService maintenanceMode) {
+                                       @Autowired(required = false) MaintenanceModeService maintenanceMode,
+                                       @Autowired(required = false) com.personal.jobagent.automation.handoff.AtsHandoffService handoffService) {
         this.plans = plans;
         this.stalePlanMinutes = stalePlanMinutes;
         this.metrics = metrics;
         this.maintenanceMode = maintenanceMode != null ? maintenanceMode : new MaintenanceModeService(false);
+        this.handoffService = handoffService;
     }
 
     public AutomationRecoveryScheduler(AutomationPlanRepository plans,
                                        long stalePlanMinutes,
                                        AutomationMetrics metrics) {
-        this(plans, stalePlanMinutes, metrics, new MaintenanceModeService(false));
+        this(plans, stalePlanMinutes, metrics, new MaintenanceModeService(false), null);
+    }
+
+    public AutomationRecoveryScheduler(AutomationPlanRepository plans,
+                                       long stalePlanMinutes,
+                                       AutomationMetrics metrics,
+                                       MaintenanceModeService maintenanceMode) {
+        this(plans, stalePlanMinutes, metrics, maintenanceMode, null);
     }
 
     @PostConstruct
@@ -72,6 +82,13 @@ public class AutomationRecoveryScheduler {
         if (recovered > 0) {
             log.warn("Recovered {} automation plan(s) with no heartbeat for over {} minute(s) — returned to PREPARED",
                     recovered, stalePlanMinutes);
+        }
+        if (handoffService != null) {
+            try {
+                handoffService.expireStaleSessions();
+            } catch (Exception e) {
+                log.warn("Could not sweep expired handoff sessions: {}", e.getMessage());
+            }
         }
     }
 }

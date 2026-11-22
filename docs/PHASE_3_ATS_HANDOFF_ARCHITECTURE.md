@@ -57,8 +57,8 @@ Robin adopts **Option B (External Human Completion)**:
 3. Worker cleanly terminates its execution, stops heartbeat timers, and releases its execution lease immediately without blocking in a 15-minute wait loop.
 4. Candidate modal displays direct employer link with clear instructions: candidate completes and submits on employer portal.
 5. Candidate clicks "Confirm & Complete Application" in Robin.
-6. Backend marks handoff session `COMPLETED`, records application as `APPLICATION_SUBMITTED` with candidate attribution, and sets plan to `READY_TO_SUBMIT`/`COMPLETED`.
-7. Zero automated duplicate submissions, zero fake solver claims.
+6. Backend marks handoff session `COMPLETED`, records application as `APPLICATION_SUBMITTED` with candidate attribution via `ApplicationStatusService.apply`, and transitions plan to terminal `COMPLETED` with structured `EXTERNAL_SUBMISSION_ATTESTATION` result.
+7. Zero automated duplicate submissions, zero worker resumes, zero fake solver claims.
 
 ---
 
@@ -92,8 +92,13 @@ stateDiagram-v2
 ```
 
 ### Concurrency & Lifecycle Guarantees:
-1. **Idempotent Handoff Initiation**:
-   If a worker retries or crashes and calls `/api/v1/handoff/initiate` for a plan that already has an active, non-expired `PENDING` session, `HandoffSessionRepository.createSession` returns the existing session idempotently without creating conflicting sessions or rotating tokens.
+1. **Partial Unique Index & Idempotent Initiation (V068)**:
+   Migration `V068__handoff_single_pending_index.sql` introduces:
+   ```sql
+   CREATE UNIQUE INDEX IF NOT EXISTS handoff_sessions_single_pending_per_plan
+   ON automation_handoff_sessions(plan_id) WHERE status = 'PENDING';
+   ```
+   This guarantees at the database level that exactly one active `PENDING` handoff session can exist per plan at any time. If concurrent worker threads attempt initiation simultaneously, PostgreSQL enforces uniqueness, and `HandoffSessionRepository.createSession` safely catches `DuplicateKeyException` and returns the existing active session.
 2. **Active Session Stability & Worker Isolation**:
    When a plan is in `HANDOFF_REQUIRED`:
    - `AutomationPlanRepository.claimNext()` only selects `status = 'PREPARED'`.
@@ -108,7 +113,7 @@ stateDiagram-v2
    ```
    Only a single completion request can succeed. Any concurrent or duplicate submission attempt returns 0 rows updated and is rejected with `409 Conflict`.
 4. **Stale Session Expiry**:
-   `expireStaleSessions()` atomically sweeps overdue `PENDING` sessions to `EXPIRED`. Completion attempts against expired sessions return `409 Conflict`.
+   `expireStaleSessions()` atomically sweeps overdue `PENDING` sessions to `EXPIRED` and marks corresponding plans `FAILED` with `HANDOFF_EXPIRED` reason.
 5. **Cancellation Lifecycle**:
    Candidate cancellation atomically sets session to `CANCELLED` and plan to `FAILED`, recording full audit entries.
 6. **Crash & Restart Recovery**:
@@ -117,14 +122,20 @@ stateDiagram-v2
    All endpoints in `HandoffController` verify ownership against the authenticated candidate's `OwnerContext`. Cross-profile access attempts return `404 Not Found` for queries and `403 Forbidden` for mutations.
 8. **Worker Token Authorization**:
    `/api/v1/handoff/initiate` requires a valid worker Bearer token or authenticated user session. Unauthenticated requests are rejected with `401 Unauthorized` / `403 Forbidden`.
-9. **Application Status Attribution**:
-   External candidate completion transitions the application to `APPLICATION_SUBMITTED` with `submitted_at` timestamp and an `application_events` record with `actor: candidate` and `event_key: handoff.external_submit`, cleanly distinguishing candidate external completion from automated worker submission (`actor: worker`, `event_key: automation.real_submit`).
+9. **Application Status Machine & Atomic Rollback**:
+   External candidate completion uses `ApplicationStatusService.apply` within a `@Transactional` boundary:
+   - Moves `READY_TO_APPLY` $\rightarrow$ `APPLICATION_STARTED` $\rightarrow$ `APPLICATION_SUBMITTED`.
+   - Records `submitted_at = clock_timestamp()`.
+   - Idempotently preserves already-submitted/terminal application statuses (`OFFER`, `INTERVIEW`, `APPLICATION_SUBMITTED`).
+   - If an invalid transition occurs, the transaction rolls back completely, preserving `PENDING` session and `HANDOFF_REQUIRED` plan states.
+10. **Plan Terminal Completion**:
+    The automation plan transitions directly to terminal `COMPLETED` with an explicit `EXTERNAL_SUBMISSION_ATTESTATION` result, clearing heartbeats and execution leases. The Playwright worker is never resumed.
 
 ---
 
 ## 5. Verification Test Suite Coverage
 
-All 12 required scenarios are rigorously validated across PostgreSQL Testcontainers, Node worker test suites, and Vitest frontend suites:
+All 16 scenarios are rigorously validated across PostgreSQL Testcontainers, Node worker test suites, and Vitest frontend suites:
 
 | # | Required Scenario | Test Implementation | Result |
 |---|---|---|---|
@@ -140,9 +151,13 @@ All 12 required scenarios are rigorously validated across PostgreSQL Testcontain
 | 10 | Unauthenticated handoff initiate rejected (401/403) | `AtsHandoffIntegrationIT.testUnauthenticatedInitiateRejected` | **PASSED** |
 | 11 | Competing worker cannot claim plan during handoff | `AtsHandoffIntegrationIT.testCompetingWorkerCannotClaimHandoffRequiredPlan` | **PASSED** |
 | 12 | Application status reflects external vs automated | `AtsHandoffIntegrationIT.testApplicationStatusReflectsExternalCompletion` | **PASSED** |
+| 13 | Confirmation without attestation rejected (400) | `AtsHandoffIntegrationIT.testCandidateConfirmationWithoutAttestationRejected` | **PASSED** |
+| 14 | Concurrent initiate race guarantees 1 PENDING session | `AtsHandoffIntegrationIT.testConcurrentInitiateSingleActiveSession` | **PASSED** |
+| 15 | Repeated completion maintains terminal status | `AtsHandoffIntegrationIT.testRepeatedCompletionCannotAlterTerminalApplication` | **PASSED** |
+| 16 | Transactional rollback preserves state on failure | `AtsHandoffIntegrationIT.testTransactionalRollbackOnApplicationTransitionFailure` | **PASSED** |
 
 ### Test Execution Summary:
-- **Backend Tests (`AtsHandoffIntegrationIT`, `AtsHandoffServiceTest`, `HandoffControllerTest`)**: 22 passed, 0 failures, 0 errors in 02:20 min (`BUILD SUCCESS`).
-- **Worker Tests (`worker/test/*.test.js`)**: 268 passed, 0 failures, 0 errors in 59.95 s.
-- **Frontend Tests (`vitest run`)**: 452 passed across 46 test files in 49.58 s.
-- **Total Tests Passing**: **742 passed, 0 failures across all layers**.
+- **Backend Tests (`AtsHandoffIntegrationIT`, `AtsHandoffServiceTest`, `HandoffControllerTest`, `AutomationRecoverySchedulerMaintenanceTest`)**: 33 passed, 0 failures, 0 errors in 02:14 min (`BUILD SUCCESS`).
+- **Worker Tests (`worker/test/*.test.js`)**: 268 passed, 0 failures, 0 errors in 88.99 s.
+- **Frontend Tests (`vitest run`)**: 453 passed across 46 test files in 48.24 s.
+- **Total Tests Passing**: **754 passed, 0 failures across all layers**.

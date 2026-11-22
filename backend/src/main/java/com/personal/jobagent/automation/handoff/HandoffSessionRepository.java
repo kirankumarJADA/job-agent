@@ -60,11 +60,21 @@ public class HandoffSessionRepository {
 
     /**
      * Creates and persists a new short-lived handoff session for an application.
-     * Idempotent: If an active, non-expired session already exists for this plan, returns it.
+     * Transaction-safe and idempotent: under concurrent initiation races, exactly one
+     * PENDING session exists per plan (enforced by DB partial unique index handoff_sessions_single_pending_per_plan).
      */
     public HandoffSessionRecord createSession(UUID ownerProfileId, UUID planId, UUID applicationId,
                                               String targetUrl, HandoffBlockReason blockReason, int ttlMinutes) {
-        // Idempotency check: if an active non-expired session already exists for this plan, return it
+        int safeTtl = Math.max(5, Math.min(ttlMinutes, 60));
+
+        // 1. Expire any overdue pending sessions for this plan first
+        jdbcTemplate.update("""
+                UPDATE automation_handoff_sessions
+                SET status = 'EXPIRED', updated_at = clock_timestamp()
+                WHERE plan_id = ? AND status = 'PENDING' AND expires_at <= clock_timestamp()
+                """, planId);
+
+        // 2. Idempotency check: if an active non-expired session already exists, return it
         Optional<HandoffSessionRecord> existing = findActiveByPlan(ownerProfileId, planId);
         if (existing.isPresent()) {
             return existing.get();
@@ -72,27 +82,25 @@ public class HandoffSessionRepository {
 
         UUID sessionId = UuidV7.generate();
         UUID handoffToken = UUID.randomUUID();
-        int safeTtl = Math.max(5, Math.min(ttlMinutes, 60));
 
-        // Mark any existing pending session for this plan as superseded/cancelled
-        jdbcTemplate.update("""
-                UPDATE automation_handoff_sessions
-                SET status = 'CANCELLED', cancelled_at = clock_timestamp(), updated_at = clock_timestamp()
-                WHERE plan_id = ? AND status = 'PENDING'
-                """, planId);
+        try {
+            jdbcTemplate.update("""
+                    INSERT INTO automation_handoff_sessions (
+                        id, plan_id, application_id, profile_id, status, block_reason,
+                        target_url, handoff_token, expires_at, created_at, updated_at
+                    ) VALUES (
+                        ?, ?, ?, ?, 'PENDING', ?,
+                        ?, ?, clock_timestamp() + make_interval(mins => ?), clock_timestamp(), clock_timestamp()
+                    )
+                    """, sessionId, planId, applicationId, ownerProfileId, blockReason.name(), targetUrl, handoffToken, safeTtl);
 
-        jdbcTemplate.update("""
-                INSERT INTO automation_handoff_sessions (
-                    id, plan_id, application_id, profile_id, status, block_reason,
-                    target_url, handoff_token, expires_at, created_at, updated_at
-                ) VALUES (
-                    ?, ?, ?, ?, 'PENDING', ?,
-                    ?, ?, clock_timestamp() + make_interval(mins => ?), clock_timestamp(), clock_timestamp()
-                )
-                """, sessionId, planId, applicationId, ownerProfileId, blockReason.name(), targetUrl, handoffToken, safeTtl);
-
-        return findById(ownerProfileId, sessionId)
-                .orElseThrow(() -> new IllegalStateException("Failed to read created handoff session " + sessionId));
+            return findById(ownerProfileId, sessionId)
+                    .orElseThrow(() -> new IllegalStateException("Failed to read created handoff session " + sessionId));
+        } catch (org.springframework.dao.DuplicateKeyException e) {
+            // Concurrent race won by another transaction; return the winning active session
+            return findActiveByPlan(ownerProfileId, planId)
+                    .orElseThrow(() -> new IllegalStateException("Handoff session race on plan " + planId, e));
+        }
     }
 
     public Optional<HandoffSessionRecord> findById(UUID ownerProfileId, UUID sessionId) {
@@ -203,16 +211,21 @@ public class HandoffSessionRepository {
     }
 
     /**
-     * Marks all overdue pending sessions as EXPIRED.
+     * Marks all overdue pending sessions as EXPIRED and returns the affected plan IDs.
      */
-    public int expireStaleSessions() {
-        return jdbcTemplate.update("""
+    public java.util.List<UUID> expireStaleSessionsAndGetPlanIds() {
+        return jdbcTemplate.query("""
                 UPDATE automation_handoff_sessions
                 SET status = 'EXPIRED',
                     updated_at = clock_timestamp()
                 WHERE status = 'PENDING'
                   AND expires_at <= clock_timestamp()
-                """);
+                RETURNING plan_id
+                """, (rs, rowNum) -> rs.getObject("plan_id", UUID.class));
+    }
+
+    public int expireStaleSessions() {
+        return expireStaleSessionsAndGetPlanIds().size();
     }
 
     public Optional<String> getApplicationStatus(UUID applicationId) {
@@ -223,22 +236,19 @@ public class HandoffSessionRepository {
                 (rs, rowNum) -> rs.getString("status"), applicationId).stream().findFirst();
     }
 
-    public void markApplicationSubmittedDirectly(UUID applicationId, UUID ownerProfileId) {
+    /**
+     * Sets submitted_at timestamp when an application has been transitioned to APPLICATION_SUBMITTED.
+     * Does NOT alter the status column itself — status transitions must strictly follow ApplicationStatusService.
+     */
+    public void recordSubmissionTimestamp(UUID applicationId) {
         if (applicationId == null) {
             return;
         }
-        String sql = """
+        jdbcTemplate.update("""
                 UPDATE applications
-                SET status = 'APPLICATION_SUBMITTED',
-                    submitted_at = clock_timestamp(),
+                SET submitted_at = COALESCE(submitted_at, clock_timestamp()),
                     updated_at = clock_timestamp()
-                WHERE id = ?
-                """;
-        if (ownerProfileId != null) {
-            sql += " AND profile_id = ?";
-            jdbcTemplate.update(sql, applicationId, ownerProfileId);
-        } else {
-            jdbcTemplate.update(sql, applicationId);
-        }
+                WHERE id = ? AND status = 'APPLICATION_SUBMITTED'
+                """, applicationId);
     }
 }

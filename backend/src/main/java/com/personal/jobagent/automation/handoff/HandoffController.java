@@ -66,12 +66,25 @@ public class HandoffController {
                 .orElseGet(() -> ResponseEntity.notFound().build());
     }
 
+    public record CompleteRequest(
+            Boolean submittedExternally,
+            String attestationNotes
+    ) {}
+
     /**
-     * Called by candidate UI when candidate has manually solved the CAPTCHA/MFA in their browser.
-     * Atomically marks session COMPLETED and resets the plan to READY_TO_SUBMIT.
+     * Called by candidate UI when candidate has explicitly attested that they submitted
+     * the application on the employer portal.
+     * Atomically marks session COMPLETED and sets plan to terminal COMPLETED.
      */
     @PostMapping("/{sessionId}/complete")
-    public ResponseEntity<?> confirmCompletion(@PathVariable UUID sessionId) {
+    public ResponseEntity<?> confirmCompletion(@PathVariable UUID sessionId,
+                                               @RequestBody(required = false) CompleteRequest req) {
+        if (req != null && Boolean.FALSE.equals(req.submittedExternally())) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "External submission attestation is required to complete handoff"
+            ));
+        }
+
         UUID profileId = ownerContext.profileIdOrNull();
         if (profileId == null && !ownerContext.isWorkerRequest()) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
@@ -97,8 +110,12 @@ public class HandoffController {
         return ResponseEntity.ok(Map.of(
                 "sessionId", sessionId,
                 "status", "COMPLETED",
-                "message", "Verification confirmed. Application resumed and ready for submission."
+                "message", "External submission attestation recorded. Application marked as candidate-submitted."
         ));
+    }
+
+    public ResponseEntity<?> confirmCompletion(UUID sessionId) {
+        return confirmCompletion(sessionId, null);
     }
 
     /**

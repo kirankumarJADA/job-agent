@@ -151,7 +151,7 @@ class AtsHandoffIntegrationIT {
 
     @Test
     @Order(1)
-    @DisplayName("Lever CAPTCHA handoff flow: initiate -> pending -> confirm -> ready_to_submit")
+    @DisplayName("Lever CAPTCHA handoff flow: initiate -> pending -> confirm -> terminal COMPLETED")
     void testLeverCaptchaHandoffFlow() throws Exception {
         SeededApplication seeded = seedPlan(PROFILE_A, "LEVER", "lever-cap-1");
 
@@ -187,16 +187,20 @@ class AtsHandoffIntegrationIT {
                 .andExpect(jsonPath("$.id").value(sessionId.toString()))
                 .andExpect(jsonPath("$.status").value("PENDING"));
 
-        // 3. Candidate resolves challenge and clicks Confirm & Resume
+        // 3. Candidate resolves challenge externally and attests submission
         mockMvc.perform(post("/api/v1/handoff/{id}/complete", sessionId)
-                        .session(sessionA).with(csrf()))
+                        .session(sessionA).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(new HandoffController.CompleteRequest(true, "Solved CAPTCHA and submitted on Lever"))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("COMPLETED"));
 
-        // 4. Verify plan is now READY_TO_SUBMIT
+        // 4. Verify plan is now terminal COMPLETED (never READY_TO_SUBMIT)
         var updatedPlan = planRepository.findById(seeded.planId());
         assertThat(updatedPlan).isPresent();
-        assertThat(updatedPlan.get().status()).isEqualTo("READY_TO_SUBMIT");
+        assertThat(updatedPlan.get().status()).isEqualTo("COMPLETED");
+        assertThat(updatedPlan.get().result()).isNotNull();
+        assertThat(updatedPlan.get().result().toString()).contains("EXTERNAL_SUBMISSION_ATTESTATION");
 
         // 5. Verify application transitioned to APPLICATION_SUBMITTED with candidate attribution (Option B)
         String appStatus = jdbc.queryForObject("SELECT status FROM applications WHERE id = ?", String.class, seeded.applicationId());
@@ -226,13 +230,15 @@ class AtsHandoffIntegrationIT {
 
         HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
 
-        // Candidate completes MFA verification
+        // Candidate completes MFA verification and attests external submission
         mockMvc.perform(post("/api/v1/handoff/{id}/complete", session.id())
-                        .session(sessionA).with(csrf()))
+                        .session(sessionA).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(new HandoffController.CompleteRequest(true, "Entered MFA and submitted"))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("COMPLETED"));
 
-        assertThat(planRepository.findById(seeded.planId()).get().status()).isEqualTo("READY_TO_SUBMIT");
+        assertThat(planRepository.findById(seeded.planId()).get().status()).isEqualTo("COMPLETED");
     }
 
     @Test
@@ -263,8 +269,8 @@ class AtsHandoffIntegrationIT {
                         .session(sessionA).with(csrf()))
                 .andExpect(status().isConflict());
 
-        // Plan remains in HANDOFF_REQUIRED, not resumed
-        assertThat(planRepository.findById(seeded.planId()).get().status()).isEqualTo("HANDOFF_REQUIRED");
+        // Plan is transitioned to FAILED (not resumed to RUNNING or READY_TO_SUBMIT)
+        assertThat(planRepository.findById(seeded.planId()).get().status()).isEqualTo("FAILED");
     }
 
     @Test
@@ -392,10 +398,12 @@ class AtsHandoffIntegrationIT {
 
         // Candidate can still resolve handoff successfully:
         mockMvc.perform(post("/api/v1/handoff/{id}/complete", session.id())
-                        .session(sessionA).with(csrf()))
+                        .session(sessionA).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(new HandoffController.CompleteRequest(true, "Recovered after crash"))))
                 .andExpect(status().isOk());
 
-        assertThat(planRepository.findById(seeded.planId()).get().status()).isEqualTo("READY_TO_SUBMIT");
+        assertThat(planRepository.findById(seeded.planId()).get().status()).isEqualTo("COMPLETED");
     }
 
     @Test
@@ -534,12 +542,179 @@ class AtsHandoffIntegrationIT {
 
         // Complete handoff via candidate session
         mockMvc.perform(post("/api/v1/handoff/{id}/complete", session.id())
-                        .session(sessionA).with(csrf()))
+                        .session(sessionA).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(new HandoffController.CompleteRequest(true, "External completion verified"))))
                 .andExpect(status().isOk());
 
         // Verify application status is APPLICATION_SUBMITTED with submitted_at timestamp
         var appRow = jdbc.queryForMap("SELECT status, submitted_at FROM applications WHERE id = ?", seeded.applicationId());
         assertThat(appRow.get("status")).isEqualTo("APPLICATION_SUBMITTED");
         assertThat(appRow.get("submitted_at")).isNotNull();
+    }
+
+    @Test
+    @Order(13)
+    @DisplayName("Candidate confirmation without attestation (submittedExternally = false) is rejected with 400 Bad Request")
+    void testCandidateConfirmationWithoutAttestationRejected() throws Exception {
+        SeededApplication seeded = seedPlan(PROFILE_A, "LEVER", "lever-no-attest-1");
+
+        var initiateReq = new HandoffController.InitiateRequest(
+                seeded.planId(), seeded.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-no-attest-1", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+        MvcResult initResult = mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(initiateReq)))
+                .andExpect(status().isCreated())
+                .andReturn();
+        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+
+        // Send confirmation with submittedExternally = false
+        mockMvc.perform(post("/api/v1/handoff/{id}/complete", session.id())
+                        .session(sessionA).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(new HandoffController.CompleteRequest(false, "Did not submit"))))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("External submission attestation is required to complete handoff"));
+
+        // Session remains PENDING, plan remains HANDOFF_REQUIRED
+        assertThat(handoffRepository.findById(PROFILE_A, session.id()).get().status()).isEqualTo(HandoffStatus.PENDING);
+        assertThat(planRepository.findById(seeded.planId()).get().status()).isEqualTo("HANDOFF_REQUIRED");
+    }
+
+    @Test
+    @Order(14)
+    @DisplayName("Adversarial race: concurrent initiate calls for same plan produce exactly 1 active PENDING session")
+    void testConcurrentInitiateSingleActiveSession() throws Exception {
+        SeededApplication seeded = seedPlan(PROFILE_A, "LEVER", "lever-race-1");
+
+        var initiateReq = new HandoffController.InitiateRequest(
+                seeded.planId(), seeded.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-race-1", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+        String reqBody = json.writeValueAsString(initiateReq);
+
+        int threadCount = 4;
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(threadCount);
+        java.util.concurrent.CyclicBarrier barrier = new java.util.concurrent.CyclicBarrier(threadCount);
+        java.util.List<java.util.concurrent.Future<UUID>> futures = new java.util.ArrayList<>();
+
+        for (int i = 0; i < threadCount; i++) {
+            futures.add(executor.submit(() -> {
+                try {
+                    barrier.await();
+                    MvcResult res = mockMvc.perform(post("/api/v1/handoff/initiate")
+                                    .header("Authorization", "Bearer " + WORKER_TOKEN)
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .content(reqBody))
+                            .andExpect(status().isCreated())
+                            .andReturn();
+                    HandoffSessionRecord rec = json.readValue(res.getResponse().getContentAsString(), HandoffSessionRecord.class);
+                    return rec.id();
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }));
+        }
+
+        java.util.Set<UUID> sessionIds = new java.util.HashSet<>();
+        for (var f : futures) {
+            sessionIds.add(f.get(10, java.util.concurrent.TimeUnit.SECONDS));
+        }
+        executor.shutdown();
+
+        // Exactly one unique session ID across all concurrent attempts
+        assertThat(sessionIds).hasSize(1);
+
+        // Database verified: exactly one PENDING session for this plan
+        int pendingCount = jdbc.queryForObject(
+                "SELECT count(*) FROM automation_handoff_sessions WHERE plan_id = ? AND status = 'PENDING'",
+                Integer.class, seeded.planId()
+        );
+        assertThat(pendingCount).isEqualTo(1);
+    }
+
+    @Test
+    @Order(15)
+    @DisplayName("Repeated completion on already-terminal application maintains terminal state without regression")
+    void testRepeatedCompletionCannotAlterTerminalApplication() throws Exception {
+        SeededApplication seeded = seedPlan(PROFILE_A, "LEVER", "lever-term-1");
+
+        // Manually set application to terminal status 'OFFER'
+        jdbc.update("UPDATE applications SET status = 'OFFER' WHERE id = ?", seeded.applicationId());
+
+        var initiateReq = new HandoffController.InitiateRequest(
+                seeded.planId(), seeded.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-term-1", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+        MvcResult initResult = mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(initiateReq)))
+                .andExpect(status().isCreated())
+                .andReturn();
+        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+
+        // Complete handoff
+        mockMvc.perform(post("/api/v1/handoff/{id}/complete", session.id())
+                        .session(sessionA).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(new HandoffController.CompleteRequest(true, "External completion"))))
+                .andExpect(status().isOk());
+
+        // Application status must remain 'OFFER' (never regressed to APPLICATION_SUBMITTED)
+        String finalAppStatus = jdbc.queryForObject("SELECT status FROM applications WHERE id = ?", String.class, seeded.applicationId());
+        assertThat(finalAppStatus).isEqualTo("OFFER");
+
+        // Plan is COMPLETED
+        assertThat(planRepository.findById(seeded.planId()).get().status()).isEqualTo("COMPLETED");
+    }
+
+    @Test
+    @Order(16)
+    @DisplayName("Transactional rollback: failure during application transition rolls back session completion to PENDING")
+    void testTransactionalRollbackOnApplicationTransitionFailure() throws Exception {
+        SeededApplication seeded = seedPlan(PROFILE_A, "LEVER", "lever-rollback-1");
+
+        var initiateReq = new HandoffController.InitiateRequest(
+                seeded.planId(), seeded.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-rollback-1", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+        MvcResult initResult = mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(initiateReq)))
+                .andExpect(status().isCreated())
+                .andReturn();
+        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+
+        // Set application to WITHDRAWN status, which cannot transition to APPLICATION_SUBMITTED
+        jdbc.update("UPDATE applications SET status = 'WITHDRAWN' WHERE id = ?", seeded.applicationId());
+
+        // Attempting to complete will fail during recordExternalSubmission and trigger transaction rollback
+        try {
+            mockMvc.perform(post("/api/v1/handoff/{id}/complete", session.id())
+                            .session(sessionA).with(csrf())
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(json.writeValueAsString(new HandoffController.CompleteRequest(true, "External completion"))));
+        } catch (Exception ignored) {
+            // Expected exception during request execution
+        }
+
+        // Verify session was rolled back and is STILL PENDING (not COMPLETED)
+        String sessionStatus = jdbc.queryForObject(
+                "SELECT status FROM automation_handoff_sessions WHERE id = ?",
+                String.class, session.id()
+        );
+        assertThat(sessionStatus).isEqualTo("PENDING");
+
+        // Plan was not transitioned to COMPLETED
+        String planStatus = jdbc.queryForObject(
+                "SELECT status FROM automation_plans WHERE id = ?",
+                String.class, seeded.planId()
+        );
+        assertThat(planStatus).isEqualTo("HANDOFF_REQUIRED");
     }
 }

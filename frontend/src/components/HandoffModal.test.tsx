@@ -36,29 +36,48 @@ describe('HandoffModal', () => {
     cleanup();
   });
 
-  it('renders modal with title, block reason, and instructions', () => {
+  it('renders modal with external completion title, block reason, and 5-step instructions', () => {
     render(<HandoffModal session={mockSession} onClose={onClose} onResumed={onResumed} />);
 
-    expect(screen.getByText('Candidate Verification Required')).toBeTruthy();
+    expect(screen.getByText('External Application & Verification Required')).toBeTruthy();
     expect(screen.getByText('CAPTCHA Challenge')).toBeTruthy();
     expect(screen.getByText(/never attempts to solve or bypass CAPTCHAs/i)).toBeTruthy();
-    expect(screen.getByText('Open Application Form').getAttribute('href')).toBe('https://jobs.lever.co/example/apply');
+    expect(screen.getByText('Open Employer Application Form').getAttribute('href')).toBe('https://jobs.lever.co/example/apply');
+    expect(screen.getByText(/Review and complete all required application fields on the employer site/i)).toBeTruthy();
+    expect(screen.getByText(/Submit the application directly on the employer website/i)).toBeTruthy();
   });
 
-  it('calls completeHandoff and notifies parent on confirm click', async () => {
+  it('requires explicit candidate attestation before external submission can be confirmed', async () => {
+    render(<HandoffModal session={mockSession} onClose={onClose} onResumed={onResumed} />);
+
+    const confirmBtn = screen.getByRole('button', { name: /confirm external submission/i });
+    // Proves that merely resolving the challenge without attestation is NOT enough to confirm submission
+    expect(confirmBtn.hasAttribute('disabled')).toBe(true);
+
+    const attestationCheckbox = screen.getByRole('checkbox', { name: /attest external submission/i });
+    fireEvent.click(attestationCheckbox);
+
+    // Button is now enabled
+    expect(confirmBtn.hasAttribute('disabled')).toBe(false);
+  });
+
+  it('calls completeHandoff with external submission attestation on confirm click', async () => {
     vi.mocked(client.completeHandoff).mockResolvedValueOnce({
       sessionId: 'test-session-123',
       status: 'COMPLETED',
-      message: 'Resumed',
+      message: 'Attestation recorded',
     });
 
     render(<HandoffModal session={mockSession} onClose={onClose} onResumed={onResumed} />);
 
-    const confirmBtn = screen.getByRole('button', { name: /confirm & resume application/i });
+    const attestationCheckbox = screen.getByRole('checkbox', { name: /attest external submission/i });
+    fireEvent.click(attestationCheckbox);
+
+    const confirmBtn = screen.getByRole('button', { name: /confirm external submission/i });
     fireEvent.click(confirmBtn);
 
     await waitFor(() => {
-      expect(client.completeHandoff).toHaveBeenCalledWith('test-session-123');
+      expect(client.completeHandoff).toHaveBeenCalledWith('test-session-123', { submittedExternally: true });
       expect(onResumed).toHaveBeenCalledTimes(1);
       expect(onClose).toHaveBeenCalledTimes(1);
     });
@@ -89,7 +108,10 @@ describe('HandoffModal', () => {
 
     render(<HandoffModal session={mockSession} onClose={onClose} onResumed={onResumed} />);
 
-    const confirmBtn = screen.getByRole('button', { name: /confirm & resume application/i });
+    const attestationCheckbox = screen.getByRole('checkbox', { name: /attest external submission/i });
+    fireEvent.click(attestationCheckbox);
+
+    const confirmBtn = screen.getByRole('button', { name: /confirm external submission/i });
     fireEvent.click(confirmBtn);
 
     await waitFor(() => {
@@ -98,7 +120,7 @@ describe('HandoffModal', () => {
     });
   });
 
-  it('disables confirm button when session is expired', () => {
+  it('disables confirm button when session is expired even if attestation checked', () => {
     const expiredSession: HandoffSession = {
       ...mockSession,
       expiresAt: new Date(Date.now() - 5000).toISOString(),
@@ -106,7 +128,7 @@ describe('HandoffModal', () => {
 
     render(<HandoffModal session={expiredSession} onClose={onClose} onResumed={onResumed} />);
 
-    const confirmBtn = screen.getByRole('button', { name: /confirm & resume application/i });
+    const confirmBtn = screen.getByRole('button', { name: /confirm external submission/i });
     expect(confirmBtn.hasAttribute('disabled')).toBe(true);
     expect(screen.getByText('EXPIRED')).toBeTruthy();
   });

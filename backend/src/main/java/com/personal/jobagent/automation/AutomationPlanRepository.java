@@ -138,7 +138,7 @@ public class AutomationPlanRepository {
      * before any further attempt.
      */
     public boolean transition(UUID id, String from, String to) {
-        return db.update("update automation_plans set status=?,submit_approved=false,updated_at=now() where id=? and status=?", to, id, from) == 1;
+        return db.update("update automation_plans set status=?,submit_approved=false,heartbeat_at=null,updated_at=now() where id=? and status=?", to, id, from) == 1;
     }
 
     /**
@@ -157,7 +157,7 @@ public class AutomationPlanRepository {
         try {
             String value = json.writeValueAsString(result == null ? List.of() : result);
             return db.update("""
-                    update automation_plans set status=?, result=?::jsonb, submit_approved=false, updated_at=now()
+                    update automation_plans set status=?, result=?::jsonb, submit_approved=false, heartbeat_at=null, updated_at=now()
                     where id=? and status=?
                     """, to, value, id, from) == 1;
         } catch (Exception e) {

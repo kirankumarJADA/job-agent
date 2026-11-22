@@ -52,7 +52,7 @@ class HandoffControllerTest {
     }
 
     @Test
-    @DisplayName("confirmCompletion returns 200 on successful resume")
+    @DisplayName("confirmCompletion returns 200 on successful candidate attestation")
     void testConfirmCompletionSuccess() {
         HandoffSessionRecord record = new HandoffSessionRecord(
                 sessionId, planId, applicationId, profileId,
@@ -63,9 +63,20 @@ class HandoffControllerTest {
         when(handoffService.findSessionAnyOwner(sessionId)).thenReturn(Optional.of(record));
         when(handoffService.confirmHandoffCompletion(profileId, sessionId)).thenReturn(true);
 
-        ResponseEntity<?> response = controller.confirmCompletion(sessionId);
+        var req = new HandoffController.CompleteRequest(true, "I submitted via employer portal");
+        ResponseEntity<?> response = controller.confirmCompletion(sessionId, req);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
+    @DisplayName("confirmCompletion rejects request when submittedExternally is false")
+    void testConfirmCompletionRejectedWithoutAttestation() {
+        var req = new HandoffController.CompleteRequest(false, "Did not submit");
+        ResponseEntity<?> response = controller.confirmCompletion(sessionId, req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(handoffService, never()).confirmHandoffCompletion(any(), any());
     }
 
     @Test

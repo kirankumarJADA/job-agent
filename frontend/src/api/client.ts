@@ -254,9 +254,10 @@ export async function getHandoffSession(applicationId: string): Promise<HandoffS
   }
 }
 
-export function completeHandoff(sessionId: string): Promise<{ sessionId: string; status: string; message: string }> {
+export function completeHandoff(sessionId: string, payload?: { submittedExternally?: boolean; attestationNotes?: string }): Promise<{ sessionId: string; status: string; message: string }> {
   return apiFetch<{ sessionId: string; status: string; message: string }>(`/handoff/${sessionId}/complete`, {
     method: 'POST',
+    body: JSON.stringify(payload ?? { submittedExternally: true }),
   });
 }
 

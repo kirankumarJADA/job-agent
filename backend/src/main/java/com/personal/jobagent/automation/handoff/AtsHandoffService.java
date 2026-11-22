@@ -8,9 +8,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.time.Instant;
+import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -108,13 +112,15 @@ public class AtsHandoffService {
     }
 
     /**
-     * Completes a handoff after candidate interaction and explicit verification confirmation.
-     * Atomically transitions the session to COMPLETED and sets plan status to READY_TO_SUBMIT.
+     * Completes a handoff after candidate interaction and explicit attestation of external submission.
+     * Atomically transitions the session to COMPLETED, the application to APPLICATION_SUBMITTED via ApplicationStatusService,
+     * and sets plan status to COMPLETED (terminal state).
      *
      * @param ownerProfileId caller profile ID
      * @param sessionId handoff session ID
      * @return true if completion succeeded; false if expired, cancelled, or not owned
      */
+    @Transactional
     public boolean confirmHandoffCompletion(UUID ownerProfileId, UUID sessionId) {
         Optional<HandoffSessionRecord> sessionOpt = handoffRepository.findById(ownerProfileId, sessionId);
         if (sessionOpt.isEmpty()) {
@@ -125,7 +131,7 @@ public class AtsHandoffService {
         HandoffSessionRecord session = sessionOpt.get();
         if (session.isExpired()) {
             log.warn("Handoff completion refused: session {} is expired", sessionId);
-            handoffRepository.expireStaleSessions();
+            expireStaleSessions();
             return false;
         }
 
@@ -135,18 +141,31 @@ public class AtsHandoffService {
             return false;
         }
 
-        // Resume automation plan to READY_TO_SUBMIT so candidate can proceed with guarded submission
-        boolean resumed = planRepository.transition(session.planId(), "HANDOFF_REQUIRED", "READY_TO_SUBMIT");
-        if (!resumed) {
-            // Also try transition from BLOCKED_ANTI_BOT if legacy state
-            planRepository.transition(session.planId(), "BLOCKED_ANTI_BOT", "READY_TO_SUBMIT");
+        // 1. Transition the application status to APPLICATION_SUBMITTED following the state machine
+        recordExternalSubmission(ownerProfileId, session.applicationId(), sessionId, session.blockReason().name());
+
+        // 2. Transition automation plan to terminal state COMPLETED with external attestation result
+        List<Object> completionResult = List.of(Map.of(
+                "type", "EXTERNAL_SUBMISSION_ATTESTATION",
+                "outcome", "COMPLETED",
+                "submissionSource", "CANDIDATE_ATTESTATION",
+                "verificationLevel", "CANDIDATE_REPORTED",
+                "attestedAt", Instant.now().toString(),
+                "sessionId", sessionId.toString(),
+                "blockReason", session.blockReason().name()
+        ));
+
+        boolean transitioned = planRepository.transitionWithResult(
+                session.planId(), "HANDOFF_REQUIRED", "COMPLETED", completionResult
+        );
+        if (!transitioned) {
+            // Also attempt transition if plan was previously in BLOCKED_ANTI_BOT
+            planRepository.transitionWithResult(
+                    session.planId(), "BLOCKED_ANTI_BOT", "COMPLETED", completionResult
+            );
         }
 
-        log.info("Handoff session {} completed by candidate. Plan {} set to READY_TO_SUBMIT", sessionId, session.planId());
-
-        // Under Option B (External Human Completion):
-        // Record candidate external submission on the application record
-        recordExternalSubmission(ownerProfileId, session.applicationId(), sessionId, session.blockReason().name());
+        log.info("Handoff session {} completed by candidate attestation. Plan {} set to COMPLETED (terminal)", sessionId, session.planId());
 
         if (audit != null) {
             audit.write(new AuditEntry(
@@ -157,7 +176,8 @@ public class AtsHandoffService {
                     session.status().name(),
                     Map.of(
                             "mode", "EXTERNAL_COMPLETION",
-                            "submissionType", "CANDIDATE_DIRECT",
+                            "submissionSource", "CANDIDATE_ATTESTATION",
+                            "verificationLevel", "CANDIDATE_REPORTED",
                             "blockReason", session.blockReason().name(),
                             "sessionId", sessionId.toString()
                     ),
@@ -170,35 +190,78 @@ public class AtsHandoffService {
     }
 
     private void recordExternalSubmission(UUID ownerProfileId, UUID applicationId, UUID sessionId, String reason) {
-        if (applicationId == null) {
+        if (applicationId == null || ownerProfileId == null) {
             return;
         }
-        try {
-            if (applicationStatus != null && ownerProfileId != null) {
-                String currentStatus = handoffRepository.getApplicationStatus(applicationId).orElse(null);
-                if ("READY_TO_APPLY".equals(currentStatus)) {
-                    applicationStatus.apply(ownerProfileId, applicationId, "APPLICATION_STARTED",
-                            "handoff.start:" + sessionId, "candidate",
-                            Map.of("sessionId", sessionId.toString(), "reason", reason));
-                }
-                applicationStatus.apply(ownerProfileId, applicationId, "APPLICATION_SUBMITTED",
-                        "handoff.external_submit:" + sessionId, "candidate",
-                        Map.of("sessionId", sessionId.toString(), "mode", "EXTERNAL_COMPLETION", "reason", reason));
-            }
-            handoffRepository.markApplicationSubmittedDirectly(applicationId, ownerProfileId);
-        } catch (Exception e) {
-            log.warn("Could not transition application status via ApplicationStatusService for session {}: {}", sessionId, e.getMessage());
-            handoffRepository.markApplicationSubmittedDirectly(applicationId, ownerProfileId);
+        if (applicationStatus == null) {
+            throw new IllegalStateException("ApplicationStatusService is required for external submission transitions");
         }
+
+        String currentStatus = handoffRepository.getApplicationStatus(applicationId).orElse(null);
+        if (currentStatus == null) {
+            throw new NoSuchElementException("Application not found: " + applicationId);
+        }
+
+        // Handle already-submitted applications idempotently without regressing status
+        if ("APPLICATION_SUBMITTED".equals(currentStatus) ||
+                "CONFIRMATION_RECEIVED".equals(currentStatus) ||
+                "INTERVIEW".equals(currentStatus) ||
+                "OFFER".equals(currentStatus)) {
+            log.info("Application {} is already in terminal/submitted status {}; maintaining status", applicationId, currentStatus);
+            handoffRepository.recordSubmissionTimestamp(applicationId);
+            return;
+        }
+
+        // State machine progression: READY_TO_APPLY -> APPLICATION_STARTED -> APPLICATION_SUBMITTED
+        if ("READY_TO_APPLY".equals(currentStatus)) {
+            applicationStatus.apply(ownerProfileId, applicationId, "APPLICATION_STARTED",
+                    "handoff.start:" + sessionId, "candidate",
+                    Map.of("sessionId", sessionId.toString(), "reason", reason));
+        }
+
+        applicationStatus.apply(ownerProfileId, applicationId, "APPLICATION_SUBMITTED",
+                "handoff.external_submit:" + sessionId, "candidate",
+                Map.of(
+                        "sessionId", sessionId.toString(),
+                        "submissionSource", "CANDIDATE_ATTESTATION",
+                        "verificationLevel", "CANDIDATE_REPORTED",
+                        "reason", reason
+                ));
+
+        handoffRepository.recordSubmissionTimestamp(applicationId);
     }
 
+    @Transactional
     public int expireStaleSessions() {
-        return handoffRepository.expireStaleSessions();
+        List<UUID> expiredPlanIds = handoffRepository.expireStaleSessionsAndGetPlanIds();
+        for (UUID planId : expiredPlanIds) {
+            List<Object> errorResult = List.of(Map.of(
+                    "type", "PLAN_ERROR",
+                    "outcome", "FAILED",
+                    "reason", "HANDOFF_EXPIRED",
+                    "message", "Handoff session expired without candidate attestation"
+            ));
+            planRepository.transitionWithResult(planId, "HANDOFF_REQUIRED", "FAILED", errorResult);
+            if (audit != null) {
+                audit.write(new AuditEntry(
+                        "SYSTEM",
+                        "ATS_HANDOFF_EXPIRED",
+                        "AUTOMATION_PLAN",
+                        planId,
+                        "HANDOFF_REQUIRED",
+                        "FAILED",
+                        null,
+                        null
+                ));
+            }
+        }
+        return expiredPlanIds.size();
     }
 
     /**
      * Cancels an active handoff session upon candidate request.
      */
+    @Transactional
     public boolean cancelHandoff(UUID ownerProfileId, UUID sessionId) {
         Optional<HandoffSessionRecord> sessionOpt = handoffRepository.findById(ownerProfileId, sessionId);
         if (sessionOpt.isEmpty()) {
@@ -208,7 +271,13 @@ public class AtsHandoffService {
         HandoffSessionRecord session = sessionOpt.get();
         boolean cancelled = handoffRepository.cancelSession(ownerProfileId, sessionId);
         if (cancelled) {
-            planRepository.transition(session.planId(), "HANDOFF_REQUIRED", "FAILED");
+            List<Object> errorResult = List.of(Map.of(
+                    "type", "PLAN_ERROR",
+                    "outcome", "FAILED",
+                    "reason", "HANDOFF_CANCELLED",
+                    "message", "Handoff session cancelled by candidate"
+            ));
+            planRepository.transitionWithResult(session.planId(), "HANDOFF_REQUIRED", "FAILED", errorResult);
             if (audit != null) {
                 audit.write(new AuditEntry(
                         "CANDIDATE",

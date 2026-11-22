@@ -1,13 +1,14 @@
 package com.personal.jobagent.automation.handoff;
 
+import com.personal.jobagent.application.ApplicationStatusService;
 import com.personal.jobagent.audit.AuditLogWriter;
 import com.personal.jobagent.automation.AutomationPlanRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -20,6 +21,7 @@ class AtsHandoffServiceTest {
     private HandoffSessionRepository handoffRepository;
     private AutomationPlanRepository planRepository;
     private AuditLogWriter audit;
+    private ApplicationStatusService applicationStatus;
     private AtsHandoffService service;
 
     private final UUID profileId = UUID.randomUUID();
@@ -32,7 +34,8 @@ class AtsHandoffServiceTest {
         handoffRepository = mock(HandoffSessionRepository.class);
         planRepository = mock(AutomationPlanRepository.class);
         audit = mock(AuditLogWriter.class);
-        service = new AtsHandoffService(handoffRepository, planRepository, audit, null);
+        applicationStatus = mock(ApplicationStatusService.class);
+        service = new AtsHandoffService(handoffRepository, planRepository, audit, null, applicationStatus);
     }
 
     @Test
@@ -58,7 +61,7 @@ class AtsHandoffServiceTest {
     }
 
     @Test
-    @DisplayName("confirmHandoffCompletion succeeds for valid pending session and resumes plan to READY_TO_SUBMIT")
+    @DisplayName("confirmHandoffCompletion succeeds for valid pending session, transitions plan to terminal COMPLETED and applies application status machine")
     void testConfirmHandoffCompletionSuccess() {
         HandoffSessionRecord record = new HandoffSessionRecord(
                 sessionId, planId, applicationId, profileId,
@@ -69,15 +72,41 @@ class AtsHandoffServiceTest {
 
         when(handoffRepository.findById(profileId, sessionId)).thenReturn(Optional.of(record));
         when(handoffRepository.completeSession(profileId, sessionId)).thenReturn(true);
-        when(planRepository.transition(planId, "HANDOFF_REQUIRED", "READY_TO_SUBMIT")).thenReturn(true);
+        when(handoffRepository.getApplicationStatus(applicationId)).thenReturn(Optional.of("READY_TO_APPLY"));
+        when(planRepository.transitionWithResult(eq(planId), eq("HANDOFF_REQUIRED"), eq("COMPLETED"), anyList())).thenReturn(true);
 
         boolean result = service.confirmHandoffCompletion(profileId, sessionId);
 
         assertThat(result).isTrue();
         verify(handoffRepository).completeSession(profileId, sessionId);
-        verify(handoffRepository).markApplicationSubmittedDirectly(applicationId, profileId);
-        verify(planRepository).transition(planId, "HANDOFF_REQUIRED", "READY_TO_SUBMIT");
+        verify(applicationStatus).apply(eq(profileId), eq(applicationId), eq("APPLICATION_STARTED"), anyString(), eq("candidate"), anyMap());
+        verify(applicationStatus).apply(eq(profileId), eq(applicationId), eq("APPLICATION_SUBMITTED"), anyString(), eq("candidate"), anyMap());
+        verify(handoffRepository).recordSubmissionTimestamp(applicationId);
+        verify(planRepository).transitionWithResult(eq(planId), eq("HANDOFF_REQUIRED"), eq("COMPLETED"), anyList());
         verify(audit).write(argThat(entry -> "ATS_HANDOFF_COMPLETED".equals(entry.action())));
+    }
+
+    @Test
+    @DisplayName("confirmHandoffCompletion for already-submitted application maintains terminal status without state regression")
+    void testConfirmHandoffCompletionAlreadySubmittedApplication() {
+        HandoffSessionRecord record = new HandoffSessionRecord(
+                sessionId, planId, applicationId, profileId,
+                HandoffStatus.PENDING, HandoffBlockReason.CAPTCHA,
+                "https://jobs.lever.co/example/123", UUID.randomUUID(),
+                Instant.now().plusSeconds(900), null, null, Instant.now(), Instant.now()
+        );
+
+        when(handoffRepository.findById(profileId, sessionId)).thenReturn(Optional.of(record));
+        when(handoffRepository.completeSession(profileId, sessionId)).thenReturn(true);
+        when(handoffRepository.getApplicationStatus(applicationId)).thenReturn(Optional.of("APPLICATION_SUBMITTED"));
+        when(planRepository.transitionWithResult(eq(planId), eq("HANDOFF_REQUIRED"), eq("COMPLETED"), anyList())).thenReturn(true);
+
+        boolean result = service.confirmHandoffCompletion(profileId, sessionId);
+
+        assertThat(result).isTrue();
+        verify(applicationStatus, never()).apply(any(), any(), any(), any(), any(), any());
+        verify(handoffRepository).recordSubmissionTimestamp(applicationId);
+        verify(planRepository).transitionWithResult(eq(planId), eq("HANDOFF_REQUIRED"), eq("COMPLETED"), anyList());
     }
 
     @Test
@@ -95,9 +124,9 @@ class AtsHandoffServiceTest {
         boolean result = service.confirmHandoffCompletion(profileId, sessionId);
 
         assertThat(result).isFalse();
-        verify(handoffRepository).expireStaleSessions();
+        verify(handoffRepository).expireStaleSessionsAndGetPlanIds();
         verify(handoffRepository, never()).completeSession(any(), any());
-        verify(planRepository, never()).transition(any(), any(), any());
+        verify(planRepository, never()).transitionWithResult(any(), any(), any(), any());
     }
 
     @Test
@@ -117,7 +146,19 @@ class AtsHandoffServiceTest {
 
         assertThat(result).isTrue();
         verify(handoffRepository).cancelSession(profileId, sessionId);
-        verify(planRepository).transition(planId, "HANDOFF_REQUIRED", "FAILED");
+        verify(planRepository).transitionWithResult(eq(planId), eq("HANDOFF_REQUIRED"), eq("FAILED"), anyList());
         verify(audit).write(argThat(entry -> "ATS_HANDOFF_CANCELLED".equals(entry.action())));
+    }
+
+    @Test
+    @DisplayName("expireStaleSessions transitions affected plans to FAILED")
+    void testExpireStaleSessions() {
+        when(handoffRepository.expireStaleSessionsAndGetPlanIds()).thenReturn(List.of(planId));
+
+        int expiredCount = service.expireStaleSessions();
+
+        assertThat(expiredCount).isEqualTo(1);
+        verify(planRepository).transitionWithResult(eq(planId), eq("HANDOFF_REQUIRED"), eq("FAILED"), anyList());
+        verify(audit).write(argThat(entry -> "ATS_HANDOFF_EXPIRED".equals(entry.action())));
     }
 }
