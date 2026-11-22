@@ -13,8 +13,21 @@ public enum HandoffBlockReason {
         if (value == null || value.isBlank()) {
             return CAPTCHA;
         }
+        String normalized = value.trim().toUpperCase();
+        if (normalized.contains("MFA")) {
+            return MFA;
+        }
+        if (normalized.contains("TURNSTILE") || normalized.contains("CLOUDFLARE")) {
+            return CLOUDFLARE_TURNSTILE;
+        }
+        if (normalized.contains("SECURITY") || normalized.contains("CHALLENGE")) {
+            return EMPLOYER_SECURITY_CHECK;
+        }
+        if (normalized.contains("CAPTCHA")) {
+            return CAPTCHA;
+        }
         try {
-            return HandoffBlockReason.valueOf(value.trim().toUpperCase());
+            return HandoffBlockReason.valueOf(normalized);
         } catch (IllegalArgumentException e) {
             return CAPTCHA;
         }

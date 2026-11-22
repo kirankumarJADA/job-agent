@@ -7,6 +7,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -28,8 +29,10 @@ public class HandoffController {
     public record InitiateRequest(
             UUID planId,
             UUID applicationId,
+            String atsPlatform,
             String targetUrl,
             String blockReason,
+            String domScreenshotRef,
             Integer ttlMinutes
     ) {}
 
@@ -49,6 +52,21 @@ public class HandoffController {
     }
 
     /**
+     * Checks if an active handoff session exists for a specific automation plan.
+     */
+    @GetMapping("/plans/{planId}")
+    public ResponseEntity<?> getActiveHandoffForPlan(@PathVariable UUID planId) {
+        UUID profileId = ownerContext.profileIdOrNull();
+        if (profileId == null && !ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+
+        return handoffService.getActiveHandoffForPlan(profileId, planId)
+                .<ResponseEntity<?>>map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.notFound().build());
+    }
+
+    /**
      * Called by candidate UI when candidate has manually solved the CAPTCHA/MFA in their browser.
      * Atomically marks session COMPLETED and resets the plan to READY_TO_SUBMIT.
      */
@@ -57,6 +75,16 @@ public class HandoffController {
         UUID profileId = ownerContext.profileIdOrNull();
         if (profileId == null && !ownerContext.isWorkerRequest()) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+
+        if (profileId != null && !ownerContext.isWorkerRequest()) {
+            Optional<HandoffSessionRecord> any = handoffService.findSessionAnyOwner(sessionId);
+            if (any.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Handoff session not found"));
+            }
+            if (!profileId.equals(any.get().profileId())) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Access denied: session belongs to another profile"));
+            }
         }
 
         boolean success = handoffService.confirmHandoffCompletion(profileId, sessionId);
@@ -83,6 +111,16 @@ public class HandoffController {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         }
 
+        if (profileId != null && !ownerContext.isWorkerRequest()) {
+            Optional<HandoffSessionRecord> any = handoffService.findSessionAnyOwner(sessionId);
+            if (any.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Handoff session not found"));
+            }
+            if (!profileId.equals(any.get().profileId())) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Access denied: session belongs to another profile"));
+            }
+        }
+
         boolean success = handoffService.cancelHandoff(profileId, sessionId);
         if (!success) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of(
@@ -102,13 +140,25 @@ public class HandoffController {
      */
     @PostMapping("/initiate")
     public ResponseEntity<?> initiateHandoff(@RequestBody InitiateRequest req) {
-        if (req == null || req.planId() == null || req.applicationId() == null || req.targetUrl() == null) {
-            return ResponseEntity.badRequest().body(Map.of("error", "planId, applicationId, and targetUrl are required"));
+        if (req == null || req.applicationId() == null || req.targetUrl() == null) {
+            return ResponseEntity.badRequest().body(Map.of("error", "applicationId and targetUrl are required"));
         }
 
         UUID profileId = ownerContext.profileIdOrNull();
         if (profileId == null && !ownerContext.isWorkerRequest()) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+
+        if (profileId != null && !ownerContext.isWorkerRequest()) {
+            boolean owned = handoffService.isApplicationOwnedBy(req.applicationId(), profileId);
+            if (!owned) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Access denied: application belongs to another profile"));
+            }
+        } else if (profileId == null && ownerContext.isWorkerRequest()) {
+            profileId = handoffService.resolveProfileId(req.planId(), req.applicationId()).orElse(null);
+            if (profileId == null) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Unable to resolve owner profile for application/plan"));
+            }
         }
 
         HandoffBlockReason reason = HandoffBlockReason.parse(req.blockReason());

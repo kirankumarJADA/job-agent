@@ -54,6 +54,13 @@ class HandoffControllerTest {
     @Test
     @DisplayName("confirmCompletion returns 200 on successful resume")
     void testConfirmCompletionSuccess() {
+        HandoffSessionRecord record = new HandoffSessionRecord(
+                sessionId, planId, applicationId, profileId,
+                HandoffStatus.PENDING, HandoffBlockReason.CAPTCHA,
+                "https://jobs.lever.co/example", UUID.randomUUID(),
+                Instant.now().plusSeconds(900), null, null, Instant.now(), Instant.now()
+        );
+        when(handoffService.findSessionAnyOwner(sessionId)).thenReturn(Optional.of(record));
         when(handoffService.confirmHandoffCompletion(profileId, sessionId)).thenReturn(true);
 
         ResponseEntity<?> response = controller.confirmCompletion(sessionId);
@@ -62,8 +69,32 @@ class HandoffControllerTest {
     }
 
     @Test
-    @DisplayName("confirmCompletion returns 409 CONFLICT on expired or unauthorized session")
+    @DisplayName("confirmCompletion returns 403 on IDOR cross-profile attempt")
+    void testConfirmCompletionIdorForbidden() {
+        UUID otherProfileId = UUID.randomUUID();
+        HandoffSessionRecord record = new HandoffSessionRecord(
+                sessionId, planId, applicationId, otherProfileId,
+                HandoffStatus.PENDING, HandoffBlockReason.CAPTCHA,
+                "https://jobs.lever.co/example", UUID.randomUUID(),
+                Instant.now().plusSeconds(900), null, null, Instant.now(), Instant.now()
+        );
+        when(handoffService.findSessionAnyOwner(sessionId)).thenReturn(Optional.of(record));
+
+        ResponseEntity<?> response = controller.confirmCompletion(sessionId);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    @Test
+    @DisplayName("confirmCompletion returns 409 CONFLICT on expired or failed completion")
     void testConfirmCompletionFailure() {
+        HandoffSessionRecord record = new HandoffSessionRecord(
+                sessionId, planId, applicationId, profileId,
+                HandoffStatus.PENDING, HandoffBlockReason.CAPTCHA,
+                "https://jobs.lever.co/example", UUID.randomUUID(),
+                Instant.now().plusSeconds(900), null, null, Instant.now(), Instant.now()
+        );
+        when(handoffService.findSessionAnyOwner(sessionId)).thenReturn(Optional.of(record));
         when(handoffService.confirmHandoffCompletion(profileId, sessionId)).thenReturn(false);
 
         ResponseEntity<?> response = controller.confirmCompletion(sessionId);
@@ -74,10 +105,43 @@ class HandoffControllerTest {
     @Test
     @DisplayName("cancelHandoff returns 200 on successful cancel")
     void testCancelHandoffSuccess() {
+        HandoffSessionRecord record = new HandoffSessionRecord(
+                sessionId, planId, applicationId, profileId,
+                HandoffStatus.PENDING, HandoffBlockReason.CAPTCHA,
+                "https://jobs.lever.co/example", UUID.randomUUID(),
+                Instant.now().plusSeconds(900), null, null, Instant.now(), Instant.now()
+        );
+        when(handoffService.findSessionAnyOwner(sessionId)).thenReturn(Optional.of(record));
         when(handoffService.cancelHandoff(profileId, sessionId)).thenReturn(true);
 
         ResponseEntity<?> response = controller.cancelHandoff(sessionId);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
+    @DisplayName("initiateHandoff with worker token resolves profileId and creates session")
+    void testInitiateHandoffWorkerToken() {
+        when(ownerContext.profileIdOrNull()).thenReturn(null);
+        when(ownerContext.isWorkerRequest()).thenReturn(true);
+        when(handoffService.resolveProfileId(planId, applicationId)).thenReturn(Optional.of(profileId));
+
+        HandoffSessionRecord record = new HandoffSessionRecord(
+                sessionId, planId, applicationId, profileId,
+                HandoffStatus.PENDING, HandoffBlockReason.CAPTCHA,
+                "https://jobs.lever.co/example", UUID.randomUUID(),
+                Instant.now().plusSeconds(900), null, null, Instant.now(), Instant.now()
+        );
+        when(handoffService.initiateHandoff(eq(profileId), eq(planId), eq(applicationId), any(), any(), eq(15)))
+                .thenReturn(record);
+
+        var req = new HandoffController.InitiateRequest(
+                planId, applicationId, "LEVER", "https://jobs.lever.co/example",
+                "LEVER_CAPTCHA_PRESENT", "evidence/screenshot.png", 15
+        );
+        ResponseEntity<?> response = controller.initiateHandoff(req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(response.getBody()).isEqualTo(record);
     }
 }

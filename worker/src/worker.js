@@ -4,6 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { BrowserWorker } from './browser_worker.js';
 import { computePlanOutcome } from './outcome.js';
+import { initiateHandoffAndWait, isHandoffEligibleError } from './handoff.js';
 
 const args = new Map();
 for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i], process.argv[i + 1] ?? true);
@@ -410,6 +411,47 @@ if (planFile) {
         // RUNNING so the backend's stale-plan sweeper reclaims and re-executes
         // it (completed steps are skipped; no plan contains a submit step).
         console.error(JSON.stringify({ type: 'PLAN_DEFERRED_ON_SHUTDOWN', planId }));
+      } else if (isHandoffEligibleError(error) && pollUrl && planId) {
+        // Phase 3: Pause execution and initiate candidate handoff for security challenges
+        console.log(JSON.stringify({ type: 'HANDOFF_INITIATING', planId, reason: error.reason || error.message }));
+        const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
+        const backendBase = new URL(apiRoot).origin;
+        try {
+          const handoffResult = await initiateHandoffAndWait({
+            plan,
+            error,
+            backendBase,
+            authHeaders,
+            sendHeartbeat,
+            runtime,
+            pollIntervalMs: 5000,
+            timeoutMs: 15 * 60 * 1000,
+          });
+
+          if (handoffResult.resumed) {
+            console.log(JSON.stringify({ type: 'HANDOFF_RESUMED', planId, sessionId: handoffResult.sessionId }));
+            // Candidate completed challenge in browser; plan is set to READY_TO_SUBMIT
+          } else {
+            console.log(JSON.stringify({ type: 'HANDOFF_ABORTED', planId, status: handoffResult.status, reason: handoffResult.reason }));
+            const outcome = handoffResult.status === 'EXPIRED' ? 'FAILED' : 'BLOCKED_ANTI_BOT';
+            const errorResult = [{
+              type: 'PLAN_ERROR',
+              outcome,
+              reason: handoffResult.reason || 'HANDOFF_' + handoffResult.status,
+              message: `Handoff session ${handoffResult.status}: ${handoffResult.reason || 'candidate did not complete'}`,
+            }];
+            await reportOutcome(planId, outcome, `Handoff ${handoffResult.status}`, errorResult).catch(() => {});
+          }
+        } catch (handoffErr) {
+          console.error(JSON.stringify({ type: 'HANDOFF_ERROR', planId, error: handoffErr.message }));
+          const errorResult = [{
+            type: 'PLAN_ERROR',
+            outcome: 'BLOCKED_ANTI_BOT',
+            reason: error.reason || null,
+            message: String(error.message),
+          }];
+          await reportOutcome(planId, 'BLOCKED_ANTI_BOT', String(error.message), errorResult).catch(() => {});
+        }
       } else {
         const outcome = error.name === 'HardStopError'
           // MFA_REQUIRED (Phase 7: Workday) is the same bucket as CAPTCHA/

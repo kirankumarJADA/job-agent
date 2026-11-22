@@ -73,6 +73,28 @@ public class AtsHandoffService {
         return handoffRepository.findActiveByPlan(ownerProfileId, planId);
     }
 
+    public Optional<HandoffSessionRecord> findSessionAnyOwner(UUID sessionId) {
+        return handoffRepository.findByIdAnyOwner(sessionId);
+    }
+
+    public Optional<UUID> resolveProfileId(UUID planId, UUID applicationId) {
+        if (planId != null) {
+            Optional<UUID> owner = planRepository.ownerOfPlan(planId);
+            if (owner.isPresent()) return owner;
+        }
+        if (applicationId != null) {
+            return handoffRepository.findProfileIdForApplication(applicationId);
+        }
+        return Optional.empty();
+    }
+
+    public boolean isApplicationOwnedBy(UUID applicationId, UUID profileId) {
+        if (applicationId == null || profileId == null) return false;
+        return handoffRepository.findProfileIdForApplication(applicationId)
+                .map(profileId::equals)
+                .orElse(false);
+    }
+
     /**
      * Completes a handoff after candidate interaction and explicit verification confirmation.
      * Atomically transitions the session to COMPLETED and sets plan status to READY_TO_SUBMIT.

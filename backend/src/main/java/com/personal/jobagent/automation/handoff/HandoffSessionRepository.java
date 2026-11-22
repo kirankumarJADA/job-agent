@@ -100,12 +100,27 @@ public class HandoffSessionRepository {
         return jdbcTemplate.query(sql, rowMapper, sessionId).stream().findFirst();
     }
 
+    public Optional<HandoffSessionRecord> findByIdAnyOwner(UUID sessionId) {
+        if (sessionId == null) {
+            return Optional.empty();
+        }
+        String sql = "SELECT " + SELECT_COLUMNS + " FROM automation_handoff_sessions WHERE id = ?";
+        return jdbcTemplate.query(sql, rowMapper, sessionId).stream().findFirst();
+    }
+
+    public Optional<UUID> findProfileIdForApplication(UUID applicationId) {
+        if (applicationId == null) {
+            return Optional.empty();
+        }
+        String sql = "SELECT profile_id FROM applications WHERE id = ?";
+        return jdbcTemplate.query(sql, (rs, rowNum) -> rs.getObject("profile_id", UUID.class), applicationId).stream().findFirst();
+    }
+
     public Optional<HandoffSessionRecord> findActiveByApplication(UUID ownerProfileId, UUID applicationId) {
         if (applicationId == null) {
             return Optional.empty();
         }
-        String sql = """
-                SELECT """ + SELECT_COLUMNS + """
+        String sql = "SELECT " + SELECT_COLUMNS + """
                 FROM automation_handoff_sessions
                 WHERE application_id = ?
                   AND status = 'PENDING'
@@ -122,8 +137,7 @@ public class HandoffSessionRepository {
         if (planId == null) {
             return Optional.empty();
         }
-        String sql = """
-                SELECT """ + SELECT_COLUMNS + """
+        String sql = "SELECT " + SELECT_COLUMNS + """
                 FROM automation_handoff_sessions
                 WHERE plan_id = ?
                   AND status = 'PENDING'
