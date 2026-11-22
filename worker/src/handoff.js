@@ -53,28 +53,24 @@ export function normalizeHandoffReason(error, planType) {
 }
 
 /**
- * Initiates handoff session and waits for candidate confirmation or timeout.
+ * Option B: Initiates candidate handoff session and returns immediately.
+ * The headless browser context is closed; control is transferred to the human candidate.
+ * The candidate completes and submits the application directly on the employer site.
  *
  * @param {object} options
  * @param {object} options.plan The automation plan being executed
  * @param {Error} options.error The hard stop error that triggered the handoff
  * @param {string} options.backendBase Base URL for Robin API
- * @param {Function} options.authHeaders Function returning { authorization: ... }
- * @param {Function} options.sendHeartbeat Heartbeat callback
- * @param {object} options.runtime Worker runtime state for cancellation
- * @param {number} [options.pollIntervalMs=5000] Interval between handoff status polls
- * @param {number} [options.timeoutMs=900000] Maximum wait time (default 15 minutes)
+ * @param {Function} [options.authHeaders] Function returning { authorization: ... }
+ * @param {number} [options.timeoutMs=900000] Maximum TTL for the handoff session
  * @param {Function} [options.fetchImpl=fetch] Custom fetch for testing
- * @returns {Promise<{resumed: boolean, status: string, sessionId?: string, reason?: string}>}
+ * @returns {Promise<{initiated: boolean, sessionId: string, status: string, blockReason: string}>}
  */
-export async function initiateHandoffAndWait({
+export async function initiateHandoff({
   plan,
   error,
   backendBase,
   authHeaders,
-  sendHeartbeat,
-  runtime,
-  pollIntervalMs = 5000,
   timeoutMs = 15 * 60 * 1000,
   fetchImpl = fetch,
 }) {
@@ -107,7 +103,53 @@ export async function initiateHandoffAndWait({
   }
 
   const session = await initResponse.json();
-  const sessionId = session.id;
+  return {
+    initiated: true,
+    sessionId: session.id,
+    status: session.status || HandoffStatus.PENDING,
+    blockReason,
+  };
+}
+
+/**
+ * Initiates handoff session and waits for candidate confirmation or timeout.
+ * Used when worker caller explicitly monitors session resolution.
+ *
+ * @param {object} options
+ * @param {object} options.plan The automation plan being executed
+ * @param {Error} options.error The hard stop error that triggered the handoff
+ * @param {string} options.backendBase Base URL for Robin API
+ * @param {Function} options.authHeaders Function returning { authorization: ... }
+ * @param {Function} options.sendHeartbeat Heartbeat callback
+ * @param {object} options.runtime Worker runtime state for cancellation
+ * @param {number} [options.pollIntervalMs=5000] Interval between handoff status polls
+ * @param {number} [options.timeoutMs=900000] Maximum wait time (default 15 minutes)
+ * @param {Function} [options.fetchImpl=fetch] Custom fetch for testing
+ * @returns {Promise<{resumed: boolean, status: string, sessionId?: string, reason?: string}>}
+ */
+export async function initiateHandoffAndWait({
+  plan,
+  error,
+  backendBase,
+  authHeaders,
+  sendHeartbeat,
+  runtime,
+  pollIntervalMs = 5000,
+  timeoutMs = 15 * 60 * 1000,
+  fetchImpl = fetch,
+}) {
+  const initResult = await initiateHandoff({
+    plan,
+    error,
+    backendBase,
+    authHeaders,
+    timeoutMs,
+    fetchImpl,
+  });
+
+  const planId = plan.planId;
+  const applicationId = plan.correlation?.applicationId;
+  const sessionId = initResult.sessionId;
 
   // Poll loop: wait for candidate action while continuing heartbeats
   const statusUrl = `${backendBase.replace(/\/$/, '')}/api/v1/handoff/applications/${encodeURIComponent(applicationId)}`;
@@ -144,7 +186,7 @@ export async function initiateHandoffAndWait({
         const planRes = await fetchImpl(planUrl, { headers: authHeaders ? authHeaders() : {} });
         if (planRes.ok) {
           const planData = await planRes.json();
-          if (planData.status === 'READY_TO_SUBMIT') {
+          if (planData.status === 'READY_TO_SUBMIT' || planData.status === 'COMPLETED') {
             return { resumed: true, status: HandoffStatus.COMPLETED, sessionId };
           }
           if (planData.status === 'FAILED' || planData.status === 'ABANDONED') {

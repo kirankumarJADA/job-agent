@@ -60,9 +60,16 @@ public class HandoffSessionRepository {
 
     /**
      * Creates and persists a new short-lived handoff session for an application.
+     * Idempotent: If an active, non-expired session already exists for this plan, returns it.
      */
     public HandoffSessionRecord createSession(UUID ownerProfileId, UUID planId, UUID applicationId,
                                               String targetUrl, HandoffBlockReason blockReason, int ttlMinutes) {
+        // Idempotency check: if an active non-expired session already exists for this plan, return it
+        Optional<HandoffSessionRecord> existing = findActiveByPlan(ownerProfileId, planId);
+        if (existing.isPresent()) {
+            return existing.get();
+        }
+
         UUID sessionId = UuidV7.generate();
         UUID handoffToken = UUID.randomUUID();
         int safeTtl = Math.max(5, Math.min(ttlMinutes, 60));
@@ -206,5 +213,32 @@ public class HandoffSessionRepository {
                 WHERE status = 'PENDING'
                   AND expires_at <= clock_timestamp()
                 """);
+    }
+
+    public Optional<String> getApplicationStatus(UUID applicationId) {
+        if (applicationId == null) {
+            return Optional.empty();
+        }
+        return jdbcTemplate.query("SELECT status FROM applications WHERE id = ?",
+                (rs, rowNum) -> rs.getString("status"), applicationId).stream().findFirst();
+    }
+
+    public void markApplicationSubmittedDirectly(UUID applicationId, UUID ownerProfileId) {
+        if (applicationId == null) {
+            return;
+        }
+        String sql = """
+                UPDATE applications
+                SET status = 'APPLICATION_SUBMITTED',
+                    submitted_at = clock_timestamp(),
+                    updated_at = clock_timestamp()
+                WHERE id = ?
+                """;
+        if (ownerProfileId != null) {
+            sql += " AND profile_id = ?";
+            jdbcTemplate.update(sql, applicationId, ownerProfileId);
+        } else {
+            jdbcTemplate.update(sql, applicationId);
+        }
     }
 }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   isHandoffEligibleError,
   normalizeHandoffReason,
+  initiateHandoff,
   initiateHandoffAndWait,
   HandoffStatus,
 } from '../src/handoff.js';
@@ -185,4 +186,46 @@ test('initiateHandoffAndWait handles session timeout and returns EXPIRED', async
   assert.equal(result.resumed, false);
   assert.equal(result.status, HandoffStatus.EXPIRED);
   assert.equal(result.reason, 'TIMEOUT');
+});
+
+test('Option B: initiateHandoff immediately posts to backend and returns session without blocking', async () => {
+  const plan = {
+    planId: 'test-plan-opt-b',
+    planType: 'WORKDAY',
+    targetUrl: 'https://workday.com/company/apply',
+    correlation: { applicationId: 'test-app-opt-b' },
+  };
+  const error = { reason: 'WORKDAY_MFA_REQUIRED' };
+
+  let initiateCalled = false;
+  let sentBody = null;
+
+  const mockFetch = async (url, options) => {
+    if (url.endsWith('/api/v1/handoff/initiate')) {
+      initiateCalled = true;
+      sentBody = JSON.parse(options.body);
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({ id: 'session-opt-b-1', status: 'PENDING' }),
+      };
+    }
+    throw new Error('Unexpected URL: ' + url);
+  };
+
+  const result = await initiateHandoff({
+    plan,
+    error,
+    backendBase: 'http://localhost:8080',
+    authHeaders: () => ({ authorization: 'Bearer test-worker-token' }),
+    fetchImpl: mockFetch,
+  });
+
+  assert.equal(initiateCalled, true);
+  assert.equal(result.initiated, true);
+  assert.equal(result.sessionId, 'session-opt-b-1');
+  assert.equal(result.status, 'PENDING');
+  assert.equal(result.blockReason, 'WORKDAY_MFA_REQUIRED');
+  assert.equal(sentBody.atsPlatform, 'WORKDAY');
+  assert.equal(sentBody.blockReason, 'WORKDAY_MFA_REQUIRED');
 });

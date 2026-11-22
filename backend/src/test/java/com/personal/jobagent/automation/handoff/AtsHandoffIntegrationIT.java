@@ -67,8 +67,8 @@ class AtsHandoffIntegrationIT {
     @Autowired private AutomationPlanRepository planRepository;
     @Autowired private HandoffSessionRepository handoffRepository;
 
-    private MockHttpSession sessionA;
-    private MockHttpSession sessionB;
+    private static MockHttpSession sessionA;
+    private static MockHttpSession sessionB;
 
     @BeforeEach
     void setUpUsers() throws Exception {
@@ -197,6 +197,10 @@ class AtsHandoffIntegrationIT {
         var updatedPlan = planRepository.findById(seeded.planId());
         assertThat(updatedPlan).isPresent();
         assertThat(updatedPlan.get().status()).isEqualTo("READY_TO_SUBMIT");
+
+        // 5. Verify application transitioned to APPLICATION_SUBMITTED with candidate attribution (Option B)
+        String appStatus = jdbc.queryForObject("SELECT status FROM applications WHERE id = ?", String.class, seeded.applicationId());
+        assertThat(appStatus).isEqualTo("APPLICATION_SUBMITTED");
     }
 
     @Test
@@ -392,5 +396,150 @@ class AtsHandoffIntegrationIT {
                 .andExpect(status().isOk());
 
         assertThat(planRepository.findById(seeded.planId()).get().status()).isEqualTo("READY_TO_SUBMIT");
+    }
+
+    @Test
+    @Order(8)
+    @DisplayName("Unauthenticated initiate is rejected with 401 Unauthorized or 403 Forbidden")
+    void testUnauthenticatedInitiateRejected() throws Exception {
+        var initiateReq = new HandoffController.InitiateRequest(
+                UUID.randomUUID(), UUID.randomUUID(), "LEVER",
+                "https://jobs.lever.co/org/unauth", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+
+        mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(initiateReq)))
+                .andExpect(result -> assertThat(result.getResponse().getStatus()).isIn(401, 403));
+    }
+
+    @Test
+    @Order(9)
+    @DisplayName("Competing worker cannot claim plan in HANDOFF_REQUIRED status")
+    void testCompetingWorkerCannotClaimHandoffRequiredPlan() throws Exception {
+        SeededApplication seeded = seedPlan(PROFILE_A, "LEVER", "lever-competing-1");
+
+        // Put plan into HANDOFF_REQUIRED via handoff initiate
+        var initiateReq = new HandoffController.InitiateRequest(
+                seeded.planId(), seeded.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-competing-1", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+
+        mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(initiateReq)))
+                .andExpect(status().isCreated());
+
+        // Competing worker queries claim-next
+        // Verify claimNext only claims PREPARED, never HANDOFF_REQUIRED
+        var claimed = planRepository.claimNext();
+        if (claimed.isPresent()) {
+            assertThat(claimed.get().id()).isNotEqualTo(seeded.planId());
+        }
+
+        // Plan remains in HANDOFF_REQUIRED
+        assertThat(planRepository.findById(seeded.planId()).get().status()).isEqualTo("HANDOFF_REQUIRED");
+    }
+
+    @Test
+    @Order(10)
+    @DisplayName("Session expiry sweeper transitions stale PENDING sessions to EXPIRED")
+    void testExpireStaleSessionsSweeper() throws Exception {
+        SeededApplication seeded = seedPlan(PROFILE_A, "LEVER", "lever-sweep-1");
+
+        var initiateReq = new HandoffController.InitiateRequest(
+                seeded.planId(), seeded.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-sweep-1", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+
+        MvcResult initResult = mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(initiateReq)))
+                .andExpect(status().isCreated())
+                .andReturn();
+
+        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+
+        // Force session to past
+        jdbc.update("UPDATE automation_handoff_sessions SET expires_at = clock_timestamp() - interval '2 minutes' WHERE id = ?", session.id());
+
+        // Run expiry sweep
+        int expired = handoffRepository.expireStaleSessions();
+        assertThat(expired).isGreaterThanOrEqualTo(1);
+
+        // Verify status in DB is now EXPIRED
+        var updated = handoffRepository.findById(PROFILE_A, session.id());
+        assertThat(updated).isPresent();
+        assertThat(updated.get().status()).isEqualTo(HandoffStatus.EXPIRED);
+    }
+
+    @Test
+    @Order(11)
+    @DisplayName("Idempotent initiation: duplicate initiate for same plan returns existing active session")
+    void testIdempotentInitiateReturnsExistingSession() throws Exception {
+        SeededApplication seeded = seedPlan(PROFILE_A, "WORKDAY", "workday-idempotent-1");
+
+        var initiateReq = new HandoffController.InitiateRequest(
+                seeded.planId(), seeded.applicationId(), "WORKDAY",
+                "https://jobs.workday.co/org/workday-idempotent-1", "WORKDAY_MFA_REQUIRED", null, 15
+        );
+
+        // First call
+        MvcResult firstResult = mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(initiateReq)))
+                .andExpect(status().isCreated())
+                .andReturn();
+        HandoffSessionRecord session1 = json.readValue(firstResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+
+        // Second duplicate call
+        MvcResult secondResult = mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(initiateReq)))
+                .andExpect(status().isCreated())
+                .andReturn();
+        HandoffSessionRecord session2 = json.readValue(secondResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+
+        // Must return identical session ID without recreating
+        assertThat(session2.id()).isEqualTo(session1.id());
+        assertThat(session2.handoffToken()).isEqualTo(session1.handoffToken());
+    }
+
+    @Test
+    @Order(12)
+    @DisplayName("Application status accurately reflects external completion vs automated completion")
+    void testApplicationStatusReflectsExternalCompletion() throws Exception {
+        SeededApplication seeded = seedPlan(PROFILE_A, "LEVER", "lever-ext-compare-1");
+
+        // Verify initial state
+        String initialStatus = jdbc.queryForObject("SELECT status FROM applications WHERE id = ?", String.class, seeded.applicationId());
+        assertThat(initialStatus).isEqualTo("READY_TO_APPLY");
+
+        // Initiate handoff
+        var initiateReq = new HandoffController.InitiateRequest(
+                seeded.planId(), seeded.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-ext-compare-1", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+        MvcResult initResult = mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(initiateReq)))
+                .andExpect(status().isCreated())
+                .andReturn();
+        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+
+        // Complete handoff via candidate session
+        mockMvc.perform(post("/api/v1/handoff/{id}/complete", session.id())
+                        .session(sessionA).with(csrf()))
+                .andExpect(status().isOk());
+
+        // Verify application status is APPLICATION_SUBMITTED with submitted_at timestamp
+        var appRow = jdbc.queryForMap("SELECT status, submitted_at FROM applications WHERE id = ?", seeded.applicationId());
+        assertThat(appRow.get("status")).isEqualTo("APPLICATION_SUBMITTED");
+        assertThat(appRow.get("submitted_at")).isNotNull();
     }
 }

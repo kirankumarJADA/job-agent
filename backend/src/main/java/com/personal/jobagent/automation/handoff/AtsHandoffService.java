@@ -1,5 +1,6 @@
 package com.personal.jobagent.automation.handoff;
 
+import com.personal.jobagent.application.ApplicationStatusService;
 import com.personal.jobagent.audit.AuditEntry;
 import com.personal.jobagent.audit.AuditLogWriter;
 import com.personal.jobagent.automation.AutomationPlanRepository;
@@ -9,6 +10,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -25,16 +27,26 @@ public class AtsHandoffService {
     private final AutomationPlanRepository planRepository;
     private final AuditLogWriter audit;
     private final TransactionTemplate transactionTemplate;
+    private final ApplicationStatusService applicationStatus;
 
     @Autowired
     public AtsHandoffService(HandoffSessionRepository handoffRepository,
                              AutomationPlanRepository planRepository,
                              @Autowired(required = false) AuditLogWriter audit,
-                             @Autowired(required = false) TransactionTemplate transactionTemplate) {
+                             @Autowired(required = false) TransactionTemplate transactionTemplate,
+                             @Autowired(required = false) ApplicationStatusService applicationStatus) {
         this.handoffRepository = handoffRepository;
         this.planRepository = planRepository;
         this.audit = audit;
         this.transactionTemplate = transactionTemplate;
+        this.applicationStatus = applicationStatus;
+    }
+
+    public AtsHandoffService(HandoffSessionRepository handoffRepository,
+                             AutomationPlanRepository planRepository,
+                             AuditLogWriter audit,
+                             TransactionTemplate transactionTemplate) {
+        this(handoffRepository, planRepository, audit, transactionTemplate, null);
     }
 
     /**
@@ -132,6 +144,10 @@ public class AtsHandoffService {
 
         log.info("Handoff session {} completed by candidate. Plan {} set to READY_TO_SUBMIT", sessionId, session.planId());
 
+        // Under Option B (External Human Completion):
+        // Record candidate external submission on the application record
+        recordExternalSubmission(ownerProfileId, session.applicationId(), sessionId, session.blockReason().name());
+
         if (audit != null) {
             audit.write(new AuditEntry(
                     "CANDIDATE",
@@ -139,13 +155,45 @@ public class AtsHandoffService {
                     "AUTOMATION_PLAN",
                     session.planId(),
                     session.status().name(),
-                    "COMPLETED",
+                    Map.of(
+                            "mode", "EXTERNAL_COMPLETION",
+                            "submissionType", "CANDIDATE_DIRECT",
+                            "blockReason", session.blockReason().name(),
+                            "sessionId", sessionId.toString()
+                    ),
                     null,
                     null
             ));
         }
 
         return true;
+    }
+
+    private void recordExternalSubmission(UUID ownerProfileId, UUID applicationId, UUID sessionId, String reason) {
+        if (applicationId == null) {
+            return;
+        }
+        try {
+            if (applicationStatus != null && ownerProfileId != null) {
+                String currentStatus = handoffRepository.getApplicationStatus(applicationId).orElse(null);
+                if ("READY_TO_APPLY".equals(currentStatus)) {
+                    applicationStatus.apply(ownerProfileId, applicationId, "APPLICATION_STARTED",
+                            "handoff.start:" + sessionId, "candidate",
+                            Map.of("sessionId", sessionId.toString(), "reason", reason));
+                }
+                applicationStatus.apply(ownerProfileId, applicationId, "APPLICATION_SUBMITTED",
+                        "handoff.external_submit:" + sessionId, "candidate",
+                        Map.of("sessionId", sessionId.toString(), "mode", "EXTERNAL_COMPLETION", "reason", reason));
+            }
+            handoffRepository.markApplicationSubmittedDirectly(applicationId, ownerProfileId);
+        } catch (Exception e) {
+            log.warn("Could not transition application status via ApplicationStatusService for session {}: {}", sessionId, e.getMessage());
+            handoffRepository.markApplicationSubmittedDirectly(applicationId, ownerProfileId);
+        }
+    }
+
+    public int expireStaleSessions() {
+        return handoffRepository.expireStaleSessions();
     }
 
     /**

@@ -75,6 +75,7 @@ class AtsHandoffServiceTest {
 
         assertThat(result).isTrue();
         verify(handoffRepository).completeSession(profileId, sessionId);
+        verify(handoffRepository).markApplicationSubmittedDirectly(applicationId, profileId);
         verify(planRepository).transition(planId, "HANDOFF_REQUIRED", "READY_TO_SUBMIT");
         verify(audit).write(argThat(entry -> "ATS_HANDOFF_COMPLETED".equals(entry.action())));
     }
