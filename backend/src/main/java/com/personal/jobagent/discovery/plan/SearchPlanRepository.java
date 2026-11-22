@@ -13,6 +13,7 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -120,18 +121,98 @@ public class SearchPlanRepository {
                 UPDATE search_plans
                 SET last_execution_status = 'RUNNING',
                     execution_owner_token = ?,
-                    execution_lease_expires_at = now() + (INTERVAL '1 millisecond' * ?),
-                    updated_at = now()
+                    execution_lease_expires_at = clock_timestamp() + (INTERVAL '1 millisecond' * ?),
+                    updated_at = clock_timestamp()
                 WHERE id = ?
                   AND active = true
                   AND (
                       last_execution_status IS NULL
                       OR last_execution_status <> 'RUNNING'
                       OR execution_lease_expires_at IS NULL
-                      OR execution_lease_expires_at < now()
+                      OR execution_lease_expires_at < clock_timestamp()
                   )
                 """, ownerToken, duration, planId);
         return updated > 0;
+    }
+
+    /**
+     * Atomically renews an execution lease using its exact execution owner token.
+     * Fails if the token is no longer owner or if the lease has already expired.
+     *
+     * @param planId plan identifier
+     * @param ownerToken worker owner token
+     * @param leaseDurationMs new lease extension duration from clock_timestamp()
+     * @return true if renewed successfully; false if lease expired or ownership lost
+     */
+    public boolean renewExecutionLease(UUID planId, UUID ownerToken, long leaseDurationMs) {
+        if (planId == null || ownerToken == null) {
+            return false;
+        }
+        long duration = leaseDurationMs > 0 ? leaseDurationMs : 60000L;
+        int updated = jdbcTemplate.update("""
+                UPDATE search_plans
+                SET execution_lease_expires_at = clock_timestamp() + (INTERVAL '1 millisecond' * ?),
+                    updated_at = clock_timestamp()
+                WHERE id = ?
+                  AND execution_owner_token = ?
+                  AND execution_lease_expires_at IS NOT NULL
+                  AND execution_lease_expires_at > clock_timestamp()
+                  AND active = true
+                  AND last_execution_status = 'RUNNING'
+                """, duration, planId, ownerToken);
+        return updated > 0;
+    }
+
+    /**
+     * Atomically verifies lease ownership at the database write boundary.
+     * Locks the search_plans row with FOR NO KEY UPDATE to prevent concurrent
+     * lease takeover while the write transaction proceeds.
+     *
+     * <p>If planId or ownerToken is null, this is a non-search-plan operation and returns safely.</p>
+     *
+     * @param planId plan identifier (nullable)
+     * @param ownerToken worker owner token (nullable)
+     * @throws ExecutionFencedException if the lease expired, was overwritten, or plan is not running
+     */
+    public void assertLeaseOwnership(UUID planId, UUID ownerToken) {
+        if (planId == null || ownerToken == null) {
+            return;
+        }
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT 1 FROM search_plans
+                WHERE id = ?
+                  AND execution_owner_token = ?
+                  AND execution_lease_expires_at IS NOT NULL
+                  AND execution_lease_expires_at > clock_timestamp()
+                  AND last_execution_status = 'RUNNING'
+                FOR NO KEY UPDATE
+                """, planId, ownerToken);
+        if (rows.isEmpty()) {
+            throw new ExecutionFencedException("Execution lease lost or expired for search plan " + planId + " and token " + ownerToken);
+        }
+    }
+
+    /**
+     * Non-locking check to determine if the worker is currently the active lease owner.
+     * Suitable for in-memory cooperative pre-flight checks before external I/O.
+     *
+     * @param planId plan identifier
+     * @param ownerToken worker owner token
+     * @return true if currently owner and lease is unexpired
+     */
+    public boolean isLeaseOwner(UUID planId, UUID ownerToken) {
+        if (planId == null || ownerToken == null) {
+            return false;
+        }
+        Integer count = jdbcTemplate.queryForObject("""
+                SELECT count(*) FROM search_plans
+                WHERE id = ?
+                  AND execution_owner_token = ?
+                  AND execution_lease_expires_at IS NOT NULL
+                  AND execution_lease_expires_at > clock_timestamp()
+                  AND last_execution_status = 'RUNNING'
+                """, Integer.class, planId, ownerToken);
+        return count != null && count > 0;
     }
 
     /**

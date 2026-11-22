@@ -2,6 +2,8 @@ package com.personal.jobagent.discovery;
 
 import com.personal.jobagent.common.MaintenanceModeService;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.discovery.plan.ExecutionFencedException;
+import com.personal.jobagent.discovery.plan.SearchPlanRepository;
 import com.personal.jobagent.discovery.platform.JobIdentity;
 import com.personal.jobagent.events.OutboxWriter;
 import com.personal.jobagent.notifications.NotificationEvents;
@@ -32,18 +34,27 @@ public class JobDiscoveryService {
     private final JdbcTemplate jdbcTemplate;
     private final OutboxWriter outboxWriter;
     private final MaintenanceModeService maintenanceMode;
+    private final SearchPlanRepository searchPlanRepository;
 
     @Autowired
     public JobDiscoveryService(JdbcTemplate jdbcTemplate,
                                OutboxWriter outboxWriter,
-                               @Autowired(required = false) MaintenanceModeService maintenanceMode) {
+                               @Autowired(required = false) MaintenanceModeService maintenanceMode,
+                               @Autowired(required = false) SearchPlanRepository searchPlanRepository) {
         this.jdbcTemplate = jdbcTemplate;
         this.outboxWriter = outboxWriter;
         this.maintenanceMode = maintenanceMode != null ? maintenanceMode : new MaintenanceModeService(false);
+        this.searchPlanRepository = searchPlanRepository;
+    }
+
+    public JobDiscoveryService(JdbcTemplate jdbcTemplate,
+                               OutboxWriter outboxWriter,
+                               MaintenanceModeService maintenanceMode) {
+        this(jdbcTemplate, outboxWriter, maintenanceMode, null);
     }
 
     public JobDiscoveryService(JdbcTemplate jdbcTemplate, OutboxWriter outboxWriter) {
-        this(jdbcTemplate, outboxWriter, new MaintenanceModeService(false));
+        this(jdbcTemplate, outboxWriter, new MaintenanceModeService(false), null);
     }
 
     public record IngestJobCommand(
@@ -134,6 +145,20 @@ public class JobDiscoveryService {
      */
     @Transactional
     public IngestResult ingestJob(IngestJobCommand cmd) {
+        return ingestJob(cmd, null, null);
+    }
+
+    /**
+     * Persists one discovered job under optional search plan execution lease fencing.
+     * When searchPlanId and executionOwnerToken are supplied, atomically verifies that
+     * the worker holds an active lease via FOR NO KEY UPDATE lock on search_plans before
+     * performing any job, observation, or outbox writes.
+     */
+    @Transactional
+    public IngestResult ingestJob(IngestJobCommand cmd, UUID searchPlanId, UUID executionOwnerToken) {
+        if (searchPlanId != null && executionOwnerToken != null && searchPlanRepository != null) {
+            searchPlanRepository.assertLeaseOwnership(searchPlanId, executionOwnerToken);
+        }
         SourceMeta meta = sourceMeta(cmd.sourceId());
         String provider = meta != null ? meta.kind() : null;
         String org = meta != null ? meta.orgIdentifier() : null;

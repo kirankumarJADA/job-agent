@@ -10,6 +10,7 @@ import com.personal.jobagent.preferences.PreferenceSetRecord;
 import com.personal.jobagent.preferences.PreferenceSetRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -17,21 +18,25 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Phase 2A Hardened: Search Plan Execution Coordinator.
+ * Phase 2B Hardened: Search Plan Execution Coordinator with Lease Renewal and Side-Effect Fencing.
  * <p>
  * Orchestrates candidate-scoped discovery search plans:
  * 1. Expands plan intents into concrete facets via {@link SearchPlanQueryExpander}.
  * 2. Enforces mutual exclusion via database-backed execution leases with owner tokens and fencing protection.
- * 3. Routes query parameters to query-capable providers (Adzuna) and harvests company boards (Greenhouse/Lever).
- * 4. Executes provider discovery bounded by per-plan result limits ({@code maxResultsPerRun}).
- * 5. Handles provider failures, timeouts, and rate limits gracefully with fail-closed semantics.
- * 6. Triggers immediate {@link JobMatchService} evaluation and authoritative multi-stage reranking on discovered jobs.
- * 7. Records execution outcome, errors, and metrics in {@code search_plans} with fencing protection.
+ * 3. Periodically renews execution lease via background heartbeat, terminating processing if ownership is lost.
+ * 4. Routes query parameters to query-capable providers (Adzuna) and harvests company boards (Greenhouse/Lever).
+ * 5. Executes provider discovery bounded by per-plan result limits ({@code maxResultsPerRun}).
+ * 6. Atomically fences all side-effects (jobs ingestion, job_matches persistence, outbox notification emissions).
+ * 7. Handles provider failures, timeouts, and rate limits gracefully with fail-closed semantics.
+ * 8. Triggers immediate {@link JobMatchService} evaluation and authoritative multi-stage reranking on discovered jobs.
+ * 9. Records execution outcome, errors, and metrics in {@code search_plans} with fencing protection.
  */
 @Service
-public class SearchPlanExecutionCoordinator {
+public class SearchPlanExecutionCoordinator implements DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(SearchPlanExecutionCoordinator.class);
 
@@ -72,6 +77,14 @@ public class SearchPlanExecutionCoordinator {
     private final JdbcTemplate jdbcTemplate;
     private final MaintenanceModeService maintenanceMode;
     private final long perSourceTimeoutMs;
+    private final long defaultLeaseDurationMs;
+    private final long defaultHeartbeatIntervalMs;
+
+    private final ScheduledExecutorService heartbeatExecutor = Executors.newScheduledThreadPool(2, r -> {
+        Thread t = new Thread(r, "search-plan-heartbeat");
+        t.setDaemon(true);
+        return t;
+    });
 
     @Autowired
     public SearchPlanExecutionCoordinator(SearchPlanRepository repository,
@@ -82,6 +95,8 @@ public class SearchPlanExecutionCoordinator {
                                           PreferenceSetRepository preferenceSetRepository,
                                           JdbcTemplate jdbcTemplate,
                                           @Value("${app.discovery.search-plan.per-source-timeout-ms:45000}") long perSourceTimeoutMs,
+                                          @Value("${app.discovery.search-plan.lease-duration-ms:60000}") long defaultLeaseDurationMs,
+                                          @Value("${app.discovery.search-plan.heartbeat-interval-ms:15000}") long defaultHeartbeatIntervalMs,
                                           MaintenanceModeService maintenanceMode) {
         this.repository = repository;
         this.queryExpander = queryExpander;
@@ -91,7 +106,28 @@ public class SearchPlanExecutionCoordinator {
         this.preferenceSetRepository = preferenceSetRepository;
         this.jdbcTemplate = jdbcTemplate;
         this.perSourceTimeoutMs = perSourceTimeoutMs > 0 ? perSourceTimeoutMs : 45000L;
+        this.defaultLeaseDurationMs = defaultLeaseDurationMs > 0 ? defaultLeaseDurationMs : 60000L;
+        this.defaultHeartbeatIntervalMs = defaultHeartbeatIntervalMs > 0 ? defaultHeartbeatIntervalMs : 15000L;
         this.maintenanceMode = maintenanceMode != null ? maintenanceMode : new MaintenanceModeService(false);
+    }
+
+    public SearchPlanExecutionCoordinator(SearchPlanRepository repository,
+                                          SearchPlanQueryExpander queryExpander,
+                                          BoardDiscoveryService boardDiscoveryService,
+                                          JobRepository jobRepository,
+                                          JobMatchService jobMatchService,
+                                          PreferenceSetRepository preferenceSetRepository,
+                                          JdbcTemplate jdbcTemplate,
+                                          long perSourceTimeoutMs,
+                                          MaintenanceModeService maintenanceMode) {
+        this(repository, queryExpander, boardDiscoveryService, jobRepository,
+                jobMatchService, preferenceSetRepository, jdbcTemplate, perSourceTimeoutMs,
+                60000L, 15000L, maintenanceMode);
+    }
+
+    @Override
+    public void destroy() {
+        heartbeatExecutor.shutdownNow();
     }
 
     /**
@@ -103,6 +139,14 @@ public class SearchPlanExecutionCoordinator {
      * @return ExecutionSummary describing the run outcome
      */
     public ExecutionSummary executePlan(UUID planId, UUID profileId, boolean manual) {
+        return executePlan(planId, profileId, manual, defaultLeaseDurationMs, defaultHeartbeatIntervalMs);
+    }
+
+    /**
+     * Executes a search plan with custom lease timing (primarily for testing and specialized workloads).
+     */
+    public ExecutionSummary executePlan(UUID planId, UUID profileId, boolean manual,
+                                        long leaseDurationMs, long heartbeatIntervalMs) {
         if (planId == null || profileId == null) {
             throw new IllegalArgumentException("planId and profileId cannot be null");
         }
@@ -124,11 +168,12 @@ public class SearchPlanExecutionCoordinator {
 
         // Mutual exclusion: atomically claim database-backed execution lease with owner token and expiry
         UUID ownerToken = UUID.randomUUID();
-        long leaseDurationMs = Math.max(perSourceTimeoutMs * 4, 300000L); // at least 5 minutes lease
+        long effectiveLeaseDuration = leaseDurationMs > 0 ? leaseDurationMs : 60000L;
+        long effectiveHeartbeatInterval = heartbeatIntervalMs > 0 ? heartbeatIntervalMs : 15000L;
 
         boolean claimed;
         try {
-            claimed = repository.claimExecutionLease(planId, ownerToken, leaseDurationMs);
+            claimed = repository.claimExecutionLease(planId, ownerToken, effectiveLeaseDuration);
         } catch (Exception e) {
             log.error("Failed to claim execution lease for search plan {} (failing closed): {}", planId, e.getMessage(), e);
             return ExecutionSummary.skipped(planId, plan.name(), "Could not acquire execution lease: " + e.getMessage());
@@ -139,8 +184,24 @@ public class SearchPlanExecutionCoordinator {
             return ExecutionSummary.skipped(planId, plan.name(), "Another execution is already active for this search plan");
         }
 
+        AtomicBoolean ownershipLost = new AtomicBoolean(false);
+        ScheduledFuture<?> heartbeatFuture = null;
         try {
-            return doExecute(plan, ownerToken);
+            heartbeatFuture = heartbeatExecutor.scheduleWithFixedDelay(() -> {
+                try {
+                    boolean renewed = repository.renewExecutionLease(planId, ownerToken, effectiveLeaseDuration);
+                    if (!renewed) {
+                        log.warn("Search plan {} lease renewal failed for token {} (lease expired or ownership lost)",
+                                planId, ownerToken);
+                        ownershipLost.set(true);
+                    }
+                } catch (Exception e) {
+                    log.error("Exception during lease renewal for search plan {}: {}", planId, e.getMessage());
+                    ownershipLost.set(true);
+                }
+            }, effectiveHeartbeatInterval, effectiveHeartbeatInterval, TimeUnit.MILLISECONDS);
+
+            return doExecute(plan, ownerToken, ownershipLost);
         } catch (Exception e) {
             log.error("Unhandled execution exception for search plan {}: {}", planId, e.getMessage(), e);
             repository.completeExecution(planId, ownerToken, "FAILED", "Execution exception: " + e.getMessage(), 0);
@@ -154,10 +215,14 @@ public class SearchPlanExecutionCoordinator {
                     null,
                     Map.of()
             );
+        } finally {
+            if (heartbeatFuture != null) {
+                heartbeatFuture.cancel(false);
+            }
         }
     }
 
-    private ExecutionSummary doExecute(SearchPlanRecord plan, UUID ownerToken) {
+    private ExecutionSummary doExecute(SearchPlanRecord plan, UUID ownerToken, AtomicBoolean ownershipLost) {
         SearchPlanQueryExpander.ExpandedQueryPlan expanded = queryExpander.expand(plan);
         Map<String, String> facetSupport = evaluateFacetSupport(expanded);
 
@@ -180,6 +245,11 @@ public class SearchPlanExecutionCoordinator {
         Set<UUID> ingestedJobIds = new LinkedHashSet<>();
 
         for (SourceCandidate source : matchingSources) {
+            if (ownershipLost.get()) {
+                notes.add("Aborted provider queries: lease ownership lost or expired");
+                break;
+            }
+
             if (totalIngested >= plan.maxResultsPerRun()) {
                 notes.add("Reached per-plan result cap (" + plan.maxResultsPerRun() + "); ceased further provider queries");
                 break;
@@ -202,9 +272,14 @@ public class SearchPlanExecutionCoordinator {
 
             try {
                 BoardDiscoveryService.SourceRunReport report = boardDiscoveryService.run(
-                        source.id(), BoardDiscoveryService.Mode.SCHEDULED, queryParams);
+                        source.id(), BoardDiscoveryService.Mode.SCHEDULED, queryParams, plan.id(), ownerToken);
 
-                if (report.ok()) {
+                if (ownershipLost.get()) {
+                    notes.add("Discarded provider results for source " + source.displayName() + ": lease lost in-flight");
+                    break;
+                }
+
+                if (report != null && report.ok()) {
                     sourcesSucceeded++;
                     if (report.ingested() != null) {
                         for (JobDiscoveryService.IngestResult res : report.ingested()) {
@@ -216,12 +291,26 @@ public class SearchPlanExecutionCoordinator {
                             }
                         }
                     }
-                } else {
+                } else if (report != null) {
                     sourcesFailed++;
                     String err = String.format("Source %s (%s) reported failure: %s - %s",
                             source.displayName(), source.kind(), report.failureCategory(), report.failureDetail());
                     errors.add(err);
+                } else {
+                    sourcesFailed++;
+                    String err = String.format("Source %s (%s) returned null report",
+                            source.displayName(), source.kind());
+                    errors.add(err);
                 }
+            } catch (ExecutionFencedException e) {
+                sourcesFailed++;
+                ownershipLost.set(true);
+                String err = String.format("Source %s (%s) fenced out: %s",
+                        source.displayName(), source.kind(), e.getMessage());
+                log.warn("Execution fenced out for search plan {} during source {}: {}", plan.id(), source.displayName(), e.getMessage());
+                errors.add(err);
+                notes.add("Execution lease lost during provider ingestion for source " + source.displayName());
+                break;
             } catch (Exception e) {
                 sourcesFailed++;
                 String err = String.format("Source %s (%s) threw exception: %s",
@@ -234,15 +323,46 @@ public class SearchPlanExecutionCoordinator {
         // Trigger matching & authoritative multi-stage reranking on newly ingested jobs
         int jobsMatched = 0;
         PreferenceSetRecord preferences = preferenceSetRepository.findActiveByProfileId(plan.profileId()).orElse(null);
-        if (preferences != null && !ingestedJobIds.isEmpty()) {
+        if (preferences != null && !ingestedJobIds.isEmpty() && !ownershipLost.get()) {
             for (UUID jobId : ingestedJobIds) {
+                if (ownershipLost.get()) {
+                    notes.add("Aborted match evaluations: lease ownership lost or expired");
+                    break;
+                }
                 try {
-                    jobMatchService.evaluateMatch(jobId, plan.profileId(), preferences);
+                    jobMatchService.evaluateMatch(jobId, plan.profileId(), preferences, plan.id(), ownerToken);
                     jobsMatched++;
+                } catch (ExecutionFencedException e) {
+                    ownershipLost.set(true);
+                    log.warn("Match evaluation fenced out for job {} in search plan {}: {}", jobId, plan.id(), e.getMessage());
+                    errors.add("Match evaluation fenced out: " + e.getMessage());
+                    notes.add("Execution lease lost during match evaluation for job " + jobId);
+                    break;
                 } catch (Exception e) {
                     log.warn("Failed match evaluation for job {} during plan execution: {}", jobId, e.getMessage());
                 }
             }
+        }
+
+        if (ownershipLost.get()) {
+            log.warn("Search plan {} execution completed by token {} but worker lost ownership; marking FAILED and discarding success",
+                    plan.id(), ownerToken);
+            errors.add("Execution lease lost or expired during processing");
+            repository.completeExecution(plan.id(), ownerToken, "FAILED", "Execution lease lost or expired", totalIngested);
+            return new ExecutionSummary(
+                    plan.id(),
+                    plan.name(),
+                    "FAILED",
+                    sourcesQueried,
+                    sourcesSucceeded,
+                    sourcesFailed,
+                    totalIngested,
+                    jobsMatched,
+                    errors,
+                    notes,
+                    expanded,
+                    facetSupport
+            );
         }
 
         String overallStatus = determineStatus(sourcesQueried, sourcesSucceeded, sourcesFailed);
@@ -254,6 +374,8 @@ public class SearchPlanExecutionCoordinator {
             log.warn("Search plan {} execution completed by token {} was fenced out (lease expired and claimed by another worker)",
                     plan.id(), ownerToken);
             notes.add("Warning: execution took longer than lease deadline; completed with fencing protection");
+            overallStatus = "FAILED";
+            errors.add("Completion update fenced out: lease expired before terminal write");
         }
 
         notes.add(String.format("Ingested %d jobs across %d sources; evaluated %d matches with multi-stage reranker",

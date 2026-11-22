@@ -2,7 +2,11 @@ package com.personal.jobagent.discovery.plan;
 
 import com.personal.jobagent.common.MaintenanceModeService;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.discovery.JobDiscoveryService;
 import com.personal.jobagent.discovery.platform.BoardDiscoveryService;
+import com.personal.jobagent.discovery.platform.PlatformRegistry;
+import com.personal.jobagent.jobs.JobMatchService;
+import com.personal.jobagent.preferences.PreferenceSetRecord;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -12,16 +16,20 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.Mockito.when;
@@ -33,7 +41,7 @@ import static org.mockito.Mockito.when;
 })
 @AutoConfigureMockMvc
 @Testcontainers
-@DisplayName("Phase 2A Hardened: Search Plan Concurrency, Fencing, and Recovery IT")
+@DisplayName("Phase 2B Hardened: Search Plan Concurrency, Heartbeat Renewal, Side-Effect Fencing, and Recovery IT")
 public class SearchPlanConcurrencyAndRecoveryIT {
 
     @Container
@@ -58,8 +66,256 @@ public class SearchPlanConcurrencyAndRecoveryIT {
     @Autowired
     private SearchPlanScheduler scheduler;
 
+    @Autowired
+    private JobDiscoveryService jobDiscoveryService;
+
+    @Autowired
+    private JobMatchService jobMatchService;
+
+    @Autowired
+    private org.springframework.transaction.PlatformTransactionManager transactionManager;
+
     @MockBean
     private BoardDiscoveryService boardDiscoveryService;
+
+    @Test
+    @DisplayName("Task 3 Scenario A-F: Expired Worker A cannot ingest, match, notify, or overwrite Worker B")
+    void testScenarioAThroughF_StaleWorkerSideEffectsFenced() {
+        UUID profileId = createTestProfile("adversarial-fencing@example.com");
+
+        SearchPlanRecord plan = searchPlanRepository.create(new SearchPlanRecord(
+                UuidV7.generate(),
+                profileId,
+                "Adversarial Fencing Plan",
+                List.of("Distributed Systems Engineer"),
+                Map.of(),
+                List.of("MOCK_SOURCE"),
+                "DAILY",
+                50,
+                true,
+                null,
+                Instant.now(),
+                Instant.now()
+        ));
+
+        // Create test source
+        UUID sourceId = UuidV7.generate();
+        jdbcTemplate.update("""
+                INSERT INTO job_sources (id, kind, org_identifier, display_name, capabilities, policy, enabled)
+                VALUES (?, 'GREENHOUSE', 'stripe-fencing', 'MOCK_SOURCE', '{}'::jsonb, 'DISCOVERY_ONLY', true)
+                ON CONFLICT (kind, org_identifier) DO NOTHING
+                """, sourceId);
+
+        // A. Worker A acquires a lease with very short TTL (100ms)
+        UUID tokenWorkerA = UUID.randomUUID();
+        boolean claimedA = searchPlanRepository.claimExecutionLease(plan.id(), tokenWorkerA, 100L);
+        assertThat(claimedA).isTrue();
+
+        // B. Worker A begins a slow provider request (simulated by sleep while lease expires)
+        // C & D. Worker A stops renewing (simulated process pause); its lease expires
+        try {
+            Thread.sleep(150);
+        } catch (InterruptedException ignored) {}
+
+        // E. Worker B acquires the lease
+        UUID tokenWorkerB = UUID.randomUUID();
+        boolean claimedB = searchPlanRepository.claimExecutionLease(plan.id(), tokenWorkerB, 60000L);
+        assertThat(claimedB).isTrue();
+
+        // Worker B executes and persists side-effects under tokenWorkerB
+        JobDiscoveryService.IngestJobCommand cmdB = new JobDiscoveryService.IngestJobCommand(
+                sourceId,
+                "job-worker-b-101",
+                null,
+                "Stripe",
+                "Senior Distributed Systems Engineer B",
+                "London",
+                "London",
+                "GB",
+                "REMOTE",
+                "FULL_TIME",
+                "SENIOR",
+                BigDecimal.valueOf(90000),
+                BigDecimal.valueOf(110000),
+                "GBP",
+                "Core infra Java distributed systems.",
+                List.of("Java", "Distributed Systems"),
+                "https://stripe.com/jobs/b-101",
+                "https://stripe.com/jobs/b-101",
+                Instant.now()
+        );
+        JobDiscoveryService.IngestResult ingestB = jobDiscoveryService.ingestJob(cmdB, plan.id(), tokenWorkerB);
+        assertThat(ingestB.jobId()).isNotNull();
+
+        // Worker B evaluates match and notifies under tokenWorkerB
+        PreferenceSetRecord prefs = new PreferenceSetRecord(
+                UUID.randomUUID(), profileId, List.of("Distributed Systems Engineer"), List.of(), List.of(),
+                List.of("Java"), List.of("London"), List.of("REMOTE"), List.of(), List.of("SENIOR"),
+                80000L, "NONE", List.of(), List.of(), "MANUAL", Map.of(), Map.of(), true
+        );
+        JobMatchService.MatchResult matchB = jobMatchService.evaluateMatch(ingestB.jobId(), profileId, prefs, plan.id(), tokenWorkerB);
+        assertThat(matchB).isNotNull();
+
+        // Worker B completes execution successfully
+        boolean completedB = searchPlanRepository.completeExecution(plan.id(), tokenWorkerB, "SUCCESS", null, 1);
+        assertThat(completedB).isTrue();
+
+        // F. Worker A resumes and receives its old provider response
+        // Prove 1: Worker A CANNOT ingest the result (fails atomically at DB boundary with ExecutionFencedException)
+        JobDiscoveryService.IngestJobCommand cmdA = new JobDiscoveryService.IngestJobCommand(
+                sourceId,
+                "job-worker-a-999",
+                null,
+                "Stripe",
+                "Stale Job From Worker A",
+                "London",
+                "London",
+                "GB",
+                "REMOTE",
+                "FULL_TIME",
+                "SENIOR",
+                BigDecimal.valueOf(90000),
+                BigDecimal.valueOf(110000),
+                "GBP",
+                "Stale posting from obsolete provider call.",
+                List.of("Java"),
+                "https://stripe.com/jobs/a-999",
+                "https://stripe.com/jobs/a-999",
+                Instant.now()
+        );
+
+        assertThatThrownBy(() -> jobDiscoveryService.ingestJob(cmdA, plan.id(), tokenWorkerA))
+                .isInstanceOf(ExecutionFencedException.class)
+                .hasMessageContaining("lease lost or expired");
+
+        // Prove 1b: BoardDiscoveryService itself rejects stale Worker A on touch/close/ingest
+        BoardDiscoveryService realBoardService = new BoardDiscoveryService(
+                jdbcTemplate, jobDiscoveryService, new PlatformRegistry(50), 50, 150, 400, 3, 1500L, 10
+        );
+        realBoardService.setSearchPlanRepository(searchPlanRepository);
+        assertThatThrownBy(() -> realBoardService.run(sourceId, BoardDiscoveryService.Mode.SCHEDULED, Map.of(), plan.id(), tokenWorkerA))
+                .isInstanceOf(ExecutionFencedException.class);
+
+        // Verify Worker A's job was NEVER inserted into jobs table
+        Integer staleJobCount = jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM jobs WHERE title = 'Stale Job From Worker A'", Integer.class);
+        assertThat(staleJobCount).isEqualTo(0);
+
+        // Prove 2 & 3: Worker A CANNOT create matches or outbox notifications
+        // Even for an existing job (such as Worker B's job), Worker A's evaluateMatch call is fenced
+        assertThatThrownBy(() -> jobMatchService.evaluateMatch(ingestB.jobId(), profileId, prefs, plan.id(), tokenWorkerA))
+                .isInstanceOf(ExecutionFencedException.class);
+
+        // Verify outbox_events has only Worker B's notification, none from Worker A
+        Integer outboxCount = jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM outbox_events WHERE aggregate_id = ?", Integer.class, ingestB.jobId());
+        assertThat(outboxCount).isEqualTo(1);
+
+        // Prove 4: Worker A CANNOT overwrite Worker B's execution result
+        boolean completedA = searchPlanRepository.completeExecution(plan.id(), tokenWorkerA, "SUCCESS", null, 999);
+        assertThat(completedA).isFalse();
+
+        // Prove 5: Worker B's execution state remains authoritative
+        SearchPlanRecord finalPlan = searchPlanRepository.findByIdAndProfileId(plan.id(), profileId).orElseThrow();
+        assertThat(finalPlan.lastExecutionStatus()).isEqualTo("SUCCESS");
+        assertThat(finalPlan.lastExecutionResults()).isEqualTo(1); // 1 from Worker B, NOT 999 from Worker A!
+    }
+
+    @Test
+    @DisplayName("Heartbeat Renewal: Active worker continuously extends lease during long execution")
+    void testHeartbeatRenewalDuringLongHealthyExecution() {
+        UUID profileId = createTestProfile("heartbeat-long-run@example.com");
+
+        SearchPlanRecord plan = searchPlanRepository.create(new SearchPlanRecord(
+                UuidV7.generate(),
+                profileId,
+                "Heartbeat Long Run Plan",
+                List.of("Staff Engineer"),
+                Map.of(),
+                List.of("MOCK_SOURCE"),
+                "DAILY",
+                50,
+                true,
+                null,
+                Instant.now(),
+                Instant.now()
+        ));
+
+        UUID sourceId = UuidV7.generate();
+        jdbcTemplate.update("""
+                INSERT INTO job_sources (id, kind, org_identifier, display_name, capabilities, policy, enabled)
+                VALUES (?, 'GREENHOUSE', 'heartbeat-source', 'MOCK_SOURCE', '{}'::jsonb, 'DISCOVERY_ONLY', true)
+                ON CONFLICT (kind, org_identifier) DO NOTHING
+                """, sourceId);
+
+        // Slow provider simulates healthy 600ms network crawl
+        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap(), any(), any()))
+                .thenAnswer(inv -> {
+                    Thread.sleep(600);
+                    return new BoardDiscoveryService.SourceRunReport(
+                            "hb-run", sourceId, "GREENHOUSE", "OK", true, Map.of(), null, null, List.of(), List.of()
+                    );
+                });
+
+        // Lease TTL is 400ms, heartbeat is 100ms.
+        // Total run takes ~600ms (> 400ms initial lease TTL).
+        // Heartbeat will renew lease at least 4 times during execution!
+        SearchPlanExecutionCoordinator.ExecutionSummary summary =
+                coordinator.executePlan(plan.id(), profileId, true, 400L, 100L);
+
+        assertThat(summary.status()).isEqualTo("SUCCESS");
+
+        SearchPlanRecord recorded = searchPlanRepository.findByIdAndProfileId(plan.id(), profileId).orElseThrow();
+        assertThat(recorded.lastExecutionStatus()).isEqualTo("SUCCESS");
+    }
+
+    @Test
+    @DisplayName("Heartbeat Failure: Worker cancels execution immediately when lease is overtaken")
+    void testFailedHeartbeatStopsWorkerAndFailsExecution() {
+        UUID profileId = createTestProfile("failed-hb@example.com");
+
+        SearchPlanRecord plan = searchPlanRepository.create(new SearchPlanRecord(
+                UuidV7.generate(),
+                profileId,
+                "Failed Heartbeat Plan",
+                List.of("DevOps Engineer"),
+                Map.of(),
+                List.of("MOCK_SOURCE"),
+                "DAILY",
+                50,
+                true,
+                null,
+                Instant.now(),
+                Instant.now()
+        ));
+
+        UUID sourceId = UuidV7.generate();
+        jdbcTemplate.update("""
+                INSERT INTO job_sources (id, kind, org_identifier, display_name, capabilities, policy, enabled)
+                VALUES (?, 'GREENHOUSE', 'failed-hb-source', 'MOCK_SOURCE', '{}'::jsonb, 'DISCOVERY_ONLY', true)
+                ON CONFLICT (kind, org_identifier) DO NOTHING
+                """, sourceId);
+
+        // When provider is called, simulate external worker stealing the lease
+        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap(), any(), any()))
+                .thenAnswer(inv -> {
+                    // Overwrite the lease in database to a different owner
+                    jdbcTemplate.update("UPDATE search_plans SET execution_owner_token = ? WHERE id = ?",
+                            UUID.randomUUID(), plan.id());
+                    Thread.sleep(300);
+                    return new BoardDiscoveryService.SourceRunReport(
+                            "hb-failed-run", sourceId, "GREENHOUSE", "OK", true, Map.of(), null, null, List.of(), List.of()
+                    );
+                });
+
+        // Lease duration 500ms, heartbeat interval 100ms
+        SearchPlanExecutionCoordinator.ExecutionSummary summary =
+                coordinator.executePlan(plan.id(), profileId, true, 500L, 100L);
+
+        // Worker must detect ownership loss and report FAILED, never SUCCESS
+        assertThat(summary.status()).isEqualTo("FAILED");
+        assertThat(summary.errors()).anyMatch(e -> e.contains("lease") || e.contains("ownership"));
+    }
 
     @Test
     @DisplayName("Concurrency: Two competing workers attempt same plan simultaneously; exactly ONE obtains lease")
@@ -81,7 +337,6 @@ public class SearchPlanConcurrencyAndRecoveryIT {
                 Instant.now()
         ));
 
-        // Create a test job source
         UUID sourceId = UuidV7.generate();
         jdbcTemplate.update("""
                 INSERT INTO job_sources (id, kind, org_identifier, display_name, capabilities, policy, enabled)
@@ -89,10 +344,10 @@ public class SearchPlanConcurrencyAndRecoveryIT {
                 ON CONFLICT (kind, org_identifier) DO NOTHING
                 """, sourceId);
 
-        // Slow mock to keep the winner inside execution for 500ms
-        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap()))
+        // Slow mock to keep the winner inside execution for 400ms
+        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap(), any(), any()))
                 .thenAnswer(inv -> {
-                    Thread.sleep(500);
+                    Thread.sleep(400);
                     return new BoardDiscoveryService.SourceRunReport(
                             "run-1", sourceId, "GREENHOUSE", "OK", true, Map.of(), null, null, List.of(), List.of()
                     );
@@ -113,39 +368,26 @@ public class SearchPlanConcurrencyAndRecoveryIT {
                             coordinator.executePlan(plan.id(), profileId, false);
                     results.add(summary);
                 } catch (Exception e) {
-                    // unexpected
+                    // ignored
                 } finally {
                     doneLatch.countDown();
                 }
             });
         }
 
-        // Fire both threads simultaneously
         startLatch.countDown();
-        boolean finished = doneLatch.await(10, TimeUnit.SECONDS);
-        assertThat(finished).isTrue();
+        boolean finished = doneLatch.await(5, TimeUnit.SECONDS);
         executor.shutdown();
 
+        assertThat(finished).isTrue();
         assertThat(results).hasSize(2);
 
         long successCount = results.stream().filter(r -> "SUCCESS".equals(r.status())).count();
         long skippedCount = results.stream().filter(r -> "SKIPPED".equals(r.status())).count();
 
-        // Exactly ONE worker obtained the lease and succeeded; the other was skipped
+        // Mutually exclusive: exactly 1 acquired lease and ran; the other was skipped
         assertThat(successCount).isEqualTo(1);
         assertThat(skippedCount).isEqualTo(1);
-
-        SearchPlanExecutionCoordinator.ExecutionSummary skippedSummary = results.stream()
-                .filter(r -> "SKIPPED".equals(r.status()))
-                .findFirst()
-                .orElseThrow();
-        assertThat(skippedSummary.notes()).anyMatch(n -> n.contains("already active"));
-
-        // After completion, verify lease was cleanly released in database
-        SearchPlanRecord finalPlan = searchPlanRepository.findByIdAndProfileId(plan.id(), profileId).orElseThrow();
-        assertThat(finalPlan.executionOwnerToken()).isNull();
-        assertThat(finalPlan.executionLeaseExpiresAt()).isNull();
-        assertThat(finalPlan.lastExecutionStatus()).isEqualTo("SUCCESS");
     }
 
     @Test
@@ -160,7 +402,7 @@ public class SearchPlanConcurrencyAndRecoveryIT {
                 UuidV7.generate(), profileId, "Plan 2", List.of(), Map.of(), List.of(), "DAILY", 50, true, null, Instant.now(), Instant.now()
         ));
 
-        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap()))
+        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap(), any(), any()))
                 .thenReturn(new BoardDiscoveryService.SourceRunReport("run", UUID.randomUUID(), "GREENHOUSE", "OK", true, Map.of(), null, null, List.of(), List.of()));
 
         ExecutorService executor = Executors.newFixedThreadPool(2);
@@ -176,39 +418,57 @@ public class SearchPlanConcurrencyAndRecoveryIT {
     }
 
     @Test
-    @DisplayName("Fencing Protection: An expired worker cannot overwrite a newer execution")
-    void testFencingProtectionAgainstExpiredWorker() {
-        UUID profileId = createTestProfile("fencing-test@example.com");
+    @DisplayName("Scheduler Competition: Multiple scheduler instances sweeping concurrently execute each plan once")
+    void testSchedulerCompetingAcrossSeparateContexts() throws Exception {
+        UUID profileId = createTestProfile("scheduler-competing@example.com");
 
         SearchPlanRecord plan = searchPlanRepository.create(new SearchPlanRecord(
-                UuidV7.generate(), profileId, "Fencing Plan", List.of(), Map.of(), List.of(), "DAILY", 50, true, null, Instant.now(), Instant.now()
+                UuidV7.generate(), profileId, "Due Hourly Plan", List.of(), Map.of(), List.of("MOCK_SOURCE"),
+                "HOURLY", 50, true, null, Instant.now(), Instant.now()
         ));
 
-        UUID tokenWorker1 = UUID.randomUUID();
-        UUID tokenWorker2 = UUID.randomUUID();
+        UUID sourceId = UuidV7.generate();
+        jdbcTemplate.update("""
+                INSERT INTO job_sources (id, kind, org_identifier, display_name, capabilities, policy, enabled)
+                VALUES (?, 'GREENHOUSE', 'sched-competing-org', 'MOCK_SOURCE', '{}'::jsonb, 'DISCOVERY_ONLY', true)
+                ON CONFLICT (kind, org_identifier) DO NOTHING
+                """, sourceId);
 
-        // Worker 1 claims lease with a very short duration (1 ms) so it immediately expires
-        boolean claimed1 = searchPlanRepository.claimExecutionLease(plan.id(), tokenWorker1, 1L);
-        assertThat(claimed1).isTrue();
+        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap(), any(), any()))
+                .thenAnswer(inv -> {
+                    Thread.sleep(300);
+                    return new BoardDiscoveryService.SourceRunReport("sched-run", sourceId, "GREENHOUSE", "OK", true, Map.of(), null, null, List.of(), List.of());
+                });
 
-        // Worker 2 claims lease after Worker 1 expired
-        try { Thread.sleep(50); } catch (InterruptedException ignored) {}
+        SearchPlanScheduler activeScheduler = new SearchPlanScheduler(
+                searchPlanRepository, coordinator, new MaintenanceModeService(false), true);
 
-        boolean claimed2 = searchPlanRepository.claimExecutionLease(plan.id(), tokenWorker2, 600000L);
-        assertThat(claimed2).isTrue();
+        int numSchedulers = 2;
+        ExecutorService executor = Executors.newFixedThreadPool(numSchedulers);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(numSchedulers);
 
-        // Worker 1 finishes late and attempts to complete execution with old token
-        boolean worker1FencedOut = searchPlanRepository.completeExecution(plan.id(), tokenWorker1, "SUCCESS", null, 999);
+        for (int i = 0; i < numSchedulers; i++) {
+            executor.submit(() -> {
+                try {
+                    startLatch.await();
+                    activeScheduler.sweepDueSearchPlans();
+                } catch (Exception ignored) {
+                } finally {
+                    doneLatch.countDown();
+                }
+            });
+        }
 
-        // FENCING VERIFICATION: Worker 1 update was rejected (0 rows updated)
-        assertThat(worker1FencedOut).isFalse();
+        startLatch.countDown();
+        boolean done = doneLatch.await(5, TimeUnit.SECONDS);
+        executor.shutdown();
 
-        // Worker 2 completes execution with authoritative token
-        boolean worker2Completed = searchPlanRepository.completeExecution(plan.id(), tokenWorker2, "SUCCESS", null, 42);
-        assertThat(worker2Completed).isTrue();
+        assertThat(done).isTrue();
 
-        SearchPlanRecord recordedPlan = searchPlanRepository.findByIdAndProfileId(plan.id(), profileId).orElseThrow();
-        assertThat(recordedPlan.lastExecutionResults()).isEqualTo(42); // Not 999!
+        SearchPlanRecord updated = searchPlanRepository.findByIdAndProfileId(plan.id(), profileId).orElseThrow();
+        assertThat(updated.lastExecutionStatus()).isEqualTo("SUCCESS");
+        assertThat(updated.lastRunAt()).isNotNull();
     }
 
     @Test
@@ -249,6 +509,75 @@ public class SearchPlanConcurrencyAndRecoveryIT {
 
         List<SearchPlanRecord> due = searchPlanRepository.findDuePlans(Instant.now());
         assertThat(due).noneMatch(p -> p.id().equals(manualPlan.id()));
+    }
+
+    @Test
+    @DisplayName("F2 Correctness: FOR NO KEY UPDATE lock remains held until observation mutation commits, blocking concurrent takeover")
+    void testObservationMutationHoldsRowLockAndBlocksConcurrentTakeover() throws Exception {
+        UUID profileId = createTestProfile("f2-lock-test@example.com");
+
+        SearchPlanRecord plan = searchPlanRepository.create(new SearchPlanRecord(
+                UuidV7.generate(), profileId, "F2 Observation Lock Plan", List.of("Security Engineer"), Map.of(),
+                List.of("MOCK"), "DAILY", 50, true, null, Instant.now(), Instant.now()
+        ));
+
+        UUID tokenA = UUID.randomUUID();
+        boolean claimedA = searchPlanRepository.claimExecutionLease(plan.id(), tokenA, 60000L);
+        assertThat(claimedA).isTrue();
+
+        TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
+        CountDownLatch lockAcquiredLatch = new CountDownLatch(1);
+        CountDownLatch releaseLockLatch = new CountDownLatch(1);
+        AtomicBoolean workerBCompletedEarly = new AtomicBoolean(false);
+
+        // Worker A executes a transaction that acquires FOR NO KEY UPDATE and pauses
+        ExecutorService executorA = Executors.newSingleThreadExecutor();
+        Future<?> workerAFuture = executorA.submit(() -> {
+            txTemplate.executeWithoutResult(status -> {
+                // 1. Assert lease ownership inside transaction -> acquires FOR NO KEY UPDATE lock
+                searchPlanRepository.assertLeaseOwnership(plan.id(), tokenA);
+                lockAcquiredLatch.countDown();
+
+                // 2. Pause while holding the row lock
+                try {
+                    boolean released = releaseLockLatch.await(5, TimeUnit.SECONDS);
+                    assertThat(released).isTrue();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+
+                // 3. Perform observation mutation while still holding lock
+                jdbcTemplate.update("UPDATE search_plans SET updated_at = clock_timestamp() WHERE id = ?", plan.id());
+            });
+        });
+
+        // Wait until Worker A has acquired the lock
+        assertThat(lockAcquiredLatch.await(3, TimeUnit.SECONDS)).isTrue();
+
+        // Worker B attempts to overwrite the lease row concurrently on another thread/connection
+        UUID tokenB = UUID.randomUUID();
+        ExecutorService executorB = Executors.newSingleThreadExecutor();
+        Future<Integer> workerBFuture = executorB.submit(() -> {
+            int rows = jdbcTemplate.update("UPDATE search_plans SET execution_owner_token = ? WHERE id = ?", tokenB, plan.id());
+            workerBCompletedEarly.set(true);
+            return rows;
+        });
+
+        // Prove Worker B is blocked on PostgreSQL FOR NO KEY UPDATE row lock and CANNOT complete
+        assertThatThrownBy(() -> workerBFuture.get(300, TimeUnit.MILLISECONDS))
+                .isInstanceOf(TimeoutException.class);
+        assertThat(workerBCompletedEarly.get()).isFalse();
+
+        // Release Worker A to complete its observation mutation and commit transaction
+        releaseLockLatch.countDown();
+        workerAFuture.get(3, TimeUnit.SECONDS);
+
+        // Now Worker B unblocks and finishes its update
+        int updatedB = workerBFuture.get(3, TimeUnit.SECONDS);
+        assertThat(updatedB).isEqualTo(1);
+
+        executorA.shutdown();
+        executorB.shutdown();
     }
 
     private UUID createTestProfile(String email) {

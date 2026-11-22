@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.common.AutomationMetrics;
 import com.personal.jobagent.common.JdbcConversions;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.discovery.plan.ExecutionFencedException;
+import com.personal.jobagent.discovery.plan.SearchPlanRepository;
 import com.personal.jobagent.jobs.rerank.MultiStageReranker;
 import com.personal.jobagent.jobs.rerank.RerankResult;
 import com.personal.jobagent.notifications.NotificationEvents;
@@ -106,6 +108,13 @@ public class JobMatchService {
         this.multiStageReranker = multiStageReranker;
     }
 
+    @Autowired(required = false)
+    private SearchPlanRepository searchPlanRepository;
+
+    public void setSearchPlanRepository(SearchPlanRepository searchPlanRepository) {
+        this.searchPlanRepository = searchPlanRepository;
+    }
+
     public record MatchResult(UUID jobId, int overall, String recommendation,
                               double skillOverlap, double remoteFit, double salaryFit,
                               double experienceFit, double visaFit, double locationFit,
@@ -149,6 +158,17 @@ public class JobMatchService {
      *                    treated as unset, and the documented default weights apply).
      */
     public MatchResult evaluateMatch(UUID jobId, UUID profileId, PreferenceSetRecord preferences) {
+        return evaluateMatch(jobId, profileId, preferences, null, null);
+    }
+
+    /**
+     * Evaluates a job match under optional search plan execution lease fencing.
+     * When searchPlanId and executionOwnerToken are supplied, atomically verifies that
+     * the worker holds an active lease via FOR NO KEY UPDATE lock on search_plans before
+     * performing any job_matches or outbox writes.
+     */
+    public MatchResult evaluateMatch(UUID jobId, UUID profileId, PreferenceSetRecord preferences,
+                                     UUID searchPlanId, UUID executionOwnerToken) {
         JobRecord job = jobRepository.findById(jobId)
                 .orElseThrow(() -> new IllegalArgumentException("Job not found: " + jobId));
 
@@ -209,6 +229,11 @@ public class JobMatchService {
 
         // Persist the decision + emit the event atomically.
         boolean notified = Boolean.TRUE.equals(transactionTemplate.execute(tx -> {
+            // Fencing guard: verify lease ownership before performing any job_matches or outbox writes
+            if (searchPlanId != null && executionOwnerToken != null && searchPlanRepository != null) {
+                searchPlanRepository.assertLeaseOwnership(searchPlanId, executionOwnerToken);
+            }
+
             // The decision belongs to (job, profile) — it is a function of THIS
             // candidate's skills and preferences — so it is stored against the
             // owner in job_matches, not on the shared jobs row where a second

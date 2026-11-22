@@ -16,7 +16,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @Testcontainers
-@DisplayName("Phase 2A Hardened: Database Migration from V064 to V065 IT")
+@DisplayName("Phase 2B Hardened: Database Migration from V064 through V065 to V066 IT")
 public class V064ToV065MigrationIT {
 
     @Container
@@ -31,8 +31,8 @@ public class V064ToV065MigrationIT {
     }
 
     @Test
-    @DisplayName("Migrates cleanly from V064 through V065 schema and validates constraints and indexes")
-    void testMigrationFromV064ToV065() {
+    @DisplayName("Migrates cleanly through V064 -> V065 -> V066 verifying schema immutability and lease additions")
+    void testMigrationFromV064ThroughV066() {
         // Step 1: Migrate up to V064 (Wave 2 F9 baseline)
         flyway("64").migrate();
 
@@ -41,59 +41,82 @@ public class V064ToV065MigrationIT {
         JdbcTemplate jdbc = new JdbcTemplate(ds);
 
         // Verify search_plans table does not exist at V064
-        Integer tableCountBefore = jdbc.queryForObject("""
+        Integer tableCountV64 = jdbc.queryForObject("""
                 SELECT count(*) FROM information_schema.tables
                 WHERE table_schema = 'public' AND table_name = 'search_plans'
                 """, Integer.class);
-        assertThat(tableCountBefore).isEqualTo(0);
+        assertThat(tableCountV64).isEqualTo(0);
 
-        // Step 2: Migrate to V065
+        // Step 2: Migrate to V065 (Candidate search plans base table)
         flyway("65").migrate();
 
         // Verify search_plans table exists now
-        Integer tableCountAfter = jdbc.queryForObject("""
+        Integer tableCountV65 = jdbc.queryForObject("""
                 SELECT count(*) FROM information_schema.tables
                 WHERE table_schema = 'public' AND table_name = 'search_plans'
                 """, Integer.class);
-        assertThat(tableCountAfter).isEqualTo(1);
+        assertThat(tableCountV65).isEqualTo(1);
 
-        // Verify columns including lease coordination columns
-        Integer colOwnerToken = jdbc.queryForObject("""
+        // Verify lease columns do NOT exist in original V065
+        Integer colOwnerTokenBefore = jdbc.queryForObject("""
                 SELECT count(*) FROM information_schema.columns
                 WHERE table_name = 'search_plans' AND column_name = 'execution_owner_token'
                 """, Integer.class);
-        assertThat(colOwnerToken).isEqualTo(1);
+        assertThat(colOwnerTokenBefore).isEqualTo(0);
 
-        Integer colLeaseExpires = jdbc.queryForObject("""
+        Integer colLeaseExpiresBefore = jdbc.queryForObject("""
                 SELECT count(*) FROM information_schema.columns
                 WHERE table_name = 'search_plans' AND column_name = 'execution_lease_expires_at'
                 """, Integer.class);
-        assertThat(colLeaseExpires).isEqualTo(1);
+        assertThat(colLeaseExpiresBefore).isEqualTo(0);
 
-        // Verify index search_plans_lease_idx exists
-        Integer indexCount = jdbc.queryForObject("""
+        Integer indexCountBefore = jdbc.queryForObject("""
                 SELECT count(*) FROM pg_indexes
                 WHERE tablename = 'search_plans' AND indexname = 'search_plans_lease_idx'
                 """, Integer.class);
-        assertThat(indexCount).isEqualTo(1);
+        assertThat(indexCountBefore).isEqualTo(0);
 
-        // Step 3: Insert test record to verify constraints
+        // Step 3: Migrate to V066 (Execution leases & fencing index additive migration)
+        flyway("66").migrate();
+
+        // Verify columns added by V066
+        Integer colOwnerTokenAfter = jdbc.queryForObject("""
+                SELECT count(*) FROM information_schema.columns
+                WHERE table_name = 'search_plans' AND column_name = 'execution_owner_token'
+                """, Integer.class);
+        assertThat(colOwnerTokenAfter).isEqualTo(1);
+
+        Integer colLeaseExpiresAfter = jdbc.queryForObject("""
+                SELECT count(*) FROM information_schema.columns
+                WHERE table_name = 'search_plans' AND column_name = 'execution_lease_expires_at'
+                """, Integer.class);
+        assertThat(colLeaseExpiresAfter).isEqualTo(1);
+
+        Integer indexCountAfter = jdbc.queryForObject("""
+                SELECT count(*) FROM pg_indexes
+                WHERE tablename = 'search_plans' AND indexname = 'search_plans_lease_idx'
+                """, Integer.class);
+        assertThat(indexCountAfter).isEqualTo(1);
+
+        // Step 4: Insert test record to verify constraints and columns
         UUID userId = UUID.randomUUID();
         UUID profileId = UUID.randomUUID();
         UUID planId = UUID.randomUUID();
+        UUID ownerToken = UUID.randomUUID();
 
-        jdbc.update("INSERT INTO users (id, email, password_hash, display_name) VALUES (?, 'mig@test.local', 'h', 'Mig')", userId);
+        jdbc.update("INSERT INTO users (id, email, password_hash, display_name) VALUES (?, 'mig2b@test.local', 'h', 'Mig2B')", userId);
         jdbc.update("INSERT INTO profiles (id, user_id, updated_at) VALUES (?, ?, now())", profileId, userId);
 
         jdbc.update("""
                 INSERT INTO search_plans (
                     id, profile_id, name, target_titles, query_facets, target_sources,
-                    search_frequency, max_results_per_run, active, last_execution_status
+                    search_frequency, max_results_per_run, active, last_execution_status,
+                    execution_owner_token, execution_lease_expires_at
                 ) VALUES (
-                    ?, ?, 'Migration Test Plan', '{Engineer}', '{"keywords":["Java"]}'::jsonb, '{ADZUNA}',
-                    'DAILY', 50, true, 'SUCCESS'
+                    ?, ?, 'Migration 2B Test Plan', '{Engineer}', '{"keywords":["Java"]}'::jsonb, '{ADZUNA}',
+                    'DAILY', 50, true, 'RUNNING', ?, now() + INTERVAL '1 hour'
                 )
-                """, planId, profileId);
+                """, planId, profileId, ownerToken);
 
         Integer planCount = jdbc.queryForObject("SELECT count(*) FROM search_plans WHERE id = ?", Integer.class, planId);
         assertThat(planCount).isEqualTo(1);

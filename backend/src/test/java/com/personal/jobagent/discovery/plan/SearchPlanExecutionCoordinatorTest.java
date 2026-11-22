@@ -86,7 +86,7 @@ class SearchPlanExecutionCoordinatorTest {
                 ),
                 List.of()
         );
-        when(boardDiscoveryService.run(eq(sourceId1), eq(BoardDiscoveryService.Mode.SCHEDULED), anyMap())).thenReturn(report);
+        when(boardDiscoveryService.run(eq(sourceId1), eq(BoardDiscoveryService.Mode.SCHEDULED), anyMap(), any(), any())).thenReturn(report);
 
         PreferenceSetRecord prefs = new PreferenceSetRecord(
                 UUID.randomUUID(), profileId, List.of("Java Engineer"), List.of(), List.of(),
@@ -107,11 +107,11 @@ class SearchPlanExecutionCoordinatorTest {
         // Verify Adzuna received query parameters
         verify(boardDiscoveryService).run(eq(sourceId1), eq(BoardDiscoveryService.Mode.SCHEDULED), argThat(params ->
                 params.containsKey("what") && params.containsKey("where") && params.get("where").equals("London")
-        ));
+        ), eq(planId), any(UUID.class));
 
         // Verify match evaluation was called for both jobs
-        verify(jobMatchService).evaluateMatch(eq(jobId1), eq(profileId), eq(prefs));
-        verify(jobMatchService).evaluateMatch(eq(jobId2), eq(profileId), eq(prefs));
+        verify(jobMatchService).evaluateMatch(eq(jobId1), eq(profileId), eq(prefs), eq(planId), any(UUID.class));
+        verify(jobMatchService).evaluateMatch(eq(jobId2), eq(profileId), eq(prefs), eq(planId), any(UUID.class));
 
         // Verify repository completed execution with fencing token
         verify(repository).completeExecution(eq(planId), any(UUID.class), eq("SUCCESS"), isNull(), eq(2));
@@ -140,7 +140,7 @@ class SearchPlanExecutionCoordinatorTest {
                 ),
                 List.of()
         );
-        when(boardDiscoveryService.run(eq(sourceId1), eq(BoardDiscoveryService.Mode.SCHEDULED), anyMap())).thenReturn(report1);
+        when(boardDiscoveryService.run(eq(sourceId1), eq(BoardDiscoveryService.Mode.SCHEDULED), anyMap(), any(), any())).thenReturn(report1);
 
         SearchPlanExecutionCoordinator.ExecutionSummary summary = coordinator.executePlan(planId, profileId, false);
 
@@ -149,7 +149,7 @@ class SearchPlanExecutionCoordinatorTest {
         assertThat(summary.sourcesQueried()).isEqualTo(1);
         assertThat(summary.notes()).anyMatch(n -> n.contains("Reached per-plan result cap"));
 
-        verify(boardDiscoveryService, times(1)).run(any(), any(), any());
+        verify(boardDiscoveryService, times(1)).run(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -172,13 +172,13 @@ class SearchPlanExecutionCoordinatorTest {
                 List.of(new JobDiscoveryService.IngestResult(UUID.randomUUID(), "INSERTED", "key1", "hash1")),
                 List.of()
         );
-        when(boardDiscoveryService.run(eq(sourceId1), eq(BoardDiscoveryService.Mode.SCHEDULED), anyMap())).thenReturn(report1);
+        when(boardDiscoveryService.run(eq(sourceId1), eq(BoardDiscoveryService.Mode.SCHEDULED), anyMap(), any(), any())).thenReturn(report1);
 
         BoardDiscoveryService.SourceRunReport report2 = new BoardDiscoveryService.SourceRunReport(
                 "corr-2", sourceId2, "FREEHIRE", "FAILED", false, Map.of(),
                 "RATE_LIMITED", "HTTP 429 Too Many Requests", List.of(), List.of("Rate limited")
         );
-        when(boardDiscoveryService.run(eq(sourceId2), eq(BoardDiscoveryService.Mode.SCHEDULED), anyMap())).thenReturn(report2);
+        when(boardDiscoveryService.run(eq(sourceId2), eq(BoardDiscoveryService.Mode.SCHEDULED), anyMap(), any(), any())).thenReturn(report2);
 
         SearchPlanExecutionCoordinator.ExecutionSummary summary = coordinator.executePlan(planId, profileId, false);
 

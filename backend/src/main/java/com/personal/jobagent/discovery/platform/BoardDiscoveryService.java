@@ -2,6 +2,8 @@ package com.personal.jobagent.discovery.platform;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.discovery.JobDiscoveryService;
+import com.personal.jobagent.discovery.plan.ExecutionFencedException;
+import com.personal.jobagent.discovery.plan.SearchPlanRepository;
 import com.personal.jobagent.discovery.platform.adapters.TsentaJobSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -84,6 +86,22 @@ public class BoardDiscoveryService {
     private final int circuitOpenAfter;
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private com.personal.jobagent.discovery.DiscoveryMetrics metrics;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private SearchPlanRepository searchPlanRepository;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private org.springframework.transaction.support.TransactionTemplate transactionTemplate;
+
+    public void setSearchPlanRepository(SearchPlanRepository searchPlanRepository) {
+        this.searchPlanRepository = searchPlanRepository;
+    }
+
+    public void setTransactionTemplate(org.springframework.transaction.support.TransactionTemplate transactionTemplate) {
+        this.transactionTemplate = transactionTemplate;
+    }
+
+    public void setTransactionManager(org.springframework.transaction.PlatformTransactionManager transactionManager) {
+        this.transactionTemplate = transactionManager != null ? new org.springframework.transaction.support.TransactionTemplate(transactionManager) : null;
+    }
 
     @org.springframework.beans.factory.annotation.Autowired
     public BoardDiscoveryService(JdbcTemplate db, JobDiscoveryService ingestion, PlatformRegistry registry,
@@ -126,6 +144,11 @@ public class BoardDiscoveryService {
 
     /** Run a persisted source by id with targeted query params. */
     public SourceRunReport run(UUID sourceId, Mode mode, Map<String, String> queryParams) {
+        return run(sourceId, mode, queryParams, null, null);
+    }
+
+    /** Run a persisted source by id with targeted query params and search plan lease fencing. */
+    public SourceRunReport run(UUID sourceId, Mode mode, Map<String, String> queryParams, UUID searchPlanId, UUID executionOwnerToken) {
         List<Map<String, Object>> rows = db.queryForList("""
                 select s.kind, s.org_identifier, s.enabled, s.policy, c.name as company_name
                 from job_sources s left join companies c on c.id = s.company_id
@@ -143,14 +166,19 @@ public class BoardDiscoveryService {
                 kind.displayName() + " discovery is " + kind.readiness().name().toLowerCase() + ": " + kind.configHint(), false));
         String org = row.get("org_identifier") == null ? "" : String.valueOf(row.get("org_identifier"));
         String employer = row.get("company_name") == null ? null : String.valueOf(row.get("company_name"));
-        return run(sourceId, adapter, org, employer, mode, queryParams);
+        return run(sourceId, adapter, org, employer, mode, queryParams, searchPlanId, executionOwnerToken);
     }
 
     SourceRunReport run(UUID sourceId, BoardAdapter adapter, String orgIdentifier, String employer, Mode mode) {
-        return run(sourceId, adapter, orgIdentifier, employer, mode, Map.of());
+        return run(sourceId, adapter, orgIdentifier, employer, mode, Map.of(), null, null);
     }
 
     SourceRunReport run(UUID sourceId, BoardAdapter adapter, String orgIdentifier, String employer, Mode mode, Map<String, String> queryParams) {
+        return run(sourceId, adapter, orgIdentifier, employer, mode, queryParams, null, null);
+    }
+
+    SourceRunReport run(UUID sourceId, BoardAdapter adapter, String orgIdentifier, String employer, Mode mode,
+                        Map<String, String> queryParams, UUID searchPlanId, UUID executionOwnerToken) {
         String correlationId = UUID.randomUUID().toString();
         long started = System.nanoTime();
         Instant runStart = dbNow();
@@ -191,6 +219,14 @@ public class BoardDiscoveryService {
         counts.put("pages", listing.pagesFetched());
         String employerName = Normalize.first(employer, listing.employerName());
 
+        // Fencing guard: verify lease ownership before performing any ingestion writes
+        if (searchPlanId != null && executionOwnerToken != null && searchPlanRepository != null) {
+            if (!searchPlanRepository.isLeaseOwner(searchPlanId, executionOwnerToken)) {
+                log.warn("Search plan {} lost lease before ingestion; discarding {} entries", searchPlanId, listing.entries().size());
+                throw new ExecutionFencedException("Search plan execution lease lost or expired before ingestion for plan " + searchPlanId);
+            }
+        }
+
         boolean authoritative = !kind.isAggregator();
         Set<String> known = knownExternalIds(sourceId);
         int detailsUsed = 0;
@@ -198,17 +234,20 @@ public class BoardDiscoveryService {
         for (BoardAdapter.ListingEntry entry : listing.entries()) {
             try {
                 if (!entry.needsDetail()) {
-                    ingest(sourceId, kind, entry.job(), employerName, counts, ingested);
+                    ingest(sourceId, kind, entry.job(), employerName, counts, ingested, searchPlanId, executionOwnerToken);
                 } else if (known.contains(entry.externalId())) {
-                    touch(sourceId, entry.externalId(), authoritative);
+                    touch(sourceId, entry.externalId(), authoritative, searchPlanId, executionOwnerToken);
                     bump(counts, "unchanged");
                 } else if (!detailBudgetGone && detailsUsed < detailBudget) {
                     detailsUsed++;
                     NormalizedJob job = adapter.detail(board, entry, context);
-                    ingest(sourceId, kind, job, employerName, counts, ingested);
+                    ingest(sourceId, kind, job, employerName, counts, ingested, searchPlanId, executionOwnerToken);
                 } else {
                     bump(counts, "deferred");
                 }
+            } catch (ExecutionFencedException e) {
+                log.warn("Search plan {} execution fenced out during ingestion: {}", searchPlanId, e.getMessage());
+                throw e;
             } catch (SafeHttpClient.FetchException e) {
                 bump(counts, "detail_failures");
                 if (e.category() == FailureCategory.BUDGET_EXHAUSTED || e.category() == FailureCategory.RATE_LIMITED
@@ -228,7 +267,7 @@ public class BoardDiscoveryService {
         // Removal requires a complete, non-failed listing that actually returned entries.
         // Do not reintroduce a mode-based bypass here: see C1 in docs/ROBIN_WAVE2_RELEASE_READINESS.md.
         if (listing.complete() && listing.failure() == null && !listing.entries().isEmpty()) {
-            counts.put("removed", markUnlisted(sourceId, runStart, authoritative));
+            counts.put("removed", markUnlisted(sourceId, runStart, authoritative, searchPlanId, executionOwnerToken));
         } else if (listing.complete() && listing.failure() == null && listing.entries().isEmpty()) {
             log.warn("Safe deletion guard activated: listing completed with 0 jobs for source {} in {} mode; skipping markUnlisted",
                     sourceId, mode);
@@ -239,12 +278,18 @@ public class BoardDiscoveryService {
 
     private void ingest(UUID sourceId, PlatformKind kind, NormalizedJob job, String employer,
                         Map<String, Object> counts, List<JobDiscoveryService.IngestResult> ingested) {
+        ingest(sourceId, kind, job, employer, counts, ingested, null, null);
+    }
+
+    private void ingest(UUID sourceId, PlatformKind kind, NormalizedJob job, String employer,
+                        Map<String, Object> counts, List<JobDiscoveryService.IngestResult> ingested,
+                        UUID searchPlanId, UUID executionOwnerToken) {
         if (job == null || job.externalId() == null || job.title() == null) {
             bump(counts, "skipped_invalid");
             return;
         }
         if (Boolean.FALSE.equals(job.active())) {
-            closeObservation(sourceId, job.externalId(), !kind.isAggregator());
+            closeObservation(sourceId, job.externalId(), !kind.isAggregator(), searchPlanId, executionOwnerToken);
             bump(counts, "closed");
             return;
         }
@@ -254,12 +299,18 @@ public class BoardDiscoveryService {
             bump(counts, "skipped_no_employer_url");
             return;
         }
-        JobDiscoveryService.IngestResult result = ingestion.ingestJob(new JobDiscoveryService.IngestJobCommand(
+        JobDiscoveryService.IngestJobCommand cmd = new JobDiscoveryService.IngestJobCommand(
                 sourceId, job.externalId(), null, Normalize.first(employer, job.employerName()), job.title(),
                 job.locationRaw(), job.city(), job.country(), job.remoteType(), job.employmentType(), null,
                 job.salaryMin(), job.salaryMax(), job.salaryCurrency(),
                 job.descriptionText() == null ? "" : job.descriptionText(), job.skills(),
-                job.applicationUrl(), job.sourceUrl(), job.postedAt(), job.salaryPeriod(), job.requisitionId()));
+                job.applicationUrl(), job.sourceUrl(), job.postedAt(), job.salaryPeriod(), job.requisitionId());
+        JobDiscoveryService.IngestResult result = (searchPlanId != null && executionOwnerToken != null)
+                ? ingestion.ingestJob(cmd, searchPlanId, executionOwnerToken)
+                : ingestion.ingestJob(cmd);
+        if (result == null) {
+            return;
+        }
         ingested.add(result);
         switch (result.action()) {
             case "INSERTED" -> bump(counts, "created");
@@ -285,50 +336,78 @@ public class BoardDiscoveryService {
     }
 
     private void touch(UUID sourceId, String externalId, boolean authoritative) {
-        db.update("update job_source_observations set last_seen_at = now() where source_id = ? and external_job_id = ?",
-                sourceId, externalId);
-        db.update("""
-                update jobs set last_seen_at = now(),
-                    deleted_at = case
-                        when ? then null
-                        when exists (
-                            select 1 from job_source_observations o
-                            join job_sources s on s.id = o.source_id
-                            where o.job_id = jobs.id
-                              and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA')
-                              and o.source_status in ('MISSING', 'CLOSED')
-                        ) then deleted_at
-                        else null
-                    end
-                where id in (select job_id from job_source_observations where source_id = ? and external_job_id = ?)
-                """, authoritative, sourceId, externalId);
+        touch(sourceId, externalId, authoritative, null, null);
+    }
+
+    private void touch(UUID sourceId, String externalId, boolean authoritative, UUID searchPlanId, UUID executionOwnerToken) {
+        Runnable block = () -> {
+            if (searchPlanId != null && executionOwnerToken != null && searchPlanRepository != null) {
+                searchPlanRepository.assertLeaseOwnership(searchPlanId, executionOwnerToken);
+            }
+            db.update("update job_source_observations set last_seen_at = now() where source_id = ? and external_job_id = ?",
+                    sourceId, externalId);
+            db.update("""
+                    update jobs set last_seen_at = now(),
+                        deleted_at = case
+                            when ? then null
+                            when exists (
+                                select 1 from job_source_observations o
+                                join job_sources s on s.id = o.source_id
+                                where o.job_id = jobs.id
+                                  and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA')
+                                  and o.source_status in ('MISSING', 'CLOSED')
+                            ) then deleted_at
+                            else null
+                        end
+                    where id in (select job_id from job_source_observations where source_id = ? and external_job_id = ?)
+                    """, authoritative, sourceId, externalId);
+        };
+        if (transactionTemplate != null) {
+            transactionTemplate.executeWithoutResult(status -> block.run());
+        } else {
+            block.run();
+        }
     }
 
     /** The source itself says the posting is closed. */
     private void closeObservation(UUID sourceId, String externalId, boolean authoritative) {
-        db.update("""
-                update job_source_observations set source_status = 'CLOSED', removed_at = now()
-                where source_id = ? and external_job_id = ? and source_status <> 'CLOSED'
-                """, sourceId, externalId);
-        if (authoritative) {
+        closeObservation(sourceId, externalId, authoritative, null, null);
+    }
+
+    private void closeObservation(UUID sourceId, String externalId, boolean authoritative, UUID searchPlanId, UUID executionOwnerToken) {
+        Runnable block = () -> {
+            if (searchPlanId != null && executionOwnerToken != null && searchPlanRepository != null) {
+                searchPlanRepository.assertLeaseOwnership(searchPlanId, executionOwnerToken);
+            }
             db.update("""
-                    update jobs j set deleted_at = now()
-                    where j.deleted_at is null
-                      and j.id in (select job_id from job_source_observations where source_id = ? and external_job_id = ?)
-                      and not exists (select 1 from job_source_observations o
-                                      join job_sources s on s.id = o.source_id
-                                      where o.job_id = j.id
-                                        and o.source_status = 'SEEN'
-                                        and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA'))
+                    update job_source_observations set source_status = 'CLOSED', removed_at = now()
+                    where source_id = ? and external_job_id = ? and source_status <> 'CLOSED'
                     """, sourceId, externalId);
+            if (authoritative) {
+                db.update("""
+                        update jobs j set deleted_at = now()
+                        where j.deleted_at is null
+                          and j.id in (select job_id from job_source_observations where source_id = ? and external_job_id = ?)
+                          and not exists (select 1 from job_source_observations o
+                                          join job_sources s on s.id = o.source_id
+                                          where o.job_id = j.id
+                                            and o.source_status = 'SEEN'
+                                            and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA'))
+                        """, sourceId, externalId);
+            } else {
+                db.update("""
+                        update jobs j set deleted_at = now()
+                        where j.deleted_at is null
+                          and j.id in (select job_id from job_source_observations where source_id = ? and external_job_id = ?)
+                          and not exists (select 1 from job_source_observations o
+                                          where o.job_id = j.id and o.source_id is not null and o.source_status = 'SEEN')
+                        """, sourceId, externalId);
+            }
+        };
+        if (transactionTemplate != null) {
+            transactionTemplate.executeWithoutResult(status -> block.run());
         } else {
-            db.update("""
-                    update jobs j set deleted_at = now()
-                    where j.deleted_at is null
-                      and j.id in (select job_id from job_source_observations where source_id = ? and external_job_id = ?)
-                      and not exists (select 1 from job_source_observations o
-                                      where o.job_id = j.id and o.source_id is not null and o.source_status = 'SEEN')
-                    """, sourceId, externalId);
+            block.run();
         }
     }
 
@@ -338,32 +417,47 @@ public class BoardDiscoveryService {
      * aggregator observations cannot keep the job alive.
      */
     private int markUnlisted(UUID sourceId, Instant runStart, boolean authoritative) {
-        java.sql.Timestamp since = java.sql.Timestamp.from(runStart);
-        db.update("""
-                update job_source_observations set source_status = 'MISSING', removed_at = now()
-                where source_id = ? and source_status = 'SEEN' and last_seen_at < ?
-                """, sourceId, since);
-        if (authoritative) {
-            return db.update("""
-                    update jobs j set deleted_at = now()
-                    where j.deleted_at is null
-                      and exists (select 1 from job_source_observations o
-                                  where o.job_id = j.id and o.source_id = ? and o.source_status in ('MISSING','CLOSED'))
-                      and not exists (select 1 from job_source_observations o
-                                      join job_sources s on s.id = o.source_id
-                                      where o.job_id = j.id
-                                        and o.source_status = 'SEEN'
-                                        and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA'))
-                    """, sourceId);
-        } else {
-            return db.update("""
-                    update jobs j set deleted_at = now()
-                    where j.deleted_at is null
-                      and exists (select 1 from job_source_observations o
-                                  where o.job_id = j.id and o.source_id = ? and o.source_status in ('MISSING','CLOSED'))
-                      and not exists (select 1 from job_source_observations o
+        return markUnlisted(sourceId, runStart, authoritative, null, null);
+    }
+
+    private int markUnlisted(UUID sourceId, Instant runStart, boolean authoritative, UUID searchPlanId, UUID executionOwnerToken) {
+        java.util.function.Supplier<Integer> block = () -> {
+            if (searchPlanId != null && executionOwnerToken != null && searchPlanRepository != null) {
+                searchPlanRepository.assertLeaseOwnership(searchPlanId, executionOwnerToken);
+            }
+            java.sql.Timestamp since = java.sql.Timestamp.from(runStart);
+            db.update("""
+                    update job_source_observations set source_status = 'MISSING', removed_at = now()
+                    where source_id = ? and source_status = 'SEEN' and last_seen_at < ?
+                    """, sourceId, since);
+            if (authoritative) {
+                return db.update("""
+                        update jobs j set deleted_at = now()
+                        where j.deleted_at is null
+                          and exists (select 1 from job_source_observations o
+                                      where o.job_id = j.id and o.source_id = ? and o.source_status in ('MISSING','CLOSED'))
+                          and not exists (select 1 from job_source_observations o
+                                          join job_sources s on s.id = o.source_id
+                                          where o.job_id = j.id
+                                            and o.source_status = 'SEEN'
+                                            and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA'))
+                        """, sourceId);
+            } else {
+                return db.update("""
+                        update jobs j set deleted_at = now()
+                        where j.deleted_at is null
+                          and exists (select 1 from job_source_observations o
+                                      where o.job_id = j.id and o.source_id = ? and o.source_status in ('MISSING','CLOSED'))
+                          and not exists (select 1 from job_source_observations o
                                       where o.job_id = j.id and o.source_id is not null and o.source_status = 'SEEN')
-                    """, sourceId);
+                        """, sourceId);
+            }
+        };
+        if (transactionTemplate != null) {
+            Integer res = transactionTemplate.execute(status -> block.get());
+            return res != null ? res : 0;
+        } else {
+            return block.get();
         }
     }
 

@@ -1,7 +1,6 @@
 -- V065: Configurable Candidate Search Plans
 -- Allows candidates and autonomous discovery operators to define targeted, multi-source search plans
 -- with query facets, provider preferences, and cadence controls.
--- Includes database-backed execution leases with owner tokens and fencing protection.
 
 CREATE TABLE search_plans (
     id UUID PRIMARY KEY,
@@ -17,8 +16,6 @@ CREATE TABLE search_plans (
     last_execution_status TEXT CHECK (last_execution_status IS NULL OR last_execution_status IN ('SUCCESS', 'FAILED', 'PARTIAL', 'RUNNING', 'SKIPPED')),
     last_execution_error TEXT,
     last_execution_results INTEGER NOT NULL DEFAULT 0,
-    execution_owner_token UUID,
-    execution_lease_expires_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -28,8 +25,5 @@ CREATE INDEX search_plans_profile_idx ON search_plans (profile_id, active);
 
 -- Index for scheduler looking for active plans due for execution
 CREATE INDEX search_plans_frequency_idx ON search_plans (search_frequency, active) WHERE active = true;
-
--- Index for execution lease coordination and stale recovery
-CREATE INDEX search_plans_lease_idx ON search_plans (active, last_execution_status, execution_lease_expires_at);
 
 COMMENT ON TABLE search_plans IS 'Configurable search plans defining candidate-scoped discovery strategies across providers';

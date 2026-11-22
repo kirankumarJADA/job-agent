@@ -164,7 +164,7 @@ public class SearchPlanEndToEndIT {
         assertThat(ingest1.jobId()).isNotNull();
 
         // Mock boardDiscoveryService.run to return the ingested job result
-        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap())).thenReturn(
+        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap(), any(), any())).thenReturn(
                 new BoardDiscoveryService.SourceRunReport(
                         "e2e-run-1", actualSourceId, "GREENHOUSE", "OK", true, Map.of("count", 1), null, null,
                         List.of(ingest1), List.of()
@@ -264,7 +264,7 @@ public class SearchPlanEndToEndIT {
                 "SELECT id FROM job_sources WHERE kind = 'ADZUNA' AND org_identifier = 'rate-limited-e2e'",
                 UUID.class);
 
-        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap())).thenReturn(
+        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap(), any(), any())).thenReturn(
                 new BoardDiscoveryService.SourceRunReport(
                         "err-run", actualFailingId, "ADZUNA", "FAILED", false, Map.of(),
                         "RATE_LIMITED", "HTTP 429 Too Many Requests (Rate limit quota exceeded)",
