@@ -160,9 +160,12 @@ public class AtsHandoffService {
         );
         if (!transitioned) {
             // Also attempt transition if plan was previously in BLOCKED_ANTI_BOT
-            planRepository.transitionWithResult(
+            transitioned = planRepository.transitionWithResult(
                     session.planId(), "BLOCKED_ANTI_BOT", "COMPLETED", completionResult
             );
+        }
+        if (!transitioned) {
+            throw new IllegalStateException("Failed to transition automation plan " + session.planId() + " to terminal COMPLETED");
         }
 
         log.info("Handoff session {} completed by candidate attestation. Plan {} set to COMPLETED (terminal)", sessionId, session.planId());
@@ -277,7 +280,13 @@ public class AtsHandoffService {
                     "reason", "HANDOFF_CANCELLED",
                     "message", "Handoff session cancelled by candidate"
             ));
-            planRepository.transitionWithResult(session.planId(), "HANDOFF_REQUIRED", "FAILED", errorResult);
+            boolean transitioned = planRepository.transitionWithResult(session.planId(), "HANDOFF_REQUIRED", "FAILED", errorResult);
+            if (!transitioned) {
+                transitioned = planRepository.transitionWithResult(session.planId(), "BLOCKED_ANTI_BOT", "FAILED", errorResult);
+            }
+            if (!transitioned) {
+                throw new IllegalStateException("Failed to transition automation plan " + session.planId() + " to FAILED on handoff cancellation");
+            }
             if (audit != null) {
                 audit.write(new AuditEntry(
                         "CANDIDATE",

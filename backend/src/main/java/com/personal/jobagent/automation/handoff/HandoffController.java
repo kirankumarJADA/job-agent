@@ -41,8 +41,12 @@ public class HandoffController {
      */
     @GetMapping("/applications/{applicationId}")
     public ResponseEntity<?> getActiveHandoff(@PathVariable UUID applicationId) {
+        if (ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Worker tokens may not access candidate handoff endpoints"));
+        }
+
         UUID profileId = ownerContext.profileIdOrNull();
-        if (profileId == null && !ownerContext.isWorkerRequest()) {
+        if (profileId == null) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         }
 
@@ -56,8 +60,12 @@ public class HandoffController {
      */
     @GetMapping("/plans/{planId}")
     public ResponseEntity<?> getActiveHandoffForPlan(@PathVariable UUID planId) {
+        if (ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Worker tokens may not access candidate handoff endpoints"));
+        }
+
         UUID profileId = ownerContext.profileIdOrNull();
-        if (profileId == null && !ownerContext.isWorkerRequest()) {
+        if (profileId == null) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         }
 
@@ -79,31 +87,39 @@ public class HandoffController {
     @PostMapping("/{sessionId}/complete")
     public ResponseEntity<?> confirmCompletion(@PathVariable UUID sessionId,
                                                @RequestBody(required = false) CompleteRequest req) {
-        if (req != null && Boolean.FALSE.equals(req.submittedExternally())) {
+        if (req == null || !Boolean.TRUE.equals(req.submittedExternally())) {
             return ResponseEntity.badRequest().body(Map.of(
-                    "error", "External submission attestation is required to complete handoff"
+                    "error", "External submission attestation (submittedExternally = true) is required to complete handoff"
             ));
         }
 
+        if (ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Worker tokens may not complete handoff sessions"));
+        }
+
         UUID profileId = ownerContext.profileIdOrNull();
-        if (profileId == null && !ownerContext.isWorkerRequest()) {
+        if (profileId == null) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         }
 
-        if (profileId != null && !ownerContext.isWorkerRequest()) {
-            Optional<HandoffSessionRecord> any = handoffService.findSessionAnyOwner(sessionId);
-            if (any.isEmpty()) {
-                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Handoff session not found"));
-            }
-            if (!profileId.equals(any.get().profileId())) {
-                return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Access denied: session belongs to another profile"));
-            }
+        Optional<HandoffSessionRecord> any = handoffService.findSessionAnyOwner(sessionId);
+        if (any.isEmpty()) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Handoff session not found"));
+        }
+        if (!profileId.equals(any.get().profileId())) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Access denied: session belongs to another profile"));
         }
 
-        boolean success = handoffService.confirmHandoffCompletion(profileId, sessionId);
-        if (!success) {
+        try {
+            boolean success = handoffService.confirmHandoffCompletion(profileId, sessionId);
+            if (!success) {
+                return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of(
+                        "error", "Handoff session expired, cancelled, or not authorized for completion"
+                ));
+            }
+        } catch (IllegalStateException e) {
             return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of(
-                    "error", "Handoff session expired, cancelled, or not authorized for completion"
+                    "error", "Handoff completion failed: " + e.getMessage()
             ));
         }
 
@@ -114,34 +130,38 @@ public class HandoffController {
         ));
     }
 
-    public ResponseEntity<?> confirmCompletion(UUID sessionId) {
-        return confirmCompletion(sessionId, null);
-    }
-
     /**
      * Called by candidate UI to abandon/cancel a pending handoff session.
      */
     @PostMapping("/{sessionId}/cancel")
     public ResponseEntity<?> cancelHandoff(@PathVariable UUID sessionId) {
+        if (ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Worker tokens may not cancel handoff sessions"));
+        }
+
         UUID profileId = ownerContext.profileIdOrNull();
-        if (profileId == null && !ownerContext.isWorkerRequest()) {
+        if (profileId == null) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         }
 
-        if (profileId != null && !ownerContext.isWorkerRequest()) {
-            Optional<HandoffSessionRecord> any = handoffService.findSessionAnyOwner(sessionId);
-            if (any.isEmpty()) {
-                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Handoff session not found"));
-            }
-            if (!profileId.equals(any.get().profileId())) {
-                return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Access denied: session belongs to another profile"));
-            }
+        Optional<HandoffSessionRecord> any = handoffService.findSessionAnyOwner(sessionId);
+        if (any.isEmpty()) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Handoff session not found"));
+        }
+        if (!profileId.equals(any.get().profileId())) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Access denied: session belongs to another profile"));
         }
 
-        boolean success = handoffService.cancelHandoff(profileId, sessionId);
-        if (!success) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of(
-                    "error", "Handoff session not found or already terminal"
+        try {
+            boolean success = handoffService.cancelHandoff(profileId, sessionId);
+            if (!success) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of(
+                        "error", "Handoff session not found or already terminal"
+                ));
+            }
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of(
+                    "error", "Handoff cancellation failed: " + e.getMessage()
             ));
         }
 

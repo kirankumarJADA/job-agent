@@ -155,9 +155,11 @@ All 16 scenarios are rigorously validated across PostgreSQL Testcontainers, Node
 | 14 | Concurrent initiate race guarantees 1 PENDING session | `AtsHandoffIntegrationIT.testConcurrentInitiateSingleActiveSession` | **PASSED** |
 | 15 | Repeated completion maintains terminal status | `AtsHandoffIntegrationIT.testRepeatedCompletionCannotAlterTerminalApplication` | **PASSED** |
 | 16 | Transactional rollback preserves state on failure | `AtsHandoffIntegrationIT.testTransactionalRollbackOnApplicationTransitionFailure` | **PASSED** |
+| 17 | Worker token cannot complete, cancel, or read sessions | `AtsHandoffIntegrationIT.testWorkerTokenCannotCompleteOrCancelOrReadCandidateHandoff` | **PASSED** |
+| 18 | Fail-closed rollback on plan transition failure | `AtsHandoffIntegrationIT.testFailClosedRollbackOnPlanTransitionFailure` | **PASSED** |
 
 ### Test Execution Summary:
-- **Backend Tests (`AtsHandoffIntegrationIT`, `AtsHandoffServiceTest`, `HandoffControllerTest`, `AutomationRecoverySchedulerMaintenanceTest`)**: 33 passed, 0 failures, 0 errors in 02:14 min (`BUILD SUCCESS`).
-- **Worker Tests (`worker/test/*.test.js`)**: 268 passed, 0 failures, 0 errors in 88.99 s.
+- **Backend Tests (`AtsHandoffIntegrationIT`, `AtsHandoffServiceTest`, `HandoffControllerTest`, `AutomationRecoverySchedulerMaintenanceTest`)**: 43 passed, 0 failures, 0 errors in 01:35 min (`BUILD SUCCESS`).
+- **Worker Tests (`worker/test/*.test.js`)**: 268 passed, 0 failures, 0 errors.
 - **Frontend Tests (`vitest run`)**: 453 passed across 46 test files in 48.24 s.
-- **Total Tests Passing**: **754 passed, 0 failures across all layers**.
+- **Total Tests Passing**: **764 passed, 0 failures across all layers**.

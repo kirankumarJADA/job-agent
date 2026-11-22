@@ -141,6 +141,7 @@ class AtsHandoffServiceTest {
 
         when(handoffRepository.findById(profileId, sessionId)).thenReturn(Optional.of(record));
         when(handoffRepository.cancelSession(profileId, sessionId)).thenReturn(true);
+        when(planRepository.transitionWithResult(eq(planId), eq("HANDOFF_REQUIRED"), eq("FAILED"), anyList())).thenReturn(true);
 
         boolean result = service.cancelHandoff(profileId, sessionId);
 
@@ -148,6 +149,45 @@ class AtsHandoffServiceTest {
         verify(handoffRepository).cancelSession(profileId, sessionId);
         verify(planRepository).transitionWithResult(eq(planId), eq("HANDOFF_REQUIRED"), eq("FAILED"), anyList());
         verify(audit).write(argThat(entry -> "ATS_HANDOFF_CANCELLED".equals(entry.action())));
+    }
+
+    @Test
+    @DisplayName("confirmHandoffCompletion throws IllegalStateException when plan transition fails")
+    void testConfirmHandoffCompletionThrowsWhenPlanTransitionFails() {
+        HandoffSessionRecord record = new HandoffSessionRecord(
+                sessionId, planId, applicationId, profileId,
+                HandoffStatus.PENDING, HandoffBlockReason.CAPTCHA,
+                "https://jobs.lever.co/example/123", UUID.randomUUID(),
+                Instant.now().plusSeconds(900), null, null, Instant.now(), Instant.now()
+        );
+
+        when(handoffRepository.findById(profileId, sessionId)).thenReturn(Optional.of(record));
+        when(handoffRepository.completeSession(profileId, sessionId)).thenReturn(true);
+        when(handoffRepository.getApplicationStatus(applicationId)).thenReturn(Optional.of("READY_TO_APPLY"));
+        when(planRepository.transitionWithResult(eq(planId), anyString(), eq("COMPLETED"), anyList())).thenReturn(false);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.confirmHandoffCompletion(profileId, sessionId))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to transition automation plan");
+    }
+
+    @Test
+    @DisplayName("cancelHandoff throws IllegalStateException when plan transition fails")
+    void testCancelHandoffThrowsWhenPlanTransitionFails() {
+        HandoffSessionRecord record = new HandoffSessionRecord(
+                sessionId, planId, applicationId, profileId,
+                HandoffStatus.PENDING, HandoffBlockReason.MFA,
+                "https://workday.example/apply", UUID.randomUUID(),
+                Instant.now().plusSeconds(900), null, null, Instant.now(), Instant.now()
+        );
+
+        when(handoffRepository.findById(profileId, sessionId)).thenReturn(Optional.of(record));
+        when(handoffRepository.cancelSession(profileId, sessionId)).thenReturn(true);
+        when(planRepository.transitionWithResult(eq(planId), anyString(), eq("FAILED"), anyList())).thenReturn(false);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.cancelHandoff(profileId, sessionId))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to transition automation plan");
     }
 
     @Test

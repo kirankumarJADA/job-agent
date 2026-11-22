@@ -31,6 +31,7 @@ class HandoffControllerTest {
         ownerContext = mock(OwnerContext.class);
         controller = new HandoffController(handoffService, ownerContext);
         when(ownerContext.profileIdOrNull()).thenReturn(profileId);
+        when(ownerContext.isWorkerRequest()).thenReturn(false);
     }
 
     @Test
@@ -52,6 +53,28 @@ class HandoffControllerTest {
     }
 
     @Test
+    @DisplayName("getActiveHandoff refuses worker requests with 403 Forbidden")
+    void testGetActiveHandoffWorkerForbidden() {
+        when(ownerContext.isWorkerRequest()).thenReturn(true);
+
+        ResponseEntity<?> response = controller.getActiveHandoff(applicationId);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        verify(handoffService, never()).getActiveHandoffForApplication(any(), any());
+    }
+
+    @Test
+    @DisplayName("getActiveHandoffForPlan refuses worker requests with 403 Forbidden")
+    void testGetActiveHandoffForPlanWorkerForbidden() {
+        when(ownerContext.isWorkerRequest()).thenReturn(true);
+
+        ResponseEntity<?> response = controller.getActiveHandoffForPlan(planId);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        verify(handoffService, never()).getActiveHandoffForPlan(any(), any());
+    }
+
+    @Test
     @DisplayName("confirmCompletion returns 200 on successful candidate attestation")
     void testConfirmCompletionSuccess() {
         HandoffSessionRecord record = new HandoffSessionRecord(
@@ -70,12 +93,43 @@ class HandoffControllerTest {
     }
 
     @Test
+    @DisplayName("confirmCompletion rejects request when body is missing (null)")
+    void testConfirmCompletionRejectedMissingBody() {
+        ResponseEntity<?> response = controller.confirmCompletion(sessionId, null);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(handoffService, never()).confirmHandoffCompletion(any(), any());
+    }
+
+    @Test
+    @DisplayName("confirmCompletion rejects request when submittedExternally is null (empty JSON object)")
+    void testConfirmCompletionRejectedNullSubmittedExternally() {
+        var req = new HandoffController.CompleteRequest(null, null);
+        ResponseEntity<?> response = controller.confirmCompletion(sessionId, req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(handoffService, never()).confirmHandoffCompletion(any(), any());
+    }
+
+    @Test
     @DisplayName("confirmCompletion rejects request when submittedExternally is false")
     void testConfirmCompletionRejectedWithoutAttestation() {
         var req = new HandoffController.CompleteRequest(false, "Did not submit");
         ResponseEntity<?> response = controller.confirmCompletion(sessionId, req);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(handoffService, never()).confirmHandoffCompletion(any(), any());
+    }
+
+    @Test
+    @DisplayName("confirmCompletion refuses worker requests with 403 Forbidden")
+    void testConfirmCompletionWorkerForbidden() {
+        when(ownerContext.isWorkerRequest()).thenReturn(true);
+
+        var req = new HandoffController.CompleteRequest(true, "Worker trying to complete");
+        ResponseEntity<?> response = controller.confirmCompletion(sessionId, req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
         verify(handoffService, never()).confirmHandoffCompletion(any(), any());
     }
 
@@ -91,7 +145,8 @@ class HandoffControllerTest {
         );
         when(handoffService.findSessionAnyOwner(sessionId)).thenReturn(Optional.of(record));
 
-        ResponseEntity<?> response = controller.confirmCompletion(sessionId);
+        var req = new HandoffController.CompleteRequest(true, "Cross profile attempt");
+        ResponseEntity<?> response = controller.confirmCompletion(sessionId, req);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
     }
@@ -108,7 +163,8 @@ class HandoffControllerTest {
         when(handoffService.findSessionAnyOwner(sessionId)).thenReturn(Optional.of(record));
         when(handoffService.confirmHandoffCompletion(profileId, sessionId)).thenReturn(false);
 
-        ResponseEntity<?> response = controller.confirmCompletion(sessionId);
+        var req = new HandoffController.CompleteRequest(true, "Valid attestation");
+        ResponseEntity<?> response = controller.confirmCompletion(sessionId, req);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
     }
@@ -128,6 +184,17 @@ class HandoffControllerTest {
         ResponseEntity<?> response = controller.cancelHandoff(sessionId);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
+    @DisplayName("cancelHandoff refuses worker requests with 403 Forbidden")
+    void testCancelHandoffWorkerForbidden() {
+        when(ownerContext.isWorkerRequest()).thenReturn(true);
+
+        ResponseEntity<?> response = controller.cancelHandoff(sessionId);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        verify(handoffService, never()).cancelHandoff(any(), any());
     }
 
     @Test

@@ -59,7 +59,9 @@ public class WorkerEventTokenFilter extends OncePerRequestFilter {
                                     FilterChain filterChain) throws ServletException, IOException {
         String path = request.getRequestURI();
         boolean workerOnly = isWorkerOnlyPath(path);
-        boolean workerCapable = workerOnly || WORKER_PLAN_PATH.matcher(path).matches() || path.startsWith("/api/v1/handoff/");
+        boolean isHandoffInitiate = "POST".equalsIgnoreCase(request.getMethod())
+                && "/api/v1/handoff/initiate".equals(path);
+        boolean workerCapable = workerOnly || WORKER_PLAN_PATH.matcher(path).matches() || isHandoffInitiate;
 
         if (!workerCapable) {
             filterChain.doFilter(request, response);
