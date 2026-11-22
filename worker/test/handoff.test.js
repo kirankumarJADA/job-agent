@@ -15,6 +15,9 @@ test('isHandoffEligibleError correctly identifies anti-bot and security challeng
   assert.equal(isHandoffEligibleError({ reason: 'WORKDAY_CAPTCHA_PRESENT' }), true);
   assert.equal(isHandoffEligibleError(new Error('Cloudflare turnstile detected')), true);
   assert.equal(isHandoffEligibleError({ reason: 'MFA_REQUIRED' }), true);
+  assert.equal(isHandoffEligibleError({ reason: 'BLOCKED_ANTI_BOT' }), true);
+  assert.equal(isHandoffEligibleError(new Error('BLOCKED_ANTI_BOT')), true);
+  assert.equal(isHandoffEligibleError({ reason: 'ANTI_BOT_CHALLENGE' }), true);
   assert.equal(isHandoffEligibleError(null), false);
 });
 
@@ -34,6 +37,14 @@ test('normalizeHandoffReason maps error reasons to standard platform strings', (
   assert.equal(
     normalizeHandoffReason({ reason: 'hCaptcha found' }, 'LEVER'),
     'LEVER_CAPTCHA_PRESENT'
+  );
+  assert.equal(
+    normalizeHandoffReason({ reason: 'BLOCKED_ANTI_BOT' }, 'GREENHOUSE'),
+    'EMPLOYER_SECURITY_CHECK'
+  );
+  assert.equal(
+    normalizeHandoffReason(new Error('Cloudflare turnstile challenge'), 'GREENHOUSE'),
+    'CLOUDFLARE_TURNSTILE'
   );
 });
 

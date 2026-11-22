@@ -50,6 +50,7 @@ class AtsHandoffServiceTest {
 
         when(handoffRepository.createSession(eq(profileId), eq(planId), eq(applicationId), anyString(), eq(HandoffBlockReason.CAPTCHA), eq(15)))
                 .thenReturn(record);
+        when(planRepository.transition(planId, "RUNNING", "HANDOFF_REQUIRED")).thenReturn(true);
 
         HandoffSessionRecord created = service.initiateHandoff(
                 profileId, planId, applicationId, "https://jobs.lever.co/example/123", HandoffBlockReason.CAPTCHA, 15
@@ -58,6 +59,40 @@ class AtsHandoffServiceTest {
         assertThat(created).isEqualTo(record);
         verify(planRepository).transition(planId, "RUNNING", "HANDOFF_REQUIRED");
         verify(audit).write(argThat(entry -> "ATS_HANDOFF_INITIATED".equals(entry.action())));
+    }
+
+    @Test
+    @DisplayName("initiateHandoff falls back to BLOCKED_ANTI_BOT transition when RUNNING transition returns false")
+    void testInitiateHandoffFallbackBlockedAntiBot() {
+        HandoffSessionRecord record = new HandoffSessionRecord(
+                sessionId, planId, applicationId, profileId,
+                HandoffStatus.PENDING, HandoffBlockReason.CAPTCHA,
+                "https://jobs.lever.co/example/123", UUID.randomUUID(),
+                Instant.now().plusSeconds(900), null, null, Instant.now(), Instant.now()
+        );
+
+        when(handoffRepository.createSession(eq(profileId), eq(planId), eq(applicationId), anyString(), eq(HandoffBlockReason.CAPTCHA), eq(15)))
+                .thenReturn(record);
+        when(planRepository.transition(planId, "RUNNING", "HANDOFF_REQUIRED")).thenReturn(false);
+        when(planRepository.transition(planId, "BLOCKED_ANTI_BOT", "HANDOFF_REQUIRED")).thenReturn(true);
+
+        HandoffSessionRecord created = service.initiateHandoff(
+                profileId, planId, applicationId, "https://jobs.lever.co/example/123", HandoffBlockReason.CAPTCHA, 15
+        );
+
+        assertThat(created).isEqualTo(record);
+        verify(planRepository).transition(planId, "RUNNING", "HANDOFF_REQUIRED");
+        verify(planRepository).transition(planId, "BLOCKED_ANTI_BOT", "HANDOFF_REQUIRED");
+    }
+
+    @Test
+    @DisplayName("isPlanOwnedBy delegates to planRepository.ownerOfPlan")
+    void testIsPlanOwnedBy() {
+        when(planRepository.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
+
+        assertThat(service.isPlanOwnedBy(planId, profileId)).isTrue();
+        assertThat(service.isPlanOwnedBy(planId, UUID.randomUUID())).isFalse();
+        assertThat(service.isPlanOwnedBy(null, profileId)).isFalse();
     }
 
     @Test

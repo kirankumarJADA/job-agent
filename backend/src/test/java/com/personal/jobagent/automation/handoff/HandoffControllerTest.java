@@ -222,4 +222,57 @@ class HandoffControllerTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         assertThat(response.getBody()).isEqualTo(record);
     }
+
+    @Test
+    @DisplayName("initiateHandoff rejects request when planId is null with 400 Bad Request")
+    void testInitiateHandoffRejectsNullPlanId() {
+        var req = new HandoffController.InitiateRequest(
+                null, applicationId, "LEVER", "https://jobs.lever.co/example",
+                "LEVER_CAPTCHA_PRESENT", "evidence/screenshot.png", 15
+        );
+        ResponseEntity<?> response = controller.initiateHandoff(req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    @Test
+    @DisplayName("initiateHandoff rejects candidate request when plan is owned by different profile with 403")
+    void testInitiateHandoffRejectsUnownedPlan() {
+        when(handoffService.isApplicationOwnedBy(applicationId, profileId)).thenReturn(true);
+        when(handoffService.isPlanOwnedBy(planId, profileId)).thenReturn(false);
+
+        var req = new HandoffController.InitiateRequest(
+                planId, applicationId, "LEVER", "https://jobs.lever.co/example",
+                "LEVER_CAPTCHA_PRESENT", "evidence/screenshot.png", 15
+        );
+        ResponseEntity<?> response = controller.initiateHandoff(req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        verify(handoffService, never()).initiateHandoff(any(), any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
+    @DisplayName("initiateHandoff succeeds when candidate owns both application and plan")
+    void testInitiateHandoffCandidateOwnsBoth() {
+        when(handoffService.isApplicationOwnedBy(applicationId, profileId)).thenReturn(true);
+        when(handoffService.isPlanOwnedBy(planId, profileId)).thenReturn(true);
+
+        HandoffSessionRecord record = new HandoffSessionRecord(
+                sessionId, planId, applicationId, profileId,
+                HandoffStatus.PENDING, HandoffBlockReason.CAPTCHA,
+                "https://jobs.lever.co/example", UUID.randomUUID(),
+                Instant.now().plusSeconds(900), null, null, Instant.now(), Instant.now()
+        );
+        when(handoffService.initiateHandoff(eq(profileId), eq(planId), eq(applicationId), any(), any(), eq(15)))
+                .thenReturn(record);
+
+        var req = new HandoffController.InitiateRequest(
+                planId, applicationId, "LEVER", "https://jobs.lever.co/example",
+                "LEVER_CAPTCHA_PRESENT", "evidence/screenshot.png", 15
+        );
+        ResponseEntity<?> response = controller.initiateHandoff(req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(response.getBody()).isEqualTo(record);
+    }
 }

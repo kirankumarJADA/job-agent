@@ -57,13 +57,23 @@ public class AtsHandoffService {
      * Initiates a candidate handoff when browser automation detects CAPTCHA, MFA, or security challenge.
      * Transitions the plan to HANDOFF_REQUIRED and persists a short-lived session.
      */
+    @Transactional
     public HandoffSessionRecord initiateHandoff(UUID ownerProfileId, UUID planId, UUID applicationId,
                                                 String targetUrl, HandoffBlockReason reason, int ttlMinutes) {
         log.info("Initiating candidate handoff for plan {} (app {}) due to {}", planId, applicationId, reason);
         HandoffSessionRecord session = handoffRepository.createSession(ownerProfileId, planId, applicationId, targetUrl, reason, ttlMinutes);
 
-        // Pause plan status safely
-        planRepository.transition(planId, "RUNNING", "HANDOFF_REQUIRED");
+        // Pause plan status safely: support transition from RUNNING or BLOCKED_ANTI_BOT to HANDOFF_REQUIRED
+        boolean transitioned = planRepository.transition(planId, "RUNNING", "HANDOFF_REQUIRED");
+        if (!transitioned) {
+            transitioned = planRepository.transition(planId, "BLOCKED_ANTI_BOT", "HANDOFF_REQUIRED");
+        }
+        if (!transitioned) {
+            Optional<String> currentStatus = planRepository.findById(planId).map(AutomationPlanRepository.PlanRow::status);
+            if (currentStatus.isEmpty() || !"HANDOFF_REQUIRED".equals(currentStatus.get())) {
+                throw new IllegalStateException("Failed to transition plan " + planId + " to HANDOFF_REQUIRED (current status: " + currentStatus.orElse("not found") + ")");
+            }
+        }
 
         if (audit != null) {
             audit.write(new AuditEntry(
@@ -107,6 +117,13 @@ public class AtsHandoffService {
     public boolean isApplicationOwnedBy(UUID applicationId, UUID profileId) {
         if (applicationId == null || profileId == null) return false;
         return handoffRepository.findProfileIdForApplication(applicationId)
+                .map(profileId::equals)
+                .orElse(false);
+    }
+
+    public boolean isPlanOwnedBy(UUID planId, UUID profileId) {
+        if (planId == null || profileId == null) return false;
+        return planRepository.ownerOfPlan(planId)
                 .map(profileId::equals)
                 .orElse(false);
     }
@@ -208,6 +225,8 @@ public class AtsHandoffService {
         // Handle already-submitted applications idempotently without regressing status
         if ("APPLICATION_SUBMITTED".equals(currentStatus) ||
                 "CONFIRMATION_RECEIVED".equals(currentStatus) ||
+                "RECRUITER_CONTACT".equals(currentStatus) ||
+                "ASSESSMENT".equals(currentStatus) ||
                 "INTERVIEW".equals(currentStatus) ||
                 "OFFER".equals(currentStatus)) {
             log.info("Application {} is already in terminal/submitted status {}; maintaining status", applicationId, currentStatus);
@@ -244,7 +263,13 @@ public class AtsHandoffService {
                     "reason", "HANDOFF_EXPIRED",
                     "message", "Handoff session expired without candidate attestation"
             ));
-            planRepository.transitionWithResult(planId, "HANDOFF_REQUIRED", "FAILED", errorResult);
+            boolean transitioned = planRepository.transitionWithResult(planId, "HANDOFF_REQUIRED", "FAILED", errorResult);
+            if (!transitioned) {
+                transitioned = planRepository.transitionWithResult(planId, "BLOCKED_ANTI_BOT", "FAILED", errorResult);
+            }
+            if (!transitioned) {
+                log.warn("Could not transition expired plan {} to FAILED; it may already be in a terminal state", planId);
+            }
             if (audit != null) {
                 audit.write(new AuditEntry(
                         "SYSTEM",

@@ -411,7 +411,7 @@ export const ApplicationsPage: React.FC = () => {
                           onClick={() => openHandoffModal(application.id)}
                           className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-200 hover:bg-amber-500/20 shadow-sm"
                         >
-                          Resolve &amp; Resume
+                          Complete on Employer Site
                         </button>
                       </div>
                     )}

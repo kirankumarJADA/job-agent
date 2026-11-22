@@ -157,9 +157,14 @@ All 16 scenarios are rigorously validated across PostgreSQL Testcontainers, Node
 | 16 | Transactional rollback preserves state on failure | `AtsHandoffIntegrationIT.testTransactionalRollbackOnApplicationTransitionFailure` | **PASSED** |
 | 17 | Worker token cannot complete, cancel, or read sessions | `AtsHandoffIntegrationIT.testWorkerTokenCannotCompleteOrCancelOrReadCandidateHandoff` | **PASSED** |
 | 18 | Fail-closed rollback on plan transition failure | `AtsHandoffIntegrationIT.testFailClosedRollbackOnPlanTransitionFailure` | **PASSED** |
+| 19 | Candidate initiate rejects cross-profile plan with 403 | `AtsHandoffIntegrationIT.testInitiateHandoffRejectsCrossProfilePlanForCandidate` | **PASSED** |
+| 20 | Initiate rejects null planId with 400 Bad Request | `AtsHandoffIntegrationIT.testInitiateHandoffRejectsNullPlanId` | **PASSED** |
+| 21 | Handoff initiation & expiration handles BLOCKED_ANTI_BOT | `AtsHandoffIntegrationIT.testHandoffInitiationAndExpirationFromBlockedAntiBot` | **PASSED** |
 
 ### Test Execution Summary:
-- **Backend Tests (`AtsHandoffIntegrationIT`, `AtsHandoffServiceTest`, `HandoffControllerTest`, `AutomationRecoverySchedulerMaintenanceTest`)**: 43 passed, 0 failures, 0 errors in 01:35 min (`BUILD SUCCESS`).
-- **Worker Tests (`worker/test/*.test.js`)**: 268 passed, 0 failures, 0 errors.
-- **Frontend Tests (`vitest run`)**: 453 passed across 46 test files in 48.24 s.
-- **Total Tests Passing**: **764 passed, 0 failures across all layers**.
+- **Backend Tests (`AtsHandoffIntegrationIT`, `AtsHandoffServiceTest`, `HandoffControllerTest`, `AutomationRecoverySchedulerMaintenanceTest`)**: 51 passed, 0 failures, 0 errors in 02:21 min (`BUILD SUCCESS`).
+- **Worker Tests (`worker/test/*.test.js`)**: 268 passed, 0 failures, 0 errors in 62.82 s.
+- **Frontend Tests (`vitest run`)**: 454 passed across 46 test files in 39.86 s.
+- **Cloudflare Email Worker Tests (`npm test`)**: 17 passed, 0 failures.
+- **Frontend Production Build (`npm run build`)**: 97 modules transformed, built in 6.89s.
+- **Total Tests Passing**: **790 passed, 0 failures across all layers**.

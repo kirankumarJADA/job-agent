@@ -57,6 +57,7 @@ export const HandoffModal: React.FC<HandoffModalProps> = ({ session, onClose, on
   };
 
   const isExpired = new Date(session.expiresAt).getTime() <= Date.now();
+  const isInactive = isExpired || session.status !== 'PENDING';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" role="dialog" aria-modal="true">
@@ -119,7 +120,7 @@ export const HandoffModal: React.FC<HandoffModalProps> = ({ session, onClose, on
                   setAttested(e.target.checked);
                   if (error) setError(null);
                 }}
-                disabled={submitting || cancelling || isExpired}
+                disabled={submitting || cancelling || isInactive}
                 className="mt-0.5 rounded border-slate-700 text-emerald-600 focus:ring-emerald-500 bg-slate-800"
               />
               <span className="text-xs text-slate-200">
@@ -132,7 +133,7 @@ export const HandoffModal: React.FC<HandoffModalProps> = ({ session, onClose, on
           </div>
 
           <div className="text-xs text-slate-400 flex items-center justify-between">
-            <span>Session Status: <strong className={isExpired ? 'text-red-400' : 'text-emerald-400'}>{isExpired ? 'EXPIRED' : session.status}</strong></span>
+            <span>Session Status: <strong className={isExpired ? 'text-red-400' : session.status === 'PENDING' ? 'text-emerald-400' : 'text-amber-400'}>{isExpired ? 'EXPIRED' : session.status}</strong></span>
             <span>Expires at: {new Date(session.expiresAt).toLocaleTimeString()}</span>
           </div>
 
@@ -157,7 +158,7 @@ export const HandoffModal: React.FC<HandoffModalProps> = ({ session, onClose, on
             <button
               type="button"
               onClick={onClose}
-              disabled={submitting}
+              disabled={submitting || cancelling}
               className="px-3 py-1.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 text-xs font-medium transition"
             >
               Dismiss
@@ -165,7 +166,7 @@ export const HandoffModal: React.FC<HandoffModalProps> = ({ session, onClose, on
             <button
               type="button"
               onClick={handleConfirm}
-              disabled={submitting || cancelling || isExpired || !attested}
+              disabled={submitting || cancelling || isInactive || !attested}
               className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-lg shadow-emerald-900/40 transition disabled:opacity-50"
             >
               {submitting ? 'Recording Attestation...' : 'Confirm External Submission'}

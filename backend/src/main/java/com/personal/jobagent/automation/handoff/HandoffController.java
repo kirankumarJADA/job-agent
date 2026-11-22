@@ -177,8 +177,8 @@ public class HandoffController {
      */
     @PostMapping("/initiate")
     public ResponseEntity<?> initiateHandoff(@RequestBody InitiateRequest req) {
-        if (req == null || req.applicationId() == null || req.targetUrl() == null) {
-            return ResponseEntity.badRequest().body(Map.of("error", "applicationId and targetUrl are required"));
+        if (req == null || req.applicationId() == null || req.planId() == null || req.targetUrl() == null) {
+            return ResponseEntity.badRequest().body(Map.of("error", "applicationId, planId, and targetUrl are required"));
         }
 
         UUID profileId = ownerContext.profileIdOrNull();
@@ -187,9 +187,10 @@ public class HandoffController {
         }
 
         if (profileId != null && !ownerContext.isWorkerRequest()) {
-            boolean owned = handoffService.isApplicationOwnedBy(req.applicationId(), profileId);
-            if (!owned) {
-                return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Access denied: application belongs to another profile"));
+            boolean appOwned = handoffService.isApplicationOwnedBy(req.applicationId(), profileId);
+            boolean planOwned = handoffService.isPlanOwnedBy(req.planId(), profileId);
+            if (!appOwned || !planOwned) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Access denied: application or plan belongs to another profile"));
             }
         } else if (profileId == null && ownerContext.isWorkerRequest()) {
             profileId = handoffService.resolveProfileId(req.planId(), req.applicationId()).orElse(null);

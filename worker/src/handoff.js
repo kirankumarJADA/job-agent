@@ -29,10 +29,11 @@ export const HandoffReason = Object.freeze({
 export function isHandoffEligibleError(error) {
   if (!error) return false;
   const reason = String(error.reason || error.message || '');
-  return /CAPTCHA|MFA|TURNSTILE|SECURITY_CHECK/i.test(reason)
+  return /CAPTCHA|MFA|TURNSTILE|SECURITY_CHECK|ANTI[-_ ]BOT/i.test(reason)
     || reason === 'LEVER_CAPTCHA_PRESENT'
     || reason === 'WORKDAY_MFA_REQUIRED'
-    || reason === 'WORKDAY_CAPTCHA_PRESENT';
+    || reason === 'WORKDAY_CAPTCHA_PRESENT'
+    || reason === 'BLOCKED_ANTI_BOT';
 }
 
 /**
@@ -48,6 +49,12 @@ export function normalizeHandoffReason(error, planType) {
   }
   if (/WORKDAY/i.test(reason)) {
     return 'WORKDAY_CAPTCHA_PRESENT';
+  }
+  if (/TURNSTILE|CLOUDFLARE/i.test(reason)) {
+    return 'CLOUDFLARE_TURNSTILE';
+  }
+  if (/ANTI[-_ ]BOT|SECURITY/i.test(reason)) {
+    return 'EMPLOYER_SECURITY_CHECK';
   }
   return reason || 'CAPTCHA';
 }

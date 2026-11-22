@@ -4,7 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { BrowserWorker } from './browser_worker.js';
 import { computePlanOutcome } from './outcome.js';
-import { initiateHandoff, initiateHandoffAndWait, isHandoffEligibleError } from './handoff.js';
+import { initiateHandoff, isHandoffEligibleError } from './handoff.js';
 
 const args = new Map();
 for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i], process.argv[i + 1] ?? true);

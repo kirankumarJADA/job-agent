@@ -132,4 +132,20 @@ describe('HandoffModal', () => {
     expect(confirmBtn.hasAttribute('disabled')).toBe(true);
     expect(screen.getByText('EXPIRED')).toBeTruthy();
   });
+
+  it('disables confirm button and checkbox when session status is not PENDING', () => {
+    const cancelledSession: HandoffSession = {
+      ...mockSession,
+      status: 'CANCELLED',
+    };
+
+    render(<HandoffModal session={cancelledSession} onClose={onClose} onResumed={onResumed} />);
+
+    const attestationCheckbox = screen.getByRole('checkbox', { name: /attest external submission/i });
+    expect(attestationCheckbox.hasAttribute('disabled')).toBe(true);
+
+    const confirmBtn = screen.getByRole('button', { name: /confirm external submission/i });
+    expect(confirmBtn.hasAttribute('disabled')).toBe(true);
+    expect(screen.getByText('CANCELLED')).toBeTruthy();
+  });
 });

@@ -66,6 +66,7 @@ class AtsHandoffIntegrationIT {
     @Autowired private ObjectMapper json;
     @Autowired private AutomationPlanRepository planRepository;
     @Autowired private HandoffSessionRepository handoffRepository;
+    @Autowired private AtsHandoffService handoffService;
 
     private static MockHttpSession sessionA;
     private static MockHttpSession sessionB;
@@ -842,5 +843,82 @@ class AtsHandoffIntegrationIT {
                 Integer.class, seeded.applicationId()
         );
         assertThat(eventCount).isEqualTo(0);
+    }
+
+    @Test
+    @DisplayName("Candidate initiate rejects cross-profile planId with 403 Forbidden")
+    void testInitiateHandoffRejectsCrossProfilePlanForCandidate() throws Exception {
+        SeededApplication seededA = seedPlan(PROFILE_A, "LEVER", "lever-plan-cand-a");
+        SeededApplication seededB = seedPlan(PROFILE_B, "LEVER", "lever-plan-cand-b");
+
+        // Candidate A attempts to initiate handoff for their application seededA, but with seededB's planId
+        var initiateReq = new HandoffController.InitiateRequest(
+                seededB.planId(), seededA.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-plan-cand-a", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+
+        mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .session(sessionA).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(initiateReq)))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("Access denied: application or plan belongs to another profile")));
+    }
+
+    @Test
+    @DisplayName("Initiate rejects null planId with 400 Bad Request")
+    void testInitiateHandoffRejectsNullPlanId() throws Exception {
+        SeededApplication seededA = seedPlan(PROFILE_A, "LEVER", "lever-plan-null-plan");
+
+        var initiateReq = new HandoffController.InitiateRequest(
+                null, seededA.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-plan-null-plan", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+
+        mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(initiateReq)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("applicationId, planId, and targetUrl are required")));
+    }
+
+    @Test
+    @DisplayName("Handoff initiation and expiration handles plan in BLOCKED_ANTI_BOT state")
+    void testHandoffInitiationAndExpirationFromBlockedAntiBot() throws Exception {
+        SeededApplication seeded = seedPlan(PROFILE_A, "GREENHOUSE", "gh-plan-blocked-1");
+
+        // Precondition: plan is in BLOCKED_ANTI_BOT
+        jdbc.update("UPDATE automation_plans SET status = 'BLOCKED_ANTI_BOT' WHERE id = ?", seeded.planId());
+
+        var initiateReq = new HandoffController.InitiateRequest(
+                seeded.planId(), seeded.applicationId(), "GREENHOUSE",
+                "https://boards.greenhouse.io/org/jobs/12345", "BLOCKED_ANTI_BOT", null, 15
+        );
+
+        MvcResult initResult = mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(initiateReq)))
+                .andExpect(status().isCreated())
+                .andReturn();
+
+        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+        assertThat(session.blockReason()).isEqualTo(HandoffBlockReason.EMPLOYER_SECURITY_CHECK);
+
+        // Plan is now in HANDOFF_REQUIRED
+        String currentPlanStatus = jdbc.queryForObject("SELECT status FROM automation_plans WHERE id = ?", String.class, seeded.planId());
+        assertThat(currentPlanStatus).isEqualTo("HANDOFF_REQUIRED");
+
+        // Expire the session in database
+        jdbc.update("UPDATE automation_handoff_sessions SET expires_at = clock_timestamp() - interval '1 second' WHERE id = ?", session.id());
+
+        // Run sweeper
+        int expired = handoffService.expireStaleSessions();
+        assertThat(expired).isGreaterThanOrEqualTo(1);
+
+        // Verify plan transitioned to terminal FAILED
+        String expiredPlanStatus = jdbc.queryForObject("SELECT status FROM automation_plans WHERE id = ?", String.class, seeded.planId());
+        assertThat(expiredPlanStatus).isEqualTo("FAILED");
     }
 }

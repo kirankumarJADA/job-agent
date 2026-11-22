@@ -84,7 +84,7 @@ public class HandoffSessionRepository {
         UUID handoffToken = UUID.randomUUID();
 
         try {
-            jdbcTemplate.update("""
+            int rows = jdbcTemplate.update("""
                     INSERT INTO automation_handoff_sessions (
                         id, plan_id, application_id, profile_id, status, block_reason,
                         target_url, handoff_token, expires_at, created_at, updated_at
@@ -92,7 +92,13 @@ public class HandoffSessionRepository {
                         ?, ?, ?, ?, 'PENDING', ?,
                         ?, ?, clock_timestamp() + make_interval(mins => ?), clock_timestamp(), clock_timestamp()
                     )
+                    ON CONFLICT (plan_id) WHERE status = 'PENDING' DO NOTHING
                     """, sessionId, planId, applicationId, ownerProfileId, blockReason.name(), targetUrl, handoffToken, safeTtl);
+
+            if (rows == 0) {
+                return findActiveByPlan(ownerProfileId, planId)
+                        .orElseThrow(() -> new IllegalStateException("Handoff session race on plan " + planId));
+            }
 
             return findById(ownerProfileId, sessionId)
                     .orElseThrow(() -> new IllegalStateException("Failed to read created handoff session " + sessionId));
