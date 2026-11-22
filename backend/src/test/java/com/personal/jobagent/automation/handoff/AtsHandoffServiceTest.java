@@ -229,11 +229,62 @@ class AtsHandoffServiceTest {
     @DisplayName("expireStaleSessions transitions affected plans to FAILED")
     void testExpireStaleSessions() {
         when(handoffRepository.expireStaleSessionsAndGetPlanIds()).thenReturn(List.of(planId));
+        when(planRepository.transitionWithResult(eq(planId), eq("HANDOFF_REQUIRED"), eq("FAILED"), anyList())).thenReturn(true);
 
         int expiredCount = service.expireStaleSessions();
 
         assertThat(expiredCount).isEqualTo(1);
         verify(planRepository).transitionWithResult(eq(planId), eq("HANDOFF_REQUIRED"), eq("FAILED"), anyList());
         verify(audit).write(argThat(entry -> "ATS_HANDOFF_EXPIRED".equals(entry.action())));
+    }
+
+    @Test
+    @DisplayName("expireStaleSessions falls back to BLOCKED_ANTI_BOT transition when HANDOFF_REQUIRED returns false")
+    void testExpireStaleSessionsFallbackBlockedAntiBot() {
+        when(handoffRepository.expireStaleSessionsAndGetPlanIds()).thenReturn(List.of(planId));
+        when(planRepository.transitionWithResult(eq(planId), eq("HANDOFF_REQUIRED"), eq("FAILED"), anyList())).thenReturn(false);
+        when(planRepository.transitionWithResult(eq(planId), eq("BLOCKED_ANTI_BOT"), eq("FAILED"), anyList())).thenReturn(true);
+
+        int expiredCount = service.expireStaleSessions();
+
+        assertThat(expiredCount).isEqualTo(1);
+        verify(planRepository).transitionWithResult(eq(planId), eq("HANDOFF_REQUIRED"), eq("FAILED"), anyList());
+        verify(planRepository).transitionWithResult(eq(planId), eq("BLOCKED_ANTI_BOT"), eq("FAILED"), anyList());
+        verify(audit).write(argThat(entry -> "ATS_HANDOFF_EXPIRED".equals(entry.action())));
+    }
+
+    @Test
+    @DisplayName("expireStaleSessions is idempotent when plan is already FAILED and does not write false audit record")
+    void testExpireStaleSessionsIdempotentAlreadyFailed() {
+        when(handoffRepository.expireStaleSessionsAndGetPlanIds()).thenReturn(List.of(planId));
+        when(planRepository.transitionWithResult(eq(planId), eq("HANDOFF_REQUIRED"), eq("FAILED"), anyList())).thenReturn(false);
+        when(planRepository.transitionWithResult(eq(planId), eq("BLOCKED_ANTI_BOT"), eq("FAILED"), anyList())).thenReturn(false);
+
+        var planRow = mock(com.personal.jobagent.automation.AutomationPlanRepository.PlanRow.class);
+        when(planRow.status()).thenReturn("FAILED");
+        when(planRepository.findById(planId)).thenReturn(Optional.of(planRow));
+
+        int expiredCount = service.expireStaleSessions();
+
+        assertThat(expiredCount).isEqualTo(1);
+        verify(audit, never()).write(any());
+    }
+
+    @Test
+    @DisplayName("expireStaleSessions throws IllegalStateException when plan is in unexpected state and does not write audit record")
+    void testExpireStaleSessionsThrowsWhenUnexpectedStatus() {
+        when(handoffRepository.expireStaleSessionsAndGetPlanIds()).thenReturn(List.of(planId));
+        when(planRepository.transitionWithResult(eq(planId), eq("HANDOFF_REQUIRED"), eq("FAILED"), anyList())).thenReturn(false);
+        when(planRepository.transitionWithResult(eq(planId), eq("BLOCKED_ANTI_BOT"), eq("FAILED"), anyList())).thenReturn(false);
+
+        var planRow = mock(com.personal.jobagent.automation.AutomationPlanRepository.PlanRow.class);
+        when(planRow.status()).thenReturn("RUNNING");
+        when(planRepository.findById(planId)).thenReturn(Optional.of(planRow));
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.expireStaleSessions())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to transition expired plan " + planId + " to FAILED");
+
+        verify(audit, never()).write(any());
     }
 }

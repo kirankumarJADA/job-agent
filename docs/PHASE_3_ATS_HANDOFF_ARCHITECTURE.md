@@ -160,11 +160,14 @@ All 16 scenarios are rigorously validated across PostgreSQL Testcontainers, Node
 | 19 | Candidate initiate rejects cross-profile plan with 403 | `AtsHandoffIntegrationIT.testInitiateHandoffRejectsCrossProfilePlanForCandidate` | **PASSED** |
 | 20 | Initiate rejects null planId with 400 Bad Request | `AtsHandoffIntegrationIT.testInitiateHandoffRejectsNullPlanId` | **PASSED** |
 | 21 | Handoff initiation & expiration handles BLOCKED_ANTI_BOT | `AtsHandoffIntegrationIT.testHandoffInitiationAndExpirationFromBlockedAntiBot` | **PASSED** |
+| 22 | Expire stale sessions idempotent when already FAILED | `AtsHandoffIntegrationIT.testExpireStaleSessionsIdempotentWhenPlanAlreadyFailed` | **PASSED** |
+| 23 | Expire stale sessions rolls back to PENDING on unexpected plan state | `AtsHandoffIntegrationIT.testExpireStaleSessionsThrowsAndRollsBackSessionWhenPlanInUnexpectedState` | **PASSED** |
+| 24 | Expire stale sessions atomic rollback across multiple plans | `AtsHandoffIntegrationIT.testExpireStaleSessionsAtomicAcrossMultiplePlans` | **PASSED** |
 
 ### Test Execution Summary:
-- **Backend Tests (`AtsHandoffIntegrationIT`, `AtsHandoffServiceTest`, `HandoffControllerTest`, `AutomationRecoverySchedulerMaintenanceTest`)**: 51 passed, 0 failures, 0 errors in 02:21 min (`BUILD SUCCESS`).
-- **Worker Tests (`worker/test/*.test.js`)**: 268 passed, 0 failures, 0 errors in 62.82 s.
-- **Frontend Tests (`vitest run`)**: 454 passed across 46 test files in 39.86 s.
-- **Cloudflare Email Worker Tests (`npm test`)**: 17 passed, 0 failures.
-- **Frontend Production Build (`npm run build`)**: 97 modules transformed, built in 6.89s.
-- **Total Tests Passing**: **790 passed, 0 failures across all layers**.
+- **Backend Tests (`AtsHandoffIntegrationIT`, `AtsHandoffServiceTest`, `HandoffControllerTest`, `AutomationRecoverySchedulerMaintenanceTest`)**: 57 passed, 0 failures, 0 errors in 02:15 min (`BUILD SUCCESS`).
+- **Worker Tests (`worker/test/*.test.js`)**: 267 passed, 0 failures, 0 errors in 66.98 s (with obsolete worker-resumption polling code removed).
+- **Frontend Tests (`vitest run`)**: 454 passed across 46 test files in 35.68 s.
+- **Cloudflare Email Worker Tests (`npm test`)**: 17 passed, 0 failures in 223 ms.
+- **Frontend Production Build (`npm run build`)**: 97 modules transformed, built in 4.62 s.
+- **Total Tests Passing**: **795 passed, 0 failures across all layers**.

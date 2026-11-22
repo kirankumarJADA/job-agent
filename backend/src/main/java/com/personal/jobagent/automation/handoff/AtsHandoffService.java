@@ -267,21 +267,31 @@ public class AtsHandoffService {
             if (!transitioned) {
                 transitioned = planRepository.transitionWithResult(planId, "BLOCKED_ANTI_BOT", "FAILED", errorResult);
             }
-            if (!transitioned) {
-                log.warn("Could not transition expired plan {} to FAILED; it may already be in a terminal state", planId);
+            if (transitioned) {
+                if (audit != null) {
+                    audit.write(new AuditEntry(
+                            "SYSTEM",
+                            "ATS_HANDOFF_EXPIRED",
+                            "AUTOMATION_PLAN",
+                            planId,
+                            "HANDOFF_REQUIRED",
+                            "FAILED",
+                            null,
+                            null
+                    ));
+                }
+                continue;
             }
-            if (audit != null) {
-                audit.write(new AuditEntry(
-                        "SYSTEM",
-                        "ATS_HANDOFF_EXPIRED",
-                        "AUTOMATION_PLAN",
-                        planId,
-                        "HANDOFF_REQUIRED",
-                        "FAILED",
-                        null,
-                        null
-                ));
+
+            // Both expected transitions failed: inspect actual plan status
+            Optional<String> currentStatus = planRepository.findById(planId).map(AutomationPlanRepository.PlanRow::status);
+            if (currentStatus.isPresent() && "FAILED".equals(currentStatus.get())) {
+                log.info("Plan {} is already in terminal FAILED status; treating expiry as idempotent", planId);
+                // Do not record an expiry audit event claiming a transition occurred when it did not
+                continue;
             }
+
+            throw new IllegalStateException("Failed to transition expired plan " + planId + " to FAILED (current status: " + currentStatus.orElse("not found") + ")");
         }
         return expiredPlanIds.size();
     }

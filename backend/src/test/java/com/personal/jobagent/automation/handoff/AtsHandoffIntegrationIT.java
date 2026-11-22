@@ -73,6 +73,9 @@ class AtsHandoffIntegrationIT {
 
     @BeforeEach
     void setUpUsers() throws Exception {
+        // Clean up any stale expired sessions to prevent cross-test contamination
+        jdbc.update("DELETE FROM automation_handoff_sessions WHERE status = 'PENDING' AND expires_at < clock_timestamp()");
+
         // Candidate A
         jdbc.update("""
                 INSERT INTO users (id, email, password_hash, display_name, auth_provider)
@@ -920,5 +923,183 @@ class AtsHandoffIntegrationIT {
         // Verify plan transitioned to terminal FAILED
         String expiredPlanStatus = jdbc.queryForObject("SELECT status FROM automation_plans WHERE id = ?", String.class, seeded.planId());
         assertThat(expiredPlanStatus).isEqualTo("FAILED");
+    }
+
+    @Test
+    @DisplayName("Expire stale sessions is idempotent when plan is already FAILED and produces no false audit record")
+    void testExpireStaleSessionsIdempotentWhenPlanAlreadyFailed() throws Exception {
+        SeededApplication seeded = seedPlan(PROFILE_A, "LEVER", "lever-plan-idemp-failed");
+
+        var initiateReq = new HandoffController.InitiateRequest(
+                seeded.planId(), seeded.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-plan-idemp-failed", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+        MvcResult initResult = mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(initiateReq)))
+                .andExpect(status().isCreated())
+                .andReturn();
+        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+
+        // Precondition: plan is in HANDOFF_REQUIRED; session is PENDING
+        // Now force the plan into FAILED directly
+        jdbc.update("UPDATE automation_plans SET status = 'FAILED' WHERE id = ?", seeded.planId());
+
+        // Expire the session in database
+        jdbc.update("UPDATE automation_handoff_sessions SET expires_at = clock_timestamp() - interval '1 second' WHERE id = ?", session.id());
+
+        int initialAuditCount = jdbc.queryForObject(
+                "SELECT count(*) FROM audit_logs WHERE action = 'ATS_HANDOFF_EXPIRED' AND entity_id = ?",
+                Integer.class, seeded.planId()
+        );
+
+        // Sweeper must succeed idempotently without error
+        int expiredCount = handoffService.expireStaleSessions();
+        assertThat(expiredCount).isGreaterThanOrEqualTo(1);
+
+        // Session status is now EXPIRED
+        String sessionStatus = jdbc.queryForObject(
+                "SELECT status FROM automation_handoff_sessions WHERE id = ?", String.class, session.id()
+        );
+        assertThat(sessionStatus).isEqualTo("EXPIRED");
+
+        // Plan status remains FAILED
+        String planStatus = jdbc.queryForObject(
+                "SELECT status FROM automation_plans WHERE id = ?", String.class, seeded.planId()
+        );
+        assertThat(planStatus).isEqualTo("FAILED");
+
+        // No false transition audit record was written
+        int postAuditCount = jdbc.queryForObject(
+                "SELECT count(*) FROM audit_logs WHERE action = 'ATS_HANDOFF_EXPIRED' AND entity_id = ?",
+                Integer.class, seeded.planId()
+        );
+        assertThat(postAuditCount).isEqualTo(initialAuditCount);
+    }
+
+    @Test
+    @DisplayName("Expire stale sessions throws IllegalStateException and rolls back session to PENDING when plan is in unexpected status")
+    void testExpireStaleSessionsThrowsAndRollsBackSessionWhenPlanInUnexpectedState() throws Exception {
+        SeededApplication seeded = seedPlan(PROFILE_A, "LEVER", "lever-plan-unexp-state");
+
+        var initiateReq = new HandoffController.InitiateRequest(
+                seeded.planId(), seeded.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-plan-unexp-state", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+        MvcResult initResult = mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(initiateReq)))
+                .andExpect(status().isCreated())
+                .andReturn();
+        HandoffSessionRecord session = json.readValue(initResult.getResponse().getContentAsString(), HandoffSessionRecord.class);
+
+        try {
+            // Force plan into unexpected RUNNING state
+            jdbc.update("UPDATE automation_plans SET status = 'RUNNING' WHERE id = ?", seeded.planId());
+
+            // Expire the session in database
+            jdbc.update("UPDATE automation_handoff_sessions SET expires_at = clock_timestamp() - interval '1 second' WHERE id = ?", session.id());
+
+            // Calling expireStaleSessions must fail and throw IllegalStateException
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> handoffService.expireStaleSessions())
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to transition expired plan " + seeded.planId() + " to FAILED");
+
+            // Transaction rollback verification:
+            // 1. Session was rolled back to PENDING (not committed as EXPIRED)
+            String sessionStatus = jdbc.queryForObject(
+                    "SELECT status FROM automation_handoff_sessions WHERE id = ?", String.class, session.id()
+            );
+            assertThat(sessionStatus).isEqualTo("PENDING");
+
+            // 2. Plan status is unchanged (still RUNNING)
+            String planStatus = jdbc.queryForObject(
+                    "SELECT status FROM automation_plans WHERE id = ?", String.class, seeded.planId()
+            );
+            assertThat(planStatus).isEqualTo("RUNNING");
+
+            // 3. No false expiry audit record was written
+            int auditCount = jdbc.queryForObject(
+                    "SELECT count(*) FROM audit_logs WHERE action = 'ATS_HANDOFF_EXPIRED' AND entity_id = ?",
+                    Integer.class, seeded.planId()
+            );
+            assertThat(auditCount).isEqualTo(0);
+        } finally {
+            jdbc.update("DELETE FROM automation_handoff_sessions WHERE id = ?", session.id());
+        }
+    }
+
+    @Test
+    @DisplayName("Expire stale sessions rolls back atomically across multiple plans when one fails")
+    void testExpireStaleSessionsAtomicAcrossMultiplePlans() throws Exception {
+        SeededApplication seeded1 = seedPlan(PROFILE_A, "LEVER", "lever-plan-multi-1");
+        SeededApplication seeded2 = seedPlan(PROFILE_A, "WORKDAY", "workday-plan-multi-2");
+
+        // Initiate handoff for plan 1
+        var req1 = new HandoffController.InitiateRequest(
+                seeded1.planId(), seeded1.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-plan-multi-1", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+        MvcResult res1 = mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(req1)))
+                .andExpect(status().isCreated())
+                .andReturn();
+        HandoffSessionRecord session1 = json.readValue(res1.getResponse().getContentAsString(), HandoffSessionRecord.class);
+
+        // Initiate handoff for plan 2
+        var req2 = new HandoffController.InitiateRequest(
+                seeded2.planId(), seeded2.applicationId(), "WORKDAY",
+                "https://workday.com/apply/multi-2", "WORKDAY_MFA_REQUIRED", null, 15
+        );
+        MvcResult res2 = mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(req2)))
+                .andExpect(status().isCreated())
+                .andReturn();
+        HandoffSessionRecord session2 = json.readValue(res2.getResponse().getContentAsString(), HandoffSessionRecord.class);
+
+        try {
+            // Plan 1 is valid HANDOFF_REQUIRED; force Plan 2 into unexpected state PREPARED
+            jdbc.update("UPDATE automation_plans SET status = 'PREPARED' WHERE id = ?", seeded2.planId());
+
+            // Expire both sessions
+            jdbc.update("UPDATE automation_handoff_sessions SET expires_at = clock_timestamp() - interval '1 second' WHERE id IN (?, ?)",
+                    session1.id(), session2.id());
+
+            // Sweeper must throw IllegalStateException on plan 2
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> handoffService.expireStaleSessions())
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to transition expired plan " + seeded2.planId() + " to FAILED");
+
+            // Complete atomic rollback verification across both plans:
+            // 1. Session 1 is STILL PENDING (not committed as EXPIRED)
+            String status1 = jdbc.queryForObject("SELECT status FROM automation_handoff_sessions WHERE id = ?", String.class, session1.id());
+            assertThat(status1).isEqualTo("PENDING");
+
+            // 2. Session 2 is STILL PENDING
+            String status2 = jdbc.queryForObject("SELECT status FROM automation_handoff_sessions WHERE id = ?", String.class, session2.id());
+            assertThat(status2).isEqualTo("PENDING");
+
+            // 3. Plan 1 was NOT transitioned to FAILED (rolled back to HANDOFF_REQUIRED)
+            String plan1Status = jdbc.queryForObject("SELECT status FROM automation_plans WHERE id = ?", String.class, seeded1.planId());
+            assertThat(plan1Status).isEqualTo("HANDOFF_REQUIRED");
+
+            // 4. Plan 2 is still PREPARED
+            String plan2Status = jdbc.queryForObject("SELECT status FROM automation_plans WHERE id = ?", String.class, seeded2.planId());
+            assertThat(plan2Status).isEqualTo("PREPARED");
+
+            // 5. Zero audit records committed for either plan
+            Integer auditCount1 = jdbc.queryForObject("SELECT count(*) FROM audit_logs WHERE action = 'ATS_HANDOFF_EXPIRED' AND entity_id = ?", Integer.class, seeded1.planId());
+            Integer auditCount2 = jdbc.queryForObject("SELECT count(*) FROM audit_logs WHERE action = 'ATS_HANDOFF_EXPIRED' AND entity_id = ?", Integer.class, seeded2.planId());
+            assertThat(auditCount1).isEqualTo(0);
+            assertThat(auditCount2).isEqualTo(0);
+        } finally {
+            jdbc.update("DELETE FROM automation_handoff_sessions WHERE id IN (?, ?)", session1.id(), session2.id());
+        }
     }
 }

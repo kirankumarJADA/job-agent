@@ -4,7 +4,6 @@ import {
   isHandoffEligibleError,
   normalizeHandoffReason,
   initiateHandoff,
-  initiateHandoffAndWait,
   HandoffStatus,
 } from '../src/handoff.js';
 
@@ -48,165 +47,17 @@ test('normalizeHandoffReason maps error reasons to standard platform strings', (
   );
 });
 
-test('initiateHandoffAndWait initiates handoff and resumes on candidate completion', async () => {
-  const plan = {
-    planId: 'test-plan-1',
-    planType: 'LEVER',
-    targetUrl: 'https://jobs.lever.co/company/job-1',
-    correlation: { applicationId: 'test-app-1' },
-  };
-  const error = { reason: 'LEVER_CAPTCHA_PRESENT', details: { screenshot: 'failures/cap.png' } };
-
-  let initiatePayload = null;
-  let pollCount = 0;
-  let heartbeatCount = 0;
-
-  const mockFetch = async (url, options) => {
-    if (url.endsWith('/api/v1/handoff/initiate')) {
-      initiatePayload = JSON.parse(options.body);
-      return {
-        ok: true,
-        status: 201,
-        json: async () => ({ id: 'session-123', status: 'PENDING' }),
-      };
-    }
-    if (url.includes('/api/v1/handoff/applications/test-app-1')) {
-      pollCount += 1;
-      if (pollCount === 1) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ id: 'session-123', status: 'PENDING' }),
-        };
-      }
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'session-123', status: 'COMPLETED' }),
-      };
-    }
-    throw new Error('Unexpected URL: ' + url);
-  };
-
-  const result = await initiateHandoffAndWait({
-    plan,
-    error,
-    backendBase: 'http://localhost:8080',
-    authHeaders: () => ({ authorization: 'Bearer test-worker-token' }),
-    sendHeartbeat: async () => { heartbeatCount += 1; },
-    runtime: { shuttingDown: false },
-    pollIntervalMs: 10,
-    timeoutMs: 1000,
-    fetchImpl: mockFetch,
-  });
-
-  assert.equal(result.resumed, true);
-  assert.equal(result.status, HandoffStatus.COMPLETED);
-  assert.equal(result.sessionId, 'session-123');
-
-  assert.equal(initiatePayload.planId, 'test-plan-1');
-  assert.equal(initiatePayload.applicationId, 'test-app-1');
-  assert.equal(initiatePayload.atsPlatform, 'LEVER');
-  assert.equal(initiatePayload.blockReason, 'LEVER_CAPTCHA_PRESENT');
-  assert.equal(initiatePayload.domScreenshotRef, 'failures/cap.png');
-});
-
-test('initiateHandoffAndWait stops when candidate cancels handoff', async () => {
-  const plan = {
-    planId: 'test-plan-2',
-    planType: 'WORKDAY',
-    targetUrl: 'https://workday.com/login',
-    correlation: { applicationId: 'test-app-2' },
-  };
-  const error = { reason: 'WORKDAY_MFA_REQUIRED' };
-
-  const mockFetch = async (url, options) => {
-    if (url.endsWith('/api/v1/handoff/initiate')) {
-      return {
-        ok: true,
-        status: 201,
-        json: async () => ({ id: 'session-456', status: 'PENDING' }),
-      };
-    }
-    if (url.includes('/api/v1/handoff/applications/test-app-2')) {
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'session-456', status: 'CANCELLED' }),
-      };
-    }
-    throw new Error('Unexpected URL: ' + url);
-  };
-
-  const result = await initiateHandoffAndWait({
-    plan,
-    error,
-    backendBase: 'http://localhost:8080',
-    authHeaders: () => ({}),
-    sendHeartbeat: async () => {},
-    runtime: { shuttingDown: false },
-    pollIntervalMs: 10,
-    timeoutMs: 1000,
-    fetchImpl: mockFetch,
-  });
-
-  assert.equal(result.resumed, false);
-  assert.equal(result.status, HandoffStatus.CANCELLED);
-  assert.equal(result.reason, 'CANDIDATE_CANCELLED');
-});
-
-test('initiateHandoffAndWait handles session timeout and returns EXPIRED', async () => {
-  const plan = {
-    planId: 'test-plan-3',
-    planType: 'LEVER',
-    targetUrl: 'https://jobs.lever.co/company',
-    correlation: { applicationId: 'test-app-3' },
-  };
-  const error = { reason: 'LEVER_CAPTCHA_PRESENT' };
-
-  const mockFetch = async (url) => {
-    if (url.endsWith('/api/v1/handoff/initiate')) {
-      return {
-        ok: true,
-        status: 201,
-        json: async () => ({ id: 'session-789', status: 'PENDING' }),
-      };
-    }
-    if (url.includes('/api/v1/handoff/applications/test-app-3')) {
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ id: 'session-789', status: 'PENDING' }),
-      };
-    }
-    throw new Error('Unexpected URL: ' + url);
-  };
-
-  const result = await initiateHandoffAndWait({
-    plan,
-    error,
-    backendBase: 'http://localhost:8080',
-    authHeaders: () => ({}),
-    sendHeartbeat: async () => {},
-    runtime: { shuttingDown: false },
-    pollIntervalMs: 20,
-    timeoutMs: 50, // fast timeout for test
-    fetchImpl: mockFetch,
-  });
-
-  assert.equal(result.resumed, false);
-  assert.equal(result.status, HandoffStatus.EXPIRED);
-  assert.equal(result.reason, 'TIMEOUT');
-});
-
-test('Option B: initiateHandoff immediately posts to backend and returns session without blocking', async () => {
+test('Option B: initiateHandoff posts correct body with domScreenshotRef and returns session without blocking', async () => {
   const plan = {
     planId: 'test-plan-opt-b',
     planType: 'WORKDAY',
     targetUrl: 'https://workday.com/company/apply',
     correlation: { applicationId: 'test-app-opt-b' },
   };
-  const error = { reason: 'WORKDAY_MFA_REQUIRED' };
+  const error = {
+    reason: 'WORKDAY_MFA_REQUIRED',
+    details: { screenshot: 'failures/workday-mfa.png' },
+  };
 
   let initiateCalled = false;
   let sentBody = null;
@@ -237,6 +88,68 @@ test('Option B: initiateHandoff immediately posts to backend and returns session
   assert.equal(result.sessionId, 'session-opt-b-1');
   assert.equal(result.status, 'PENDING');
   assert.equal(result.blockReason, 'WORKDAY_MFA_REQUIRED');
+  assert.equal(sentBody.planId, 'test-plan-opt-b');
+  assert.equal(sentBody.applicationId, 'test-app-opt-b');
   assert.equal(sentBody.atsPlatform, 'WORKDAY');
   assert.equal(sentBody.blockReason, 'WORKDAY_MFA_REQUIRED');
+  assert.equal(sentBody.domScreenshotRef, 'failures/workday-mfa.png');
+  assert.equal(sentBody.ttlMinutes, 15);
+});
+
+test('Option B: initiateHandoff throws HANDOFF_INITIATE_FAILED on non-2xx status', async () => {
+  const plan = {
+    planId: 'test-plan-fail',
+    planType: 'LEVER',
+    targetUrl: 'https://jobs.lever.co/company/job',
+    correlation: { applicationId: 'test-app-fail' },
+  };
+  const error = { reason: 'LEVER_CAPTCHA_PRESENT' };
+
+  const mockFetch = async () => ({
+    ok: false,
+    status: 500,
+  });
+
+  await assert.rejects(
+    () => initiateHandoff({
+      plan,
+      error,
+      backendBase: 'http://localhost:8080',
+      fetchImpl: mockFetch,
+    }),
+    /HANDOFF_INITIATE_FAILED:500/
+  );
+});
+
+test('Option B: initiateHandoff applies custom timeoutMs correctly in ttlMinutes', async () => {
+  const plan = {
+    planId: 'test-plan-custom-ttl',
+    planType: 'GREENHOUSE',
+    targetUrl: 'https://boards.greenhouse.io/job',
+    correlation: { applicationId: 'test-app-custom-ttl' },
+  };
+  const error = { reason: 'BLOCKED_ANTI_BOT' };
+
+  let sentBody = null;
+  const mockFetch = async (url, options) => {
+    sentBody = JSON.parse(options.body);
+    return {
+      ok: true,
+      status: 201,
+      json: async () => ({ id: 'session-ttl-1', status: 'PENDING' }),
+    };
+  };
+
+  const result = await initiateHandoff({
+    plan,
+    error,
+    backendBase: 'http://localhost:8080',
+    timeoutMs: 30 * 60 * 1000,
+    fetchImpl: mockFetch,
+  });
+
+  assert.equal(result.initiated, true);
+  assert.equal(result.blockReason, 'EMPLOYER_SECURITY_CHECK');
+  assert.equal(sentBody.ttlMinutes, 30);
+  assert.equal(sentBody.blockReason, 'EMPLOYER_SECURITY_CHECK');
 });
