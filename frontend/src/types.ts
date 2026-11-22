@@ -1338,3 +1338,23 @@ export interface SubmissionReceipt {
   authorization: AuthorizationRecord;
   attempts: AttemptSummary[];
 }
+
+export type HandoffBlockReason = 'CAPTCHA' | 'MFA' | 'CLOUDFLARE_TURNSTILE' | 'EMPLOYER_SECURITY_CHECK';
+export type HandoffStatus = 'PENDING' | 'COMPLETED' | 'EXPIRED' | 'CANCELLED';
+
+export interface HandoffSession {
+  id: string;
+  planId: string;
+  applicationId: string;
+  profileId: string;
+  status: HandoffStatus;
+  blockReason: HandoffBlockReason;
+  targetUrl: string;
+  handoffToken: string;
+  expiresAt: string;
+  completedAt?: string | null;
+  cancelledAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+

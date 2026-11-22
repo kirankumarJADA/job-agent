@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { apiFetch } from '../api/client';
-import { ApplicationSummary, ApplicationTimelineEvent, AutomationPackageView } from '../types';
+import { apiFetch, getHandoffSession } from '../api/client';
+import { ApplicationSummary, ApplicationTimelineEvent, AutomationPackageView, HandoffSession } from '../types';
 import { ApplicationPrepStatus } from '../components/ApplicationPrepStatus';
 import { ApplyWorkspace } from '../components/ApplyWorkspace';
 import { ZohoRecruitReviewPanel } from '../components/ZohoRecruitReviewPanel';
 import { LeverReviewPanel } from '../components/LeverReviewPanel';
 import { WorkdayReviewPanel } from '../components/WorkdayReviewPanel';
 import { AshbyReviewPanel } from '../components/AshbyReviewPanel';
+import { HandoffModal } from '../components/HandoffModal';
 import { ApplicationTrackPanel } from '../components/ApplicationTrackPanel';
 import { GmailMailboxCard } from '../components/GmailMailboxCard';
 import { RobinMailboxCard } from '../components/RobinMailboxCard';
@@ -67,6 +68,20 @@ export const ApplicationsPage: React.FC = () => {
   // the same evidence without collapsing them.
   const [queueKey, setQueueKey] = useState(0);
   const [panelsKey, setPanelsKey] = useState(0);
+  const [activeHandoff, setActiveHandoff] = useState<HandoffSession | null>(null);
+
+  const openHandoffModal = async (applicationId: string) => {
+    try {
+      const session = await getHandoffSession(applicationId);
+      if (session) {
+        setActiveHandoff(session);
+      } else {
+        alert('No active handoff session found for this application.');
+      }
+    } catch {
+      alert('Failed to retrieve handoff session details.');
+    }
+  };
 
   const fetchApplications = useCallback(async () => {
     setLoading(true);
@@ -386,6 +401,20 @@ export const ApplicationsPage: React.FC = () => {
                         Blocked by anti-bot — an uncertain outcome; Robin never guesses what happened
                       </span>
                     )}
+                    {application.planStatus === 'HANDOFF_REQUIRED' && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-amber-400 text-xs font-medium">
+                          Paused for verification (CAPTCHA/MFA)
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => openHandoffModal(application.id)}
+                          className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-200 hover:bg-amber-500/20 shadow-sm"
+                        >
+                          Resolve &amp; Resume
+                        </button>
+                      </div>
+                    )}
                     {application.planStatus === 'RECONCILIATION_REQUIRED' && (
                       <span className="text-purple-400 text-xs font-medium">
                         Submission unconfirmed — human reconciliation required
@@ -446,6 +475,13 @@ export const ApplicationsPage: React.FC = () => {
             </SectionCard>
           ))}
         </div>
+      )}
+      {activeHandoff && (
+        <HandoffModal
+          session={activeHandoff}
+          onClose={() => setActiveHandoff(null)}
+          onResumed={fetchApplications}
+        />
       )}
     </PageShell>
   );
@@ -630,6 +666,7 @@ function PlanStatusBadge({ status }: { status?: string | null }) {  if (!status)
     AWAITING_SUBMIT_APPROVAL: 'bg-red-500/20 text-red-300',
     ABANDONED: 'bg-gray-500/20 text-gray-400',
     RECONCILIATION_REQUIRED: 'bg-purple-500/20 text-purple-300',
+    HANDOFF_REQUIRED: 'bg-amber-500/20 text-amber-300',
   };
   return (
     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${colors[status] || 'bg-gray-500/20 text-gray-400'}`}>

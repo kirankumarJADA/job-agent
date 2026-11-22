@@ -1,4 +1,4 @@
-import type { ApplicationSummary, ExpandedQueryPlan, SearchPlan, SearchPlanExecutionSummary } from '../types';
+import type { ApplicationSummary, ExpandedQueryPlan, HandoffSession, SearchPlan, SearchPlanExecutionSummary } from '../types';
 
 export const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1';
 
@@ -242,3 +242,27 @@ export function runSearchPlan(id: string): Promise<SearchPlanExecutionSummary> {
 export function expandSearchPlan(id: string): Promise<ExpandedQueryPlan> {
   return apiFetch<ExpandedQueryPlan>(`/search-plans/${id}/expand`);
 }
+
+export async function getHandoffSession(applicationId: string): Promise<HandoffSession | null> {
+  try {
+    return await apiFetch<HandoffSession>(`/handoff/applications/${applicationId}`);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+export function completeHandoff(sessionId: string): Promise<{ sessionId: string; status: string; message: string }> {
+  return apiFetch<{ sessionId: string; status: string; message: string }>(`/handoff/${sessionId}/complete`, {
+    method: 'POST',
+  });
+}
+
+export function cancelHandoff(sessionId: string): Promise<{ sessionId: string; status: string; message: string }> {
+  return apiFetch<{ sessionId: string; status: string; message: string }>(`/handoff/${sessionId}/cancel`, {
+    method: 'POST',
+  });
+}
+
