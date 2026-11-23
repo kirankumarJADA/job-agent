@@ -211,13 +211,28 @@ public class BoardDiscoveryService {
                     FailureCategory.CONFIGURATION, e.getMessage(), mode);
         }
 
+        long deadlineNanos = (timeoutMs != null && timeoutMs > 0)
+                ? started + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+                : Long.MAX_VALUE;
+
         boolean healthCheck = mode == Mode.HEALTH_CHECK;
         int pageCap = kind == PlatformKind.TSENTA ? (healthCheck ? 1 : tsentaMaxPages) : (healthCheck ? 2 : maxPages);
         int detailBudget = kind == PlatformKind.TSENTA
                 ? Math.min(healthCheck ? 3 : maxDetails, ((TsentaJobSource) adapter).maxDetailsPerRun())
                 : (healthCheck ? Math.min(5, maxDetails) : maxDetails);
         SafeHttpClient http = httpFactory.apply(kind);
+        if (timeoutMs != null && timeoutMs > 0) {
+            long remainingMs = Math.max(100L, java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime()));
+            Duration clampedTimeout = Duration.ofMillis(Math.min(20_000L, remainingMs));
+            http = http.withTimeout(clampedTimeout);
+        }
         BoardAdapter.CrawlContext context = new BoardAdapter.CrawlContext(http, pageCap, Instant.now(), employer);
+
+        // Pre-request deadline check
+        if (System.nanoTime() >= deadlineNanos) {
+            return finish(sourceId, kind, correlationId, started, counts, ingested, false,
+                    FailureCategory.TIMEOUT, "Execution timed out before listing request (" + timeoutMs + "ms)", mode);
+        }
 
         BoardAdapter.ListingResult listing;
         try {
@@ -230,6 +245,14 @@ public class BoardDiscoveryService {
         counts.put("listed", listing.entries().size());
         counts.put("pages", listing.pagesFetched());
         String employerName = Normalize.first(employer, listing.employerName());
+
+        // Post-listing deadline check
+        if (System.nanoTime() >= deadlineNanos) {
+            log.warn("Search plan {} source {} exceeded timeout ({}ms) during listing request",
+                    searchPlanId, sourceId, timeoutMs);
+            return finish(sourceId, kind, correlationId, started, counts, ingested, false,
+                    FailureCategory.TIMEOUT, "Source execution exceeded timeout (" + timeoutMs + "ms) during listing", mode);
+        }
 
         // Fail-closed fencing guard: verify lease ownership before performing any ingestion writes
         if (searchPlanId != null || executionOwnerToken != null) {
@@ -252,14 +275,25 @@ public class BoardDiscoveryService {
         boolean truncatedByBudget = false;
         boolean truncatedByTimeout = false;
 
+        int maxEntriesToProcess = (maxResults != null && maxResults > 0) ? Math.max(maxResults * 5, 250) : 1000;
+        int entriesProcessed = 0;
+
         for (BoardAdapter.ListingEntry entry : listing.entries()) {
+            if (entriesProcessed >= maxEntriesToProcess) {
+                truncatedByBudget = true;
+                log.info("Search plan {} source {} reached max entry inspection cap ({}); halting",
+                        searchPlanId, sourceId, maxEntriesToProcess);
+                break;
+            }
+            entriesProcessed++;
+
             if (maxResults != null && maxResults > 0 && ingested.size() >= maxResults) {
                 truncatedByBudget = true;
                 log.info("Search plan {} source {} reached max results budget ({}); ceasing further ingestion",
                         searchPlanId, sourceId, maxResults);
                 break;
             }
-            if (timeoutMs != null && timeoutMs > 0 && (System.nanoTime() - started) >= java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMs)) {
+            if (System.nanoTime() >= deadlineNanos) {
                 truncatedByTimeout = true;
                 log.warn("Search plan {} source {} exceeded timeout ({}ms); ceasing further ingestion",
                         searchPlanId, sourceId, timeoutMs);
@@ -268,13 +302,29 @@ public class BoardDiscoveryService {
 
             try {
                 if (!entry.needsDetail()) {
+                    if (System.nanoTime() >= deadlineNanos) {
+                        truncatedByTimeout = true;
+                        break;
+                    }
                     ingest(sourceId, kind, entry.job(), employerName, counts, ingested, searchPlanId, executionOwnerToken);
                 } else if (known.contains(entry.externalId())) {
+                    if (System.nanoTime() >= deadlineNanos) {
+                        truncatedByTimeout = true;
+                        break;
+                    }
                     touch(sourceId, entry.externalId(), authoritative, searchPlanId, executionOwnerToken);
                     bump(counts, "unchanged");
                 } else if (!detailBudgetGone && detailsUsed < detailBudget) {
+                    if (System.nanoTime() >= deadlineNanos) {
+                        truncatedByTimeout = true;
+                        break;
+                    }
                     detailsUsed++;
                     NormalizedJob job = adapter.detail(board, entry, context);
+                    if (System.nanoTime() >= deadlineNanos) {
+                        truncatedByTimeout = true;
+                        break;
+                    }
                     ingest(sourceId, kind, job, employerName, counts, ingested, searchPlanId, executionOwnerToken);
                 } else {
                     bump(counts, "deferred");
@@ -297,20 +347,22 @@ public class BoardDiscoveryService {
         // Safe deletion guard:
         // A listing truncated by maxResults or timeout must NEVER remove or unlist active jobs.
         // Removal requires a complete, non-failed listing that was NOT truncated and actually returned entries.
-        if (!truncatedByBudget && !truncatedByTimeout && listing.complete() && listing.failure() == null && !listing.entries().isEmpty()) {
+        boolean isDeadlineExceeded = System.nanoTime() >= deadlineNanos;
+        if (!truncatedByBudget && !truncatedByTimeout && !isDeadlineExceeded
+                && listing.complete() && listing.failure() == null && !listing.entries().isEmpty()) {
             counts.put("removed", markUnlisted(sourceId, runStart, authoritative, searchPlanId, executionOwnerToken));
-        } else if (truncatedByBudget || truncatedByTimeout) {
-            log.info("Listing was truncated (budget={}, timeout={}); skipping markUnlisted to protect active jobs for source {}",
-                    truncatedByBudget, truncatedByTimeout, sourceId);
+        } else if (truncatedByBudget || truncatedByTimeout || isDeadlineExceeded) {
+            log.info("Listing was truncated (budget={}, timeout={}, deadlineExceeded={}); skipping markUnlisted to protect active jobs for source {}",
+                    truncatedByBudget, truncatedByTimeout, isDeadlineExceeded, sourceId);
         } else if (listing.complete() && listing.failure() == null && listing.entries().isEmpty()) {
             log.warn("Safe deletion guard activated: listing completed with 0 jobs for source {} in {} mode; skipping markUnlisted",
                     sourceId, mode);
         }
 
-        boolean isComplete = listing.complete() && !truncatedByBudget && !truncatedByTimeout;
+        boolean isComplete = listing.complete() && !truncatedByBudget && !truncatedByTimeout && !isDeadlineExceeded;
         FailureCategory failureCat = listing.failure();
         String failureDetail = listing.failureDetail();
-        if (truncatedByTimeout && failureCat == null) {
+        if ((truncatedByTimeout || isDeadlineExceeded) && failureCat == null) {
             failureCat = FailureCategory.TIMEOUT;
             failureDetail = "Source execution exceeded timeout (" + timeoutMs + "ms)";
         }

@@ -413,6 +413,59 @@ class BoardDiscoveryServiceTest {
     }
 
     @Test
+    void maxResultsCeilingHaltsIngestionAndSkipsMarkUnlisted() {
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(List.of(full("1"), full("2"), full("3"), full("4")), 1, null);
+        var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), null, null, 2, 45000L);
+
+        // Only 2 of the 4 entries were ingested
+        assertThat(report.counts().get("created")).isEqualTo(2);
+        assertThat(report.ingested()).hasSize(2);
+        assertThat(report.complete()).isFalse();
+
+        // Safe deletion guard: markUnlisted must NEVER be called when run was truncated by budget
+        verify(db, never()).update(contains("update job_source_observations set source_status = 'MISSING'"), any(Object[].class));
+    }
+
+    @Test
+    void timeoutCeilingHaltsExecutionAndRecordsFailureCategoryTimeout() {
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(List.of(full("1"), full("2"), full("3")), 1, null);
+
+        // 1 millisecond timeout guarantees deadline expiration during loop
+        var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), null, null, 10, 1L);
+
+        assertThat(report.complete()).isFalse();
+        assertThat(report.failureCategory()).isEqualTo("TIMEOUT");
+
+        // Safe deletion guard: markUnlisted must NEVER be called on timeout
+        verify(db, never()).update(contains("update job_source_observations set source_status = 'MISSING'"), any(Object[].class));
+    }
+
+    @Test
+    void existingKnownJobsAreTouchedWithoutConsumingIngestionBudget() {
+        Scripted a = new Scripted();
+        // Entry 1 and 2 need detail (partial)
+        a.listing = ListingResult.complete(List.of(partial("known-1"), partial("new-2")), 1, null);
+
+        // Mark known-1 as already seen
+        when(db.queryForList(contains("from job_source_observations"), eq(SOURCE)))
+                .thenReturn(List.of(Map.of("external_job_id", "known-1")));
+
+        var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), null, null, 1, 45000L);
+
+        // known-1 was touched (unchanged)
+        assertThat(report.counts().get("unchanged")).isEqualTo(1);
+        // new-2 was fetched and created (1 ingested, meeting maxResults = 1)
+        assertThat(report.counts().get("created")).isEqualTo(1);
+        assertThat(report.ingested()).hasSize(1);
+        assertThat(a.detailed).containsExactly("new-2");
+    }
+
+    @Test
     void theRecordedRunMetadataCarriesCountsAndNoSecrets() {
         Scripted a = new Scripted();
         a.listing = ListingResult.partial(List.of(), 0, FailureCategory.ACCESS_DENIED, "HTTP 403", null);

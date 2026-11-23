@@ -123,6 +123,14 @@ public class SafeHttpClient {
         return Math.max(0, settings.maxRequests() - requestsMade);
     }
 
+    public Settings settings() {
+        return settings;
+    }
+
+    public SafeHttpClient withTimeout(Duration timeout) {
+        return new SafeHttpClient(this.transport, this.guard, this.settings.withTimeout(timeout), this.sleeper);
+    }
+
     public String get(URI uri, Accept accept) {
         return exchange("GET", uri, null, accept);
     }
