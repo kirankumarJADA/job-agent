@@ -893,6 +893,190 @@ class AtsHandoffIntegrationIT {
     }
 
     @Test
+    @DisplayName("Candidate initiate rejects non-HTTPS, dangerous, and malformed URLs with 400 Bad Request")
+    void testCandidateInitiateRejectsDangerousUrls() throws Exception {
+        SeededApplication seeded = seedPlan(PROFILE_A, "LEVER", "lever-url-safety");
+
+        String[] dangerousUrls = {
+                "http://jobs.lever.co/org/lever-url-safety",
+                "javascript:alert(document.cookie)",
+                "data:text/html,<script>alert(1)</script>",
+                "file:///etc/passwd",
+                "blob:https://jobs.lever.co/uuid",
+                "//jobs.lever.co/org/lever-url-safety",
+                "https://user:password@jobs.lever.co/org/lever-url-safety",
+                "https://"
+        };
+
+        for (String url : dangerousUrls) {
+            var req = new HandoffController.InitiateRequest(
+                    seeded.planId(), seeded.applicationId(), "LEVER",
+                    url, "LEVER_CAPTCHA_PRESENT", null, 15
+            );
+
+            mockMvc.perform(post("/api/v1/handoff/initiate")
+                            .session(sessionA).with(csrf())
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(json.writeValueAsString(req)))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("Invalid target URL")));
+        }
+
+        // Verify zero sessions created and plan remains in RUNNING status
+        Integer sessionCount = jdbc.queryForObject(
+                "SELECT count(*) FROM automation_handoff_sessions WHERE plan_id = ?",
+                Integer.class, seeded.planId()
+        );
+        assertThat(sessionCount).isEqualTo(0);
+
+        String planStatus = jdbc.queryForObject(
+                "SELECT status FROM automation_plans WHERE id = ?",
+                String.class, seeded.planId()
+        );
+        assertThat(planStatus).isEqualTo("RUNNING");
+    }
+
+    @Test
+    @DisplayName("Candidate initiate rejects mismatched plan and application owned by same candidate with 400 Bad Request")
+    void testCandidateInitiateRejectsMismatchedPlanAndApplicationSameCandidate() throws Exception {
+        SeededApplication app1 = seedPlan(PROFILE_A, "LEVER", "lever-cand-a-app-1");
+        SeededApplication app2 = seedPlan(PROFILE_A, "LEVER", "lever-cand-a-app-2");
+
+        // Candidate A attempts to initiate with app1's planId, but app2's applicationId
+        var req = new HandoffController.InitiateRequest(
+                app1.planId(), app2.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-cand-a-app-1", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+
+        mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .session(sessionA).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(req)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("Plan does not belong to the specified application")));
+
+        // Verify zero sessions created
+        Integer count1 = jdbc.queryForObject("SELECT count(*) FROM automation_handoff_sessions WHERE plan_id = ?", Integer.class, app1.planId());
+        Integer count2 = jdbc.queryForObject("SELECT count(*) FROM automation_handoff_sessions WHERE plan_id = ?", Integer.class, app2.planId());
+        assertThat(count1).isEqualTo(0);
+        assertThat(count2).isEqualTo(0);
+
+        // Verify plan statuses remain RUNNING
+        assertThat(jdbc.queryForObject("SELECT status FROM automation_plans WHERE id = ?", String.class, app1.planId())).isEqualTo("RUNNING");
+        assertThat(jdbc.queryForObject("SELECT status FROM automation_plans WHERE id = ?", String.class, app2.planId())).isEqualTo("RUNNING");
+
+        // Verify zero audit records created for handoff initiation
+        Integer auditCount = jdbc.queryForObject(
+                "SELECT count(*) FROM audit_logs WHERE entity_id IN (?, ?) AND action = 'ATS_HANDOFF_INITIATED'",
+                Integer.class, app1.planId(), app2.planId()
+        );
+        assertThat(auditCount).isEqualTo(0);
+    }
+
+    @Test
+    @DisplayName("Candidate initiate rejects application owned by different profile with 403 Forbidden")
+    void testCandidateInitiateRejectsUnownedApplication() throws Exception {
+        SeededApplication candAPlan = seedPlan(PROFILE_A, "LEVER", "lever-cand-a-plan");
+        SeededApplication candBPlan = seedPlan(PROFILE_B, "LEVER", "lever-cand-b-plan");
+
+        // Candidate A tries to initiate with their own plan, but Candidate B's application
+        var req = new HandoffController.InitiateRequest(
+                candAPlan.planId(), candBPlan.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-cand-a-plan", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+
+        mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .session(sessionA).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(req)))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("Access denied: application or plan belongs to another profile")));
+
+        // Verify plan remains RUNNING and no session created
+        assertThat(jdbc.queryForObject("SELECT status FROM automation_plans WHERE id = ?", String.class, candAPlan.planId())).isEqualTo("RUNNING");
+        Integer sessionCount = jdbc.queryForObject("SELECT count(*) FROM automation_handoff_sessions WHERE plan_id = ?", Integer.class, candAPlan.planId());
+        assertThat(sessionCount).isEqualTo(0);
+    }
+
+    @Test
+    @DisplayName("Worker initiate rejects mismatched plan and application IDs with 400 Bad Request")
+    void testWorkerInitiateRejectsMismatchedPlanAndApplication() throws Exception {
+        SeededApplication app1 = seedPlan(PROFILE_A, "LEVER", "lever-worker-mismatch-1");
+        SeededApplication app2 = seedPlan(PROFILE_A, "LEVER", "lever-worker-mismatch-2");
+
+        // Worker attempts initiate with app1.planId() and app2.applicationId()
+        var req = new HandoffController.InitiateRequest(
+                app1.planId(), app2.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-worker-mismatch-1", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+
+        mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(req)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("Plan does not belong to the specified application")));
+
+        // Verify zero sessions created, plan remains RUNNING, and zero audit records
+        Integer count = jdbc.queryForObject("SELECT count(*) FROM automation_handoff_sessions WHERE plan_id = ?", Integer.class, app1.planId());
+        assertThat(count).isEqualTo(0);
+        assertThat(jdbc.queryForObject("SELECT status FROM automation_plans WHERE id = ?", String.class, app1.planId())).isEqualTo("RUNNING");
+
+        Integer auditCount = jdbc.queryForObject(
+                "SELECT count(*) FROM audit_logs WHERE entity_id = ? AND action = 'ATS_HANDOFF_INITIATED'",
+                Integer.class, app1.planId()
+        );
+        assertThat(auditCount).isEqualTo(0);
+    }
+
+    @Test
+    @DisplayName("Worker initiate rejects cross-profile plan and application with 400 Bad Request")
+    void testWorkerInitiateRejectsCrossProfilePlanAndApplication() throws Exception {
+        SeededApplication candA = seedPlan(PROFILE_A, "LEVER", "lever-worker-cand-a");
+        SeededApplication candB = seedPlan(PROFILE_B, "LEVER", "lever-worker-cand-b");
+
+        // Worker attempts initiate with Candidate A's plan and Candidate B's application
+        var req = new HandoffController.InitiateRequest(
+                candA.planId(), candB.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-worker-cand-a", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+
+        mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(req)))
+                .andExpect(status().isBadRequest());
+
+        // Verify zero sessions created and plan remains RUNNING
+        Integer count = jdbc.queryForObject("SELECT count(*) FROM automation_handoff_sessions WHERE plan_id = ?", Integer.class, candA.planId());
+        assertThat(count).isEqualTo(0);
+        assertThat(jdbc.queryForObject("SELECT status FROM automation_plans WHERE id = ?", String.class, candA.planId())).isEqualTo("RUNNING");
+    }
+
+    @Test
+    @DisplayName("Worker initiate succeeds for valid plan and application pair")
+    void testWorkerInitiateSucceedsForValidPair() throws Exception {
+        SeededApplication seeded = seedPlan(PROFILE_A, "LEVER", "lever-worker-valid-pair");
+
+        var req = new HandoffController.InitiateRequest(
+                seeded.planId(), seeded.applicationId(), "LEVER",
+                "https://jobs.lever.co/org/lever-worker-valid-pair", "LEVER_CAPTCHA_PRESENT", null, 15
+        );
+
+        mockMvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(req)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("PENDING"))
+                .andExpect(jsonPath("$.planId").value(seeded.planId().toString()))
+                .andExpect(jsonPath("$.applicationId").value(seeded.applicationId().toString()));
+
+        // Verify plan transitioned to HANDOFF_REQUIRED
+        assertThat(jdbc.queryForObject("SELECT status FROM automation_plans WHERE id = ?", String.class, seeded.planId())).isEqualTo("HANDOFF_REQUIRED");
+    }
+
+    @Test
     @DisplayName("Initiate rejects null planId with 400 Bad Request")
     void testInitiateHandoffRejectsNullPlanId() throws Exception {
         SeededApplication seededA = seedPlan(PROFILE_A, "LEVER", "lever-plan-null-plan");

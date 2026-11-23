@@ -11,6 +11,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -54,12 +56,72 @@ public class AtsHandoffService {
     }
 
     /**
+     * Validates that the target URL is an absolute HTTPS URL with a valid host,
+     * no embedded user credentials, and no protocol-relative or dangerous schemes.
+     */
+    public static void validateTargetUrl(String targetUrl) {
+        if (targetUrl == null || targetUrl.isBlank()) {
+            throw new IllegalArgumentException("Target URL must not be null or blank");
+        }
+        String trimmed = targetUrl.trim();
+        if (trimmed.startsWith("//")) {
+            throw new IllegalArgumentException("Protocol-relative target URLs are not permitted");
+        }
+        URI uri;
+        try {
+            uri = new URI(trimmed);
+        } catch (URISyntaxException e) {
+            throw new IllegalArgumentException("Invalid target URL syntax: " + e.getMessage(), e);
+        }
+        if (!uri.isAbsolute()) {
+            throw new IllegalArgumentException("Target URL must be absolute");
+        }
+        if (!"https".equalsIgnoreCase(uri.getScheme())) {
+            throw new IllegalArgumentException("Target URL scheme must be HTTPS (got: " + uri.getScheme() + ")");
+        }
+        String host = uri.getHost();
+        if (host == null || host.isBlank()) {
+            throw new IllegalArgumentException("Target URL must contain a valid host");
+        }
+        if (uri.getUserInfo() != null || (uri.getRawAuthority() != null && uri.getRawAuthority().contains("@"))) {
+            throw new IllegalArgumentException("Target URL must not contain embedded credentials");
+        }
+    }
+
+    /**
      * Initiates a candidate handoff when browser automation detects CAPTCHA, MFA, or security challenge.
      * Transitions the plan to HANDOFF_REQUIRED and persists a short-lived session.
      */
     @Transactional
     public HandoffSessionRecord initiateHandoff(UUID ownerProfileId, UUID planId, UUID applicationId,
                                                 String targetUrl, HandoffBlockReason reason, int ttlMinutes) {
+        if (ownerProfileId == null || planId == null || applicationId == null) {
+            throw new IllegalArgumentException("ownerProfileId, planId, and applicationId are required");
+        }
+        validateTargetUrl(targetUrl);
+
+        // Invariant: automation_plans.application_id == requested applicationId
+        AutomationPlanRepository.PlanRow plan = planRepository.findById(planId)
+                .orElseThrow(() -> new IllegalArgumentException("Automation plan not found: " + planId));
+        if (!applicationId.equals(plan.applicationId())) {
+            throw new IllegalArgumentException("Mismatched plan and application: plan " + planId
+                    + " belongs to application " + plan.applicationId() + ", but requested application was " + applicationId);
+        }
+
+        // Invariant: plan owner must match supplied ownerProfileId
+        UUID planOwner = planRepository.ownerOfPlan(planId)
+                .orElseThrow(() -> new SecurityException("Plan owner not found for plan: " + planId));
+        if (!ownerProfileId.equals(planOwner)) {
+            throw new SecurityException("Plan " + planId + " does not belong to profile " + ownerProfileId);
+        }
+
+        // Invariant: application owner must match supplied ownerProfileId
+        UUID appOwner = handoffRepository.findProfileIdForApplication(applicationId)
+                .orElseThrow(() -> new SecurityException("Application owner not found for application: " + applicationId));
+        if (!ownerProfileId.equals(appOwner)) {
+            throw new SecurityException("Application " + applicationId + " does not belong to profile " + ownerProfileId);
+        }
+
         log.info("Initiating candidate handoff for plan {} (app {}) due to {}", planId, applicationId, reason);
         HandoffSessionRecord session = handoffRepository.createSession(ownerProfileId, planId, applicationId, targetUrl, reason, ttlMinutes);
 
@@ -103,15 +165,31 @@ public class AtsHandoffService {
         return handoffRepository.findByIdAnyOwner(sessionId);
     }
 
+    public boolean isPlanAssociatedWithApplication(UUID planId, UUID applicationId) {
+        if (planId == null || applicationId == null) {
+            return false;
+        }
+        return planRepository.findById(planId)
+                .map(AutomationPlanRepository.PlanRow::applicationId)
+                .map(applicationId::equals)
+                .orElse(false);
+    }
+
     public Optional<UUID> resolveProfileId(UUID planId, UUID applicationId) {
-        if (planId != null) {
-            Optional<UUID> owner = planRepository.ownerOfPlan(planId);
-            if (owner.isPresent()) return owner;
+        if (planId == null || applicationId == null) {
+            return Optional.empty();
         }
-        if (applicationId != null) {
-            return handoffRepository.findProfileIdForApplication(applicationId);
+        // Invariant: plan must exist and be associated with applicationId
+        Optional<AutomationPlanRepository.PlanRow> planOpt = planRepository.findById(planId);
+        if (planOpt.isEmpty() || !applicationId.equals(planOpt.get().applicationId())) {
+            return Optional.empty();
         }
-        return Optional.empty();
+        Optional<UUID> planOwner = planRepository.ownerOfPlan(planId);
+        Optional<UUID> appOwner = handoffRepository.findProfileIdForApplication(applicationId);
+        if (planOwner.isEmpty() || appOwner.isEmpty() || !planOwner.get().equals(appOwner.get())) {
+            return Optional.empty();
+        }
+        return planOwner;
     }
 
     public boolean isApplicationOwnedBy(UUID applicationId, UUID profileId) {

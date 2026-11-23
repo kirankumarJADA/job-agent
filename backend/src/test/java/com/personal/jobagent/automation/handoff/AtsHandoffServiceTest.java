@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -36,6 +37,14 @@ class AtsHandoffServiceTest {
         audit = mock(AuditLogWriter.class);
         applicationStatus = mock(ApplicationStatusService.class);
         service = new AtsHandoffService(handoffRepository, planRepository, audit, null, applicationStatus);
+
+        var planRow = new AutomationPlanRepository.PlanRow(
+                planId, applicationId, "https://jobs.lever.co/example/123", "RUNNING",
+                Map.of(), List.of(), false, Instant.now(), Instant.now()
+        );
+        when(planRepository.findById(planId)).thenReturn(Optional.of(planRow));
+        when(planRepository.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
+        when(handoffRepository.findProfileIdForApplication(applicationId)).thenReturn(Optional.of(profileId));
     }
 
     @Test
@@ -291,5 +300,160 @@ class AtsHandoffServiceTest {
                 .hasMessageContaining("Failed to transition expired plan " + planId + " to FAILED");
 
         verify(audit, never()).write(any());
+    }
+
+    @Test
+    @DisplayName("validateTargetUrl accepts valid HTTPS URLs")
+    void testValidateTargetUrlSuccess() {
+        AtsHandoffService.validateTargetUrl("https://jobs.lever.co/example/123");
+        AtsHandoffService.validateTargetUrl("https://workday.com/apply");
+        AtsHandoffService.validateTargetUrl("https://sub.domain.co.uk/apply?job=456#form");
+    }
+
+    @Test
+    @DisplayName("validateTargetUrl rejects invalid, malformed, or dangerous URLs")
+    void testValidateTargetUrlRejections() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> AtsHandoffService.validateTargetUrl(null))
+                .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> AtsHandoffService.validateTargetUrl(""))
+                .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> AtsHandoffService.validateTargetUrl("   "))
+                .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> AtsHandoffService.validateTargetUrl("http://insecure.com/apply"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("HTTPS");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> AtsHandoffService.validateTargetUrl("javascript:alert(1)"))
+                .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> AtsHandoffService.validateTargetUrl("data:text/html,<script>alert(1)</script>"))
+                .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> AtsHandoffService.validateTargetUrl("file:///etc/passwd"))
+                .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> AtsHandoffService.validateTargetUrl("blob:https://jobs.lever.co/uuid"))
+                .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> AtsHandoffService.validateTargetUrl("//jobs.lever.co/example"))
+                .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> AtsHandoffService.validateTargetUrl("https://user:password@jobs.lever.co/example"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("embedded credentials");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> AtsHandoffService.validateTargetUrl("https://user@jobs.lever.co/example"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("embedded credentials");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> AtsHandoffService.validateTargetUrl("https://"))
+                .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> AtsHandoffService.validateTargetUrl("https:///path"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("valid host");
+    }
+
+    @Test
+    @DisplayName("initiateHandoff rejects invalid target URL and creates no session or transition")
+    void testInitiateHandoffRejectsInvalidUrl() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                service.initiateHandoff(profileId, planId, applicationId, "javascript:alert(1)", HandoffBlockReason.CAPTCHA, 15)
+        ).isInstanceOf(IllegalArgumentException.class);
+
+        verify(handoffRepository, never()).createSession(any(), any(), any(), any(), any(), anyInt());
+        verify(planRepository, never()).transition(any(), any(), any());
+        verify(audit, never()).write(any());
+    }
+
+    @Test
+    @DisplayName("initiateHandoff throws when plan is not found and creates no session or transition")
+    void testInitiateHandoffThrowsWhenPlanNotFound() {
+        when(planRepository.findById(planId)).thenReturn(Optional.empty());
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                service.initiateHandoff(profileId, planId, applicationId, "https://jobs.lever.co/apply", HandoffBlockReason.CAPTCHA, 15)
+        ).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("Automation plan not found");
+
+        verify(handoffRepository, never()).createSession(any(), any(), any(), any(), any(), anyInt());
+        verify(planRepository, never()).transition(any(), any(), any());
+        verify(audit, never()).write(any());
+    }
+
+    @Test
+    @DisplayName("initiateHandoff throws when plan belongs to a different application")
+    void testInitiateHandoffThrowsWhenPlanBelongsToDifferentApplication() {
+        UUID otherAppId = UUID.randomUUID();
+        var mismatchedPlan = new AutomationPlanRepository.PlanRow(
+                planId, otherAppId, "https://jobs.lever.co/example/123", "RUNNING",
+                Map.of(), List.of(), false, Instant.now(), Instant.now()
+        );
+        when(planRepository.findById(planId)).thenReturn(Optional.of(mismatchedPlan));
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                service.initiateHandoff(profileId, planId, applicationId, "https://jobs.lever.co/apply", HandoffBlockReason.CAPTCHA, 15)
+        ).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("Mismatched plan and application");
+
+        verify(handoffRepository, never()).createSession(any(), any(), any(), any(), any(), anyInt());
+        verify(planRepository, never()).transition(any(), any(), any());
+        verify(audit, never()).write(any());
+    }
+
+    @Test
+    @DisplayName("initiateHandoff throws SecurityException when plan is owned by another profile")
+    void testInitiateHandoffThrowsWhenPlanOwnedByAnotherProfile() {
+        UUID otherProfileId = UUID.randomUUID();
+        when(planRepository.ownerOfPlan(planId)).thenReturn(Optional.of(otherProfileId));
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                service.initiateHandoff(profileId, planId, applicationId, "https://jobs.lever.co/apply", HandoffBlockReason.CAPTCHA, 15)
+        ).isInstanceOf(SecurityException.class).hasMessageContaining("Plan " + planId + " does not belong to profile");
+
+        verify(handoffRepository, never()).createSession(any(), any(), any(), any(), any(), anyInt());
+        verify(planRepository, never()).transition(any(), any(), any());
+        verify(audit, never()).write(any());
+    }
+
+    @Test
+    @DisplayName("initiateHandoff throws SecurityException when application is owned by another profile")
+    void testInitiateHandoffThrowsWhenApplicationOwnedByAnotherProfile() {
+        UUID otherProfileId = UUID.randomUUID();
+        when(handoffRepository.findProfileIdForApplication(applicationId)).thenReturn(Optional.of(otherProfileId));
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                service.initiateHandoff(profileId, planId, applicationId, "https://jobs.lever.co/apply", HandoffBlockReason.CAPTCHA, 15)
+        ).isInstanceOf(SecurityException.class).hasMessageContaining("Application " + applicationId + " does not belong to profile");
+
+        verify(handoffRepository, never()).createSession(any(), any(), any(), any(), any(), anyInt());
+        verify(planRepository, never()).transition(any(), any(), any());
+        verify(audit, never()).write(any());
+    }
+
+    @Test
+    @DisplayName("isPlanAssociatedWithApplication returns true only for matching plan and application")
+    void testIsPlanAssociatedWithApplication() {
+        assertThat(service.isPlanAssociatedWithApplication(planId, applicationId)).isTrue();
+        assertThat(service.isPlanAssociatedWithApplication(planId, UUID.randomUUID())).isFalse();
+        assertThat(service.isPlanAssociatedWithApplication(UUID.randomUUID(), applicationId)).isFalse();
+        assertThat(service.isPlanAssociatedWithApplication(null, applicationId)).isFalse();
+        assertThat(service.isPlanAssociatedWithApplication(planId, null)).isFalse();
+    }
+
+    @Test
+    @DisplayName("resolveProfileId enforces matching plan-application association and ownership")
+    void testResolveProfileId() {
+        // Matching: returns profileId
+        assertThat(service.resolveProfileId(planId, applicationId)).contains(profileId);
+
+        // Plan belongs to other application: returns empty
+        UUID otherAppId = UUID.randomUUID();
+        var mismatchedPlan = new AutomationPlanRepository.PlanRow(
+                planId, otherAppId, "https://jobs.lever.co/example/123", "RUNNING",
+                Map.of(), List.of(), false, Instant.now(), Instant.now()
+        );
+        when(planRepository.findById(planId)).thenReturn(Optional.of(mismatchedPlan));
+        assertThat(service.resolveProfileId(planId, applicationId)).isEmpty();
+
+        // Application owned by different profile: returns empty
+        when(planRepository.findById(planId)).thenReturn(Optional.of(
+                new AutomationPlanRepository.PlanRow(planId, applicationId, "https://jobs.lever.co/apply", "RUNNING", Map.of(), List.of(), false, Instant.now(), Instant.now())
+        ));
+        when(handoffRepository.findProfileIdForApplication(applicationId)).thenReturn(Optional.of(UUID.randomUUID()));
+        assertThat(service.resolveProfileId(planId, applicationId)).isEmpty();
+
+        // Nulls: returns empty
+        assertThat(service.resolveProfileId(null, applicationId)).isEmpty();
+        assertThat(service.resolveProfileId(planId, null)).isEmpty();
     }
 }

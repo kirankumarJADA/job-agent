@@ -34,6 +34,9 @@ class HandoffControllerTest {
         controller = new HandoffController(handoffService, ownerContext);
         when(ownerContext.profileIdOrNull()).thenReturn(profileId);
         when(ownerContext.isWorkerRequest()).thenReturn(false);
+        when(handoffService.isPlanAssociatedWithApplication(planId, applicationId)).thenReturn(true);
+        when(handoffService.isApplicationOwnedBy(applicationId, profileId)).thenReturn(true);
+        when(handoffService.isPlanOwnedBy(planId, profileId)).thenReturn(true);
     }
 
     @Test
@@ -344,5 +347,161 @@ class HandoffControllerTest {
         assertThat(json).doesNotContain("handoffToken");
         assertThat(json).doesNotContain("handoff_token");
         assertThat(json).doesNotContain(secretToken.toString());
+    }
+
+    @Test
+    @DisplayName("initiateHandoff rejects non-HTTPS URL with 400 Bad Request")
+    void testInitiateHandoffRejectsNonHttpsUrl() {
+        var req = new HandoffController.InitiateRequest(
+                planId, applicationId, "LEVER", "http://jobs.lever.co/example",
+                "LEVER_CAPTCHA_PRESENT", "evidence/screenshot.png", 15
+        );
+        ResponseEntity<?> response = controller.initiateHandoff(req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(handoffService, never()).initiateHandoff(any(), any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
+    @DisplayName("initiateHandoff rejects javascript: scheme with 400 Bad Request")
+    void testInitiateHandoffRejectsJavascriptUrl() {
+        var req = new HandoffController.InitiateRequest(
+                planId, applicationId, "LEVER", "javascript:alert(1)",
+                "LEVER_CAPTCHA_PRESENT", "evidence/screenshot.png", 15
+        );
+        ResponseEntity<?> response = controller.initiateHandoff(req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(handoffService, never()).initiateHandoff(any(), any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
+    @DisplayName("initiateHandoff rejects data: scheme with 400 Bad Request")
+    void testInitiateHandoffRejectsDataUrl() {
+        var req = new HandoffController.InitiateRequest(
+                planId, applicationId, "LEVER", "data:text/html,<script>alert(1)</script>",
+                "LEVER_CAPTCHA_PRESENT", "evidence/screenshot.png", 15
+        );
+        ResponseEntity<?> response = controller.initiateHandoff(req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(handoffService, never()).initiateHandoff(any(), any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
+    @DisplayName("initiateHandoff rejects file: scheme with 400 Bad Request")
+    void testInitiateHandoffRejectsFileUrl() {
+        var req = new HandoffController.InitiateRequest(
+                planId, applicationId, "LEVER", "file:///etc/passwd",
+                "LEVER_CAPTCHA_PRESENT", "evidence/screenshot.png", 15
+        );
+        ResponseEntity<?> response = controller.initiateHandoff(req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(handoffService, never()).initiateHandoff(any(), any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
+    @DisplayName("initiateHandoff rejects blob: scheme with 400 Bad Request")
+    void testInitiateHandoffRejectsBlobUrl() {
+        var req = new HandoffController.InitiateRequest(
+                planId, applicationId, "LEVER", "blob:https://jobs.lever.co/uuid",
+                "LEVER_CAPTCHA_PRESENT", "evidence/screenshot.png", 15
+        );
+        ResponseEntity<?> response = controller.initiateHandoff(req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(handoffService, never()).initiateHandoff(any(), any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
+    @DisplayName("initiateHandoff rejects protocol-relative URL with 400 Bad Request")
+    void testInitiateHandoffRejectsProtocolRelativeUrl() {
+        var req = new HandoffController.InitiateRequest(
+                planId, applicationId, "LEVER", "//jobs.lever.co/example",
+                "LEVER_CAPTCHA_PRESENT", "evidence/screenshot.png", 15
+        );
+        ResponseEntity<?> response = controller.initiateHandoff(req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(handoffService, never()).initiateHandoff(any(), any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
+    @DisplayName("initiateHandoff rejects embedded credentials with 400 Bad Request")
+    void testInitiateHandoffRejectsEmbeddedCredentials() {
+        var req = new HandoffController.InitiateRequest(
+                planId, applicationId, "LEVER", "https://user:password@jobs.lever.co/example",
+                "LEVER_CAPTCHA_PRESENT", "evidence/screenshot.png", 15
+        );
+        ResponseEntity<?> response = controller.initiateHandoff(req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(handoffService, never()).initiateHandoff(any(), any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
+    @DisplayName("initiateHandoff rejects URL without valid host with 400 Bad Request")
+    void testInitiateHandoffRejectsMissingHost() {
+        var req = new HandoffController.InitiateRequest(
+                planId, applicationId, "LEVER", "https://",
+                "LEVER_CAPTCHA_PRESENT", "evidence/screenshot.png", 15
+        );
+        ResponseEntity<?> response = controller.initiateHandoff(req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(handoffService, never()).initiateHandoff(any(), any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
+    @DisplayName("initiateHandoff rejects candidate request when plan does not belong to application with 400 Bad Request")
+    void testInitiateHandoffCandidateRejectsMismatchedPlanAndApplication() {
+        when(handoffService.isApplicationOwnedBy(applicationId, profileId)).thenReturn(true);
+        when(handoffService.isPlanOwnedBy(planId, profileId)).thenReturn(true);
+        when(handoffService.isPlanAssociatedWithApplication(planId, applicationId)).thenReturn(false);
+
+        var req = new HandoffController.InitiateRequest(
+                planId, applicationId, "LEVER", "https://jobs.lever.co/example",
+                "LEVER_CAPTCHA_PRESENT", "evidence/screenshot.png", 15
+        );
+        ResponseEntity<?> response = controller.initiateHandoff(req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(handoffService, never()).initiateHandoff(any(), any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
+    @DisplayName("initiateHandoff rejects worker request when plan does not belong to application with 400 Bad Request")
+    void testInitiateHandoffWorkerRejectsMismatchedPlanAndApplication() {
+        when(ownerContext.profileIdOrNull()).thenReturn(null);
+        when(ownerContext.isWorkerRequest()).thenReturn(true);
+        when(handoffService.isPlanAssociatedWithApplication(planId, applicationId)).thenReturn(false);
+
+        var req = new HandoffController.InitiateRequest(
+                planId, applicationId, "LEVER", "https://jobs.lever.co/example",
+                "LEVER_CAPTCHA_PRESENT", "evidence/screenshot.png", 15
+        );
+        ResponseEntity<?> response = controller.initiateHandoff(req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(handoffService, never()).initiateHandoff(any(), any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
+    @DisplayName("initiateHandoff rejects worker request when resolveProfileId fails with 400 Bad Request")
+    void testInitiateHandoffWorkerRejectsUnresolvableProfile() {
+        when(ownerContext.profileIdOrNull()).thenReturn(null);
+        when(ownerContext.isWorkerRequest()).thenReturn(true);
+        when(handoffService.isPlanAssociatedWithApplication(planId, applicationId)).thenReturn(true);
+        when(handoffService.resolveProfileId(planId, applicationId)).thenReturn(Optional.empty());
+
+        var req = new HandoffController.InitiateRequest(
+                planId, applicationId, "LEVER", "https://jobs.lever.co/example",
+                "LEVER_CAPTCHA_PRESENT", "evidence/screenshot.png", 15
+        );
+        ResponseEntity<?> response = controller.initiateHandoff(req);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(handoffService, never()).initiateHandoff(any(), any(), any(), any(), any(), anyInt());
     }
 }

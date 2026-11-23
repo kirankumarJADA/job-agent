@@ -183,6 +183,12 @@ public class HandoffController {
             return ResponseEntity.badRequest().body(Map.of("error", "applicationId, planId, and targetUrl are required"));
         }
 
+        try {
+            AtsHandoffService.validateTargetUrl(req.targetUrl());
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Invalid target URL: " + e.getMessage()));
+        }
+
         UUID profileId = ownerContext.profileIdOrNull();
         if (profileId == null && !ownerContext.isWorkerRequest()) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
@@ -194,7 +200,13 @@ public class HandoffController {
             if (!appOwned || !planOwned) {
                 return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Access denied: application or plan belongs to another profile"));
             }
+            if (!handoffService.isPlanAssociatedWithApplication(req.planId(), req.applicationId())) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Plan does not belong to the specified application"));
+            }
         } else if (profileId == null && ownerContext.isWorkerRequest()) {
+            if (!handoffService.isPlanAssociatedWithApplication(req.planId(), req.applicationId())) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Plan does not belong to the specified application"));
+            }
             profileId = handoffService.resolveProfileId(req.planId(), req.applicationId()).orElse(null);
             if (profileId == null) {
                 return ResponseEntity.badRequest().body(Map.of("error", "Unable to resolve owner profile for application/plan"));
@@ -204,10 +216,15 @@ public class HandoffController {
         HandoffBlockReason reason = HandoffBlockReason.parse(req.blockReason());
         int ttl = req.ttlMinutes() != null ? req.ttlMinutes() : 15;
 
-        HandoffSessionRecord session = handoffService.initiateHandoff(
-                profileId, req.planId(), req.applicationId(), req.targetUrl(), reason, ttl
-        );
-
-        return ResponseEntity.status(HttpStatus.CREATED).body(HandoffSessionResponse.from(session));
+        try {
+            HandoffSessionRecord session = handoffService.initiateHandoff(
+                    profileId, req.planId(), req.applicationId(), req.targetUrl(), reason, ttl
+            );
+            return ResponseEntity.status(HttpStatus.CREATED).body(HandoffSessionResponse.from(session));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (SecurityException e) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", e.getMessage()));
+        }
     }
 }

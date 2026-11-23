@@ -8,6 +8,27 @@ interface HandoffModalProps {
   onResumed: () => void;
 }
 
+/**
+ * Validates that a target URL is an absolute HTTPS URL with a valid host
+ * and no embedded user credentials or dangerous schemes.
+ */
+export function isValidHttpsUrl(urlString?: string | null): boolean {
+  if (!urlString || typeof urlString !== 'string') return false;
+  try {
+    const trimmed = urlString.trim();
+    if (!trimmed.toLowerCase().startsWith('https://') || trimmed.startsWith('//')) return false;
+    const parsed = new URL(trimmed);
+    return (
+      parsed.protocol === 'https:' &&
+      Boolean(parsed.hostname) &&
+      !parsed.username &&
+      !parsed.password
+    );
+  } catch {
+    return false;
+  }
+}
+
 export const HandoffModal: React.FC<HandoffModalProps> = ({ session, onClose, onResumed }) => {
   const [attested, setAttested] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -56,8 +77,9 @@ export const HandoffModal: React.FC<HandoffModalProps> = ({ session, onClose, on
     }
   };
 
+  const isUrlValid = isValidHttpsUrl(session.targetUrl);
   const isExpired = new Date(session.expiresAt).getTime() <= Date.now();
-  const isInactive = isExpired || session.status !== 'PENDING';
+  const isInactive = isExpired || session.status !== 'PENDING' || !isUrlValid;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" role="dialog" aria-modal="true">
@@ -90,17 +112,23 @@ export const HandoffModal: React.FC<HandoffModalProps> = ({ session, onClose, on
               <li>
                 <span>Open the employer application in your own browser:</span>
                 <div className="mt-1 pl-5">
-                  <a
-                    href={session.targetUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 underline font-medium"
-                  >
-                    Open Employer Application Form
-                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                    </svg>
-                  </a>
+                  {isUrlValid ? (
+                    <a
+                      href={session.targetUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 underline font-medium"
+                    >
+                      Open Employer Application Form
+                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                      </svg>
+                    </a>
+                  ) : (
+                    <span className="text-xs text-red-400 font-medium">
+                      Invalid or insecure employer application URL
+                    </span>
+                  )}
                 </div>
               </li>
               <li>Resolve the CAPTCHA, MFA code, or security verification on the employer portal.</li>
@@ -136,6 +164,12 @@ export const HandoffModal: React.FC<HandoffModalProps> = ({ session, onClose, on
             <span>Session Status: <strong className={isExpired ? 'text-red-400' : session.status === 'PENDING' ? 'text-emerald-400' : 'text-amber-400'}>{isExpired ? 'EXPIRED' : session.status}</strong></span>
             <span>Expires at: {new Date(session.expiresAt).toLocaleTimeString()}</span>
           </div>
+
+          {!isUrlValid && (
+            <div className="p-3 rounded-lg bg-red-950/60 border border-red-500/40 text-red-200 text-xs">
+              This handoff session contains an invalid or insecure target URL. Direct navigation and completion are disabled.
+            </div>
+          )}
 
           {error && (
             <div className="p-3 rounded-lg bg-red-950/60 border border-red-500/40 text-red-200 text-xs">

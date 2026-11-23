@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
-import { HandoffModal } from './HandoffModal';
+import { HandoffModal, isValidHttpsUrl } from './HandoffModal';
 import * as client from '../api/client';
 import type { HandoffSession } from '../types';
 
@@ -146,5 +146,54 @@ describe('HandoffModal', () => {
     const confirmBtn = screen.getByRole('button', { name: /confirm external submission/i });
     expect(confirmBtn.hasAttribute('disabled')).toBe(true);
     expect(screen.getByText('CANCELLED')).toBeTruthy();
+  });
+
+  describe('isValidHttpsUrl security validator', () => {
+    it('accepts legitimate HTTPS URLs', () => {
+      expect(isValidHttpsUrl('https://jobs.lever.co/company/apply')).toBe(true);
+      expect(isValidHttpsUrl('HTTPS://jobs.lever.co/company/apply')).toBe(true);
+      expect(isValidHttpsUrl('https://workday.com/en-US/apply')).toBe(true);
+      expect(isValidHttpsUrl('https://boards.greenhouse.io/job/12345')).toBe(true);
+      expect(isValidHttpsUrl('https://sub.domain.co.uk/path?q=test#hash')).toBe(true);
+    });
+
+    it('rejects non-HTTPS, dangerous, and malformed URLs', () => {
+      expect(isValidHttpsUrl('http://insecure.com/apply')).toBe(false);
+      expect(isValidHttpsUrl('javascript:alert(1)')).toBe(false);
+      expect(isValidHttpsUrl('data:text/html,<script>alert(1)</script>')).toBe(false);
+      expect(isValidHttpsUrl('file:///etc/passwd')).toBe(false);
+      expect(isValidHttpsUrl('blob:https://jobs.lever.co/uuid')).toBe(false);
+      expect(isValidHttpsUrl('//evil.com/apply')).toBe(false);
+      expect(isValidHttpsUrl('https://user:password@jobs.lever.co/apply')).toBe(false);
+      expect(isValidHttpsUrl('https://user@jobs.lever.co/apply')).toBe(false);
+      expect(isValidHttpsUrl('https://')).toBe(false);
+      expect(isValidHttpsUrl('')).toBe(false);
+      expect(isValidHttpsUrl('   ')).toBe(false);
+      expect(isValidHttpsUrl(null)).toBe(false);
+      expect(isValidHttpsUrl(undefined)).toBe(false);
+    });
+  });
+
+  it('defensively refuses to render links with invalid or non-HTTPS targetUrl and disables submission', () => {
+    const maliciousSession: HandoffSession = {
+      ...mockSession,
+      targetUrl: 'javascript:alert(document.cookie)',
+    };
+
+    render(<HandoffModal session={maliciousSession} onClose={onClose} onResumed={onResumed} />);
+
+    // Link must NOT be rendered
+    expect(screen.queryByText('Open Employer Application Form')).toBeNull();
+    // Insecure URL indicator must be displayed
+    expect(screen.getByText('Invalid or insecure employer application URL')).toBeTruthy();
+    expect(screen.getByText(/This handoff session contains an invalid or insecure target URL/i)).toBeTruthy();
+
+    // Confirm button must be disabled
+    const confirmBtn = screen.getByRole('button', { name: /confirm external submission/i });
+    expect(confirmBtn.hasAttribute('disabled')).toBe(true);
+
+    // Attestation checkbox must be disabled
+    const attestationCheckbox = screen.getByRole('checkbox', { name: /attest external submission/i });
+    expect(attestationCheckbox.hasAttribute('disabled')).toBe(true);
   });
 });
