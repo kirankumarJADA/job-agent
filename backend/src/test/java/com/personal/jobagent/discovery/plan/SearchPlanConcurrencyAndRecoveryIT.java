@@ -868,6 +868,52 @@ public class SearchPlanConcurrencyAndRecoveryIT {
         assertThat(freshInstance2.getPersistedScanOffset(sourceId, planB.id())).isEqualTo(7);
     }
 
+    @Test
+    @DisplayName("Fail-closed against PostgreSQL: non-existent source row fails explicitly with IllegalStateException")
+    void testMissingSourceRowFailsClosedAgainstPostgres() {
+        BoardDiscoveryService service = new BoardDiscoveryService(
+                jdbcTemplate, jobDiscoveryService, new PlatformRegistry(50), 50, 150, 400, 3, 1500L, 10
+        );
+        UUID nonExistentSourceId = UuidV7.generate();
+        UUID planId = UuidV7.generate();
+
+        assertThatThrownBy(() -> service.getPersistedScanOffset(nonExistentSourceId, planId))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("does not exist in database; cannot determine authoritative scan offset (failing closed)");
+
+        assertThatThrownBy(() -> service.getPersistedScanOffset(nonExistentSourceId, null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("does not exist in database; cannot determine authoritative scan offset (failing closed)");
+    }
+
+    @Test
+    @DisplayName("Fail-closed against PostgreSQL: malformed persisted offset data throws IllegalStateException")
+    void testMalformedScanOffsetFailsClosedAgainstPostgres() {
+        BoardDiscoveryService service = new BoardDiscoveryService(
+                jdbcTemplate, jobDiscoveryService, new PlatformRegistry(50), 50, 150, 400, 3, 1500L, 10
+        );
+        UUID sourceId = UuidV7.generate();
+        UUID planId = UuidV7.generate();
+
+        jdbcTemplate.update("""
+                INSERT INTO job_sources (id, kind, org_identifier, display_name, capabilities, policy, enabled, last_run)
+                VALUES (?, 'GREENHOUSE', 'corrupted-org', 'Corrupted Test Org', '{}'::jsonb, 'DISCOVERY_ONLY', true,
+                        jsonb_build_object('plan_offsets', jsonb_build_object(?, 'corrupted-offset'), 'scan_offset', 'bad-default'))
+                ON CONFLICT (kind, org_identifier) DO UPDATE
+                SET last_run = jsonb_build_object('plan_offsets', jsonb_build_object(?, 'corrupted-offset'), 'scan_offset', 'bad-default')
+                """, sourceId, planId.toString(), planId.toString());
+
+        assertThatThrownBy(() -> service.getPersistedScanOffset(sourceId, planId))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("is not a valid integer (failing closed)")
+                .hasCauseInstanceOf(NumberFormatException.class);
+
+        assertThatThrownBy(() -> service.getPersistedScanOffset(sourceId, null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("is not a valid integer (failing closed)")
+                .hasCauseInstanceOf(NumberFormatException.class);
+    }
+
     private UUID createTestProfile(String email) {
         UUID userId = UuidV7.generate();
         UUID profileId = UuidV7.generate();

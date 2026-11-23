@@ -49,6 +49,15 @@ class BoardDiscoveryServiceTest {
                 UUID.randomUUID(), "INSERTED", "d", "h"));
         when(ingestion.ingestJob(any(), any(), any())).thenAnswer(inv -> new JobDiscoveryService.IngestResult(
                 UUID.randomUUID(), "INSERTED", "d", "h"));
+
+        // Default: source row exists in job_sources with no initial plan-specific or default scan offset
+        Map<String, Object> defaultSourceRow = new java.util.HashMap<>();
+        when(db.queryForList(contains("select last_run->>'scan_offset'"), any(Object[].class)))
+                .thenReturn(List.of(defaultSourceRow));
+        when(db.queryForList(contains("select last_run->>'scan_offset'"), eq(SOURCE)))
+                .thenReturn(List.of(defaultSourceRow));
+        when(db.queryForList(contains("last_run->'plan_offsets'"), any(Object[].class)))
+                .thenReturn(List.of(defaultSourceRow));
     }
 
     private void sourceRow(String kind, String org, boolean enabled, String policy) {
@@ -166,6 +175,13 @@ class BoardDiscoveryServiceTest {
         // Mode so that adding one cannot quietly reintroduce the bypass.
         for (BoardDiscoveryService.Mode mode : BoardDiscoveryService.Mode.values()) {
             org.mockito.Mockito.reset(db);
+            Map<String, Object> defaultSourceRow = new java.util.HashMap<>();
+            when(db.queryForList(contains("select last_run->>'scan_offset'"), any(Object[].class)))
+                    .thenReturn(List.of(defaultSourceRow));
+            when(db.queryForList(contains("select last_run->>'scan_offset'"), eq(SOURCE)))
+                    .thenReturn(List.of(defaultSourceRow));
+            when(db.queryForList(contains("last_run->'plan_offsets'"), any(Object[].class)))
+                    .thenReturn(List.of(defaultSourceRow));
             Scripted a = new Scripted();
             a.listing = ListingResult.complete(List.of(), 1, null);
 
@@ -592,6 +608,25 @@ class BoardDiscoveryServiceTest {
 
         when(db.queryForList(contains("from job_source_observations"), eq(SOURCE))).thenReturn(knownList);
 
+        java.util.concurrent.atomic.AtomicReference<String> persistedOffset =
+                new java.util.concurrent.atomic.AtomicReference<>("0");
+        when(db.queryForList(contains("select last_run->>'scan_offset'"), eq(SOURCE)))
+                .thenAnswer(inv -> List.of(Map.of("default_offset", persistedOffset.get())));
+        when(db.update(contains("update job_sources set"), any(Object[].class)))
+                .thenAnswer(inv -> {
+                    Object[] args = extractVarargs(inv);
+                    if (args.length > 0 && args[0] != null) {
+                        try {
+                            com.fasterxml.jackson.databind.JsonNode root =
+                                    new com.fasterxml.jackson.databind.ObjectMapper().readTree(String.valueOf(args[0]));
+                            if (root.has("scan_offset")) {
+                                persistedOffset.set(root.get("scan_offset").asText());
+                            }
+                        } catch (Exception ignored) {}
+                    }
+                    return 1;
+                });
+
         Scripted a = new Scripted();
         a.listing = ListingResult.complete(entries, 1, null);
 
@@ -713,7 +748,7 @@ class BoardDiscoveryServiceTest {
             if (planOffsets != null && planOffsets.containsKey(planId)) {
                 return List.of(Map.of("plan_offset", String.valueOf(planOffsets.get(planId))));
             }
-            return List.of();
+            return List.of(new java.util.HashMap<String, Object>());
         });
 
         // Run 1: Plan A scans 2 jobs (starts at 0 -> saves offset 2)
@@ -798,7 +833,7 @@ class BoardDiscoveryServiceTest {
                 if (planOffsets != null && planOffsets.containsKey(planId)) {
                     return List.of(Map.of("plan_offset", String.valueOf(planOffsets.get(planId))));
                 }
-                return List.of();
+                return List.of(new java.util.HashMap<String, Object>());
             }
         });
 
@@ -999,5 +1034,100 @@ class BoardDiscoveryServiceTest {
 
         // Offset MUST NOT have been updated in local cache
         assertThat(service.getPersistedScanOffset(SOURCE, planA)).isEqualTo(0);
+    }
+
+    @Test
+    void databaseReadFailureFailsClosedWithoutUsingStaleCache() {
+        UUID planId = UUID.randomUUID();
+        // Even if an offset was somehow cached in memory
+        when(db.queryForList(contains("last_run->'plan_offsets'"), any(Object[].class)))
+                .thenThrow(new org.springframework.jdbc.CannotGetJdbcConnectionException("DB Connection refused"));
+
+        assertThatThrownBy(() -> service.getPersistedScanOffset(SOURCE, planId))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("database query failure; failing closed")
+                .hasCauseInstanceOf(org.springframework.jdbc.CannotGetJdbcConnectionException.class);
+
+        // Also test default offset query failure
+        when(db.queryForList(contains("select last_run->>'scan_offset'"), eq(SOURCE)))
+                .thenThrow(new org.springframework.jdbc.CannotGetJdbcConnectionException("DB Connection refused"));
+
+        assertThatThrownBy(() -> service.getPersistedScanOffset(SOURCE, null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("database query failure; failing closed")
+                .hasCauseInstanceOf(org.springframework.jdbc.CannotGetJdbcConnectionException.class);
+    }
+
+    @Test
+    void missingSourceRowFailsExplicitlyWithoutReturningCachedOffsetOrIngesting() {
+        UUID unknownSource = UUID.randomUUID();
+        UUID planId = UUID.randomUUID();
+
+        // Database returns empty list (source row does not exist in job_sources)
+        when(db.queryForList(contains("last_run->'plan_offsets'"), any(Object[].class)))
+                .thenReturn(List.of());
+        when(db.queryForList(contains("select last_run->>'scan_offset'"), eq(unknownSource)))
+                .thenReturn(List.of());
+
+        assertThatThrownBy(() -> service.getPersistedScanOffset(unknownSource, planId))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("does not exist in database; cannot determine authoritative scan offset (failing closed)");
+
+        assertThatThrownBy(() -> service.getPersistedScanOffset(unknownSource, null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("does not exist in database; cannot determine authoritative scan offset (failing closed)");
+
+        // Also verify run() fails explicitly before any ingestion or detail calls
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(List.of(full("job-1")), 1, null);
+        assertThatThrownBy(() -> service.run(unknownSource, a, "acme", null, BoardDiscoveryService.Mode.MANUAL, Map.of()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("does not exist in database");
+        assertThat(a.detailed).isEmpty();
+        verify(ingestion, never()).ingestJob(any());
+    }
+
+    @Test
+    void malformedPersistedScanOffsetFailsClosed() {
+        UUID planId = UUID.randomUUID();
+
+        // 1. Malformed plan-specific offset
+        when(db.queryForList(contains("last_run->'plan_offsets'"), any(Object[].class)))
+                .thenReturn(List.of(Map.of("plan_offset", "not-a-number")));
+
+        assertThatThrownBy(() -> service.getPersistedScanOffset(SOURCE, planId))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("is not a valid integer (failing closed)")
+                .hasCauseInstanceOf(NumberFormatException.class);
+
+        // 2. Malformed default scan offset
+        when(db.queryForList(contains("select last_run->>'scan_offset'"), eq(SOURCE)))
+                .thenReturn(List.of(Map.of("default_offset", "corrupted-json-val")));
+
+        assertThatThrownBy(() -> service.getPersistedScanOffset(SOURCE, null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("is not a valid integer (failing closed)")
+                .hasCauseInstanceOf(NumberFormatException.class);
+    }
+
+    @Test
+    void legacyOffsetKeyCompatibilityIsPreservedWhenNestedPlanOffsetsAbsent() {
+        UUID planId = UUID.randomUUID();
+        Map<String, Object> row = new java.util.HashMap<>();
+        row.put("plan_offset", null);
+        row.put("legacy_plan_offset", "42");
+
+        when(db.queryForList(contains("last_run->'plan_offsets'"), any(Object[].class)))
+                .thenReturn(List.of(row));
+
+        int offset = service.getPersistedScanOffset(SOURCE, planId);
+        assertThat(offset).isEqualTo(42);
+    }
+
+    @Test
+    void nullSourceIdThrowsIllegalArgumentException() {
+        assertThatThrownBy(() -> service.getPersistedScanOffset(null, UUID.randomUUID()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("sourceId must not be null");
     }
 }

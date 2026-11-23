@@ -95,55 +95,66 @@ public class BoardDiscoveryService {
 
     public int getPersistedScanOffset(UUID sourceId, UUID searchPlanId) {
         if (sourceId == null) {
-            return 0;
+            throw new IllegalArgumentException("sourceId must not be null when reading persisted scan offset");
         }
         String memoryKey = (searchPlanId != null) ? searchPlanId + ":" + sourceId : sourceId.toString();
         if (db == null) {
             return scanOffsets.getOrDefault(memoryKey, 0);
         }
+
+        List<Map<String, Object>> rows;
         try {
             if (searchPlanId != null) {
                 String planIdStr = searchPlanId.toString();
                 String legacyKey = "scan_offset_" + searchPlanId;
-                List<Map<String, Object>> rows = db.queryForList("""
+                rows = db.queryForList("""
                         select
                             last_run->'plan_offsets'->>? as plan_offset,
                             last_run->>? as legacy_plan_offset
                         from job_sources where id = ?
                         """, planIdStr, legacyKey, sourceId);
-                if (!rows.isEmpty()) {
-                    Object val = rows.get(0).get("plan_offset");
-                    if (val == null) {
-                        val = rows.get(0).get("legacy_plan_offset");
-                    }
-                    if (val != null) {
-                        int offset = Integer.parseInt(String.valueOf(val));
-                        scanOffsets.put(memoryKey, offset);
-                        return offset;
-                    }
-                    scanOffsets.put(memoryKey, 0);
-                    return 0;
-                }
             } else {
-                List<Map<String, Object>> rows = db.queryForList(
+                rows = db.queryForList(
                         "select last_run->>'scan_offset' as default_offset from job_sources where id = ?",
                         sourceId);
-                if (!rows.isEmpty()) {
-                    Object val = rows.get(0).get("default_offset");
-                    if (val != null) {
-                        int offset = Integer.parseInt(String.valueOf(val));
-                        scanOffsets.put(memoryKey, offset);
-                        return offset;
-                    }
-                    scanOffsets.put(memoryKey, 0);
-                    return 0;
-                }
             }
         } catch (Exception e) {
-            log.debug("Could not read persisted scan offset for source {}: {}", sourceId, e.getMessage());
-            return scanOffsets.getOrDefault(memoryKey, 0);
+            log.error("Failed to query persisted scan offset for source {} (searchPlan: {}): {}",
+                    sourceId, searchPlanId, e.getMessage());
+            throw new IllegalStateException("Failed to query persisted scan offset for source " + sourceId
+                    + " (database query failure; failing closed): " + e.getMessage(), e);
         }
-        return scanOffsets.getOrDefault(memoryKey, 0);
+
+        if (rows.isEmpty()) {
+            throw new IllegalStateException("Job source " + sourceId
+                    + " does not exist in database; cannot determine authoritative scan offset (failing closed)");
+        }
+
+        Map<String, Object> row = rows.get(0);
+        Object val;
+        if (searchPlanId != null) {
+            val = row.get("plan_offset");
+            if (val == null) {
+                val = row.get("legacy_plan_offset");
+            }
+        } else {
+            val = row.get("default_offset");
+        }
+
+        if (val != null) {
+            try {
+                int offset = Integer.parseInt(String.valueOf(val));
+                scanOffsets.put(memoryKey, offset);
+                return offset;
+            } catch (NumberFormatException e) {
+                throw new IllegalStateException("Malformed persisted scan offset for source " + sourceId
+                        + ": '" + val + "' is not a valid integer (failing closed)", e);
+            }
+        }
+
+        // Source row exists, but no offset recorded for this plan: authoritatively start at 0
+        scanOffsets.put(memoryKey, 0);
+        return 0;
     }
 
     public void setSearchPlanRepository(SearchPlanRepository searchPlanRepository) {
