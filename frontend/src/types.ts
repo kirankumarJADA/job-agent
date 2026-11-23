@@ -122,7 +122,7 @@ export interface ExpandedQueryPlan {
 export interface SearchPlanExecutionSummary {
   searchPlanId: string;
   planName: string;
-  status: 'SUCCESS' | 'PARTIAL' | 'FAILED' | 'SKIPPED';
+  status: 'SUCCESS' | 'PARTIAL' | 'FAILED' | 'SKIPPED' | 'QUEUED' | 'ACCEPTED';
   sourcesQueried: number;
   sourcesSucceeded: number;
   sourcesFailed: number;
@@ -132,6 +132,8 @@ export interface SearchPlanExecutionSummary {
   notes: string[];
   expandedQuery?: ExpandedQueryPlan;
   providerFacetSupport?: Record<string, string>;
+  executionId?: string;
+  statusUrl?: string;
 }
 
 export interface JobDetailResponse {

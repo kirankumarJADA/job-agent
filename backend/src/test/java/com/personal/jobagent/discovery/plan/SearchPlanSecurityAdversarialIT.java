@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.common.UuidV7;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.awaitility.Awaitility;
+import java.time.Duration;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -255,6 +257,126 @@ public class SearchPlanSecurityAdversarialIT {
                 .andExpect(jsonPath("$.name").value("DTO Sanitization Plan"))
                 .andExpect(jsonPath("$.executionOwnerToken").doesNotExist())
                 .andExpect(jsonPath("$.executionLeaseExpiresAt").doesNotExist());
+    }
+
+    @Test
+    @DisplayName("Semantics: Async execution returns 202 ACCEPTED with QUEUED status, executionId, and statusUrl")
+    void testAsyncExecutionReturnsQueuedWithExecutionIdAndStatusUrl() throws Exception {
+        String email = "async-run@example.com";
+        String pass = "Password123!";
+        UUID user = createTestUser(email, pass);
+        UUID profile = createProfileForUser(user);
+        MockHttpSession session = login(email, pass);
+
+        SearchPlanRecord plan = searchPlanRepository.create(new SearchPlanRecord(
+                UuidV7.generate(),
+                profile,
+                "Async Queue Test Plan",
+                List.of("Staff Engineer"),
+                Map.of(),
+                List.of("ADZUNA"),
+                "DAILY",
+                50,
+                true,
+                null,
+                null,
+                null
+        ));
+
+        mockMvc.perform(post("/api/v1/search-plans/" + plan.id() + "/run")
+                        .session(session)
+                        .with(csrf()))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.status").value("QUEUED"))
+                .andExpect(jsonPath("$.executionId").isNotEmpty())
+                .andExpect(jsonPath("$.statusUrl").value("/api/v1/search-plans/" + plan.id()))
+                .andExpect(jsonPath("$.searchPlanId").value(plan.id().toString()))
+                .andExpect(jsonPath("$.planName").value("Async Queue Test Plan"));
+    }
+
+    @Test
+    @DisplayName("Audit Attribution: Asynchronous run preserves authenticated actor, IP, and request URI in audit logs")
+    void testAsynchronousAuditAttributionPreservesActorAndMetadata() throws Exception {
+        String email = "audit-actor@example.com";
+        String pass = "Password123!";
+        UUID user = createTestUser(email, pass);
+        UUID profile = createProfileForUser(user);
+        MockHttpSession session = login(email, pass);
+
+        SearchPlanRecord plan = searchPlanRepository.create(new SearchPlanRecord(
+                UuidV7.generate(),
+                profile,
+                "Audit Attribution Plan",
+                List.of("Lead Architect"),
+                Map.of(),
+                List.of("ADZUNA"),
+                "DAILY",
+                50,
+                true,
+                null,
+                null,
+                null
+        ));
+
+        mockMvc.perform(post("/api/v1/search-plans/" + plan.id() + "/run")
+                        .session(session)
+                        .with(csrf()))
+                .andExpect(status().isAccepted());
+
+        // Verify SEARCH_PLAN_RUN_QUEUED entry was recorded with the authenticated user email and metadata
+        Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                    SELECT actor, action, entity_id, ip, after_state::text as after_state
+                    FROM audit_logs
+                    WHERE entity_type = 'SEARCH_PLAN'
+                      AND entity_id = ?
+                      AND action = 'SEARCH_PLAN_RUN_QUEUED'
+                    """, plan.id());
+            assertThat(rows).isNotEmpty();
+            Map<String, Object> queueAudit = rows.get(0);
+            assertThat(queueAudit.get("actor")).isEqualTo(email);
+            assertThat(queueAudit.get("after_state").toString()).contains("/api/v1/search-plans/" + plan.id() + "/run");
+            assertThat(queueAudit.get("after_state").toString()).contains("executionId");
+        });
+    }
+
+    @Test
+    @DisplayName("Concurrency: Database-backed preflight rejects duplicate run with 409 Conflict when lease is active")
+    void testPreflightRejectsDuplicateExecutionWhenLeaseActive() throws Exception {
+        String email = "conflict-test@example.com";
+        String pass = "Password123!";
+        UUID user = createTestUser(email, pass);
+        UUID profile = createProfileForUser(user);
+        MockHttpSession session = login(email, pass);
+
+        SearchPlanRecord plan = searchPlanRepository.create(new SearchPlanRecord(
+                UuidV7.generate(),
+                profile,
+                "Conflict Test Plan",
+                List.of("Platform Engineer"),
+                Map.of(),
+                List.of("ADZUNA"),
+                "DAILY",
+                50,
+                true,
+                null,
+                null,
+                null
+        ));
+
+        // Claim lease directly in database
+        UUID workerToken = UUID.randomUUID();
+        boolean claimed = searchPlanRepository.claimExecutionLease(plan.id(), workerToken, 60000L);
+        assertThat(claimed).isTrue();
+
+        // Calling run must return 409 Conflict
+        mockMvc.perform(post("/api/v1/search-plans/" + plan.id() + "/run")
+                        .session(session)
+                        .with(csrf()))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.title").value("Conflict"))
+                .andExpect(jsonPath("$.detail").value("Search plan is already executing with an active lease"));
     }
 
     private MockHttpSession login(String email, String password) throws Exception {

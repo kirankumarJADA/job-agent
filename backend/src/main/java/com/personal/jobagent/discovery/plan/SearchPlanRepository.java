@@ -238,6 +238,28 @@ public class SearchPlanRepository {
     }
 
     /**
+     * Database-backed check to determine if an active unexpired execution lease is currently held on this plan.
+     * Evaluated strictly against database clock_timestamp() to eliminate application clock drift.
+     *
+     * @param planId plan identifier
+     * @return true if an unexpired execution lease is held and status is RUNNING
+     */
+    public boolean isExecutionLeaseActive(UUID planId) {
+        if (planId == null) {
+            return false;
+        }
+        Integer count = jdbcTemplate.queryForObject("""
+                SELECT count(*) FROM search_plans
+                WHERE id = ?
+                  AND execution_owner_token IS NOT NULL
+                  AND execution_lease_expires_at IS NOT NULL
+                  AND execution_lease_expires_at > clock_timestamp()
+                  AND last_execution_status = 'RUNNING'
+                """, Integer.class, planId);
+        return count != null && count > 0;
+    }
+
+    /**
      * Completes an execution and releases the lease with fencing protection.
      * If the worker was expired and another execution took over, or lease expired, the update affects 0 rows.
      *

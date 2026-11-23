@@ -112,6 +112,10 @@ public class SearchPlanService {
         return getPlan(id, profileId).map(queryExpander::expand);
     }
 
+    public boolean isExecutionLeaseActive(UUID planId) {
+        return repository.isExecutionLeaseActive(planId);
+    }
+
     private void validatePlan(SearchPlanRecord plan) {
         if (plan.name() == null || plan.name().trim().isEmpty()) {
             throw new IllegalArgumentException("Search plan name cannot be blank");

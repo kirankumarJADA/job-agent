@@ -93,6 +93,9 @@ function executionStatusTone(status?: string | null): PillTone {
       return 'amber';
     case 'FAILED':
       return 'red';
+    case 'QUEUED':
+    case 'ACCEPTED':
+      return 'sky';
     case 'SKIPPED':
       return 'slate';
     default:

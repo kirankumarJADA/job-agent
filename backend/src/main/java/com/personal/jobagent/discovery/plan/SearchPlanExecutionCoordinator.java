@@ -44,7 +44,7 @@ public class SearchPlanExecutionCoordinator implements DisposableBean {
     public record ExecutionSummary(
             UUID searchPlanId,
             String planName,
-            String status, // SUCCESS, PARTIAL, FAILED, SKIPPED
+            String status, // SUCCESS, PARTIAL, FAILED, SKIPPED, QUEUED
             int sourcesQueried,
             int sourcesSucceeded,
             int sourcesFailed,
@@ -53,8 +53,27 @@ public class SearchPlanExecutionCoordinator implements DisposableBean {
             List<String> errors,
             List<String> notes,
             SearchPlanQueryExpander.ExpandedQueryPlan expandedQuery,
-            Map<String, String> providerFacetSupport
+            Map<String, String> providerFacetSupport,
+            UUID executionId,
+            String statusUrl
     ) {
+        public ExecutionSummary(UUID searchPlanId,
+                                String planName,
+                                String status,
+                                int sourcesQueried,
+                                int sourcesSucceeded,
+                                int sourcesFailed,
+                                int jobsIngested,
+                                int jobsMatched,
+                                List<String> errors,
+                                List<String> notes,
+                                SearchPlanQueryExpander.ExpandedQueryPlan expandedQuery,
+                                Map<String, String> providerFacetSupport) {
+            this(searchPlanId, planName, status, sourcesQueried, sourcesSucceeded, sourcesFailed,
+                    jobsIngested, jobsMatched, errors, notes, expandedQuery, providerFacetSupport,
+                    null, searchPlanId != null ? "/api/v1/search-plans/" + searchPlanId : null);
+        }
+
         public static ExecutionSummary skipped(UUID planId, String planName, String reason) {
             return new ExecutionSummary(
                     planId,
@@ -64,7 +83,24 @@ public class SearchPlanExecutionCoordinator implements DisposableBean {
                     List.of(),
                     List.of(reason),
                     null,
-                    Map.of()
+                    Map.of(),
+                    null,
+                    planId != null ? "/api/v1/search-plans/" + planId : null
+            );
+        }
+
+        public static ExecutionSummary queued(UUID planId, String planName, UUID executionId, String reason) {
+            return new ExecutionSummary(
+                    planId,
+                    planName != null ? planName : "Unknown",
+                    "QUEUED",
+                    0, 0, 0, 0, 0,
+                    List.of(),
+                    List.of(reason != null ? reason : "Execution queued asynchronously"),
+                    null,
+                    Map.of(),
+                    executionId,
+                    planId != null ? "/api/v1/search-plans/" + planId : null
             );
         }
     }
