@@ -25,6 +25,7 @@ class MultiStageRerankerTest {
 
     private ProfileRepository profileRepo;
     private SemanticSkillMatcher semanticMatcher;
+    private JdbcTemplate jdbcTemplate;
     private MultiStageReranker reranker;
 
     private final UUID profileId = UUID.randomUUID();
@@ -33,8 +34,60 @@ class MultiStageRerankerTest {
     @BeforeEach
     void setUp() {
         profileRepo = mock(ProfileRepository.class);
-        semanticMatcher = new SemanticSkillMatcher(mock(JdbcTemplate.class), null);
-        reranker = new MultiStageReranker(profileRepo, semanticMatcher);
+        jdbcTemplate = mock(JdbcTemplate.class);
+        semanticMatcher = new SemanticSkillMatcher(jdbcTemplate, null);
+        reranker = new MultiStageReranker(profileRepo, semanticMatcher, jdbcTemplate);
+    }
+
+    @Test
+    @DisplayName("Stage 1: Disqualified when visa sponsorship REQUIRED but employer has NO_LICENCE in sponsor_records")
+    void stage1_visaRequiredWithNoLicence_disqualified() {
+        UUID companyId = UUID.randomUUID();
+        JobRecord job = jobWithCompany(companyId, "Software Engineer", "MID", 60000, List.of("Java"));
+        PreferenceSetRecord prefs = new PreferenceSetRecord(
+                UUID.randomUUID(), profileId, List.of("Software Engineer"), List.of(), List.of(),
+                List.of(), List.of(), List.of("HYBRID"), List.of(), List.of("MID"),
+                50000L, "REQUIRED", List.of(), List.of(), "MANUAL",
+                Map.of("skill", 35, "experience", 20, "visa", 10, "location", 10, "salary", 15, "career", 5, "difficulty", 5),
+                Map.of(), true
+        );
+
+        when(jdbcTemplate.queryForList(anyString(), eq(companyId)))
+                .thenReturn(List.of(Map.of("licence_indicator", "NO_LICENCE", "confidence", 1.0)));
+
+        RerankResult result = reranker.rerank(job, profileId, prefs);
+
+        assertThat(result.eligible()).isFalse();
+        assertThat(result.overallScore()).isEqualTo(0);
+        assertThat(result.recommendation()).isEqualTo("SKIP");
+        assertThat(result.concerns()).anyMatch(c -> c.contains("NO_LICENCE"));
+    }
+
+    @Test
+    @DisplayName("Stage 1: Disqualified by excluded keywords in EffectiveMatchingCriteria")
+    void stage1_excludedKeywords_disqualified() {
+        JobRecord job = job("Senior WordPress Developer", "SENIOR", 70000, List.of("PHP"));
+        com.personal.jobagent.jobs.EffectiveMatchingCriteria criteria = new com.personal.jobagent.jobs.EffectiveMatchingCriteria(
+                profileId,
+                List.of("WordPress Developer"),
+                List.of("PHP"),
+                List.of("wordpress"),
+                List.of("London"),
+                List.of("HYBRID"),
+                List.of("SENIOR"),
+                50000L,
+                "NONE",
+                List.of(),
+                List.of(),
+                Map.of()
+        );
+
+        RerankResult result = reranker.rerank(job, profileId, criteria);
+
+        assertThat(result.eligible()).isFalse();
+        assertThat(result.overallScore()).isEqualTo(0);
+        assertThat(result.recommendation()).isEqualTo("SKIP");
+        assertThat(result.concerns()).anyMatch(c -> c.contains("excluded keyword"));
     }
 
     @Test
@@ -115,8 +168,12 @@ class MultiStageRerankerTest {
     }
 
     private JobRecord job(String title, String level, int salaryMax, List<String> skills) {
+        return jobWithCompany(null, title, level, salaryMax, skills);
+    }
+
+    private JobRecord jobWithCompany(UUID companyId, String title, String level, int salaryMax, List<String> skills) {
         return new JobRecord(
-                jobId, UUID.randomUUID(), "ext-1", null, "Acme Corp", title,
+                jobId, UUID.randomUUID(), "ext-1", companyId, "Acme Corp", title,
                 "London", "London", "UK", "HYBRID", "FULL_TIME", level,
                 BigDecimal.valueOf(salaryMax - 5000), BigDecimal.valueOf(salaryMax),
                 "GBP", "Description", skills, "https://example.com/apply", "https://example.com/job",

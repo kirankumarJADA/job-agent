@@ -420,7 +420,7 @@ class JobMatchServiceTest {
         when(jobRepository.findById(JOB)).thenReturn(Optional.of(job(List.of("Java"), 60000)));
         profileSkills("Java");
 
-        when(reranker.rerank(any(), any(), any())).thenReturn(new RerankResult(
+        when(reranker.rerank(any(JobRecord.class), any(UUID.class), any(EffectiveMatchingCriteria.class))).thenReturn(new RerankResult(
                 JOB, "Engineer", false, 0, "SKIP",
                 Map.of("hard_eligibility", 0.0), List.of(), List.of(), List.of(),
                 List.of("Title disqualified"), "Disqualified", "Failed hard eligibility gate"));
@@ -448,7 +448,7 @@ class JobMatchServiceTest {
         when(jobRepository.findById(JOB)).thenReturn(Optional.of(job(List.of("Java"), 60000)));
         profileSkills("Java");
 
-        when(reranker.rerank(any(), any(), any())).thenReturn(new RerankResult(
+        when(reranker.rerank(any(JobRecord.class), any(UUID.class), any(EffectiveMatchingCriteria.class))).thenReturn(new RerankResult(
                 JOB, "Engineer", true, 88, "APPLY",
                 Map.of("hard_eligibility", 1.0, "skills_overlap", 0.9), List.of("Java"), List.of(),
                 List.of("High skill match"), List.of(), "Scored 88", "Recommended"));

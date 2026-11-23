@@ -3,6 +3,7 @@ package com.personal.jobagent.discovery.plan;
 import com.personal.jobagent.common.MaintenanceModeService;
 import com.personal.jobagent.discovery.JobDiscoveryService;
 import com.personal.jobagent.discovery.platform.BoardDiscoveryService;
+import com.personal.jobagent.jobs.EffectiveMatchingCriteria;
 import com.personal.jobagent.jobs.JobMatchService;
 import com.personal.jobagent.jobs.JobRecord;
 import com.personal.jobagent.jobs.JobRepository;
@@ -79,12 +80,7 @@ public class SearchPlanExecutionCoordinator implements DisposableBean {
     private final long perSourceTimeoutMs;
     private final long defaultLeaseDurationMs;
     private final long defaultHeartbeatIntervalMs;
-
-    private final ScheduledExecutorService heartbeatExecutor = Executors.newScheduledThreadPool(2, r -> {
-        Thread t = new Thread(r, "search-plan-heartbeat");
-        t.setDaemon(true);
-        return t;
-    });
+    private final ScheduledExecutorService heartbeatExecutor;
 
     @Autowired
     public SearchPlanExecutionCoordinator(SearchPlanRepository repository,
@@ -97,6 +93,7 @@ public class SearchPlanExecutionCoordinator implements DisposableBean {
                                           @Value("${app.discovery.search-plan.per-source-timeout-ms:45000}") long perSourceTimeoutMs,
                                           @Value("${app.discovery.search-plan.lease-duration-ms:60000}") long defaultLeaseDurationMs,
                                           @Value("${app.discovery.search-plan.heartbeat-interval-ms:15000}") long defaultHeartbeatIntervalMs,
+                                          @Value("${app.discovery.search-plan.heartbeat-threads:4}") int heartbeatThreads,
                                           MaintenanceModeService maintenanceMode) {
         this.repository = repository;
         this.queryExpander = queryExpander;
@@ -109,6 +106,12 @@ public class SearchPlanExecutionCoordinator implements DisposableBean {
         this.defaultLeaseDurationMs = defaultLeaseDurationMs > 0 ? defaultLeaseDurationMs : 60000L;
         this.defaultHeartbeatIntervalMs = defaultHeartbeatIntervalMs > 0 ? defaultHeartbeatIntervalMs : 15000L;
         this.maintenanceMode = maintenanceMode != null ? maintenanceMode : new MaintenanceModeService(false);
+        int poolSize = Math.max(2, Math.min(50, heartbeatThreads));
+        this.heartbeatExecutor = Executors.newScheduledThreadPool(poolSize, r -> {
+            Thread t = new Thread(r, "search-plan-heartbeat");
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     public SearchPlanExecutionCoordinator(SearchPlanRepository repository,
@@ -122,7 +125,7 @@ public class SearchPlanExecutionCoordinator implements DisposableBean {
                                           MaintenanceModeService maintenanceMode) {
         this(repository, queryExpander, boardDiscoveryService, jobRepository,
                 jobMatchService, preferenceSetRepository, jdbcTemplate, perSourceTimeoutMs,
-                60000L, 15000L, maintenanceMode);
+                60000L, 15000L, 4, maintenanceMode);
     }
 
     @Override
@@ -250,7 +253,8 @@ public class SearchPlanExecutionCoordinator implements DisposableBean {
                 break;
             }
 
-            if (totalIngested >= plan.maxResultsPerRun()) {
+            int remainingBudget = plan.maxResultsPerRun() - totalIngested;
+            if (remainingBudget <= 0) {
                 notes.add("Reached per-plan result cap (" + plan.maxResultsPerRun() + "); ceased further provider queries");
                 break;
             }
@@ -272,7 +276,8 @@ public class SearchPlanExecutionCoordinator implements DisposableBean {
 
             try {
                 BoardDiscoveryService.SourceRunReport report = boardDiscoveryService.run(
-                        source.id(), BoardDiscoveryService.Mode.SCHEDULED, queryParams, plan.id(), ownerToken);
+                        source.id(), BoardDiscoveryService.Mode.SCHEDULED, queryParams, plan.id(), ownerToken,
+                        remainingBudget, perSourceTimeoutMs);
 
                 if (ownershipLost.get()) {
                     notes.add("Discarded provider results for source " + source.displayName() + ": lease lost in-flight");
@@ -323,14 +328,15 @@ public class SearchPlanExecutionCoordinator implements DisposableBean {
         // Trigger matching & authoritative multi-stage reranking on newly ingested jobs
         int jobsMatched = 0;
         PreferenceSetRecord preferences = preferenceSetRepository.findActiveByProfileId(plan.profileId()).orElse(null);
-        if (preferences != null && !ingestedJobIds.isEmpty() && !ownershipLost.get()) {
+        EffectiveMatchingCriteria criteria = EffectiveMatchingCriteria.create(plan.profileId(), preferences, expanded);
+        if (!ingestedJobIds.isEmpty() && !ownershipLost.get()) {
             for (UUID jobId : ingestedJobIds) {
                 if (ownershipLost.get()) {
                     notes.add("Aborted match evaluations: lease ownership lost or expired");
                     break;
                 }
                 try {
-                    jobMatchService.evaluateMatch(jobId, plan.profileId(), preferences, plan.id(), ownerToken);
+                    jobMatchService.evaluateMatch(jobId, plan.profileId(), criteria, plan.id(), ownerToken);
                     jobsMatched++;
                 } catch (ExecutionFencedException e) {
                     ownershipLost.set(true);

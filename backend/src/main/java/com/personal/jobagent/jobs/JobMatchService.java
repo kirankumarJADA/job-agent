@@ -169,17 +169,36 @@ public class JobMatchService {
      */
     public MatchResult evaluateMatch(UUID jobId, UUID profileId, PreferenceSetRecord preferences,
                                      UUID searchPlanId, UUID executionOwnerToken) {
+        EffectiveMatchingCriteria criteria = EffectiveMatchingCriteria.fromPreferences(profileId, preferences);
+        return evaluateMatch(jobId, profileId, criteria, searchPlanId, executionOwnerToken);
+    }
+
+    /**
+     * Evaluates a job match under effective criteria and optional search plan execution lease fencing.
+     */
+    public MatchResult evaluateMatch(UUID jobId, UUID profileId, EffectiveMatchingCriteria criteria,
+                                     UUID searchPlanId, UUID executionOwnerToken) {
+        if ((searchPlanId == null) != (executionOwnerToken == null)) {
+            throw new IllegalArgumentException("searchPlanId and executionOwnerToken must both be provided or both be null");
+        }
+        if (searchPlanId != null && executionOwnerToken != null && searchPlanRepository == null) {
+            throw new IllegalStateException("SearchPlanRepository is required for fenced match evaluation");
+        }
+        if (criteria == null) {
+            criteria = EffectiveMatchingCriteria.fromPreferences(profileId, null);
+        }
+
         JobRecord job = jobRepository.findById(jobId)
                 .orElseThrow(() -> new IllegalArgumentException("Job not found: " + jobId));
 
-        List<String> allowedRemoteTypes = preferences == null ? List.of() : preferences.remoteTypes();
-        List<String> allowedExperienceLevels = preferences == null ? List.of() : preferences.experienceLevels();
-        List<String> allowedLocations = preferences == null ? List.of() : preferences.locationsAllowed();
-        List<String> allowedTitles = preferences == null ? List.of() : preferences.titles();
-        String sponsorshipPolicy = preferences == null ? null : preferences.sponsorshipPolicy();
-        Number desiredSalaryMin = preferences == null ? null : preferences.salaryMinGbp();
+        List<String> allowedRemoteTypes = criteria.remoteTypes();
+        List<String> allowedExperienceLevels = criteria.experienceLevels();
+        List<String> allowedLocations = criteria.locationsAllowed();
+        List<String> allowedTitles = criteria.titles();
+        String sponsorshipPolicy = criteria.sponsorshipPolicy();
+        Number desiredSalaryMin = criteria.salaryMinGbp();
 
-        Map<String, Integer> weights = resolveWeights(preferences == null ? null : preferences.scoringWeights());
+        Map<String, Integer> weights = resolveWeights(criteria.scoringWeights());
 
         SkillOverlap skillOverlap = computeSkillOverlap(job, profileId);
         double remoteFit = computeRemoteFit(job, allowedRemoteTypes);
@@ -206,7 +225,7 @@ public class JobMatchService {
                 : overall >= REVIEW_THRESHOLD ? "REVIEW" : "SKIP";
 
         RerankResult rerankResult = multiStageReranker != null
-                ? multiStageReranker.rerank(job, profileId, preferences)
+                ? multiStageReranker.rerank(job, profileId, criteria)
                 : null;
 
         // Authoritative decision: when MultiStageReranker is available, its multi-stage
@@ -230,7 +249,7 @@ public class JobMatchService {
         // Persist the decision + emit the event atomically.
         boolean notified = Boolean.TRUE.equals(transactionTemplate.execute(tx -> {
             // Fencing guard: verify lease ownership before performing any job_matches or outbox writes
-            if (searchPlanId != null && executionOwnerToken != null && searchPlanRepository != null) {
+            if (searchPlanId != null && executionOwnerToken != null) {
                 searchPlanRepository.assertLeaseOwnership(searchPlanId, executionOwnerToken);
             }
 

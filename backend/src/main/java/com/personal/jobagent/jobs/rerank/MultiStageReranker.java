@@ -1,5 +1,6 @@
 package com.personal.jobagent.jobs.rerank;
 
+import com.personal.jobagent.jobs.EffectiveMatchingCriteria;
 import com.personal.jobagent.jobs.HardFilterService;
 import com.personal.jobagent.jobs.JobRecord;
 import com.personal.jobagent.jobs.SemanticSkillMatcher;
@@ -8,6 +9,8 @@ import com.personal.jobagent.jobs.SkillSynonymRegistry;
 import com.personal.jobagent.jobs.TitleSynonymRegistry;
 import com.personal.jobagent.preferences.PreferenceSetRecord;
 import com.personal.jobagent.profile.ProfileRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -16,7 +19,7 @@ import java.util.*;
  * Agent 1: Multi-stage intelligent job reranking engine.
  * <p>
  * Re-ranks candidate retrieval pools through a strict 5-stage pipeline:
- * 1. Hard Eligibility Gate (Title word-boundary regex, salary floor, location, remote, visa)
+ * 1. Hard Eligibility Gate (Title word-boundary regex, salary floor, location, remote, visa, exclusions)
  * 2. Semantic Skills Overlap (Exact, synonym-normalised, and semantic matching)
  * 3. Seniority Trajectory Alignment (Calibrated career progression curve)
  * 4. Title & Domain Affinity (Synonym families and domain proximity)
@@ -30,20 +33,37 @@ public class MultiStageReranker {
 
     private final ProfileRepository profileRepository;
     private final SemanticSkillMatcher semanticSkillMatcher;
+    private final JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    public MultiStageReranker(ProfileRepository profileRepository,
+                              SemanticSkillMatcher semanticSkillMatcher,
+                              @Autowired(required = false) JdbcTemplate jdbcTemplate) {
+        this.profileRepository = profileRepository;
+        this.semanticSkillMatcher = semanticSkillMatcher;
+        this.jdbcTemplate = jdbcTemplate;
+    }
 
     public MultiStageReranker(ProfileRepository profileRepository,
                               SemanticSkillMatcher semanticSkillMatcher) {
-        this.profileRepository = profileRepository;
-        this.semanticSkillMatcher = semanticSkillMatcher;
+        this(profileRepository, semanticSkillMatcher, null);
     }
 
     public RerankResult rerank(JobRecord job, UUID profileId, PreferenceSetRecord preferences) {
-        List<String> allowedTitles = preferences == null ? List.of() : preferences.titles();
-        List<String> allowedLocations = preferences == null ? List.of() : preferences.locationsAllowed();
-        List<String> allowedRemoteTypes = preferences == null ? List.of() : preferences.remoteTypes();
-        List<String> allowedExperienceLevels = preferences == null ? List.of() : preferences.experienceLevels();
-        Long salaryMinGbp = preferences == null ? null : preferences.salaryMinGbp();
-        String sponsorshipPolicy = preferences == null ? null : preferences.sponsorshipPolicy();
+        return rerank(job, profileId, EffectiveMatchingCriteria.fromPreferences(profileId, preferences));
+    }
+
+    public RerankResult rerank(JobRecord job, UUID profileId, EffectiveMatchingCriteria criteria) {
+        if (criteria == null) {
+            criteria = EffectiveMatchingCriteria.fromPreferences(profileId, null);
+        }
+
+        List<String> allowedTitles = criteria.targetTitles();
+        List<String> allowedLocations = criteria.locations();
+        List<String> allowedRemoteTypes = criteria.remoteTypes();
+        List<String> allowedExperienceLevels = criteria.experienceLevels();
+        Long salaryMinGbp = criteria.salaryMinGbp();
+        String sponsorshipPolicy = criteria.sponsorshipPolicy();
 
         // ─────────────────────────────────────────────────────────────
         // STAGE 1: Hard Eligibility Gate
@@ -56,12 +76,78 @@ public class MultiStageReranker {
                 || allowedRemoteTypes.stream().anyMatch(r -> r.equalsIgnoreCase(job.remoteType()));
         boolean locationEligible = allowedLocations.isEmpty() || HardFilterService.matchesLocation(job, allowedLocations);
 
-        if (!titleEligible || !salaryEligible || !remoteEligible || !locationEligible) {
+        // Visa Sponsorship Check: If candidate requires sponsorship, reject employers confirmed NO_LICENCE
+        boolean sponsorshipEligible = true;
+        String sponsorshipReason = null;
+        double visaScore = 1.0;
+        if (sponsorshipPolicy != null && "REQUIRED".equalsIgnoreCase(sponsorshipPolicy.trim())) {
+            UUID companyId = job.companyId();
+            if (companyId != null && jdbcTemplate != null) {
+                List<Map<String, Object>> sponsorRows = jdbcTemplate.queryForList("""
+                        SELECT licence_indicator, confidence
+                        FROM sponsor_records
+                        WHERE company_id = ?
+                        ORDER BY fetched_at DESC
+                        LIMIT 1
+                        """, companyId);
+                if (!sponsorRows.isEmpty()) {
+                    String indicator = (String) sponsorRows.get(0).get("licence_indicator");
+                    if (indicator != null && "NO_LICENCE".equalsIgnoreCase(indicator.trim())) {
+                        sponsorshipEligible = false;
+                        sponsorshipReason = "Employer is recorded as not holding a sponsor licence (NO_LICENCE)";
+                        visaScore = 0.0;
+                    } else if (indicator != null && "CONFIRMED".equalsIgnoreCase(indicator.trim())) {
+                        visaScore = 1.0;
+                    } else {
+                        visaScore = 0.5; // UNKNOWN or unconfirmed
+                    }
+                } else {
+                    visaScore = 0.5; // Unknown sponsor data passes with neutral score
+                }
+            } else {
+                visaScore = 0.5;
+            }
+        }
+
+        // Excluded Keywords Check
+        boolean exclusionsEligible = true;
+        String matchedExcludedKeyword = null;
+        if (criteria.excludedKeywords() != null && !criteria.excludedKeywords().isEmpty()) {
+            String titleLower = job.title() != null ? job.title().toLowerCase(Locale.ROOT) : "";
+            String descLower = job.descriptionText() != null ? job.descriptionText().toLowerCase(Locale.ROOT) : "";
+            for (String kw : criteria.excludedKeywords()) {
+                if (kw != null && !kw.isBlank()) {
+                    String kwLower = kw.trim().toLowerCase(Locale.ROOT);
+                    if (titleLower.contains(kwLower) || descLower.contains(kwLower)) {
+                        exclusionsEligible = false;
+                        matchedExcludedKeyword = kw.trim();
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Excluded Companies Check
+        boolean companyEligible = true;
+        if (criteria.excludedCompanies() != null && !criteria.excludedCompanies().isEmpty() && job.companyNameRaw() != null) {
+            String compLower = job.companyNameRaw().toLowerCase(Locale.ROOT);
+            for (String exComp : criteria.excludedCompanies()) {
+                if (exComp != null && !exComp.isBlank() && compLower.contains(exComp.trim().toLowerCase(Locale.ROOT))) {
+                    companyEligible = false;
+                    break;
+                }
+            }
+        }
+
+        if (!titleEligible || !salaryEligible || !remoteEligible || !locationEligible || !sponsorshipEligible || !exclusionsEligible || !companyEligible) {
             List<String> reasons = new ArrayList<>();
             if (!titleEligible) reasons.add("Title '" + job.title() + "' does not match target roles");
             if (!salaryEligible) reasons.add("Salary is below 80% of minimum threshold (£" + salaryMinGbp + ")");
             if (!remoteEligible) reasons.add("Remote type '" + job.remoteType() + "' does not match preferences");
             if (!locationEligible) reasons.add("Location does not match target areas");
+            if (!sponsorshipEligible) reasons.add(sponsorshipReason);
+            if (!exclusionsEligible) reasons.add("Role matches excluded keyword '" + matchedExcludedKeyword + "'");
+            if (!companyEligible) reasons.add("Company is in candidate's excluded companies list");
 
             return new RerankResult(
                     job.id(),
@@ -94,6 +180,16 @@ public class MultiStageReranker {
                 .filter(s -> !s.isEmpty())
                 .collect(java.util.stream.Collectors.toSet())
                 : Set.of();
+
+        if (criteria.primaryKeywords() != null && !criteria.primaryKeywords().isEmpty()) {
+            Set<String> augmentedSkills = new HashSet<>(candidateSkills);
+            for (String pk : criteria.primaryKeywords()) {
+                if (pk != null && !pk.isBlank()) {
+                    augmentedSkills.add(pk.trim());
+                }
+            }
+            candidateSkills = augmentedSkills;
+        }
 
         List<String> jobSkills = job.skillsExtracted() != null ? job.skillsExtracted() : List.of();
         SemanticSkillMatcher.SemanticOverlap overlap = semanticSkillMatcher.computeOverlap(jobSkills, candidateSkills);
@@ -128,12 +224,7 @@ public class MultiStageReranker {
         // ─────────────────────────────────────────────────────────────
         double salaryScore = computeSalaryFit(job.salaryMax(), salaryMinGbp);
 
-        // Normalize weights over applicable categories.
-        // Default weights: Skills 35%, Title 25%, Seniority 20%, Salary 10%, Location/Remote 10%
-        // When candidate specifies customized scoring_weights, honor them.
-        // When a dimension is unconstrained (e.g. no target titles or experience levels set),
-        // exclude it from the weighted average rather than artificially inflating the score.
-        Map<String, Object> configuredWeights = preferences != null ? preferences.scoringWeights() : null;
+        Map<String, Object> configuredWeights = criteria.scoringWeights();
         double wSkill = 35.0;
         double wTitle = 25.0;
         double wSeniority = 20.0;
