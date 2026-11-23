@@ -65,6 +65,7 @@ class BoardDiscoveryServiceTest {
         final List<String> detailed = new ArrayList<>();
         RuntimeException detailFailure;
         RuntimeException listFailure;
+        long listDelayMs = 0;
 
         @Override public PlatformKind kind() { return PlatformKind.GEM; }
         @Override public Optional<BoardRef> recognize(URI url) { return Optional.empty(); }
@@ -74,6 +75,13 @@ class BoardDiscoveryServiceTest {
         }
         @Override public ListingResult list(BoardRef board, CrawlContext context) {
             if (listFailure != null) throw listFailure;
+            if (listDelayMs > 0) {
+                try {
+                    Thread.sleep(listDelayMs);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
             return listing;
         }
         @Override public NormalizedJob detail(BoardRef board, ListingEntry entry, CrawlContext context) {
@@ -431,11 +439,11 @@ class BoardDiscoveryServiceTest {
     @Test
     void timeoutCeilingHaltsExecutionAndRecordsFailureCategoryTimeout() {
         Scripted a = new Scripted();
+        a.listDelayMs = 20; // Deterministically exceeds 5ms timeout
         a.listing = ListingResult.complete(List.of(full("1"), full("2"), full("3")), 1, null);
 
-        // 1 millisecond timeout guarantees deadline expiration during loop
         var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
-                Map.of(), null, null, 10, 1L);
+                Map.of(), null, null, 10, 5L);
 
         assertThat(report.complete()).isFalse();
         assertThat(report.failureCategory()).isEqualTo("TIMEOUT");
