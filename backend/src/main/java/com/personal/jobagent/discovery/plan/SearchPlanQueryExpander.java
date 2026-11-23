@@ -40,16 +40,18 @@ public class SearchPlanQueryExpander {
 
         // Extract primary keywords / required skills
         Set<String> keywords = new LinkedHashSet<>();
-        if (facets.containsKey("skills") && facets.get("skills") instanceof List<?> list) {
-            for (Object item : list) {
+        List<?> skillsList = extractFacetList(facets, "skills");
+        if (skillsList != null) {
+            for (Object item : skillsList) {
                 if (item != null && !item.toString().isBlank()) {
                     String skill = item.toString().trim();
                     keywords.add(SkillSynonymRegistry.canonicalise(skill));
                 }
             }
         }
-        if (facets.containsKey("keywords") && facets.get("keywords") instanceof List<?> list) {
-            for (Object item : list) {
+        List<?> kwList = extractFacetList(facets, "keywords", "primaryKeywords");
+        if (kwList != null) {
+            for (Object item : kwList) {
                 if (item != null && !item.toString().isBlank()) {
                     keywords.add(item.toString().trim());
                 }
@@ -58,8 +60,9 @@ public class SearchPlanQueryExpander {
 
         // Negative keywords to filter out noise
         List<String> negativeKeywords = new ArrayList<>();
-        if (facets.containsKey("exclude") && facets.get("exclude") instanceof List<?> list) {
-            for (Object item : list) {
+        List<?> excludeList = extractFacetList(facets, "exclude", "excludeKeywords", "negativeKeywords");
+        if (excludeList != null) {
+            for (Object item : excludeList) {
                 if (item != null && !item.toString().isBlank()) {
                     negativeKeywords.add(item.toString().trim());
                 }
@@ -68,8 +71,9 @@ public class SearchPlanQueryExpander {
 
         // Locations
         List<String> locations = new ArrayList<>();
-        if (facets.containsKey("locations") && facets.get("locations") instanceof List<?> list) {
-            for (Object item : list) {
+        List<?> locList = extractFacetList(facets, "locations", "targetLocations");
+        if (locList != null) {
+            for (Object item : locList) {
                 if (item != null && !item.toString().isBlank()) {
                     locations.add(item.toString().trim());
                 }
@@ -78,8 +82,9 @@ public class SearchPlanQueryExpander {
 
         // Remote types
         List<String> remoteTypes = new ArrayList<>();
-        if (facets.containsKey("remoteTypes") && facets.get("remoteTypes") instanceof List<?> list) {
-            for (Object item : list) {
+        List<?> remoteList = extractFacetList(facets, "remoteTypes", "remote");
+        if (remoteList != null) {
+            for (Object item : remoteList) {
                 if (item != null && !item.toString().isBlank()) {
                     remoteTypes.add(item.toString().trim().toUpperCase(Locale.ROOT));
                 }
@@ -88,8 +93,9 @@ public class SearchPlanQueryExpander {
 
         // Seniority levels
         List<SeniorityClassifier.Level> seniorityLevels = new ArrayList<>();
-        if (facets.containsKey("seniority") && facets.get("seniority") instanceof List<?> list) {
-            for (Object item : list) {
+        List<?> seniorityList = extractFacetList(facets, "seniority", "seniorityLevels", "experienceLevels");
+        if (seniorityList != null) {
+            for (Object item : seniorityList) {
                 if (item != null && !item.toString().isBlank()) {
                     SeniorityClassifier.Level lvl = SeniorityClassifier.parseLevel(item.toString().trim());
                     if (lvl != null && !seniorityLevels.contains(lvl)) {
@@ -118,5 +124,15 @@ public class SearchPlanQueryExpander {
                 targetSources,
                 plan.maxResultsPerRun()
         );
+    }
+
+    private static List<?> extractFacetList(Map<String, Object> facets, String... keys) {
+        if (facets == null || keys == null) return null;
+        for (String k : keys) {
+            if (facets.containsKey(k) && facets.get(k) instanceof List<?> list) {
+                return list;
+            }
+        }
+        return null;
     }
 }

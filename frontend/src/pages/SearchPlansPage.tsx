@@ -160,10 +160,10 @@ export const SearchPlansPage: React.FC = () => {
       maxResultsPerRun: plan.maxResultsPerRun || plan.max_results_per_run || 50,
       active: plan.active !== false,
       primaryKeywords: joinList(facets.keywords || facets.primaryKeywords || []),
-      excludeKeywords: joinList(facets.excludeKeywords || facets.negativeKeywords || []),
+      excludeKeywords: joinList(facets.excludeKeywords || facets.exclude || facets.negativeKeywords || []),
       targetLocations: joinList(facets.locations || facets.targetLocations || []),
       remoteTypes: (facets.remoteTypes || []) as string[],
-      seniorityLevels: (facets.seniorityLevels || []) as string[],
+      seniorityLevels: (facets.seniorityLevels || facets.seniority || []) as string[],
     });
     setFormError(null);
     setIsModalOpen(true);
@@ -274,9 +274,11 @@ export const SearchPlansPage: React.FC = () => {
       queryFacets: {
         keywords: splitCommaList(formData.primaryKeywords),
         excludeKeywords: splitCommaList(formData.excludeKeywords),
+        exclude: splitCommaList(formData.excludeKeywords),
         locations: splitCommaList(formData.targetLocations),
         remoteTypes: formData.remoteTypes,
         seniorityLevels: formData.seniorityLevels,
+        seniority: formData.seniorityLevels,
       },
     };
 

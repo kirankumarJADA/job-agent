@@ -149,6 +149,12 @@ public class BoardDiscoveryService {
 
     /** Run a persisted source by id with targeted query params and search plan lease fencing. */
     public SourceRunReport run(UUID sourceId, Mode mode, Map<String, String> queryParams, UUID searchPlanId, UUID executionOwnerToken) {
+        return run(sourceId, mode, queryParams, searchPlanId, executionOwnerToken, null, null);
+    }
+
+    /** Run a persisted source by id with targeted query params, search plan lease fencing, max results budget and timeout. */
+    public SourceRunReport run(UUID sourceId, Mode mode, Map<String, String> queryParams, UUID searchPlanId, UUID executionOwnerToken,
+                               Integer maxResults, Long timeoutMs) {
         List<Map<String, Object>> rows = db.queryForList("""
                 select s.kind, s.org_identifier, s.enabled, s.policy, c.name as company_name
                 from job_sources s left join companies c on c.id = s.company_id
@@ -166,19 +172,25 @@ public class BoardDiscoveryService {
                 kind.displayName() + " discovery is " + kind.readiness().name().toLowerCase() + ": " + kind.configHint(), false));
         String org = row.get("org_identifier") == null ? "" : String.valueOf(row.get("org_identifier"));
         String employer = row.get("company_name") == null ? null : String.valueOf(row.get("company_name"));
-        return run(sourceId, adapter, org, employer, mode, queryParams, searchPlanId, executionOwnerToken);
+        return run(sourceId, adapter, org, employer, mode, queryParams, searchPlanId, executionOwnerToken, maxResults, timeoutMs);
     }
 
     SourceRunReport run(UUID sourceId, BoardAdapter adapter, String orgIdentifier, String employer, Mode mode) {
-        return run(sourceId, adapter, orgIdentifier, employer, mode, Map.of(), null, null);
+        return run(sourceId, adapter, orgIdentifier, employer, mode, Map.of(), null, null, null, null);
     }
 
     SourceRunReport run(UUID sourceId, BoardAdapter adapter, String orgIdentifier, String employer, Mode mode, Map<String, String> queryParams) {
-        return run(sourceId, adapter, orgIdentifier, employer, mode, queryParams, null, null);
+        return run(sourceId, adapter, orgIdentifier, employer, mode, queryParams, null, null, null, null);
     }
 
     SourceRunReport run(UUID sourceId, BoardAdapter adapter, String orgIdentifier, String employer, Mode mode,
                         Map<String, String> queryParams, UUID searchPlanId, UUID executionOwnerToken) {
+        return run(sourceId, adapter, orgIdentifier, employer, mode, queryParams, searchPlanId, executionOwnerToken, null, null);
+    }
+
+    SourceRunReport run(UUID sourceId, BoardAdapter adapter, String orgIdentifier, String employer, Mode mode,
+                        Map<String, String> queryParams, UUID searchPlanId, UUID executionOwnerToken,
+                        Integer maxResults, Long timeoutMs) {
         String correlationId = UUID.randomUUID().toString();
         long started = System.nanoTime();
         Instant runStart = dbNow();
@@ -219,8 +231,14 @@ public class BoardDiscoveryService {
         counts.put("pages", listing.pagesFetched());
         String employerName = Normalize.first(employer, listing.employerName());
 
-        // Fencing guard: verify lease ownership before performing any ingestion writes
-        if (searchPlanId != null && executionOwnerToken != null && searchPlanRepository != null) {
+        // Fail-closed fencing guard: verify lease ownership before performing any ingestion writes
+        if (searchPlanId != null || executionOwnerToken != null) {
+            if (searchPlanId == null || executionOwnerToken == null) {
+                throw new IllegalArgumentException("searchPlanId and executionOwnerToken must both be non-null when running with search plan fencing");
+            }
+            if (searchPlanRepository == null) {
+                throw new IllegalStateException("SearchPlanRepository is required for search plan lease fencing but is null (failing closed)");
+            }
             if (!searchPlanRepository.isLeaseOwner(searchPlanId, executionOwnerToken)) {
                 log.warn("Search plan {} lost lease before ingestion; discarding {} entries", searchPlanId, listing.entries().size());
                 throw new ExecutionFencedException("Search plan execution lease lost or expired before ingestion for plan " + searchPlanId);
@@ -231,7 +249,23 @@ public class BoardDiscoveryService {
         Set<String> known = knownExternalIds(sourceId);
         int detailsUsed = 0;
         boolean detailBudgetGone = false;
+        boolean truncatedByBudget = false;
+        boolean truncatedByTimeout = false;
+
         for (BoardAdapter.ListingEntry entry : listing.entries()) {
+            if (maxResults != null && maxResults > 0 && ingested.size() >= maxResults) {
+                truncatedByBudget = true;
+                log.info("Search plan {} source {} reached max results budget ({}); ceasing further ingestion",
+                        searchPlanId, sourceId, maxResults);
+                break;
+            }
+            if (timeoutMs != null && timeoutMs > 0 && (System.nanoTime() - started) >= java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMs)) {
+                truncatedByTimeout = true;
+                log.warn("Search plan {} source {} exceeded timeout ({}ms); ceasing further ingestion",
+                        searchPlanId, sourceId, timeoutMs);
+                break;
+            }
+
             try {
                 if (!entry.needsDetail()) {
                     ingest(sourceId, kind, entry.job(), employerName, counts, ingested, searchPlanId, executionOwnerToken);
@@ -260,20 +294,29 @@ public class BoardDiscoveryService {
         }
         counts.put("requests", http.requestsMade());
 
-        // Safe deletion guard: a complete listing that returned 0 entries must NEVER remove or
-        // unlist active jobs, in any mode. An empty result is indistinguishable from a silent
-        // upstream failure - a board emptied by mistake, lapsed auth, a changed feed shape - so it
-        // is never treated as authoritative, not even for an admin-triggered manual sync.
-        // Removal requires a complete, non-failed listing that actually returned entries.
-        // Do not reintroduce a mode-based bypass here: see C1 in docs/ROBIN_WAVE2_RELEASE_READINESS.md.
-        if (listing.complete() && listing.failure() == null && !listing.entries().isEmpty()) {
+        // Safe deletion guard:
+        // A listing truncated by maxResults or timeout must NEVER remove or unlist active jobs.
+        // Removal requires a complete, non-failed listing that was NOT truncated and actually returned entries.
+        if (!truncatedByBudget && !truncatedByTimeout && listing.complete() && listing.failure() == null && !listing.entries().isEmpty()) {
             counts.put("removed", markUnlisted(sourceId, runStart, authoritative, searchPlanId, executionOwnerToken));
+        } else if (truncatedByBudget || truncatedByTimeout) {
+            log.info("Listing was truncated (budget={}, timeout={}); skipping markUnlisted to protect active jobs for source {}",
+                    truncatedByBudget, truncatedByTimeout, sourceId);
         } else if (listing.complete() && listing.failure() == null && listing.entries().isEmpty()) {
             log.warn("Safe deletion guard activated: listing completed with 0 jobs for source {} in {} mode; skipping markUnlisted",
                     sourceId, mode);
         }
-        return finish(sourceId, kind, correlationId, started, counts, ingested, listing.complete(),
-                listing.failure(), listing.failureDetail(), mode);
+
+        boolean isComplete = listing.complete() && !truncatedByBudget && !truncatedByTimeout;
+        FailureCategory failureCat = listing.failure();
+        String failureDetail = listing.failureDetail();
+        if (truncatedByTimeout && failureCat == null) {
+            failureCat = FailureCategory.TIMEOUT;
+            failureDetail = "Source execution exceeded timeout (" + timeoutMs + "ms)";
+        }
+
+        return finish(sourceId, kind, correlationId, started, counts, ingested, isComplete,
+                failureCat, failureDetail, mode);
     }
 
     private void ingest(UUID sourceId, PlatformKind kind, NormalizedJob job, String employer,
@@ -341,7 +384,13 @@ public class BoardDiscoveryService {
 
     private void touch(UUID sourceId, String externalId, boolean authoritative, UUID searchPlanId, UUID executionOwnerToken) {
         Runnable block = () -> {
-            if (searchPlanId != null && executionOwnerToken != null && searchPlanRepository != null) {
+            if (searchPlanId != null || executionOwnerToken != null) {
+                if (searchPlanId == null || executionOwnerToken == null) {
+                    throw new IllegalArgumentException("searchPlanId and executionOwnerToken must both be non-null when running with search plan fencing");
+                }
+                if (searchPlanRepository == null) {
+                    throw new IllegalStateException("SearchPlanRepository is required for search plan lease fencing but is null (failing closed)");
+                }
                 searchPlanRepository.assertLeaseOwnership(searchPlanId, executionOwnerToken);
             }
             db.update("update job_source_observations set last_seen_at = now() where source_id = ? and external_job_id = ?",
@@ -376,7 +425,13 @@ public class BoardDiscoveryService {
 
     private void closeObservation(UUID sourceId, String externalId, boolean authoritative, UUID searchPlanId, UUID executionOwnerToken) {
         Runnable block = () -> {
-            if (searchPlanId != null && executionOwnerToken != null && searchPlanRepository != null) {
+            if (searchPlanId != null || executionOwnerToken != null) {
+                if (searchPlanId == null || executionOwnerToken == null) {
+                    throw new IllegalArgumentException("searchPlanId and executionOwnerToken must both be non-null when running with search plan fencing");
+                }
+                if (searchPlanRepository == null) {
+                    throw new IllegalStateException("SearchPlanRepository is required for search plan lease fencing but is null (failing closed)");
+                }
                 searchPlanRepository.assertLeaseOwnership(searchPlanId, executionOwnerToken);
             }
             db.update("""
@@ -422,7 +477,13 @@ public class BoardDiscoveryService {
 
     private int markUnlisted(UUID sourceId, Instant runStart, boolean authoritative, UUID searchPlanId, UUID executionOwnerToken) {
         java.util.function.Supplier<Integer> block = () -> {
-            if (searchPlanId != null && executionOwnerToken != null && searchPlanRepository != null) {
+            if (searchPlanId != null || executionOwnerToken != null) {
+                if (searchPlanId == null || executionOwnerToken == null) {
+                    throw new IllegalArgumentException("searchPlanId and executionOwnerToken must both be non-null when running with search plan fencing");
+                }
+                if (searchPlanRepository == null) {
+                    throw new IllegalStateException("SearchPlanRepository is required for search plan lease fencing but is null (failing closed)");
+                }
                 searchPlanRepository.assertLeaseOwnership(searchPlanId, executionOwnerToken);
             }
             java.sql.Timestamp since = java.sql.Timestamp.from(runStart);

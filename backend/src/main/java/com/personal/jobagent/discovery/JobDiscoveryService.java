@@ -156,7 +156,13 @@ public class JobDiscoveryService {
      */
     @Transactional
     public IngestResult ingestJob(IngestJobCommand cmd, UUID searchPlanId, UUID executionOwnerToken) {
-        if (searchPlanId != null && executionOwnerToken != null && searchPlanRepository != null) {
+        if (searchPlanId != null || executionOwnerToken != null) {
+            if (searchPlanId == null || executionOwnerToken == null) {
+                throw new IllegalArgumentException("searchPlanId and executionOwnerToken must both be non-null when running with search plan fencing");
+            }
+            if (searchPlanRepository == null) {
+                throw new IllegalStateException("SearchPlanRepository is required for search plan lease fencing but is null (failing closed)");
+            }
             searchPlanRepository.assertLeaseOwnership(searchPlanId, executionOwnerToken);
         }
         SourceMeta meta = sourceMeta(cmd.sourceId());

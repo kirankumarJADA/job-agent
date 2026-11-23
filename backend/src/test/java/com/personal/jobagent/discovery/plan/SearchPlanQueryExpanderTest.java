@@ -77,4 +77,37 @@ class SearchPlanQueryExpanderTest {
         assertThat(expanded.maxResults()).isEqualTo(50);
         assertThat(expanded.negativeKeywords()).isEmpty();
     }
+
+    @Test
+    @DisplayName("Supports frontend wire alias keys (excludeKeywords, seniorityLevels, targetLocations, remote)")
+    void supportsFrontendWireAliases() {
+        SearchPlanRecord plan = new SearchPlanRecord(
+                UUID.randomUUID(),
+                UUID.randomUUID(),
+                "Frontend Wire Alias Plan",
+                List.of("Full Stack Engineer"),
+                Map.of(
+                        "excludeKeywords", List.of("WordPress", "PHP"),
+                        "seniorityLevels", List.of("LEAD", "PRINCIPAL"),
+                        "targetLocations", List.of("Manchester"),
+                        "remote", List.of("REMOTE"),
+                        "keywords", List.of("Kubernetes", "Golang")
+                ),
+                List.of("ADZUNA"),
+                "DAILY",
+                25,
+                true,
+                null,
+                Instant.now(),
+                Instant.now()
+        );
+
+        SearchPlanQueryExpander.ExpandedQueryPlan expanded = expander.expand(plan);
+
+        assertThat(expanded.negativeKeywords()).containsExactly("WordPress", "PHP");
+        assertThat(expanded.seniorityLevels()).contains(SeniorityClassifier.Level.LEAD, SeniorityClassifier.Level.PRINCIPAL);
+        assertThat(expanded.targetLocations()).containsExactly("Manchester");
+        assertThat(expanded.remoteTypes()).containsExactly("REMOTE");
+        assertThat(expanded.primaryKeywords()).contains("Kubernetes", "Golang");
+    }
 }
