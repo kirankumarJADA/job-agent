@@ -14,7 +14,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * The only HTTP client discovery adapters use. One instance per run: it
@@ -360,6 +361,12 @@ public class SafeHttpClient {
 
     /** JDK transport: never follows redirects itself and stops reading at the size cap. */
     static final class JdkTransport implements Transport {
+        private static final ScheduledExecutorService WATCHDOG = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "safe-http-body-watchdog");
+            t.setDaemon(true);
+            return t;
+        });
+
         private final HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .followRedirects(HttpClient.Redirect.NEVER)
@@ -368,26 +375,76 @@ public class SafeHttpClient {
         @Override
         public RawResponse exchange(String method, URI uri, Map<String, String> headers, byte[] body,
                                     Duration timeout, int maxBytes) throws IOException {
-            HttpRequest.Builder builder = HttpRequest.newBuilder(uri).timeout(timeout);
+            long deadlineNanos = (timeout != null)
+                    ? System.nanoTime() + timeout.toNanos()
+                    : Long.MAX_VALUE;
+
+            HttpRequest.Builder builder = HttpRequest.newBuilder(uri);
+            if (timeout != null && !timeout.isZero() && !timeout.isNegative()) {
+                builder.timeout(timeout);
+            }
             headers.forEach(builder::header);
             builder.method(method, body == null ? HttpRequest.BodyPublishers.noBody()
                     : HttpRequest.BodyPublishers.ofByteArray(body));
+
+            HttpResponse<InputStream> response;
             try {
-                HttpResponse<InputStream> response = client.send(builder.build(), HttpResponse.BodyHandlers.ofInputStream());
-                byte[] bytes;
-                boolean truncated;
-                try (InputStream in = response.body()) {
-                    bytes = in.readNBytes(maxBytes + 1);
-                    truncated = bytes.length > maxBytes;
-                    if (truncated) bytes = java.util.Arrays.copyOf(bytes, maxBytes);
-                }
-                Map<String, String> flat = new java.util.LinkedHashMap<>();
-                response.headers().map().forEach((k, v) -> { if (!v.isEmpty()) flat.put(k, v.get(0)); });
-                return new RawResponse(response.statusCode(), flat, bytes, truncated);
+                response = client.send(builder.build(), HttpResponse.BodyHandlers.ofInputStream());
+            } catch (HttpTimeoutException e) {
+                throw e;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IOException("interrupted", e);
             }
+
+            long remainingNanos = deadlineNanos - System.nanoTime();
+            if (remainingNanos <= 0) {
+                try {
+                    response.body().close();
+                } catch (IOException ignored) {}
+                throw new HttpTimeoutException("response body read timed out before reading started");
+            }
+
+            InputStream in = response.body();
+            AtomicBoolean timedOut = new AtomicBoolean(false);
+            ScheduledFuture<?> watchdogTask = null;
+            if (timeout != null) {
+                watchdogTask = WATCHDOG.schedule(() -> {
+                    timedOut.set(true);
+                    try {
+                        in.close();
+                    } catch (IOException ignored) {}
+                }, remainingNanos, TimeUnit.NANOSECONDS);
+            }
+
+            byte[] bytes;
+            boolean truncated;
+            try {
+                bytes = in.readNBytes(maxBytes + 1);
+                if (timedOut.get() || System.nanoTime() >= deadlineNanos) {
+                    throw new HttpTimeoutException("response body read timed out during body consumption");
+                }
+                truncated = bytes.length > maxBytes;
+                if (truncated) {
+                    bytes = java.util.Arrays.copyOf(bytes, maxBytes);
+                }
+            } catch (IOException e) {
+                if (timedOut.get() || System.nanoTime() >= deadlineNanos) {
+                    throw new HttpTimeoutException("response body read timed out during body consumption: " + e.getMessage());
+                }
+                throw e;
+            } finally {
+                if (watchdogTask != null) {
+                    watchdogTask.cancel(false);
+                }
+                try {
+                    in.close();
+                } catch (IOException ignored) {}
+            }
+
+            Map<String, String> flat = new java.util.LinkedHashMap<>();
+            response.headers().map().forEach((k, v) -> { if (!v.isEmpty()) flat.put(k, v.get(0)); });
+            return new RawResponse(response.statusCode(), flat, bytes, truncated);
         }
     }
 }

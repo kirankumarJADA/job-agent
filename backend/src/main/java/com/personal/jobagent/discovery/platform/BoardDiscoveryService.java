@@ -91,6 +91,42 @@ public class BoardDiscoveryService {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private org.springframework.transaction.support.TransactionTemplate transactionTemplate;
 
+    private final java.util.concurrent.ConcurrentHashMap<String, Integer> scanOffsets = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private int getPersistedScanOffset(UUID sourceId, UUID searchPlanId) {
+        if (sourceId == null) {
+            return 0;
+        }
+        String memoryKey = (searchPlanId != null) ? searchPlanId + ":" + sourceId : sourceId.toString();
+        Integer cached = scanOffsets.get(memoryKey);
+        if (cached != null) {
+            return cached;
+        }
+        if (db == null) {
+            return 0;
+        }
+        try {
+            String col = (searchPlanId != null) ? "scan_offset_" + searchPlanId : "scan_offset";
+            List<Map<String, Object>> rows = db.queryForList(
+                    "select last_run->>? as plan_offset, last_run->>'scan_offset' as default_offset from job_sources where id = ?",
+                    col, sourceId);
+            if (!rows.isEmpty()) {
+                Object val = rows.get(0).get("plan_offset");
+                if (val == null) {
+                    val = rows.get(0).get("default_offset");
+                }
+                if (val != null) {
+                    int offset = Integer.parseInt(String.valueOf(val));
+                    scanOffsets.put(memoryKey, offset);
+                    return offset;
+                }
+            }
+        } catch (Exception e) {
+            log.debug("Could not read persisted scan offset for source {}: {}", sourceId, e.getMessage());
+        }
+        return 0;
+    }
+
     public void setSearchPlanRepository(SearchPlanRepository searchPlanRepository) {
         this.searchPlanRepository = searchPlanRepository;
     }
@@ -280,19 +316,21 @@ public class BoardDiscoveryService {
         int entriesProcessed = 0;
         int resultCount = 0;
 
-        for (BoardAdapter.ListingEntry entry : listing.entries()) {
-            if (entriesProcessed >= maxEntriesToProcess) {
-                truncatedByBudget = true;
-                log.info("Search plan {} source {} reached max entry inspection cap ({}); halting",
-                        searchPlanId, sourceId, maxEntriesToProcess);
-                break;
-            }
-            entriesProcessed++;
+        int totalEntries = listing.entries().size();
+        int startOffset = getPersistedScanOffset(sourceId, searchPlanId);
+        int offset = (totalEntries > 0) ? (startOffset % totalEntries) : 0;
 
+        for (int i = 0; i < totalEntries; i++) {
             if (maxResults != null && maxResults > 0 && resultCount >= maxResults) {
                 truncatedByBudget = true;
                 log.info("Search plan {} source {} reached max results budget ({} new/updated jobs); ceasing further ingestion",
                         searchPlanId, sourceId, maxResults);
+                break;
+            }
+            if (entriesProcessed >= maxEntriesToProcess) {
+                truncatedByBudget = true;
+                log.info("Search plan {} source {} reached max entry inspection cap ({}); halting",
+                        searchPlanId, sourceId, maxEntriesToProcess);
                 break;
             }
             if (System.nanoTime() >= deadlineNanos) {
@@ -301,6 +339,10 @@ public class BoardDiscoveryService {
                         searchPlanId, sourceId, timeoutMs);
                 break;
             }
+
+            int entryIndex = (offset + i) % totalEntries;
+            BoardAdapter.ListingEntry entry = listing.entries().get(entryIndex);
+            entriesProcessed++;
 
             try {
                 if (!entry.needsDetail()) {
@@ -356,6 +398,14 @@ public class BoardDiscoveryService {
         }
         counts.put("requests", http.requestsMade());
         counts.put("result_count", resultCount);
+
+        int nextOffset = (totalEntries > 0) ? (offset + entriesProcessed) % totalEntries : 0;
+        counts.put("scan_offset", nextOffset);
+        if (searchPlanId != null) {
+            counts.put("scan_offset_" + searchPlanId, nextOffset);
+        }
+        String memoryKey = (searchPlanId != null) ? searchPlanId + ":" + sourceId : sourceId.toString();
+        scanOffsets.put(memoryKey, nextOffset);
 
         // Safe deletion guard:
         // A listing truncated by maxResults or timeout must NEVER remove or unlist active jobs.

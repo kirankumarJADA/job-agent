@@ -571,4 +571,74 @@ class BoardDiscoveryServiceTest {
         verify(ingestion, never()).ingestJob(any());
         verify(db, never()).update(contains("update job_source_observations set source_status = 'MISSING'"), any(Object[].class));
     }
+
+    @Test
+    void repeatRunsRotateScanOffsetBeyondMaxEntriesToProcessPreventingStarvation() {
+        // Feed of 2,500 entries:
+        // Entries 0..1999 are already known
+        // Entries 2000..2499 are new postings beyond maxEntriesToProcess (2,000)
+        List<Map<String, Object>> knownList = new ArrayList<>();
+        List<BoardAdapter.ListingEntry> entries = new ArrayList<>();
+        for (int i = 0; i < 2000; i++) {
+            String id = "known-" + i;
+            knownList.add(Map.of("external_job_id", id));
+            entries.add(partial(id));
+        }
+        for (int i = 2000; i < 2500; i++) {
+            entries.add(full("new-" + i));
+        }
+
+        when(db.queryForList(contains("from job_source_observations"), eq(SOURCE))).thenReturn(knownList);
+
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(entries, 1, null);
+
+        // Run 1: maxResults = 50 -> maxEntriesToProcess = max(50 * 20, 2000) = 2000
+        // Inspects entries 0..1999 (all known), halts at cap 2000, finds 0 new results
+        var report1 = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), null, null, 50, 60000L);
+
+        assertThat(report1.counts().get("unchanged")).isEqualTo(2000);
+        assertThat(report1.counts().get("created")).isEqualTo(0);
+        assertThat(report1.counts().get("scan_offset")).isEqualTo(2000);
+        assertThat(report1.complete()).isFalse(); // truncated by maxEntriesToProcess cap
+
+        // Run 2: Exact same source and feed.
+        // Thanks to persistent scan offset (2000), Run 2 starts inspection at index 2000!
+        // Discovers new postings 2000..2049, consuming maxResults budget (50).
+        var report2 = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), null, null, 50, 60000L);
+
+        assertThat(report2.counts().get("created")).isEqualTo(50);
+        assertThat(report2.counts().get("scan_offset")).isEqualTo(2050);
+        // Proves later postings beyond maxEntriesToProcess are NOT starved across repeat runs
+    }
+
+    @Test
+    void persistentScanOffsetSurvivesDatabaseReloadViaLastRunJson() {
+        // Mock DB returning persisted scan_offset = 2000 from job_sources.last_run
+        when(db.queryForList(contains("select last_run->>"), eq("scan_offset"), eq(SOURCE)))
+                .thenReturn(List.of(Map.of("default_offset", "2000")));
+
+        List<BoardAdapter.ListingEntry> entries = new ArrayList<>();
+        for (int i = 0; i < 2500; i++) {
+            entries.add(partial("job-" + i));
+        }
+        when(db.queryForList(contains("from job_source_observations"), eq(SOURCE))).thenReturn(List.of());
+
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(entries, 1, null);
+
+        // Fresh service instance simulates server restart
+        BoardDiscoveryService freshInstance = new BoardDiscoveryService(
+                db, ingestion, registry, kind -> http.client(), 50, 2, 3, 10);
+
+        var report = freshInstance.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), null, null, 2, 60000L);
+
+        // Starts at offset 2000 and ingests job-2000 and job-2001
+        assertThat(a.detailed).containsExactly("job-2000", "job-2001");
+        assertThat(report.counts().get("created")).isEqualTo(2);
+        assertThat(report.counts().get("scan_offset")).isEqualTo(2002);
+    }
 }
