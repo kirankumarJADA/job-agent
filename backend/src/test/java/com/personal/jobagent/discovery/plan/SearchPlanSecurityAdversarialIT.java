@@ -1,5 +1,6 @@
 package com.personal.jobagent.discovery.plan;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.common.UuidV7;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -8,10 +9,12 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.security.test.context.support.WithMockUser;
+import org.springframework.mock.web.MockHttpSession;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -23,6 +26,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(properties = {
@@ -53,6 +57,12 @@ public class SearchPlanSecurityAdversarialIT {
 
     @Autowired
     private SearchPlanRepository searchPlanRepository;
+
+    @Autowired
+    private PasswordEncoder passwordEncoder;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     @Test
     @DisplayName("Adversarial: SQL Injection payloads in search plan titles and facets are safely escaped")
@@ -122,20 +132,165 @@ public class SearchPlanSecurityAdversarialIT {
         assertThat(searchPlanRepository.findByIdAndProfileId(planA.id(), candidateA)).isPresent();
     }
 
-    private UUID createTestProfile(String email) {
+    @Test
+    @DisplayName("Security: Unauthenticated requests receive 401 across search plan endpoints")
+    void testUnauthenticatedRequestsReceive401() throws Exception {
+        UUID randomId = UUID.randomUUID();
+
+        mockMvc.perform(get("/api/v1/search-plans"))
+                .andExpect(status().isUnauthorized());
+
+        mockMvc.perform(get("/api/v1/search-plans/" + randomId))
+                .andExpect(status().isUnauthorized());
+
+        mockMvc.perform(post("/api/v1/search-plans").with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isUnauthorized());
+
+        mockMvc.perform(delete("/api/v1/search-plans/" + randomId).with(csrf()))
+                .andExpect(status().isUnauthorized());
+
+        mockMvc.perform(post("/api/v1/search-plans/" + randomId + "/run").with(csrf()))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    @DisplayName("Security: HTTP Cross-tenant IDOR returns 404 for unauthorized candidate")
+    void testHttpCrossTenantIdorReturns404() throws Exception {
+        String pass = "Password123!";
+        UUID userA = createTestUser("http-user-a@example.com", pass);
+        UUID profileA = createProfileForUser(userA);
+
+        UUID userB = createTestUser("http-user-b@example.com", pass);
+        UUID profileB = createProfileForUser(userB);
+
+        MockHttpSession sessionA = login("http-user-a@example.com", pass);
+        MockHttpSession sessionB = login("http-user-b@example.com", pass);
+
+        SearchPlanRecord planA = searchPlanRepository.create(new SearchPlanRecord(
+                UuidV7.generate(),
+                profileA,
+                "Candidate A Private Search Plan",
+                List.of("Principal Architect"),
+                Map.of("skills", List.of("Java")),
+                List.of("GREENHOUSE"),
+                "DAILY",
+                50,
+                true,
+                null,
+                null,
+                null
+        ));
+
+        // Candidate A can get the plan
+        mockMvc.perform(get("/api/v1/search-plans/" + planA.id()).session(sessionA))
+                .andExpect(status().isOk());
+
+        // Candidate B attempt to GET Candidate A's plan returns 404
+        mockMvc.perform(get("/api/v1/search-plans/" + planA.id()).session(sessionB))
+                .andExpect(status().isNotFound());
+
+        // Candidate B attempt to DELETE Candidate A's plan returns 404
+        mockMvc.perform(delete("/api/v1/search-plans/" + planA.id()).session(sessionB).with(csrf()))
+                .andExpect(status().isNotFound());
+
+        // Candidate B attempt to run Candidate A's plan returns 404
+        mockMvc.perform(post("/api/v1/search-plans/" + planA.id() + "/run").session(sessionB).with(csrf()))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    @DisplayName("Security: CSRF is enforced on mutating search plan endpoints")
+    void testCsrfProtectionEnforcedOnMutations() throws Exception {
+        String pass = "Password123!";
+        UUID user = createTestUser("csrf-test@example.com", pass);
+        createProfileForUser(user);
+        MockHttpSession session = login("csrf-test@example.com", pass);
+
+        // POST without CSRF -> 403 Forbidden
+        mockMvc.perform(post("/api/v1/search-plans")
+                        .session(session)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"Test\"}"))
+                .andExpect(status().isForbidden());
+
+        // DELETE without CSRF -> 403 Forbidden
+        mockMvc.perform(delete("/api/v1/search-plans/" + UUID.randomUUID())
+                        .session(session))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @DisplayName("Security: Public response DTO sanitizes internal lease tokens and expiration")
+    void testPublicDtoSanitizesInternalLeaseFields() throws Exception {
+        String pass = "Password123!";
+        UUID user = createTestUser("dto-test@example.com", pass);
+        UUID profile = createProfileForUser(user);
+        MockHttpSession session = login("dto-test@example.com", pass);
+
+        SearchPlanRecord plan = searchPlanRepository.create(new SearchPlanRecord(
+                UuidV7.generate(),
+                profile,
+                "DTO Sanitization Plan",
+                List.of("Software Engineer"),
+                Map.of(),
+                List.of("ADZUNA"),
+                "DAILY",
+                50,
+                true,
+                null,
+                null,
+                null
+        ));
+
+        // Claim lease directly to set execution_owner_token in database
+        UUID token = UUID.randomUUID();
+        searchPlanRepository.claimExecutionLease(plan.id(), token, 60000L);
+
+        // Fetch via API
+        mockMvc.perform(get("/api/v1/search-plans/" + plan.id()).session(session))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(plan.id().toString()))
+                .andExpect(jsonPath("$.name").value("DTO Sanitization Plan"))
+                .andExpect(jsonPath("$.executionOwnerToken").doesNotExist())
+                .andExpect(jsonPath("$.executionLeaseExpiresAt").doesNotExist());
+    }
+
+    private MockHttpSession login(String email, String password) throws Exception {
+        MvcResult result = mockMvc.perform(post("/api/v1/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "email", email,
+                                "password", password))))
+                .andExpect(status().isOk())
+                .andReturn();
+        return (MockHttpSession) result.getRequest().getSession();
+    }
+
+    private UUID createTestUser(String email, String rawPassword) {
         UUID userId = UuidV7.generate();
-        UUID profileId = UuidV7.generate();
-
+        String hash = passwordEncoder.encode(rawPassword);
         jdbcTemplate.update("""
-                INSERT INTO users (id, email, password_hash, display_name, created_at)
-                VALUES (?, ?, 'hash', 'Test User', now())
-                """, userId, email);
+                INSERT INTO users (id, email, password_hash, display_name, auth_provider, role, created_at)
+                VALUES (?, ?, ?, 'Test Candidate', 'LOCAL', 'CANDIDATE', now())
+                ON CONFLICT (email) DO UPDATE SET password_hash = excluded.password_hash
+                """, userId, email, hash);
+        return jdbcTemplate.queryForObject("SELECT id FROM users WHERE email = ?", UUID.class, email);
+    }
 
+    private UUID createProfileForUser(UUID userId) {
+        UUID profileId = UuidV7.generate();
         jdbcTemplate.update("""
                 INSERT INTO profiles (id, user_id, updated_at)
                 VALUES (?, ?, now())
+                ON CONFLICT (user_id) DO NOTHING
                 """, profileId, userId);
+        return jdbcTemplate.queryForObject("SELECT id FROM profiles WHERE user_id = ?", UUID.class, userId);
+    }
 
-        return profileId;
+    private UUID createTestProfile(String email) {
+        UUID userId = createTestUser(email, "Password123!");
+        return createProfileForUser(userId);
     }
 }
