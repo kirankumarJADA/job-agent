@@ -116,6 +116,14 @@ public class SearchPlanService {
         return repository.isExecutionLeaseActive(planId);
     }
 
+    public boolean reserveExecutionLease(UUID planId, UUID ownerToken) {
+        return repository.claimExecutionLease(planId, ownerToken, 60000L);
+    }
+
+    public boolean releaseExecutionLease(UUID planId, UUID ownerToken) {
+        return repository.releaseExecutionLease(planId, ownerToken);
+    }
+
     private void validatePlan(SearchPlanRecord plan) {
         if (plan.name() == null || plan.name().trim().isEmpty()) {
             throw new IllegalArgumentException("Search plan name cannot be blank");

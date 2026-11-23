@@ -483,4 +483,92 @@ class BoardDiscoveryServiceTest {
         assertThat(lastRun.getValue()).contains("\"failure_category\":\"ACCESS_DENIED\"", "\"duration_ms\"", "\"mode\":\"MANUAL\"")
                 .doesNotContainIgnoringCase("token").doesNotContainIgnoringCase("password");
     }
+
+    @Test
+    void completeFeedWithTenKnownJobsDoesNotStarveFiveNewJobsLaterInFeed() {
+        Scripted a = new Scripted();
+        List<ListingEntry> entries = new ArrayList<>();
+        for (int i = 1; i <= 10; i++) {
+            entries.add(full("known-" + i));
+        }
+        for (int i = 1; i <= 5; i++) {
+            entries.add(full("new-" + i));
+        }
+        a.listing = ListingResult.complete(entries, 1, null);
+
+        // Mock ingestion: "known-" jobs return TOUCHED, "new-" jobs return INSERTED
+        when(ingestion.ingestJob(any())).thenAnswer(inv -> {
+            JobDiscoveryService.IngestJobCommand cmd = inv.getArgument(0);
+            if (cmd.externalId().startsWith("known-")) {
+                return new JobDiscoveryService.IngestResult(UUID.randomUUID(), "TOUCHED", "d", "h");
+            } else {
+                return new JobDiscoveryService.IngestResult(UUID.randomUUID(), "INSERTED", "d", "h");
+            }
+        });
+
+        // maxResults = 5
+        var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), null, null, 5, 45000L);
+
+        // All 10 known jobs touched without consuming budget
+        assertThat(report.counts().get("unchanged")).isEqualTo(10);
+        // All 5 new jobs discovered and created
+        assertThat(report.counts().get("created")).isEqualTo(5);
+        assertThat(report.counts().get("result_count")).isEqualTo(5);
+        assertThat(report.complete()).isTrue();
+    }
+
+    @Test
+    void existingJobWithChangedContentIsUpdatedAndConsumesBudget() {
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(List.of(full("job-1"), full("job-2")), 1, null);
+
+        when(ingestion.ingestJob(any())).thenAnswer(inv -> {
+            JobDiscoveryService.IngestJobCommand cmd = inv.getArgument(0);
+            if ("job-1".equals(cmd.externalId())) {
+                return new JobDiscoveryService.IngestResult(UUID.randomUUID(), "UPDATED", "d", "h");
+            } else {
+                return new JobDiscoveryService.IngestResult(UUID.randomUUID(), "INSERTED", "d", "h");
+            }
+        });
+
+        // maxResults = 1 -> job-1 (UPDATED) consumes the single result budget, halting before job-2
+        var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), null, null, 1, 45000L);
+
+        assertThat(report.counts().get("updated")).isEqualTo(1);
+        assertThat(report.counts().get("created")).isEqualTo(0); // job-2 was not ingested
+        assertThat(report.counts().get("result_count")).isEqualTo(1);
+        assertThat(report.complete()).isFalse(); // truncated by budget
+        verify(db, never()).update(contains("update job_source_observations set source_status = 'MISSING'"), any(Object[].class));
+    }
+
+    @Test
+    void detailResponseArrivingAfterDeadlineDoesNotPerformIngestionWrite() {
+        when(db.queryForList(contains("from job_source_observations"), eq(SOURCE))).thenReturn(List.of());
+
+        // Custom adapter that delays in detail() to push past deadline
+        BoardAdapter lateAdapter = new BoardAdapter() {
+            @Override public PlatformKind kind() { return PlatformKind.GEM; }
+            @Override public Optional<BoardRef> recognize(URI url) { return Optional.empty(); }
+            @Override public BoardRef parseIdentifier(String id) { return new BoardRef(kind(), id, Map.of()); }
+            @Override public ListingResult list(BoardRef b, CrawlContext ctx) {
+                return ListingResult.complete(List.of(partial("late-job")), 1, null);
+            }
+            @Override public NormalizedJob detail(BoardRef b, ListingEntry e, CrawlContext ctx) {
+                try { Thread.sleep(25); } catch (InterruptedException ignored) {}
+                return NormalizedJob.builder(e.externalId(), "Role").description("d")
+                        .applicationUrl("https://example.com/app").build();
+            }
+        };
+
+        var report = service.run(SOURCE, lateAdapter, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), null, null, 10, 10L);
+
+        assertThat(report.complete()).isFalse();
+        assertThat(report.failureCategory()).isEqualTo("TIMEOUT");
+        // Ingestion write was NOT performed because detail completed after deadline
+        verify(ingestion, never()).ingestJob(any());
+        verify(db, never()).update(contains("update job_source_observations set source_status = 'MISSING'"), any(Object[].class));
+    }
 }

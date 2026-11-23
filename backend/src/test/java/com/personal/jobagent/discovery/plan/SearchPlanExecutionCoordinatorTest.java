@@ -248,4 +248,83 @@ class SearchPlanExecutionCoordinatorTest {
         assertThat(summary.notes()).anyMatch(n -> n.contains("maintenance mode"));
         verifyNoInteractions(boardDiscoveryService);
     }
+
+    @Test
+    @DisplayName("Global budget counts only INSERTED and UPDATED, ignoring TOUCHED across multiple sources")
+    void globalBudgetCountsOnlyInsertedAndUpdated() {
+        SearchPlanRecord plan = new SearchPlanRecord(
+                planId, profileId, "Multi-source Plan",
+                List.of("Engineer"), Map.of(), List.of("ADZUNA", "GREENHOUSE"), "DAILY", 5, true, null, Instant.now(), Instant.now()
+        );
+        when(repository.findByIdAndProfileId(planId, profileId)).thenReturn(Optional.of(plan));
+
+        when(jdbcTemplate.queryForList(contains("FROM job_sources"))).thenReturn(List.of(
+                Map.of("id", sourceId1, "kind", "ADZUNA", "display_name", "Source 1", "org_identifier", "gb"),
+                Map.of("id", sourceId2, "kind", "GREENHOUSE", "display_name", "Source 2", "org_identifier", "gh")
+        ));
+
+        // Source 1 returns 10 TOUCHED jobs and 2 INSERTED jobs
+        List<JobDiscoveryService.IngestResult> s1Results = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            s1Results.add(new JobDiscoveryService.IngestResult(UUID.randomUUID(), "TOUCHED", "k" + i, "h" + i));
+        }
+        s1Results.add(new JobDiscoveryService.IngestResult(UUID.randomUUID(), "INSERTED", "new1", "h_new1"));
+        s1Results.add(new JobDiscoveryService.IngestResult(UUID.randomUUID(), "INSERTED", "new2", "h_new2"));
+
+        BoardDiscoveryService.SourceRunReport report1 = new BoardDiscoveryService.SourceRunReport(
+                "corr-1", sourceId1, "ADZUNA", "OK", true, Map.of(), null, null, s1Results, List.of()
+        );
+        // Source 2 returns 3 INSERTED jobs (meeting global budget of 5)
+        UUID s2Job1 = UUID.randomUUID();
+        UUID s2Job2 = UUID.randomUUID();
+        UUID s2Job3 = UUID.randomUUID();
+        BoardDiscoveryService.SourceRunReport report2 = new BoardDiscoveryService.SourceRunReport(
+                "corr-2", sourceId2, "GREENHOUSE", "OK", true, Map.of(), null, null,
+                List.of(
+                        new JobDiscoveryService.IngestResult(s2Job1, "INSERTED", "s2_1", "h1"),
+                        new JobDiscoveryService.IngestResult(s2Job2, "INSERTED", "s2_2", "h2"),
+                        new JobDiscoveryService.IngestResult(s2Job3, "INSERTED", "s2_3", "h3")
+                ),
+                List.of()
+        );
+
+        // When source 1 runs, remainingBudget is 5
+        when(boardDiscoveryService.run(eq(sourceId1), any(), anyMap(), any(), any(), eq(5), anyLong())).thenReturn(report1);
+        // Source 1 produced 2 new results (10 TOUCHED did not count); remaining budget passed to source 2 is 3
+        when(boardDiscoveryService.run(eq(sourceId2), any(), anyMap(), any(), any(), eq(3), anyLong())).thenReturn(report2);
+
+        SearchPlanExecutionCoordinator.ExecutionSummary summary = coordinator.executePlan(planId, profileId, true);
+
+        assertThat(summary.status()).isEqualTo("SUCCESS");
+        assertThat(summary.sourcesQueried()).isEqualTo(2);
+        assertThat(summary.jobsIngested()).isEqualTo(5); // exactly 2 from s1 + 3 from s2
+    }
+
+    @Test
+    @DisplayName("executePlanWithReservedLease uses existing reserved owner token and skips claiming new lease")
+    void executePlanWithReservedLease_usesReservedToken() {
+        UUID reservedToken = UUID.randomUUID();
+        SearchPlanRecord plan = new SearchPlanRecord(
+                planId, profileId, "Reserved Plan",
+                List.of("DevOps"), Map.of(), List.of("ADZUNA"), "DAILY", 10, true, null, Instant.now(), Instant.now()
+        );
+        when(repository.findByIdAndProfileId(planId, profileId)).thenReturn(Optional.of(plan));
+        when(jdbcTemplate.queryForList(contains("FROM job_sources"))).thenReturn(List.of(
+                Map.of("id", sourceId1, "kind", "ADZUNA", "display_name", "Adzuna UK", "org_identifier", "gb")
+        ));
+        BoardDiscoveryService.SourceRunReport report = new BoardDiscoveryService.SourceRunReport(
+                "corr-res", sourceId1, "ADZUNA", "OK", true, Map.of(), null, null, List.of(), List.of()
+        );
+        when(boardDiscoveryService.run(eq(sourceId1), any(), anyMap(), any(), any(), anyInt(), anyLong())).thenReturn(report);
+        when(repository.completeExecution(eq(planId), eq(reservedToken), anyString(), any(), anyInt())).thenReturn(true);
+
+        SearchPlanExecutionCoordinator.ExecutionSummary summary =
+                coordinator.executePlanWithReservedLease(planId, profileId, reservedToken, true);
+
+        assertThat(summary.status()).isEqualTo("SUCCESS");
+        // Verify repository.claimExecutionLease was NEVER invoked because lease was already reserved
+        verify(repository, never()).claimExecutionLease(eq(planId), any(UUID.class), anyLong());
+        // Verify completeExecution was called with the exact reservedToken
+        verify(repository).completeExecution(eq(planId), eq(reservedToken), eq("SUCCESS"), any(), eq(0));
+    }
 }

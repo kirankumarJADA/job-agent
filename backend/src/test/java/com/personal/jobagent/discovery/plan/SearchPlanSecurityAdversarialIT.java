@@ -24,6 +24,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
@@ -65,6 +66,9 @@ public class SearchPlanSecurityAdversarialIT {
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    @Autowired
+    private SearchPlansController searchPlansController;
 
     @Test
     @DisplayName("Adversarial: SQL Injection payloads in search plan titles and facets are safely escaped")
@@ -377,6 +381,132 @@ public class SearchPlanSecurityAdversarialIT {
                 .andExpect(jsonPath("$.status").value(409))
                 .andExpect(jsonPath("$.title").value("Conflict"))
                 .andExpect(jsonPath("$.detail").value("Search plan is already executing with an active lease"));
+    }
+
+    @Test
+    @DisplayName("Concurrency: Concurrent manual runs result in exactly one 202 ACCEPTED and one 409 CONFLICT")
+    void testConcurrentManualRunsOneReceives202OtherReceives409() throws Exception {
+        String email = "concurrent-run@example.com";
+        String pass = "Password123!";
+        UUID user = createTestUser(email, pass);
+        UUID profile = createProfileForUser(user);
+        MockHttpSession session = login(email, pass);
+
+        SearchPlanRecord plan = searchPlanRepository.create(new SearchPlanRecord(
+                UuidV7.generate(),
+                profile,
+                "Concurrent Run Test Plan",
+                List.of("Platform Engineer"),
+                Map.of(),
+                List.of("ADZUNA"),
+                "DAILY",
+                50,
+                true,
+                null,
+                null,
+                null
+        ));
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            CyclicBarrier barrier = new CyclicBarrier(2);
+            Future<Integer> f1 = pool.submit(() -> {
+                barrier.await();
+                return mockMvc.perform(post("/api/v1/search-plans/" + plan.id() + "/run")
+                                .session(session)
+                                .with(csrf()))
+                        .andReturn().getResponse().getStatus();
+            });
+            Future<Integer> f2 = pool.submit(() -> {
+                barrier.await();
+                return mockMvc.perform(post("/api/v1/search-plans/" + plan.id() + "/run")
+                                .session(session)
+                                .with(csrf()))
+                        .andReturn().getResponse().getStatus();
+            });
+
+            int s1 = f1.get(10, TimeUnit.SECONDS);
+            int s2 = f2.get(10, TimeUnit.SECONDS);
+
+            List<Integer> statuses = List.of(s1, s2);
+            assertThat(statuses).containsExactlyInAnyOrder(202, 409);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    @DisplayName("Saturation: Queue saturation rejects run with 429, releases lease, and omits queued audit")
+    void testQueueSaturationReturns429WithoutQueuedAuditEntry() throws Exception {
+        String email = "queue-saturation@example.com";
+        String pass = "Password123!";
+        UUID user = createTestUser(email, pass);
+        UUID profile = createProfileForUser(user);
+        MockHttpSession session = login(email, pass);
+
+        SearchPlanRecord plan = searchPlanRepository.create(new SearchPlanRecord(
+                UuidV7.generate(),
+                profile,
+                "Saturation Test Plan",
+                List.of("Reliability Engineer"),
+                Map.of(),
+                List.of("ADZUNA"),
+                "DAILY",
+                50,
+                true,
+                null,
+                null,
+                null
+        ));
+
+        ThreadPoolExecutor executor = (ThreadPoolExecutor) org.springframework.test.util.ReflectionTestUtils.getField(
+                searchPlansController, "manualRunExecutor");
+        assertThat(executor).isNotNull();
+
+        CountDownLatch blockerLatch = new CountDownLatch(1);
+        try {
+            // Fill executor threads and queue to 100% capacity
+            while (true) {
+                try {
+                    executor.execute(() -> {
+                        try {
+                            blockerLatch.await(30, TimeUnit.SECONDS);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    });
+                } catch (RejectedExecutionException ree) {
+                    // Executor is now fully saturated
+                    break;
+                }
+            }
+
+            // Saturated executor must reject the run request with 429 Too Many Requests
+            mockMvc.perform(post("/api/v1/search-plans/" + plan.id() + "/run")
+                            .session(session)
+                            .with(csrf()))
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(jsonPath("$.status").value(429))
+                    .andExpect(jsonPath("$.title").value("Too Many Requests"))
+                    .andExpect(jsonPath("$.detail").value("Manual run queue is full; please try again later"));
+
+            // Verify that no SEARCH_PLAN_RUN_QUEUED audit entry was recorded
+            List<Map<String, Object>> audits = jdbcTemplate.queryForList("""
+                    SELECT id FROM audit_logs
+                    WHERE entity_type = 'SEARCH_PLAN'
+                      AND entity_id = ?
+                      AND action = 'SEARCH_PLAN_RUN_QUEUED'
+                    """, plan.id());
+            assertThat(audits).isEmpty();
+
+            // Verify lease was safely released
+            SearchPlanRecord current = searchPlanRepository.findByIdAndProfileId(plan.id(), profile).orElseThrow();
+            assertThat(current.executionOwnerToken()).isNull();
+            assertThat(current.executionLeaseExpiresAt()).isNull();
+
+        } finally {
+            blockerLatch.countDown();
+        }
     }
 
     private MockHttpSession login(String email, String password) throws Exception {

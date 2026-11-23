@@ -222,11 +222,9 @@ public class BoardDiscoveryService {
                 : (healthCheck ? Math.min(5, maxDetails) : maxDetails);
         SafeHttpClient http = httpFactory.apply(kind);
         if (timeoutMs != null && timeoutMs > 0) {
-            long remainingMs = Math.max(100L, java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime()));
-            Duration clampedTimeout = Duration.ofMillis(Math.min(20_000L, remainingMs));
-            http = http.withTimeout(clampedTimeout);
+            http = http.withDeadline(deadlineNanos);
         }
-        BoardAdapter.CrawlContext context = new BoardAdapter.CrawlContext(http, pageCap, Instant.now(), employer);
+        BoardAdapter.CrawlContext context = new BoardAdapter.CrawlContext(http, pageCap, Instant.now(), employer, deadlineNanos);
 
         // Pre-request deadline check
         if (System.nanoTime() >= deadlineNanos) {
@@ -237,6 +235,9 @@ public class BoardDiscoveryService {
         BoardAdapter.ListingResult listing;
         try {
             listing = adapter.list(board, context);
+        } catch (SafeHttpClient.FetchException e) {
+            log.warn("Adapter {} fetch failed for source {}: category={} message={}", kind, sourceId, e.category(), e.getMessage());
+            listing = BoardAdapter.ListingResult.failed(e.category(), e.getMessage());
         } catch (RuntimeException e) {
             // An adapter bug must not take the sweep down; it is recorded, never hidden.
             log.warn("Adapter {} failed for source {}: {}", kind, sourceId, e.getClass().getSimpleName());
@@ -247,7 +248,7 @@ public class BoardDiscoveryService {
         String employerName = Normalize.first(employer, listing.employerName());
 
         // Post-listing deadline check
-        if (System.nanoTime() >= deadlineNanos) {
+        if (System.nanoTime() >= deadlineNanos || listing.failure() == FailureCategory.TIMEOUT) {
             log.warn("Search plan {} source {} exceeded timeout ({}ms) during listing request",
                     searchPlanId, sourceId, timeoutMs);
             return finish(sourceId, kind, correlationId, started, counts, ingested, false,
@@ -275,8 +276,9 @@ public class BoardDiscoveryService {
         boolean truncatedByBudget = false;
         boolean truncatedByTimeout = false;
 
-        int maxEntriesToProcess = (maxResults != null && maxResults > 0) ? Math.max(maxResults * 5, 250) : 1000;
+        int maxEntriesToProcess = (maxResults != null && maxResults > 0) ? Math.max(maxResults * 20, 2000) : 5000;
         int entriesProcessed = 0;
+        int resultCount = 0;
 
         for (BoardAdapter.ListingEntry entry : listing.entries()) {
             if (entriesProcessed >= maxEntriesToProcess) {
@@ -287,9 +289,9 @@ public class BoardDiscoveryService {
             }
             entriesProcessed++;
 
-            if (maxResults != null && maxResults > 0 && ingested.size() >= maxResults) {
+            if (maxResults != null && maxResults > 0 && resultCount >= maxResults) {
                 truncatedByBudget = true;
-                log.info("Search plan {} source {} reached max results budget ({}); ceasing further ingestion",
+                log.info("Search plan {} source {} reached max results budget ({} new/updated jobs); ceasing further ingestion",
                         searchPlanId, sourceId, maxResults);
                 break;
             }
@@ -306,7 +308,10 @@ public class BoardDiscoveryService {
                         truncatedByTimeout = true;
                         break;
                     }
-                    ingest(sourceId, kind, entry.job(), employerName, counts, ingested, searchPlanId, executionOwnerToken);
+                    JobDiscoveryService.IngestResult res = ingest(sourceId, kind, entry.job(), employerName, counts, ingested, searchPlanId, executionOwnerToken);
+                    if (res != null && ("INSERTED".equals(res.action()) || "UPDATED".equals(res.action()))) {
+                        resultCount++;
+                    }
                 } else if (known.contains(entry.externalId())) {
                     if (System.nanoTime() >= deadlineNanos) {
                         truncatedByTimeout = true;
@@ -325,7 +330,10 @@ public class BoardDiscoveryService {
                         truncatedByTimeout = true;
                         break;
                     }
-                    ingest(sourceId, kind, job, employerName, counts, ingested, searchPlanId, executionOwnerToken);
+                    JobDiscoveryService.IngestResult res = ingest(sourceId, kind, job, employerName, counts, ingested, searchPlanId, executionOwnerToken);
+                    if (res != null && ("INSERTED".equals(res.action()) || "UPDATED".equals(res.action()))) {
+                        resultCount++;
+                    }
                 } else {
                     bump(counts, "deferred");
                 }
@@ -334,6 +342,10 @@ public class BoardDiscoveryService {
                 throw e;
             } catch (SafeHttpClient.FetchException e) {
                 bump(counts, "detail_failures");
+                if (e.category() == FailureCategory.TIMEOUT) {
+                    truncatedByTimeout = true;
+                    break;
+                }
                 if (e.category() == FailureCategory.BUDGET_EXHAUSTED || e.category() == FailureCategory.RATE_LIMITED
                         || e.category() == FailureCategory.ACCESS_DENIED) {
                     detailBudgetGone = true; // stop asking; the rest wait for the next run
@@ -343,6 +355,7 @@ public class BoardDiscoveryService {
             }
         }
         counts.put("requests", http.requestsMade());
+        counts.put("result_count", resultCount);
 
         // Safe deletion guard:
         // A listing truncated by maxResults or timeout must NEVER remove or unlist active jobs.
@@ -371,28 +384,28 @@ public class BoardDiscoveryService {
                 failureCat, failureDetail, mode);
     }
 
-    private void ingest(UUID sourceId, PlatformKind kind, NormalizedJob job, String employer,
-                        Map<String, Object> counts, List<JobDiscoveryService.IngestResult> ingested) {
-        ingest(sourceId, kind, job, employer, counts, ingested, null, null);
+    private JobDiscoveryService.IngestResult ingest(UUID sourceId, PlatformKind kind, NormalizedJob job, String employer,
+                                                    Map<String, Object> counts, List<JobDiscoveryService.IngestResult> ingested) {
+        return ingest(sourceId, kind, job, employer, counts, ingested, null, null);
     }
 
-    private void ingest(UUID sourceId, PlatformKind kind, NormalizedJob job, String employer,
-                        Map<String, Object> counts, List<JobDiscoveryService.IngestResult> ingested,
-                        UUID searchPlanId, UUID executionOwnerToken) {
+    private JobDiscoveryService.IngestResult ingest(UUID sourceId, PlatformKind kind, NormalizedJob job, String employer,
+                                                    Map<String, Object> counts, List<JobDiscoveryService.IngestResult> ingested,
+                                                    UUID searchPlanId, UUID executionOwnerToken) {
         if (job == null || job.externalId() == null || job.title() == null) {
             bump(counts, "skipped_invalid");
-            return;
+            return null;
         }
         if (Boolean.FALSE.equals(job.active())) {
             closeObservation(sourceId, job.externalId(), !kind.isAggregator(), searchPlanId, executionOwnerToken);
             bump(counts, "closed");
-            return;
+            return null;
         }
         if (kind.isAggregator() && job.applicationUrl() == null) {
             // Without the employer's own application URL the posting cannot be
             // applied to honestly; it is not stored with an aggregator URL instead.
             bump(counts, "skipped_no_employer_url");
-            return;
+            return null;
         }
         JobDiscoveryService.IngestJobCommand cmd = new JobDiscoveryService.IngestJobCommand(
                 sourceId, job.externalId(), null, Normalize.first(employer, job.employerName()), job.title(),
@@ -404,7 +417,7 @@ public class BoardDiscoveryService {
                 ? ingestion.ingestJob(cmd, searchPlanId, executionOwnerToken)
                 : ingestion.ingestJob(cmd);
         if (result == null) {
-            return;
+            return null;
         }
         ingested.add(result);
         switch (result.action()) {
@@ -416,6 +429,7 @@ public class BoardDiscoveryService {
         if (metrics != null) {
             metrics.recordJobIngestion(kind.name(), result.action(), result.crossSource());
         }
+        return result;
     }
 
     private Set<String> knownExternalIds(UUID sourceId) {

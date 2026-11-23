@@ -164,4 +164,76 @@ class SafeHttpClientTest {
         assertThat(s.maxAttempts()).isBetween(1, 5);
         assertThat(s.maxRetryAfterMs()).isLessThanOrEqualTo(30_000L);
     }
+
+    @Test
+    void remainingDeadlineClampsTransportTimeout() {
+        FixtureHttp f = new FixtureHttp().on("GET", "x", json("{}"));
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(50);
+        SafeHttpClient client = f.client(SafeHttpClient.Settings.defaults().withTimeout(Duration.ofSeconds(20)).withMinInterval(0))
+                .withDeadline(deadline);
+
+        client.get(URI.create("https://deadline.example.com/x"), SafeHttpClient.Accept.JSON);
+
+        assertThat(f.capturedTimeouts).hasSize(1);
+        assertThat(f.capturedTimeouts.get(0)).isLessThanOrEqualTo(Duration.ofMillis(55));
+    }
+
+    @Test
+    void zeroRemainingTimePreventsTransportCall() {
+        FixtureHttp f = new FixtureHttp().on("GET", "x", json("{}"));
+        long pastDeadline = System.nanoTime() - java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(10);
+        SafeHttpClient client = f.client().withDeadline(pastDeadline);
+
+        var e = fails(() -> client.get(URI.create("https://expired.example.com/x"), SafeHttpClient.Accept.JSON));
+
+        assertThat(e.category()).isEqualTo(FailureCategory.TIMEOUT);
+        assertThat(f.requests).isEmpty();
+        assertThat(f.capturedTimeouts).isEmpty();
+    }
+
+    @Test
+    void timeSpentOnFirstRequestReducesTimeoutForNextRequest() {
+        FixtureHttp f = new FixtureHttp().on("GET", "x", json("{}"));
+        long start = System.nanoTime();
+        long deadline = start + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(200);
+        SafeHttpClient client = f.client(SafeHttpClient.Settings.defaults().withTimeout(Duration.ofSeconds(10)).withMinInterval(0))
+                .withDeadline(deadline);
+
+        client.get(URI.create("https://multi.example.com/x"), SafeHttpClient.Accept.JSON);
+        try { Thread.sleep(30); } catch (InterruptedException ignored) {}
+        client.get(URI.create("https://multi.example.com/x"), SafeHttpClient.Accept.JSON);
+
+        assertThat(f.capturedTimeouts).hasSize(2);
+        assertThat(f.capturedTimeouts.get(1)).isLessThan(f.capturedTimeouts.get(0));
+    }
+
+    @Test
+    void retryAbortsImmediatelyWhenDeadlineExpires() {
+        FixtureHttp f = new FixtureHttp().on("GET", "x", status(503));
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(30);
+        SafeHttpClient client = new SafeHttpClient(f, f.guard(),
+                new SafeHttpClient.Settings(100, 0, Duration.ofSeconds(5), 1024 * 1024, 5, 200, 5000),
+                ms -> { try { Thread.sleep(ms); } catch (InterruptedException ignored) {} },
+                deadline);
+
+        var e = fails(() -> client.get(URI.create("https://retry.example.com/x"), SafeHttpClient.Accept.JSON));
+
+        assertThat(e.category()).isEqualTo(FailureCategory.TIMEOUT);
+        // Did not burn all 5 attempts because deadline terminated retries
+        assertThat(f.requests.size()).isLessThan(5);
+    }
+
+    @Test
+    void redirectChainRespectsAbsoluteDeadline() {
+        FixtureHttp f = new FixtureHttp()
+                .on("GET", "step1", redirect("https://r.example.com/step2"))
+                .on("GET", "step2", redirect("https://r.example.com/step3"))
+                .on("GET", "step3", json("{}"));
+        long pastDeadline = System.nanoTime() - 1000L;
+        SafeHttpClient client = f.client().withDeadline(pastDeadline);
+
+        var e = fails(() -> client.get(URI.create("https://r.example.com/step1"), SafeHttpClient.Accept.JSON));
+        assertThat(e.category()).isEqualTo(FailureCategory.TIMEOUT);
+        assertThat(f.requests).isEmpty();
+    }
 }

@@ -261,6 +261,81 @@ public class SearchPlanExecutionCoordinator implements DisposableBean {
         }
     }
 
+    /**
+     * Executes a search plan using an already reserved execution lease and owner token.
+     * Used by SearchPlansController for atomic asynchronous execution reservations.
+     */
+    public ExecutionSummary executePlanWithReservedLease(UUID planId, UUID profileId, UUID ownerToken, boolean manual) {
+        return executePlanWithReservedLease(planId, profileId, ownerToken, manual, defaultLeaseDurationMs, defaultHeartbeatIntervalMs);
+    }
+
+    public ExecutionSummary executePlanWithReservedLease(UUID planId, UUID profileId, UUID ownerToken, boolean manual,
+                                                         long leaseDurationMs, long heartbeatIntervalMs) {
+        if (planId == null || profileId == null || ownerToken == null) {
+            throw new IllegalArgumentException("planId, profileId, and ownerToken cannot be null");
+        }
+
+        if (maintenanceMode.isMaintenanceMode()) {
+            log.warn("Search plan execution paused: maintenance mode is active");
+            repository.releaseExecutionLease(planId, ownerToken);
+            return ExecutionSummary.skipped(planId, null, "Execution paused: system maintenance mode active");
+        }
+
+        Optional<SearchPlanRecord> optPlan = repository.findByIdAndProfileId(planId, profileId);
+        if (optPlan.isEmpty()) {
+            repository.releaseExecutionLease(planId, ownerToken);
+            return ExecutionSummary.skipped(planId, null, "Search plan not found or not owned by profile");
+        }
+
+        SearchPlanRecord plan = optPlan.get();
+        if (!manual && !plan.active()) {
+            repository.releaseExecutionLease(planId, ownerToken);
+            return ExecutionSummary.skipped(planId, plan.name(), "Search plan is disabled/inactive");
+        }
+
+        long effectiveLeaseDuration = leaseDurationMs > 0 ? leaseDurationMs : 60000L;
+        long effectiveHeartbeatInterval = heartbeatIntervalMs > 0 ? heartbeatIntervalMs : 15000L;
+
+        AtomicBoolean ownershipLost = new AtomicBoolean(false);
+        ScheduledFuture<?> heartbeatFuture = null;
+        try {
+            heartbeatFuture = heartbeatExecutor.scheduleWithFixedDelay(() -> {
+                try {
+                    boolean renewed = repository.renewExecutionLease(planId, ownerToken, effectiveLeaseDuration);
+                    if (!renewed) {
+                        log.warn("Search plan {} lease renewal failed for token {} (lease expired or ownership lost)",
+                                planId, ownerToken);
+                        ownershipLost.set(true);
+                    }
+                } catch (Exception e) {
+                    log.error("Exception during lease renewal for search plan {}: {}", planId, e.getMessage());
+                    ownershipLost.set(true);
+                }
+            }, effectiveHeartbeatInterval, effectiveHeartbeatInterval, TimeUnit.MILLISECONDS);
+
+            return doExecute(plan, ownerToken, ownershipLost);
+        } catch (Exception e) {
+            log.error("Unhandled execution exception for search plan {}: {}", planId, e.getMessage(), e);
+            repository.completeExecution(planId, ownerToken, "FAILED", "Execution exception: " + e.getMessage(), 0);
+            return new ExecutionSummary(
+                    plan.id(),
+                    plan.name(),
+                    "FAILED",
+                    0, 0, 0, 0, 0,
+                    List.of("Execution failure: " + e.getMessage()),
+                    List.of("Execution aborted due to unexpected exception"),
+                    null,
+                    Map.of(),
+                    ownerToken,
+                    "/api/v1/search-plans/" + plan.id()
+            );
+        } finally {
+            if (heartbeatFuture != null) {
+                heartbeatFuture.cancel(false);
+            }
+        }
+    }
+
     private ExecutionSummary doExecute(SearchPlanRecord plan, UUID ownerToken, AtomicBoolean ownershipLost) {
         SearchPlanQueryExpander.ExpandedQueryPlan expanded = queryExpander.expand(plan);
         Map<String, String> facetSupport = evaluateFacetSupport(expanded);
@@ -324,10 +399,13 @@ public class SearchPlanExecutionCoordinator implements DisposableBean {
                     sourcesSucceeded++;
                     if (report.ingested() != null) {
                         for (JobDiscoveryService.IngestResult res : report.ingested()) {
-                            if (totalIngested < plan.maxResultsPerRun()) {
-                                totalIngested++;
-                                if (res.jobId() != null) {
-                                    ingestedJobIds.add(res.jobId());
+                            boolean isResult = "INSERTED".equals(res.action()) || "UPDATED".equals(res.action());
+                            if (isResult) {
+                                if (totalIngested < plan.maxResultsPerRun()) {
+                                    totalIngested++;
+                                    if (res.jobId() != null) {
+                                        ingestedJobIds.add(res.jobId());
+                                    }
                                 }
                             }
                         }

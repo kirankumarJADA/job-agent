@@ -101,14 +101,20 @@ public class SafeHttpClient {
     private final AddressGuard guard;
     private final Settings settings;
     private final Sleeper sleeper;
+    private final Long deadlineNanos;
     private int requestsMade;
     private long lastRequestAt;
 
     public SafeHttpClient(Transport transport, AddressGuard guard, Settings settings, Sleeper sleeper) {
+        this(transport, guard, settings, sleeper, null);
+    }
+
+    public SafeHttpClient(Transport transport, AddressGuard guard, Settings settings, Sleeper sleeper, Long deadlineNanos) {
         this.transport = transport;
         this.guard = guard;
         this.settings = settings;
         this.sleeper = sleeper;
+        this.deadlineNanos = deadlineNanos;
     }
 
     public static SafeHttpClient live(Settings settings) {
@@ -127,8 +133,16 @@ public class SafeHttpClient {
         return settings;
     }
 
+    public Long deadlineNanos() {
+        return deadlineNanos;
+    }
+
     public SafeHttpClient withTimeout(Duration timeout) {
-        return new SafeHttpClient(this.transport, this.guard, this.settings.withTimeout(timeout), this.sleeper);
+        return new SafeHttpClient(this.transport, this.guard, this.settings.withTimeout(timeout), this.sleeper, this.deadlineNanos);
+    }
+
+    public SafeHttpClient withDeadline(Long deadlineNanos) {
+        return new SafeHttpClient(this.transport, this.guard, this.settings, this.sleeper, deadlineNanos);
     }
 
     public String get(URI uri, Accept accept) {
@@ -139,17 +153,26 @@ public class SafeHttpClient {
         return exchange("POST", uri, jsonBody, accept);
     }
 
+    private void checkDeadline(String phase) {
+        if (deadlineNanos != null && System.nanoTime() >= deadlineNanos) {
+            throw new FetchException(FailureCategory.TIMEOUT, "Execution deadline exceeded " + phase, 0);
+        }
+    }
+
     private String exchange(String method, URI uri, String body, Accept accept) {
         URI current = uri;
         for (int hop = 0; hop <= 3; hop++) {
+            checkDeadline("before redirect hop " + hop);
             try {
                 guard.check(current);
             } catch (AddressGuard.UnsafeAddressException e) {
                 throw new FetchException(FailureCategory.UNSAFE_ADDRESS, e.getMessage(), 0);
             }
             RawResponse response = withRetries(method, current, body, accept);
+            checkDeadline("after request attempt for " + current);
             int status = response.status();
             if (status >= 300 && status < 400 && response.header("Location").isPresent()) {
+                checkDeadline("before redirect resolution");
                 URI next;
                 try {
                     next = current.resolve(response.header("Location").get().strip());
@@ -203,34 +226,62 @@ public class SafeHttpClient {
     private RawResponse withRetries(String method, URI uri, String body, Accept accept) {
         FetchException last = null;
         for (int attempt = 1; attempt <= Math.max(1, settings.maxAttempts()); attempt++) {
+            checkDeadline("before request attempt " + attempt);
             if (requestsMade >= settings.maxRequests()) {
                 throw new FetchException(FailureCategory.BUDGET_EXHAUSTED,
                         "request budget of " + settings.maxRequests() + " exhausted", 0);
             }
             pace();
+            checkDeadline("after pacing before attempt " + attempt);
             requestsMade++;
             RawResponse response;
+            Duration attemptTimeout = settings.timeout();
+            if (deadlineNanos != null) {
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0) {
+                    throw new FetchException(FailureCategory.TIMEOUT, "Execution deadline exceeded before transport exchange", 0);
+                }
+                Duration remaining = Duration.ofNanos(remainingNanos);
+                if (attemptTimeout == null || remaining.compareTo(attemptTimeout) < 0) {
+                    attemptTimeout = remaining;
+                }
+            }
             try {
                 java.util.Map<String, String> headers = new java.util.LinkedHashMap<>();
                 headers.put("User-Agent", USER_AGENT);
                 headers.put("Accept", accept.header);
                 if (body != null) headers.put("Content-Type", "application/json");
                 response = transport.exchange(method, uri, headers,
-                        body == null ? null : body.getBytes(StandardCharsets.UTF_8), settings.timeout(), settings.maxBytes());
+                        body == null ? null : body.getBytes(StandardCharsets.UTF_8), attemptTimeout, settings.maxBytes());
             } catch (HttpTimeoutException e) {
                 last = new FetchException(FailureCategory.TIMEOUT, "timed out", 0);
-                backoff(attempt, null);
+                if (deadlineNanos != null && System.nanoTime() >= deadlineNanos) {
+                    throw last;
+                }
+                if (attempt < settings.maxAttempts()) {
+                    backoff(attempt, null);
+                }
                 continue;
             } catch (IOException e) {
                 last = new FetchException(FailureCategory.NETWORK, "network error: " + e.getClass().getSimpleName(), 0);
-                backoff(attempt, null);
+                if (deadlineNanos != null && System.nanoTime() >= deadlineNanos) {
+                    throw new FetchException(FailureCategory.TIMEOUT, "Execution deadline exceeded during network error", 0);
+                }
+                if (attempt < settings.maxAttempts()) {
+                    backoff(attempt, null);
+                }
                 continue;
             }
             int status = response.status();
             if (status == 429 || status == 502 || status == 503 || status == 504) {
                 last = new FetchException(status == 429 ? FailureCategory.RATE_LIMITED : FailureCategory.UPSTREAM_ERROR,
                         "HTTP " + status, status);
-                if (attempt < settings.maxAttempts()) backoff(attempt, response.header("Retry-After").orElse(null));
+                if (attempt < settings.maxAttempts()) {
+                    if (deadlineNanos != null && System.nanoTime() >= deadlineNanos) {
+                        throw new FetchException(FailureCategory.TIMEOUT, "Execution deadline exceeded before retry attempt", 0);
+                    }
+                    backoff(attempt, response.header("Retry-After").orElse(null));
+                }
                 continue;
             }
             return response;
@@ -241,11 +292,21 @@ public class SafeHttpClient {
     private void pace() {
         long now = System.currentTimeMillis();
         long wait = lastRequestAt + settings.minIntervalMs() - now;
-        if (lastRequestAt > 0 && wait > 0) sleepQuietly(wait);
+        if (lastRequestAt > 0 && wait > 0) {
+            if (deadlineNanos != null) {
+                long remainingMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
+                if (remainingMs <= 0) {
+                    throw new FetchException(FailureCategory.TIMEOUT, "Execution deadline exceeded during pacing", 0);
+                }
+                wait = Math.min(wait, remainingMs);
+            }
+            sleepQuietly(wait);
+        }
         lastRequestAt = System.currentTimeMillis();
     }
 
     private void backoff(int attempt, String retryAfter) {
+        checkDeadline("before retry backoff for attempt " + attempt);
         long delay = settings.baseBackoffMs() * (1L << Math.min(attempt - 1, 6));
         delay += ThreadLocalRandom.current().nextLong(Math.max(1, settings.baseBackoffMs() / 2));
         if (retryAfter != null) {
@@ -256,7 +317,16 @@ public class SafeHttpClient {
                 // HTTP-date form: keep exponential delay
             }
         }
-        sleepQuietly(Math.min(delay, settings.maxRetryAfterMs()));
+        long targetWait = Math.min(delay, settings.maxRetryAfterMs());
+        if (deadlineNanos != null) {
+            long remainingMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
+            if (remainingMs <= 0) {
+                throw new FetchException(FailureCategory.TIMEOUT, "Execution deadline exceeded before backoff sleep", 0);
+            }
+            targetWait = Math.min(targetWait, remainingMs);
+        }
+        sleepQuietly(targetWait);
+        checkDeadline("after retry backoff for attempt " + attempt);
     }
 
     private void sleepQuietly(long ms) {

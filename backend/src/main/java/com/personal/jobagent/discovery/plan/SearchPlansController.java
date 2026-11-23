@@ -27,6 +27,8 @@ import java.util.concurrent.TimeUnit;
 @RequestMapping("/api/v1/search-plans")
 public class SearchPlansController implements DisposableBean {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(SearchPlansController.class);
+
     private final SearchPlanService service;
     private final SearchPlanExecutionCoordinator coordinator;
     private final JdbcTemplate jdbcTemplate;
@@ -160,62 +162,90 @@ public class SearchPlansController implements DisposableBean {
         String actor = authentication != null ? authentication.getName() : "UNKNOWN";
         UUID executionId = UuidV7.generate();
 
-        // Database-backed preflight lease check evaluated via PostgreSQL clock_timestamp()
-        if (service.isExecutionLeaseActive(id)) {
+        // Synchronous atomic execution reservation via database-backed lease
+        UUID ownerToken = UUID.randomUUID();
+        boolean reserved = service.reserveExecutionLease(id, ownerToken);
+        if (!reserved) {
             return ResponseEntity.status(HttpStatus.CONFLICT).body(
                     ApiError.of(409, "Conflict", "Search plan is already executing with an active lease", requestUri, null));
         }
 
         if (sync) {
-            SearchPlanExecutionCoordinator.ExecutionSummary summary = coordinator.executePlan(id, profileId, true);
-            auditLogWriter.write(new AuditEntry(
-                    actor, "SEARCH_PLAN_EXECUTED", "SEARCH_PLAN", id,
-                    Map.of(),
-                    Map.of("status", summary.status(), "jobsIngested", summary.jobsIngested(), "sync", true, "requestUri", requestUri),
-                    remoteAddr,
-                    executionId
-            ));
-            return ResponseEntity.ok(summary);
+            try {
+                SearchPlanExecutionCoordinator.ExecutionSummary summary =
+                        coordinator.executePlanWithReservedLease(id, profileId, ownerToken, true);
+                auditLogWriter.write(new AuditEntry(
+                        actor, "SEARCH_PLAN_EXECUTED", "SEARCH_PLAN", id,
+                        Map.of(),
+                        Map.of("status", summary.status(), "jobsIngested", summary.jobsIngested(), "sync", true,
+                                "requestUri", requestUri, "correlationId", executionId.toString()),
+                        remoteAddr,
+                        executionId
+                ));
+                return ResponseEntity.ok(summary);
+            } catch (Exception e) {
+                service.releaseExecutionLease(id, ownerToken);
+                throw e;
+            }
         }
 
-        // Synchronously record queuing audit entry on caller thread
-        auditLogWriter.write(new AuditEntry(
-                actor, "SEARCH_PLAN_RUN_QUEUED", "SEARCH_PLAN", id,
-                Map.of(),
-                Map.of("executionId", executionId.toString(), "requestUri", requestUri, "async", true),
-                remoteAddr,
-                executionId
-        ));
-
+        java.util.concurrent.CountDownLatch admissionGate = new java.util.concurrent.CountDownLatch(1);
         try {
             manualRunExecutor.submit(() -> {
                 try {
-                    SearchPlanExecutionCoordinator.ExecutionSummary summary = coordinator.executePlan(id, profileId, true);
+                    // Task-start gate: wait for caller thread to commit SEARCH_PLAN_RUN_QUEUED audit entry
+                    boolean admitted = admissionGate.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                    if (!admitted) {
+                        log.warn("Search plan {} async execution aborted: admission gate timed out", id);
+                        service.releaseExecutionLease(id, ownerToken);
+                        return;
+                    }
+                    SearchPlanExecutionCoordinator.ExecutionSummary summary =
+                            coordinator.executePlanWithReservedLease(id, profileId, ownerToken, true);
                     auditLogWriter.write(new AuditEntry(
                             actor, "SEARCH_PLAN_EXECUTED", "SEARCH_PLAN", id,
                             Map.of(),
                             Map.of("status", summary.status(), "jobsIngested", summary.jobsIngested(), "async", true,
-                                    "requestUri", requestUri, "executionId", executionId.toString()),
+                                    "requestUri", requestUri, "correlationId", executionId.toString(), "executionId", executionId.toString()),
                             remoteAddr,
                             executionId
                     ));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    service.releaseExecutionLease(id, ownerToken);
                 } catch (Exception e) {
+                    log.error("Async execution failed for search plan {}: {}", id, e.getMessage(), e);
                     auditLogWriter.write(new AuditEntry(
                             actor, "SEARCH_PLAN_EXECUTION_FAILED", "SEARCH_PLAN", id,
                             Map.of(),
                             Map.of("error", e.getMessage() != null ? e.getMessage() : "Execution exception", "async", true,
-                                    "requestUri", requestUri, "executionId", executionId.toString()),
+                                    "requestUri", requestUri, "correlationId", executionId.toString(), "executionId", executionId.toString()),
                             remoteAddr,
                             executionId
                     ));
                 }
             });
-            return ResponseEntity.status(HttpStatus.ACCEPTED).body(
-                    SearchPlanExecutionCoordinator.ExecutionSummary.queued(id, plan.name(), executionId, "Execution queued asynchronously"));
         } catch (RejectedExecutionException e) {
+            service.releaseExecutionLease(id, ownerToken);
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body(
                     ApiError.of(429, "Too Many Requests", "Manual run queue is full; please try again later", requestUri, null));
         }
+
+        // Successfully admitted to executor: write QUEUED audit entry before opening gate
+        auditLogWriter.write(new AuditEntry(
+                actor, "SEARCH_PLAN_RUN_QUEUED", "SEARCH_PLAN", id,
+                Map.of(),
+                Map.of("correlationId", executionId.toString(), "executionId", executionId.toString(), "requestUri", requestUri, "async", true),
+                remoteAddr,
+                executionId
+        ));
+
+        // Open task gate for worker thread
+        admissionGate.countDown();
+
+        return ResponseEntity.status(HttpStatus.ACCEPTED).body(
+                SearchPlanExecutionCoordinator.ExecutionSummary.queued(
+                        id, plan.name(), executionId, "Execution queued asynchronously"));
     }
 
     private void audit(String action, UUID targetId, Map<String, Object> before, Map<String, Object> after, HttpServletRequest request) {
