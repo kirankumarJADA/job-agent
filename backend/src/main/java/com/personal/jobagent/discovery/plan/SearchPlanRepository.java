@@ -83,7 +83,29 @@ public class SearchPlanRepository {
                 rowMapper());
     }
 
+    public List<SearchPlanRecord> findDuePlans() {
+        return jdbcTemplate.query("""
+                SELECT * FROM search_plans
+                WHERE active = true
+                  AND (
+                      last_execution_status IS NULL
+                      OR last_execution_status <> 'RUNNING'
+                      OR execution_lease_expires_at IS NULL
+                      OR execution_lease_expires_at < clock_timestamp()
+                  )
+                  AND (
+                      (search_frequency = 'HOURLY' AND (last_run_at IS NULL OR last_run_at <= clock_timestamp() - INTERVAL '1 hour'))
+                   OR (search_frequency = 'DAILY' AND (last_run_at IS NULL OR last_run_at <= clock_timestamp() - INTERVAL '1 day'))
+                   OR (search_frequency = 'WEEKLY' AND (last_run_at IS NULL OR last_run_at <= clock_timestamp() - INTERVAL '7 days'))
+                  )
+                ORDER BY last_run_at ASC NULLS FIRST
+                """, rowMapper());
+    }
+
     public List<SearchPlanRecord> findDuePlans(Instant now) {
+        if (now == null) {
+            return findDuePlans();
+        }
         Timestamp ts = Timestamp.from(now);
         Timestamp hourlyCutoff = Timestamp.from(now.minus(Duration.ofHours(1)));
         Timestamp dailyCutoff = Timestamp.from(now.minus(Duration.ofDays(1)));
@@ -217,7 +239,7 @@ public class SearchPlanRepository {
 
     /**
      * Completes an execution and releases the lease with fencing protection.
-     * If the worker was expired and another execution took over, the update affects 0 rows.
+     * If the worker was expired and another execution took over, or lease expired, the update affects 0 rows.
      *
      * @param planId plan identifier
      * @param ownerToken worker owner token
@@ -229,15 +251,18 @@ public class SearchPlanRepository {
     public boolean completeExecution(UUID planId, UUID ownerToken, String status, String error, int resultsCount) {
         int updated = jdbcTemplate.update("""
                 UPDATE search_plans
-                SET last_run_at = now(),
+                SET last_run_at = clock_timestamp(),
                     last_execution_status = ?,
                     last_execution_error = ?,
                     last_execution_results = ?,
                     execution_owner_token = NULL,
                     execution_lease_expires_at = NULL,
-                    updated_at = now()
+                    updated_at = clock_timestamp()
                 WHERE id = ?
                   AND execution_owner_token = ?
+                  AND execution_lease_expires_at IS NOT NULL
+                  AND execution_lease_expires_at > clock_timestamp()
+                  AND last_execution_status = 'RUNNING'
                 """, status, error, resultsCount, planId, ownerToken);
         return updated > 0;
     }
@@ -250,29 +275,56 @@ public class SearchPlanRepository {
                 UPDATE search_plans
                 SET execution_owner_token = NULL,
                     execution_lease_expires_at = NULL,
-                    updated_at = now()
+                    updated_at = clock_timestamp()
                 WHERE id = ?
                   AND execution_owner_token = ?
+                  AND execution_lease_expires_at IS NOT NULL
+                  AND execution_lease_expires_at > clock_timestamp()
+                  AND last_execution_status = 'RUNNING'
                 """, planId, ownerToken);
         return updated > 0;
     }
 
     /**
+     * Recovers abandoned or crashed executions whose lease has expired using database clock.
+     *
+     * @return count of recovered plans
+     */
+    public int recoverStaleExecutions() {
+        return jdbcTemplate.update("""
+                UPDATE search_plans
+                SET last_execution_status = 'FAILED',
+                    last_execution_error = 'Execution lease expired or worker terminated unexpectedly',
+                    last_run_at = clock_timestamp(),
+                    execution_owner_token = NULL,
+                    execution_lease_expires_at = NULL,
+                    updated_at = clock_timestamp()
+                WHERE active = true
+                  AND last_execution_status = 'RUNNING'
+                  AND execution_lease_expires_at IS NOT NULL
+                  AND execution_lease_expires_at < clock_timestamp()
+                """);
+    }
+
+    /**
      * Recovers abandoned or crashed executions whose lease has expired.
      *
-     * @param now current timestamp
+     * @param now current timestamp (if null, uses clock_timestamp())
      * @return count of recovered plans
      */
     public int recoverStaleExecutions(Instant now) {
+        if (now == null) {
+            return recoverStaleExecutions();
+        }
         Timestamp ts = Timestamp.from(now);
         return jdbcTemplate.update("""
                 UPDATE search_plans
                 SET last_execution_status = 'FAILED',
                     last_execution_error = 'Execution lease expired or worker terminated unexpectedly',
-                    last_run_at = now(),
+                    last_run_at = clock_timestamp(),
                     execution_owner_token = NULL,
                     execution_lease_expires_at = NULL,
-                    updated_at = now()
+                    updated_at = clock_timestamp()
                 WHERE active = true
                   AND last_execution_status = 'RUNNING'
                   AND execution_lease_expires_at IS NOT NULL
@@ -355,13 +407,13 @@ public class SearchPlanRepository {
     public void recordExecution(UUID id, String status, String error, int resultsCount) {
         jdbcTemplate.update("""
                 UPDATE search_plans SET
-                    last_run_at = now(),
+                    last_run_at = clock_timestamp(),
                     last_execution_status = ?,
                     last_execution_error = ?,
                     last_execution_results = ?,
                     execution_owner_token = NULL,
                     execution_lease_expires_at = NULL,
-                    updated_at = now()
+                    updated_at = clock_timestamp()
                 WHERE id = ?
                 """, status, error, resultsCount, id);
     }

@@ -31,6 +31,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.Mockito.when;
 
@@ -249,7 +251,7 @@ public class SearchPlanConcurrencyAndRecoveryIT {
                 """, sourceId);
 
         // Slow provider simulates healthy 600ms network crawl
-        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap(), any(), any()))
+        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap(), any(), any(), anyInt(), anyLong()))
                 .thenAnswer(inv -> {
                     Thread.sleep(600);
                     return new BoardDiscoveryService.SourceRunReport(
@@ -297,7 +299,7 @@ public class SearchPlanConcurrencyAndRecoveryIT {
                 """, sourceId);
 
         // When provider is called, simulate external worker stealing the lease
-        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap(), any(), any()))
+        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap(), any(), any(), anyInt(), anyLong()))
                 .thenAnswer(inv -> {
                     // Overwrite the lease in database to a different owner
                     jdbcTemplate.update("UPDATE search_plans SET execution_owner_token = ? WHERE id = ?",
@@ -345,7 +347,7 @@ public class SearchPlanConcurrencyAndRecoveryIT {
                 """, sourceId);
 
         // Slow mock to keep the winner inside execution for 400ms
-        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap(), any(), any()))
+        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap(), any(), any(), anyInt(), anyLong()))
                 .thenAnswer(inv -> {
                     Thread.sleep(400);
                     return new BoardDiscoveryService.SourceRunReport(
@@ -402,7 +404,7 @@ public class SearchPlanConcurrencyAndRecoveryIT {
                 UuidV7.generate(), profileId, "Plan 2", List.of(), Map.of(), List.of(), "DAILY", 50, true, null, Instant.now(), Instant.now()
         ));
 
-        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap(), any(), any()))
+        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap(), any(), any(), anyInt(), anyLong()))
                 .thenReturn(new BoardDiscoveryService.SourceRunReport("run", UUID.randomUUID(), "GREENHOUSE", "OK", true, Map.of(), null, null, List.of(), List.of()));
 
         ExecutorService executor = Executors.newFixedThreadPool(2);
@@ -434,7 +436,7 @@ public class SearchPlanConcurrencyAndRecoveryIT {
                 ON CONFLICT (kind, org_identifier) DO NOTHING
                 """, sourceId);
 
-        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap(), any(), any()))
+        when(boardDiscoveryService.run(any(UUID.class), any(BoardDiscoveryService.Mode.class), anyMap(), any(), any(), anyInt(), anyLong()))
                 .thenAnswer(inv -> {
                     Thread.sleep(300);
                     return new BoardDiscoveryService.SourceRunReport("sched-run", sourceId, "GREENHOUSE", "OK", true, Map.of(), null, null, List.of(), List.of());
@@ -578,6 +580,63 @@ public class SearchPlanConcurrencyAndRecoveryIT {
 
         executorA.shutdown();
         executorB.shutdown();
+    }
+
+    @Test
+    @DisplayName("P1 Regression A5: Expired worker cannot mark execution SUCCESS via completeExecution")
+    void testExpiredWorkerCannotCompleteExecution() throws InterruptedException {
+        UUID profileId = createTestProfile("expired-worker-complete@example.com");
+
+        SearchPlanRecord plan = searchPlanRepository.create(new SearchPlanRecord(
+                UuidV7.generate(), profileId, "A5 Expiry Complete Plan", List.of("Staff SRE"), Map.of(),
+                List.of("MOCK"), "DAILY", 50, true, null, Instant.now(), Instant.now()
+        ));
+
+        UUID tokenA = UUID.randomUUID();
+        // Claim lease with 50ms TTL
+        boolean claimed = searchPlanRepository.claimExecutionLease(plan.id(), tokenA, 50L);
+        assertThat(claimed).isTrue();
+
+        // Wait for lease to expire against PostgreSQL clock
+        Thread.sleep(120);
+
+        // Expired Worker A attempts completeExecution
+        boolean completed = searchPlanRepository.completeExecution(plan.id(), tokenA, "SUCCESS", null, 25);
+        assertThat(completed).isFalse();
+
+        // Assert database state was NOT corrupted by the expired worker
+        SearchPlanRecord current = searchPlanRepository.findByIdAndProfileId(plan.id(), profileId).orElseThrow();
+        assertThat(current.lastExecutionStatus()).isEqualTo("RUNNING"); // Still RUNNING, awaiting recovery or takeover
+        assertThat(current.lastExecutionResults()).isEqualTo(0); // Results count was NOT updated
+    }
+
+    @Test
+    @DisplayName("P1 Regression A6: Stale lease recovery and due plan polling evaluate against database clock")
+    void testDatabaseClockRecoveryAndDuePlans() throws InterruptedException {
+        UUID profileId = createTestProfile("db-clock-test@example.com");
+
+        SearchPlanRecord plan = searchPlanRepository.create(new SearchPlanRecord(
+                UuidV7.generate(), profileId, "A6 DB Clock Plan", List.of("DevOps Engineer"), Map.of(),
+                List.of("MOCK"), "HOURLY", 50, true, null, Instant.now(), Instant.now()
+        ));
+
+        // 1. Test database-clock stale recovery
+        UUID token = UUID.randomUUID();
+        searchPlanRepository.claimExecutionLease(plan.id(), token, 50L);
+        Thread.sleep(120);
+
+        int recovered = searchPlanRepository.recoverStaleExecutions();
+        assertThat(recovered).isGreaterThanOrEqualTo(1);
+
+        SearchPlanRecord afterRecovery = searchPlanRepository.findByIdAndProfileId(plan.id(), profileId).orElseThrow();
+        assertThat(afterRecovery.lastExecutionStatus()).isEqualTo("FAILED");
+        assertThat(afterRecovery.lastExecutionError()).contains("Execution lease expired");
+
+        // 2. Test database-clock findDuePlans
+        // Set last_run_at to 2 hours ago via PostgreSQL clock
+        jdbcTemplate.update("UPDATE search_plans SET last_run_at = clock_timestamp() - INTERVAL '2 hours' WHERE id = ?", plan.id());
+        List<SearchPlanRecord> due = searchPlanRepository.findDuePlans();
+        assertThat(due).anyMatch(p -> p.id().equals(plan.id()));
     }
 
     private UUID createTestProfile(String email) {

@@ -50,11 +50,9 @@ public class SearchPlanScheduler {
             return;
         }
 
-        Instant now = Instant.now();
-
         // Step 1: Recover abandoned or crashed executions whose lease expired
         try {
-            int recovered = repository.recoverStaleExecutions(now);
+            int recovered = repository.recoverStaleExecutions();
             if (recovered > 0) {
                 log.warn("Recovered {} stale search plan execution(s) whose leases had expired", recovered);
             }
@@ -63,7 +61,7 @@ public class SearchPlanScheduler {
         }
 
         // Step 2: Sweep due active search plans (excluding MANUAL and currently running plans)
-        List<SearchPlanRecord> duePlans = repository.findDuePlans(now);
+        List<SearchPlanRecord> duePlans = repository.findDuePlans();
         if (duePlans.isEmpty()) {
             return;
         }

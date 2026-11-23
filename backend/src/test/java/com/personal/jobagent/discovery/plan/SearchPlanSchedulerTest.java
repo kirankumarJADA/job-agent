@@ -41,8 +41,8 @@ class SearchPlanSchedulerTest {
         SearchPlanRecord r1 = new SearchPlanRecord(plan1, prof1, "Plan 1", List.of(), Map.of(), List.of(), "HOURLY", 50, true, null, Instant.now(), Instant.now());
         SearchPlanRecord r2 = new SearchPlanRecord(plan2, prof2, "Plan 2", List.of(), Map.of(), List.of(), "DAILY", 50, true, null, Instant.now(), Instant.now());
 
-        when(repository.recoverStaleExecutions(any(Instant.class))).thenReturn(1);
-        when(repository.findDuePlans(any(Instant.class))).thenReturn(List.of(r1, r2));
+        when(repository.recoverStaleExecutions()).thenReturn(1);
+        when(repository.findDuePlans()).thenReturn(List.of(r1, r2));
 
         when(coordinator.executePlan(eq(plan1), eq(prof1), eq(false))).thenReturn(
                 new SearchPlanExecutionCoordinator.ExecutionSummary(plan1, "Plan 1", "SUCCESS", 1, 1, 0, 5, 5, List.of(), List.of(), null, Map.of())
@@ -53,7 +53,8 @@ class SearchPlanSchedulerTest {
 
         scheduler.sweepDueSearchPlans();
 
-        verify(repository).recoverStaleExecutions(any(Instant.class));
+        verify(repository).recoverStaleExecutions();
+        verify(repository).findDuePlans();
         verify(coordinator).executePlan(eq(plan1), eq(prof1), eq(false));
         verify(coordinator).executePlan(eq(plan2), eq(prof2), eq(false));
     }
