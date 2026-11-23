@@ -851,4 +851,153 @@ class BoardDiscoveryServiceTest {
             assertThat(planOffsets.get(planId.toString())).isEqualTo(2);
         }
     }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void crossInstanceOffsetConsistencyPicksUpPostgresAdvancementWithoutStaleCache() throws Exception {
+        UUID planA = UUID.randomUUID();
+        UUID tokenA = UUID.randomUUID();
+
+        com.personal.jobagent.discovery.plan.SearchPlanRepository searchPlanRepo =
+                mock(com.personal.jobagent.discovery.plan.SearchPlanRepository.class);
+        when(searchPlanRepo.isLeaseOwner(any(), any())).thenReturn(true);
+
+        java.util.concurrent.atomic.AtomicReference<String> simulatedLastRun =
+                new java.util.concurrent.atomic.AtomicReference<>("{}");
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+
+        when(db.update(anyString(), any(Object[].class))).thenAnswer(inv -> {
+            String sql = inv.getArgument(0, String.class);
+            Object[] args = extractVarargs(inv);
+            if (sql.contains("jsonb_set") && sql.contains("plan_offsets")) {
+                String planId = String.valueOf(args[0]);
+                Integer offset = Integer.valueOf(String.valueOf(args[1]));
+                Map<String, Object> currentLastRun = mapper.readValue(simulatedLastRun.get(), Map.class);
+                Map<String, Object> planOffsets = (Map<String, Object>) currentLastRun.getOrDefault("plan_offsets", new java.util.HashMap<>());
+                planOffsets.put(planId, offset);
+                currentLastRun.put("plan_offsets", planOffsets);
+                simulatedLastRun.set(mapper.writeValueAsString(currentLastRun));
+            } else if (sql.contains("update job_sources set")) {
+                String lastRunJson = String.valueOf(args[0]);
+                Map<String, Object> currentLastRun = mapper.readValue(simulatedLastRun.get(), Map.class);
+                Map<String, Object> newLastRun = mapper.readValue(lastRunJson, Map.class);
+                if (currentLastRun.containsKey("plan_offsets")) {
+                    newLastRun.put("plan_offsets", currentLastRun.get("plan_offsets"));
+                }
+                simulatedLastRun.set(mapper.writeValueAsString(newLastRun));
+            }
+            return 1;
+        });
+
+        when(db.queryForList(contains("last_run->'plan_offsets'"), any(Object[].class))).thenAnswer(inv -> {
+            Object[] args = extractVarargs(inv);
+            String planId = String.valueOf(args[0]);
+            Map<String, Object> current = mapper.readValue(simulatedLastRun.get(), Map.class);
+            Map<String, Object> planOffsets = (Map<String, Object>) current.get("plan_offsets");
+            if (planOffsets != null && planOffsets.containsKey(planId)) {
+                return List.of(Map.of("plan_offset", String.valueOf(planOffsets.get(planId))));
+            }
+            // Row exists in job_sources, but plan_offsets has no entry for this plan yet
+            return List.of(new java.util.HashMap<String, Object>());
+        });
+
+        when(db.queryForList(contains("from job_source_observations"), eq(SOURCE))).thenReturn(List.of());
+
+        List<BoardAdapter.ListingEntry> entries = new ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            entries.add(full("job-" + i));
+        }
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(entries, 1, null);
+
+        // Instance A
+        BoardDiscoveryService instanceA = new BoardDiscoveryService(
+                db, ingestion, registry, kind -> http.client(), 50, 2, 3, 10);
+        instanceA.setSearchPlanRepository(searchPlanRepo);
+
+        // Instance B
+        BoardDiscoveryService instanceB = new BoardDiscoveryService(
+                db, ingestion, registry, kind -> http.client(), 50, 2, 3, 10);
+        instanceB.setSearchPlanRepository(searchPlanRepo);
+
+        // 1. Instance A reads offset (0), runs 2 jobs, and persists offset 2 to PostgreSQL.
+        // Instance A now has 2 in its local memory cache.
+        var reportA1 = instanceA.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), planA, tokenA, 2, 60000L);
+        assertThat(reportA1.counts().get("scan_offset")).isEqualTo(2);
+        assertThat(instanceA.getPersistedScanOffset(SOURCE, planA)).isEqualTo(2);
+
+        // 2. Instance B runs against the same plan and source.
+        // Instance B queries PostgreSQL, reads offset 2, runs 3 jobs, and advances offset to 5 in PostgreSQL.
+        var reportB1 = instanceB.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), planA, tokenA, 3, 60000L);
+        assertThat(reportB1.counts().get("scan_offset")).isEqualTo(5);
+        assertThat(instanceB.getPersistedScanOffset(SOURCE, planA)).isEqualTo(5);
+
+        // 3. Instance A executes AGAIN!
+        // Instance A had 2 in its local cache.
+        // PostgreSQL is the authoritative source: Instance A MUST NOT use stale cached 2!
+        // Instance A queries PostgreSQL, reads 5, runs 2 jobs, and advances to offset 7 in PostgreSQL.
+        var reportA2 = instanceA.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), planA, tokenA, 2, 60000L);
+        assertThat(reportA2.counts().get("scan_offset")).isEqualTo(7);
+        assertThat(instanceA.getPersistedScanOffset(SOURCE, planA)).isEqualTo(7);
+
+        // 4. Repeat after constructing fresh service instances
+        BoardDiscoveryService instanceC = new BoardDiscoveryService(
+                db, ingestion, registry, kind -> http.client(), 50, 2, 3, 10);
+        instanceC.setSearchPlanRepository(searchPlanRepo);
+        assertThat(instanceC.getPersistedScanOffset(SOURCE, planA)).isEqualTo(7);
+
+        var reportC = instanceC.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), planA, tokenA, 2, 60000L);
+        assertThat(reportC.counts().get("scan_offset")).isEqualTo(9);
+
+        BoardDiscoveryService instanceD = new BoardDiscoveryService(
+                db, ingestion, registry, kind -> http.client(), 50, 2, 3, 10);
+        instanceD.setSearchPlanRepository(searchPlanRepo);
+        assertThat(instanceD.getPersistedScanOffset(SOURCE, planA)).isEqualTo(9);
+
+        var reportD = instanceD.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), planA, tokenA, 2, 60000L);
+        assertThat(reportD.counts().get("scan_offset")).isEqualTo(11);
+        assertThat(instanceD.getPersistedScanOffset(SOURCE, planA)).isEqualTo(11);
+    }
+
+    @Test
+    void newlyCalculatedOffsetIsNotCachedIfPersistenceFails() {
+        UUID planA = UUID.randomUUID();
+        UUID tokenA = UUID.randomUUID();
+
+        com.personal.jobagent.discovery.plan.SearchPlanRepository searchPlanRepo =
+                mock(com.personal.jobagent.discovery.plan.SearchPlanRepository.class);
+        when(searchPlanRepo.isLeaseOwner(any(), any())).thenReturn(true);
+        service.setSearchPlanRepository(searchPlanRepo);
+
+        when(db.queryForList(contains("from job_source_observations"), eq(SOURCE))).thenReturn(List.of());
+
+        // Initial offset in DB is 0
+        when(db.queryForList(contains("last_run->'plan_offsets'"), any(Object[].class)))
+                .thenReturn(List.of(new java.util.HashMap<String, Object>()));
+
+        // Simulate database persistence failure
+        when(db.update(contains("update job_sources set"), any(Object[].class)))
+                .thenThrow(new org.springframework.dao.DataIntegrityViolationException("Database disk full"));
+
+        List<BoardAdapter.ListingEntry> entries = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            entries.add(full("job-" + i));
+        }
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(entries, 1, null);
+
+        // Execution fails during persistence
+        org.junit.jupiter.api.Assertions.assertThrows(
+                org.springframework.dao.DataIntegrityViolationException.class,
+                () -> service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                        Map.of(), planA, tokenA, 2, 60000L));
+
+        // Offset MUST NOT have been updated in local cache
+        assertThat(service.getPersistedScanOffset(SOURCE, planA)).isEqualTo(0);
+    }
 }

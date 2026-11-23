@@ -3,7 +3,10 @@ package com.personal.jobagent.discovery.plan;
 import com.personal.jobagent.common.MaintenanceModeService;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.discovery.JobDiscoveryService;
+import com.personal.jobagent.discovery.platform.BoardAdapter;
 import com.personal.jobagent.discovery.platform.BoardDiscoveryService;
+import com.personal.jobagent.discovery.platform.NormalizedJob;
+import com.personal.jobagent.discovery.platform.PlatformKind;
 import com.personal.jobagent.discovery.platform.PlatformRegistry;
 import com.personal.jobagent.jobs.JobMatchService;
 import com.personal.jobagent.preferences.PreferenceSetRecord;
@@ -22,6 +25,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.math.BigDecimal;
+import java.net.URI;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
@@ -715,15 +719,153 @@ public class SearchPlanConcurrencyAndRecoveryIT {
                 jdbcTemplate, jobDiscoveryService, new PlatformRegistry(50), 50, 150, 400, 3, 1500L, 10
         );
 
-        java.lang.reflect.Method getOffsetMethod = BoardDiscoveryService.class.getDeclaredMethod(
-                "getPersistedScanOffset", UUID.class, UUID.class);
-        getOffsetMethod.setAccessible(true);
-
-        int offsetA = (int) getOffsetMethod.invoke(freshInstance, sourceId, planA);
-        int offsetB = (int) getOffsetMethod.invoke(freshInstance, sourceId, planB);
+        int offsetA = freshInstance.getPersistedScanOffset(sourceId, planA);
+        int offsetB = freshInstance.getPersistedScanOffset(sourceId, planB);
 
         assertThat(offsetA).isEqualTo(50);
         assertThat(offsetB).isEqualTo(75);
+    }
+
+    @Test
+    @DisplayName("Cross-instance offset consistency: PostgreSQL authoritative read updates stale local cache, and finish() preserves plan_offsets")
+    void testCrossInstanceOffsetConsistencyAndProductionFinishPathAgainstPostgres() throws Exception {
+        UUID profileId = createTestProfile("cross-instance-consistency@example.com");
+
+        SearchPlanRecord planA = searchPlanRepository.create(new SearchPlanRecord(
+                UuidV7.generate(), profileId, "Plan A Cross Instance", List.of("Software Engineer"), Map.of(),
+                List.of("GREENHOUSE"), "DAILY", 50, true, null, Instant.now(), Instant.now()
+        ));
+        SearchPlanRecord planB = searchPlanRepository.create(new SearchPlanRecord(
+                UuidV7.generate(), profileId, "Plan B Cross Instance", List.of("Data Scientist"), Map.of(),
+                List.of("GREENHOUSE"), "DAILY", 50, true, null, Instant.now(), Instant.now()
+        ));
+
+        UUID tokenA1 = UUID.randomUUID();
+        assertThat(searchPlanRepository.claimExecutionLease(planA.id(), tokenA1, 60000L)).isTrue();
+
+        UUID sourceId = UuidV7.generate();
+        jdbcTemplate.update("""
+                INSERT INTO job_sources (id, kind, org_identifier, display_name, capabilities, policy, enabled, last_run)
+                VALUES (?, 'GREENHOUSE', 'cross-inst-org', 'Cross Instance Test Org', '{}'::jsonb, 'DISCOVERY_ONLY', true, '{"plan_offsets":{}}'::jsonb)
+                ON CONFLICT (kind, org_identifier) DO UPDATE SET last_run = '{"plan_offsets":{}}'::jsonb
+                """, sourceId);
+
+        // Prepare scripted adapter with 10 entries
+        List<BoardAdapter.ListingEntry> entries = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            NormalizedJob job = NormalizedJob.builder("job-" + i, "Role " + i)
+                    .description("Full job description for role " + i)
+                    .applicationUrl("https://boards.greenhouse.io/cross-inst-org/jobs/" + i)
+                    .sourceUrl("https://boards.greenhouse.io/cross-inst-org/jobs/" + i)
+                    .build();
+            entries.add(BoardAdapter.ListingEntry.complete(job));
+        }
+
+        BoardAdapter testAdapter = new BoardAdapter() {
+            @Override public PlatformKind kind() { return PlatformKind.GREENHOUSE; }
+            @Override public Optional<BoardRef> recognize(URI url) { return Optional.empty(); }
+            @Override public BoardRef parseIdentifier(String id) { return new BoardRef(kind(), id, Map.of()); }
+            @Override public ListingResult list(BoardRef board, CrawlContext context) {
+                return ListingResult.complete(entries, 1, "Acme Corp");
+            }
+            @Override public NormalizedJob detail(BoardRef board, ListingEntry entry, CrawlContext context) {
+                return entry.job();
+            }
+        };
+
+        // Instance A
+        BoardDiscoveryService serviceA = new BoardDiscoveryService(
+                jdbcTemplate, jobDiscoveryService, new PlatformRegistry(50), 50, 150, 400, 3, 1500L, 10
+        );
+        serviceA.setSearchPlanRepository(searchPlanRepository);
+        serviceA.setTransactionTemplate(new TransactionTemplate(transactionManager));
+
+        // Instance B
+        BoardDiscoveryService serviceB = new BoardDiscoveryService(
+                jdbcTemplate, jobDiscoveryService, new PlatformRegistry(50), 50, 150, 400, 3, 1500L, 10
+        );
+        serviceB.setSearchPlanRepository(searchPlanRepository);
+        serviceB.setTransactionTemplate(new TransactionTemplate(transactionManager));
+
+        // 1. Instance A executes Plan A (scans 2 jobs). Starts at 0 -> advances to 2.
+        // Production finish() persists plan_offsets: { planA: 2 } to PostgreSQL.
+        var reportA1 = serviceA.run(sourceId, testAdapter, "cross-inst-org", "Acme Corp",
+                BoardDiscoveryService.Mode.MANUAL, Map.of(), planA.id(), tokenA1, 2, 60000L);
+        assertThat(reportA1.ok()).isTrue();
+        assertThat(reportA1.counts().get("scan_offset")).isEqualTo(2);
+        assertThat(serviceA.getPersistedScanOffset(sourceId, planA.id())).isEqualTo(2);
+
+        // Verify in PostgreSQL: top-level last_run fields AND plan_offsets are written
+        Map<String, Object> dbRow1 = jdbcTemplate.queryForMap(
+                "SELECT last_run->'plan_offsets'->>? as offset_a, last_run->>'status' as status, last_run->>'mode' as mode FROM job_sources WHERE id = ?",
+                planA.id().toString(), sourceId);
+        assertThat(dbRow1.get("offset_a")).isEqualTo("2");
+        assertThat(dbRow1.get("status")).isEqualTo("ok");
+        assertThat(dbRow1.get("mode")).isEqualTo("MANUAL");
+
+        // 2. Instance B executes Plan A (renews/claims lease with tokenA2).
+        UUID tokenA2 = UUID.randomUUID();
+        jdbcTemplate.update("UPDATE search_plans SET execution_owner_token = ?, execution_lease_expires_at = clock_timestamp() + interval '1 minute' WHERE id = ?",
+                tokenA2, planA.id());
+
+        // Instance B queries PostgreSQL, reads offset 2, processes 3 jobs -> advances to 5.
+        // Production finish() persists plan_offsets: { planA: 5 } to PostgreSQL.
+        var reportB1 = serviceB.run(sourceId, testAdapter, "cross-inst-org", "Acme Corp",
+                BoardDiscoveryService.Mode.MANUAL, Map.of(), planA.id(), tokenA2, 3, 60000L);
+        assertThat(reportB1.ok()).isTrue();
+        assertThat(reportB1.counts().get("scan_offset")).isEqualTo(5);
+        assertThat(serviceB.getPersistedScanOffset(sourceId, planA.id())).isEqualTo(5);
+
+        // 3. Instance B executes Plan B (starts at 0, touches 5 known jobs 0..4, ingests 2 new jobs 5..6).
+        // Since 7 entries were inspected to reach maxResults budget (2), scan_offset advances to 7.
+        UUID tokenB1 = UUID.randomUUID();
+        assertThat(searchPlanRepository.claimExecutionLease(planB.id(), tokenB1, 60000L)).isTrue();
+
+        var reportB2 = serviceB.run(sourceId, testAdapter, "cross-inst-org", "Acme Corp",
+                BoardDiscoveryService.Mode.MANUAL, Map.of(), planB.id(), tokenB1, 2, 60000L);
+        assertThat(reportB2.ok()).isTrue();
+        assertThat(reportB2.counts().get("scan_offset")).isEqualTo(7);
+
+        // Verify in PostgreSQL: plan_offsets has BOTH planA: 5 AND planB: 7!
+        Map<String, Object> dbRow2 = jdbcTemplate.queryForMap("""
+                SELECT
+                    last_run->'plan_offsets'->>? as offset_a,
+                    last_run->'plan_offsets'->>? as offset_b
+                FROM job_sources WHERE id = ?
+                """, planA.id().toString(), planB.id().toString(), sourceId);
+        assertThat(dbRow2.get("offset_a")).isEqualTo("5");
+        assertThat(dbRow2.get("offset_b")).isEqualTo("7");
+
+        // 4. Instance A executes Plan A AGAIN!
+        // Instance A's local memory had cached 2!
+        // It MUST read the newer offset 5 from PostgreSQL (not 2)!
+        // Starting at 5, it touches known jobs 5..6 and ingests new jobs 7..8 (4 entries inspected -> advances to 9).
+        UUID tokenA3 = UUID.randomUUID();
+        jdbcTemplate.update("UPDATE search_plans SET execution_owner_token = ?, execution_lease_expires_at = clock_timestamp() + interval '1 minute' WHERE id = ?",
+                tokenA3, planA.id());
+
+        var reportA2 = serviceA.run(sourceId, testAdapter, "cross-inst-org", "Acme Corp",
+                BoardDiscoveryService.Mode.MANUAL, Map.of(), planA.id(), tokenA3, 2, 60000L);
+        assertThat(reportA2.ok()).isTrue();
+        assertThat(reportA2.counts().get("scan_offset")).isEqualTo(9);
+        assertThat(serviceA.getPersistedScanOffset(sourceId, planA.id())).isEqualTo(9);
+
+        // Verify in PostgreSQL that Plan B's offset is STILL 7 and Plan A's is now 9:
+        Map<String, Object> dbRow3 = jdbcTemplate.queryForMap("""
+                SELECT
+                    last_run->'plan_offsets'->>? as offset_a,
+                    last_run->'plan_offsets'->>? as offset_b
+                FROM job_sources WHERE id = ?
+                """, planA.id().toString(), planB.id().toString(), sourceId);
+        assertThat(dbRow3.get("offset_a")).isEqualTo("9");
+        assertThat(dbRow3.get("offset_b")).isEqualTo("7");
+
+        // 5. Repeat after constructing fresh service instance (simulating full server restart)
+        BoardDiscoveryService freshInstance2 = new BoardDiscoveryService(
+                jdbcTemplate, jobDiscoveryService, new PlatformRegistry(50), 50, 150, 400, 3, 1500L, 10
+        );
+        assertThat(freshInstance2.getPersistedScanOffset(sourceId, planA.id())).isEqualTo(9);
+        assertThat(freshInstance2.getPersistedScanOffset(sourceId, planB.id())).isEqualTo(7);
     }
 
     private UUID createTestProfile(String email) {

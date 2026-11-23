@@ -93,17 +93,13 @@ public class BoardDiscoveryService {
 
     private final java.util.concurrent.ConcurrentHashMap<String, Integer> scanOffsets = new java.util.concurrent.ConcurrentHashMap<>();
 
-    private int getPersistedScanOffset(UUID sourceId, UUID searchPlanId) {
+    public int getPersistedScanOffset(UUID sourceId, UUID searchPlanId) {
         if (sourceId == null) {
             return 0;
         }
         String memoryKey = (searchPlanId != null) ? searchPlanId + ":" + sourceId : sourceId.toString();
-        Integer cached = scanOffsets.get(memoryKey);
-        if (cached != null) {
-            return cached;
-        }
         if (db == null) {
-            return 0;
+            return scanOffsets.getOrDefault(memoryKey, 0);
         }
         try {
             if (searchPlanId != null) {
@@ -125,6 +121,8 @@ public class BoardDiscoveryService {
                         scanOffsets.put(memoryKey, offset);
                         return offset;
                     }
+                    scanOffsets.put(memoryKey, 0);
+                    return 0;
                 }
             } else {
                 List<Map<String, Object>> rows = db.queryForList(
@@ -137,12 +135,15 @@ public class BoardDiscoveryService {
                         scanOffsets.put(memoryKey, offset);
                         return offset;
                     }
+                    scanOffsets.put(memoryKey, 0);
+                    return 0;
                 }
             }
         } catch (Exception e) {
             log.debug("Could not read persisted scan offset for source {}: {}", sourceId, e.getMessage());
+            return scanOffsets.getOrDefault(memoryKey, 0);
         }
-        return 0;
+        return scanOffsets.getOrDefault(memoryKey, 0);
     }
 
     public void setSearchPlanRepository(SearchPlanRepository searchPlanRepository) {
@@ -242,9 +243,9 @@ public class BoardDiscoveryService {
         return run(sourceId, adapter, orgIdentifier, employer, mode, queryParams, searchPlanId, executionOwnerToken, null, null);
     }
 
-    SourceRunReport run(UUID sourceId, BoardAdapter adapter, String orgIdentifier, String employer, Mode mode,
-                        Map<String, String> queryParams, UUID searchPlanId, UUID executionOwnerToken,
-                        Integer maxResults, Long timeoutMs) {
+    public SourceRunReport run(UUID sourceId, BoardAdapter adapter, String orgIdentifier, String employer, Mode mode,
+                               Map<String, String> queryParams, UUID searchPlanId, UUID executionOwnerToken,
+                               Integer maxResults, Long timeoutMs) {
         String correlationId = UUID.randomUUID().toString();
         long started = System.nanoTime();
         Instant runStart = dbNow();
@@ -422,8 +423,6 @@ public class BoardDiscoveryService {
         if (searchPlanId != null) {
             counts.put("scan_offset_" + searchPlanId, nextOffset);
         }
-        String memoryKey = (searchPlanId != null) ? searchPlanId + ":" + sourceId : sourceId.toString();
-        scanOffsets.put(memoryKey, nextOffset);
 
         // Safe deletion guard:
         // A listing truncated by maxResults or timeout must NEVER remove or unlist active jobs.
@@ -693,6 +692,9 @@ public class BoardDiscoveryService {
         if (failure != null) health.put("error", failure.name() + (detail == null ? "" : ": " + truncate(detail)));
 
         Runnable persistAction = () -> {
+            if (db == null) {
+                return;
+            }
             if (ok) {
                 db.update("""
                         update job_sources set last_run_at = now(), last_attempted_at = now(), last_success_at = now(),
@@ -735,6 +737,12 @@ public class BoardDiscoveryService {
             transactionTemplate.executeWithoutResult(txStatus -> persistAction.run());
         } else {
             persistAction.run();
+        }
+
+        // Write newly calculated offset to local cache only after successful persistence
+        if (counts.containsKey("scan_offset")) {
+            String memoryKey = (searchPlanId != null) ? searchPlanId + ":" + sourceId : sourceId.toString();
+            scanOffsets.put(memoryKey, (Integer) counts.get("scan_offset"));
         }
 
         // V055 run history
