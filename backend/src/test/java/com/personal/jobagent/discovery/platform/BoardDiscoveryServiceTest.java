@@ -1032,27 +1032,156 @@ class BoardDiscoveryServiceTest {
                 () -> service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
                         Map.of(), planA, tokenA, 2, 60000L));
 
-        // Offset MUST NOT have been updated in local cache
+        // Offset MUST NOT have been updated in local cache (verified via reflection on in-memory map)
+        try {
+            java.lang.reflect.Field field = BoardDiscoveryService.class.getDeclaredField("scanOffsets");
+            field.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            Map<String, ?> memoryMap = (Map<String, ?>) field.get(service);
+            assertThat(memoryMap.get(planA + ":" + SOURCE)).isNotEqualTo(2);
+            assertThat(memoryMap.get(planA + ":" + SOURCE)).isEqualTo(0);
+        } catch (Exception e) {
+            org.junit.jupiter.api.Assertions.fail(e);
+        }
         assertThat(service.getPersistedScanOffset(SOURCE, planA)).isEqualTo(0);
     }
 
     @Test
-    void databaseReadFailureFailsClosedWithoutUsingStaleCache() {
-        UUID planId = UUID.randomUUID();
-        // Even if an offset was somehow cached in memory
-        when(db.queryForList(contains("last_run->'plan_offsets'"), any(Object[].class)))
-                .thenThrow(new org.springframework.jdbc.CannotGetJdbcConnectionException("DB Connection refused"));
+    @SuppressWarnings("unchecked")
+    void databaseReadFailureFailsClosedWithoutUsingStaleCache() throws Exception {
+        UUID planA = UUID.randomUUID();
+        UUID tokenA = UUID.randomUUID();
 
-        assertThatThrownBy(() -> service.getPersistedScanOffset(SOURCE, planId))
+        com.personal.jobagent.discovery.plan.SearchPlanRepository searchPlanRepo =
+                mock(com.personal.jobagent.discovery.plan.SearchPlanRepository.class);
+        when(searchPlanRepo.isLeaseOwner(any(), any())).thenReturn(true);
+
+        java.util.concurrent.atomic.AtomicReference<String> simulatedLastRun =
+                new java.util.concurrent.atomic.AtomicReference<>("{}");
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+
+        java.util.concurrent.atomic.AtomicBoolean failDatabaseReads =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+
+        when(db.update(anyString(), any(Object[].class))).thenAnswer(inv -> {
+            String sql = inv.getArgument(0, String.class);
+            Object[] args = extractVarargs(inv);
+            if (sql.contains("jsonb_set") && sql.contains("plan_offsets")) {
+                String planId = String.valueOf(args[0]);
+                Integer offset = Integer.valueOf(String.valueOf(args[1]));
+                Map<String, Object> currentLastRun = mapper.readValue(simulatedLastRun.get(), Map.class);
+                Map<String, Object> planOffsets = (Map<String, Object>) currentLastRun.getOrDefault("plan_offsets", new java.util.HashMap<>());
+                planOffsets.put(planId, offset);
+                currentLastRun.put("plan_offsets", planOffsets);
+                simulatedLastRun.set(mapper.writeValueAsString(currentLastRun));
+            } else if (sql.contains("update job_sources set")) {
+                String lastRunJson = String.valueOf(args[0]);
+                Map<String, Object> currentLastRun = mapper.readValue(simulatedLastRun.get(), Map.class);
+                Map<String, Object> newLastRun = mapper.readValue(lastRunJson, Map.class);
+                if (currentLastRun.containsKey("plan_offsets")) {
+                    newLastRun.put("plan_offsets", currentLastRun.get("plan_offsets"));
+                }
+                simulatedLastRun.set(mapper.writeValueAsString(newLastRun));
+            }
+            return 1;
+        });
+
+        when(db.queryForList(contains("last_run->'plan_offsets'"), any(Object[].class))).thenAnswer(inv -> {
+            if (failDatabaseReads.get()) {
+                throw new org.springframework.jdbc.CannotGetJdbcConnectionException("PostgreSQL connection refused");
+            }
+            Object[] args = extractVarargs(inv);
+            String planId = String.valueOf(args[0]);
+            Map<String, Object> current = mapper.readValue(simulatedLastRun.get(), Map.class);
+            Map<String, Object> planOffsets = (Map<String, Object>) current.get("plan_offsets");
+            if (planOffsets != null && planOffsets.containsKey(planId)) {
+                return List.of(Map.of("plan_offset", String.valueOf(planOffsets.get(planId))));
+            }
+            return List.of(new java.util.HashMap<String, Object>());
+        });
+
+        when(db.queryForList(contains("select last_run->>'scan_offset'"), eq(SOURCE))).thenAnswer(inv -> {
+            if (failDatabaseReads.get()) {
+                throw new org.springframework.jdbc.CannotGetJdbcConnectionException("PostgreSQL connection refused");
+            }
+            return List.of(new java.util.HashMap<String, Object>());
+        });
+
+        when(db.queryForList(contains("from job_source_observations"), eq(SOURCE))).thenReturn(List.of());
+
+        List<BoardAdapter.ListingEntry> entries = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            entries.add(full("job-" + i));
+        }
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(entries, 1, null);
+
+        // Instance A
+        BoardDiscoveryService instanceA = new BoardDiscoveryService(
+                db, ingestion, registry, kind -> http.client(), 50, 2, 3, 10);
+        instanceA.setSearchPlanRepository(searchPlanRepo);
+
+        // Instance B
+        BoardDiscoveryService instanceB = new BoardDiscoveryService(
+                db, ingestion, registry, kind -> http.client(), 50, 2, 3, 10);
+        instanceB.setSearchPlanRepository(searchPlanRepo);
+
+        // 1. Instance A reads offset (starts at 0), runs 2 jobs, and persists offset 2 to PostgreSQL.
+        var reportA1 = instanceA.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), planA, tokenA, 2, 60000L);
+        assertThat(reportA1.counts().get("scan_offset")).isEqualTo(2);
+
+        // 2. Instance A now has 2 cached locally in its in-memory scanOffsets map.
+        // Reading it through getPersistedScanOffset returns 2 while DB is healthy.
+        assertThat(instanceA.getPersistedScanOffset(SOURCE, planA)).isEqualTo(2);
+
+        // 3. Instance B runs against the same plan and source, reads offset 2, runs 3 jobs,
+        // and advances the persisted database offset to 5 in PostgreSQL.
+        var reportB1 = instanceB.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), planA, tokenA, 3, 60000L);
+        assertThat(reportB1.counts().get("scan_offset")).isEqualTo(5);
+        assertThat(instanceB.getPersistedScanOffset(SOURCE, planA)).isEqualTo(5);
+
+        // Instance A still has stale offset 2 cached locally in memory!
+        // Simulated PostgreSQL currently holds offset 5.
+
+        // 4. PostgreSQL now fails with a connection exception on next read.
+        failDatabaseReads.set(true);
+
+        // 5, 6, 7. Instance A attempts another read of the scan offset:
+        // Because PostgreSQL is authoritative, Instance A MUST query PostgreSQL.
+        // When the query throws CannotGetJdbcConnectionException, it MUST NOT fall back
+        // to its local cached offset of 2. It must fail closed and throw IllegalStateException!
+        assertThatThrownBy(() -> instanceA.getPersistedScanOffset(SOURCE, planA))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("database query failure; failing closed")
                 .hasCauseInstanceOf(org.springframework.jdbc.CannotGetJdbcConnectionException.class);
 
-        // Also test default offset query failure
-        when(db.queryForList(contains("select last_run->>'scan_offset'"), eq(SOURCE)))
-                .thenThrow(new org.springframework.jdbc.CannotGetJdbcConnectionException("DB Connection refused"));
+        // 8. Instance A attempts another execution:
+        // run() must fail immediately when attempting to read the initial scan offset.
+        org.mockito.Mockito.clearInvocations(ingestion);
+        org.mockito.Mockito.clearInvocations(db);
+        a.detailed.clear();
 
-        assertThatThrownBy(() -> service.getPersistedScanOffset(SOURCE, null))
+        assertThatThrownBy(() -> instanceA.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), planA, tokenA, 2, 60000L))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("database query failure; failing closed")
+                .hasCauseInstanceOf(org.springframework.jdbc.CannotGetJdbcConnectionException.class);
+
+        // Verify that NO jobs were detailed or ingested, and NO database update/write occurred
+        assertThat(a.detailed).isEmpty();
+        verify(ingestion, never()).ingestJob(any());
+        verify(ingestion, never()).ingestJob(any(), any(), any());
+        verify(db, never()).update(anyString(), any(Object[].class));
+
+        // Verify the persisted database state still holds offset 5 (unchanged, never overwritten)
+        failDatabaseReads.set(false);
+        assertThat(instanceB.getPersistedScanOffset(SOURCE, planA)).isEqualTo(5);
+
+        // Also verify default offset (null searchPlanId) read failure fails closed
+        failDatabaseReads.set(true);
+        assertThatThrownBy(() -> instanceA.getPersistedScanOffset(SOURCE, null))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("database query failure; failing closed")
                 .hasCauseInstanceOf(org.springframework.jdbc.CannotGetJdbcConnectionException.class);
@@ -1108,6 +1237,23 @@ class BoardDiscoveryServiceTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("is not a valid integer (failing closed)")
                 .hasCauseInstanceOf(NumberFormatException.class);
+
+        // 3. Negative offset fails closed
+        when(db.queryForList(contains("last_run->'plan_offsets'"), any(Object[].class)))
+                .thenReturn(List.of(Map.of("plan_offset", "-1")));
+
+        assertThatThrownBy(() -> service.getPersistedScanOffset(SOURCE, planId))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Negative persisted scan offset")
+                .hasMessageContaining("is invalid (failing closed)");
+
+        when(db.queryForList(contains("select last_run->>'scan_offset'"), eq(SOURCE)))
+                .thenReturn(List.of(Map.of("default_offset", "-5")));
+
+        assertThatThrownBy(() -> service.getPersistedScanOffset(SOURCE, null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Negative persisted scan offset")
+                .hasMessageContaining("is invalid (failing closed)");
     }
 
     @Test
@@ -1122,6 +1268,20 @@ class BoardDiscoveryServiceTest {
 
         int offset = service.getPersistedScanOffset(SOURCE, planId);
         assertThat(offset).isEqualTo(42);
+    }
+
+    @Test
+    void planOffsetTakesPrecedenceOverLegacyPlanOffset() {
+        UUID planId = UUID.randomUUID();
+        Map<String, Object> row = new java.util.HashMap<>();
+        row.put("plan_offset", "10");
+        row.put("legacy_plan_offset", "42");
+
+        when(db.queryForList(contains("last_run->'plan_offsets'"), any(Object[].class)))
+                .thenReturn(List.of(row));
+
+        int offset = service.getPersistedScanOffset(SOURCE, planId);
+        assertThat(offset).isEqualTo(10);
     }
 
     @Test

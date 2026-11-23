@@ -912,6 +912,23 @@ public class SearchPlanConcurrencyAndRecoveryIT {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("is not a valid integer (failing closed)")
                 .hasCauseInstanceOf(NumberFormatException.class);
+
+        // 3. Negative offset in PostgreSQL fails closed
+        jdbcTemplate.update("""
+                UPDATE job_sources
+                SET last_run = jsonb_build_object('plan_offsets', jsonb_build_object(?, -5), 'scan_offset', -1)
+                WHERE id = ?
+                """, planId.toString(), sourceId);
+
+        assertThatThrownBy(() -> service.getPersistedScanOffset(sourceId, planId))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Negative persisted scan offset")
+                .hasMessageContaining("is invalid (failing closed)");
+
+        assertThatThrownBy(() -> service.getPersistedScanOffset(sourceId, null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Negative persisted scan offset")
+                .hasMessageContaining("is invalid (failing closed)");
     }
 
     private UUID createTestProfile(String email) {

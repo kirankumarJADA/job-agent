@@ -144,6 +144,10 @@ public class BoardDiscoveryService {
         if (val != null) {
             try {
                 int offset = Integer.parseInt(String.valueOf(val));
+                if (offset < 0) {
+                    throw new IllegalStateException("Negative persisted scan offset for source " + sourceId
+                            + ": " + offset + " is invalid (failing closed)");
+                }
                 scanOffsets.put(memoryKey, offset);
                 return offset;
             } catch (NumberFormatException e) {
