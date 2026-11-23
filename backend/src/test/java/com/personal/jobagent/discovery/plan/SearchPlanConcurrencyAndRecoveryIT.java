@@ -639,6 +639,93 @@ public class SearchPlanConcurrencyAndRecoveryIT {
         assertThat(due).anyMatch(p -> p.id().equals(plan.id()));
     }
 
+    @Test
+    @DisplayName("Task 4: Concurrent Search Plans preserve independent scan offsets in PostgreSQL without overwriting")
+    void testConcurrentSearchPlansPreserveIndependentScanOffsetsInRealPostgres() throws Exception {
+        UUID sourceId = UuidV7.generate();
+        jdbcTemplate.update("""
+                INSERT INTO job_sources (id, kind, org_identifier, display_name, capabilities, policy, enabled, last_run)
+                VALUES (?, 'GREENHOUSE', 'concurrent-offset-test', 'MOCK_SOURCE', '{}'::jsonb, 'DISCOVERY_ONLY', true, '{}'::jsonb)
+                ON CONFLICT (kind, org_identifier) DO NOTHING
+                """, sourceId);
+
+        UUID planA = UuidV7.generate();
+        UUID planB = UuidV7.generate();
+
+        int numThreads = 2;
+        ExecutorService executor = Executors.newFixedThreadPool(numThreads);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(numThreads);
+
+        // Thread 1: Plan A updates offset to 50
+        executor.submit(() -> {
+            try {
+                startLatch.await();
+                jdbcTemplate.update("""
+                        UPDATE job_sources SET
+                            last_run = jsonb_set(
+                                coalesce(last_run, '{}'::jsonb),
+                                '{plan_offsets}',
+                                coalesce(last_run->'plan_offsets', '{}'::jsonb) || jsonb_build_object(?::text, ?::int)
+                            )
+                        WHERE id = ?
+                        """, planA.toString(), 50, sourceId);
+            } catch (Exception ignored) {
+            } finally {
+                doneLatch.countDown();
+            }
+        });
+
+        // Thread 2: Plan B updates offset to 75
+        executor.submit(() -> {
+            try {
+                startLatch.await();
+                jdbcTemplate.update("""
+                        UPDATE job_sources SET
+                            last_run = jsonb_set(
+                                coalesce(last_run, '{}'::jsonb),
+                                '{plan_offsets}',
+                                coalesce(last_run->'plan_offsets', '{}'::jsonb) || jsonb_build_object(?::text, ?::int)
+                            )
+                        WHERE id = ?
+                        """, planB.toString(), 75, sourceId);
+            } catch (Exception ignored) {
+            } finally {
+                doneLatch.countDown();
+            }
+        });
+
+        startLatch.countDown();
+        assertThat(doneLatch.await(5, TimeUnit.SECONDS)).isTrue();
+        executor.shutdown();
+
+        // 1. Verify in real PostgreSQL that both plan offsets are persisted
+        Map<String, Object> row = jdbcTemplate.queryForMap("""
+                SELECT
+                    last_run->'plan_offsets'->>? as offset_a,
+                    last_run->'plan_offsets'->>? as offset_b
+                FROM job_sources WHERE id = ?
+                """, planA.toString(), planB.toString(), sourceId);
+
+        assertThat(row.get("offset_a")).isEqualTo("50");
+        assertThat(row.get("offset_b")).isEqualTo("75");
+
+        // 2. Verify a fresh BoardDiscoveryService instance (application restart) reads both offsets independently
+        BoardDiscoveryService freshInstance = new BoardDiscoveryService(
+                jdbcTemplate, jobDiscoveryService, new PlatformRegistry(50), 50, 150, 400, 3, 1500L, 10
+        );
+
+        java.lang.reflect.Method getOffsetMethod = BoardDiscoveryService.class.getDeclaredMethod(
+                "getPersistedScanOffset", UUID.class, UUID.class);
+        getOffsetMethod.setAccessible(true);
+
+        int offsetA = (int) getOffsetMethod.invoke(freshInstance, sourceId, planA);
+        int offsetB = (int) getOffsetMethod.invoke(freshInstance, sourceId, planB);
+
+        assertThat(offsetA).isEqualTo(50);
+        assertThat(offsetB).isEqualTo(75);
+    }
+
     private UUID createTestProfile(String email) {
         UUID userId = UuidV7.generate();
         UUID profileId = UuidV7.generate();

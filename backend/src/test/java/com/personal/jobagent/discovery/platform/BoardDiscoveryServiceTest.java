@@ -47,6 +47,8 @@ class BoardDiscoveryServiceTest {
         service = new BoardDiscoveryService(db, ingestion, registry, factory, 50, 2, 3, 10);
         when(ingestion.ingestJob(any())).thenAnswer(inv -> new JobDiscoveryService.IngestResult(
                 UUID.randomUUID(), "INSERTED", "d", "h"));
+        when(ingestion.ingestJob(any(), any(), any())).thenAnswer(inv -> new JobDiscoveryService.IngestResult(
+                UUID.randomUUID(), "INSERTED", "d", "h"));
     }
 
     private void sourceRow(String kind, String org, boolean enabled, String policy) {
@@ -617,7 +619,7 @@ class BoardDiscoveryServiceTest {
     @Test
     void persistentScanOffsetSurvivesDatabaseReloadViaLastRunJson() {
         // Mock DB returning persisted scan_offset = 2000 from job_sources.last_run
-        when(db.queryForList(contains("select last_run->>"), eq("scan_offset"), eq(SOURCE)))
+        when(db.queryForList(contains("select last_run->>'scan_offset'"), eq(SOURCE)))
                 .thenReturn(List.of(Map.of("default_offset", "2000")));
 
         List<BoardAdapter.ListingEntry> entries = new ArrayList<>();
@@ -640,5 +642,213 @@ class BoardDiscoveryServiceTest {
         assertThat(a.detailed).containsExactly("job-2000", "job-2001");
         assertThat(report.counts().get("created")).isEqualTo(2);
         assertThat(report.counts().get("scan_offset")).isEqualTo(2002);
+    }
+
+    private static Object[] extractVarargs(org.mockito.invocation.InvocationOnMock inv) {
+        Object[] all = inv.getArguments();
+        if (all.length == 2 && all[1] instanceof Object[] varargs) {
+            return varargs;
+        }
+        Object[] varargs = new Object[all.length - 1];
+        System.arraycopy(all, 1, varargs, 0, varargs.length);
+        return varargs;
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void alternatingSearchPlansPersistIndependentScanOffsetsAcrossRestarts() throws Exception {
+        UUID planA = UUID.randomUUID();
+        UUID tokenA = UUID.randomUUID();
+        UUID planB = UUID.randomUUID();
+        UUID tokenB = UUID.randomUUID();
+
+        com.personal.jobagent.discovery.plan.SearchPlanRepository searchPlanRepo =
+                mock(com.personal.jobagent.discovery.plan.SearchPlanRepository.class);
+        when(searchPlanRepo.isLeaseOwner(any(), any())).thenReturn(true);
+        service.setSearchPlanRepository(searchPlanRepo);
+
+        List<BoardAdapter.ListingEntry> entries = new ArrayList<>();
+        for (int i = 0; i < 2500; i++) {
+            entries.add(full("job-" + i));
+        }
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(entries, 1, null);
+        when(db.queryForList(contains("from job_source_observations"), eq(SOURCE))).thenReturn(List.of());
+
+        // Simulated persistent database column job_sources.last_run JSON
+        java.util.concurrent.atomic.AtomicReference<String> simulatedLastRun =
+                new java.util.concurrent.atomic.AtomicReference<>("{}");
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+
+        // Simulate PostgreSQL atomic JSONB update for job_sources:
+        when(db.update(anyString(), any(Object[].class))).thenAnswer(inv -> {
+            String sql = inv.getArgument(0, String.class);
+            Object[] args = extractVarargs(inv);
+            if (sql.contains("jsonb_set") && sql.contains("plan_offsets")) {
+                String planId = String.valueOf(args[0]);
+                Integer offset = Integer.valueOf(String.valueOf(args[1]));
+                Map<String, Object> currentLastRun = mapper.readValue(simulatedLastRun.get(), Map.class);
+                Map<String, Object> planOffsets = (Map<String, Object>) currentLastRun.getOrDefault("plan_offsets", new java.util.HashMap<>());
+                planOffsets.put(planId, offset);
+                currentLastRun.put("plan_offsets", planOffsets);
+                simulatedLastRun.set(mapper.writeValueAsString(currentLastRun));
+            } else if (sql.contains("update job_sources set")) {
+                String lastRunJson = String.valueOf(args[0]);
+                Map<String, Object> currentLastRun = mapper.readValue(simulatedLastRun.get(), Map.class);
+                Map<String, Object> newLastRun = mapper.readValue(lastRunJson, Map.class);
+                if (currentLastRun.containsKey("plan_offsets")) {
+                    newLastRun.put("plan_offsets", currentLastRun.get("plan_offsets"));
+                }
+                simulatedLastRun.set(mapper.writeValueAsString(newLastRun));
+            }
+            return 1;
+        });
+
+        // Simulate PostgreSQL reading per-plan offset from last_run->'plan_offsets'->>?
+        when(db.queryForList(contains("last_run->'plan_offsets'"), any(Object[].class))).thenAnswer(inv -> {
+            Object[] args = extractVarargs(inv);
+            String planId = String.valueOf(args[0]);
+            Map<String, Object> current = mapper.readValue(simulatedLastRun.get(), Map.class);
+            Map<String, Object> planOffsets = (Map<String, Object>) current.get("plan_offsets");
+            if (planOffsets != null && planOffsets.containsKey(planId)) {
+                return List.of(Map.of("plan_offset", String.valueOf(planOffsets.get(planId))));
+            }
+            return List.of();
+        });
+
+        // Run 1: Plan A scans 2 jobs (starts at 0 -> saves offset 2)
+        var reportA1 = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), planA, tokenA, 2, 60000L);
+        assertThat(reportA1.counts().get("scan_offset")).isEqualTo(2);
+
+        // Run 2: Plan B scans 3 jobs (starts at 0 -> saves offset 3)
+        var reportB1 = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), planB, tokenB, 3, 60000L);
+        assertThat(reportB1.counts().get("scan_offset")).isEqualTo(3);
+
+        // SIMULATE APPLICATION RESTART:
+        // A fresh service instance has completely empty in-memory scanOffsets cache.
+        BoardDiscoveryService freshInstance = new BoardDiscoveryService(
+                db, ingestion, registry, kind -> http.client(), 50, 2, 3, 10);
+        freshInstance.setSearchPlanRepository(searchPlanRepo);
+
+        // Run 3: Plan A runs again on fresh instance.
+        // It must NOT be overwritten by Plan B's offset (3)!
+        // It must resume at its own saved offset (2) and scan 2 jobs (offset becomes 4).
+        a.detailed.clear();
+        var reportA2 = freshInstance.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), planA, tokenA, 2, 60000L);
+        assertThat(reportA2.counts().get("scan_offset")).isEqualTo(4);
+
+        // Run 4: Plan B runs again on fresh instance.
+        // It must resume at its own saved offset (3) and scan 2 jobs (offset becomes 5).
+        a.detailed.clear();
+        var reportB2 = freshInstance.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), planB, tokenB, 2, 60000L);
+        assertThat(reportB2.counts().get("scan_offset")).isEqualTo(5);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void concurrentPlanOffsetUpdatesAgainstSameSourceDoNotRace() throws Exception {
+        int threadCount = 8;
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(threadCount);
+        java.util.concurrent.CountDownLatch readyLatch = new java.util.concurrent.CountDownLatch(threadCount);
+        java.util.concurrent.CountDownLatch startLatch = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<String> simulatedLastRun =
+                new java.util.concurrent.atomic.AtomicReference<>("{}");
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+
+        com.personal.jobagent.discovery.plan.SearchPlanRepository searchPlanRepo =
+                mock(com.personal.jobagent.discovery.plan.SearchPlanRepository.class);
+        when(searchPlanRepo.isLeaseOwner(any(), any())).thenReturn(true);
+        service.setSearchPlanRepository(searchPlanRepo);
+
+        when(db.update(anyString(), any(Object[].class))).thenAnswer(inv -> {
+            synchronized (simulatedLastRun) {
+                String sql = inv.getArgument(0, String.class);
+                Object[] args = extractVarargs(inv);
+                if (sql.contains("jsonb_set") && sql.contains("plan_offsets")) {
+                    String planId = String.valueOf(args[0]);
+                    Integer offset = Integer.valueOf(String.valueOf(args[1]));
+                    Map<String, Object> currentLastRun = mapper.readValue(simulatedLastRun.get(), Map.class);
+                    Map<String, Object> planOffsets = (Map<String, Object>) currentLastRun.getOrDefault("plan_offsets", new java.util.HashMap<>());
+                    planOffsets.put(planId, offset);
+                    currentLastRun.put("plan_offsets", planOffsets);
+                    simulatedLastRun.set(mapper.writeValueAsString(currentLastRun));
+                } else if (sql.contains("update job_sources set")) {
+                    String lastRunJson = String.valueOf(args[0]);
+                    Map<String, Object> currentLastRun = mapper.readValue(simulatedLastRun.get(), Map.class);
+                    Map<String, Object> newLastRun = mapper.readValue(lastRunJson, Map.class);
+                    if (currentLastRun.containsKey("plan_offsets")) {
+                        newLastRun.put("plan_offsets", currentLastRun.get("plan_offsets"));
+                    }
+                    simulatedLastRun.set(mapper.writeValueAsString(newLastRun));
+                }
+                return 1;
+            }
+        });
+
+        when(db.queryForList(contains("last_run->'plan_offsets'"), any(Object[].class))).thenAnswer(inv -> {
+            synchronized (simulatedLastRun) {
+                Object[] args = extractVarargs(inv);
+                String planId = String.valueOf(args[0]);
+                Map<String, Object> current = mapper.readValue(simulatedLastRun.get(), Map.class);
+                Map<String, Object> planOffsets = (Map<String, Object>) current.get("plan_offsets");
+                if (planOffsets != null && planOffsets.containsKey(planId)) {
+                    return List.of(Map.of("plan_offset", String.valueOf(planOffsets.get(planId))));
+                }
+                return List.of();
+            }
+        });
+
+        when(db.queryForList(contains("from job_source_observations"), eq(SOURCE))).thenReturn(List.of());
+
+        List<BoardAdapter.ListingEntry> entries = new ArrayList<>();
+        for (int i = 0; i < 1000; i++) {
+            entries.add(full("job-" + i));
+        }
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(entries, 1, null);
+
+        List<UUID> planIds = new ArrayList<>();
+        List<UUID> ownerTokens = new ArrayList<>();
+        for (int i = 0; i < threadCount; i++) {
+            planIds.add(UUID.randomUUID());
+            ownerTokens.add(UUID.randomUUID());
+        }
+
+        List<java.util.concurrent.Future<BoardDiscoveryService.SourceRunReport>> futures = new ArrayList<>();
+        for (int i = 0; i < threadCount; i++) {
+            final UUID planId = planIds.get(i);
+            final UUID token = ownerTokens.get(i);
+            futures.add(executor.submit(() -> {
+                readyLatch.countDown();
+                startLatch.await();
+                return service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                        Map.of(), planId, token, 2, 60000L);
+            }));
+        }
+
+        readyLatch.await(5, java.util.concurrent.TimeUnit.SECONDS);
+        startLatch.countDown();
+
+        for (var future : futures) {
+            BoardDiscoveryService.SourceRunReport report = future.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(report.ok()).isTrue();
+            assertThat(report.counts().get("scan_offset")).isEqualTo(2);
+        }
+
+        executor.shutdown();
+        assertThat(executor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+
+        // Verify that in simulated DB, all 8 plan offsets were durably recorded without being lost
+        Map<String, Object> finalLastRun = mapper.readValue(simulatedLastRun.get(), Map.class);
+        Map<String, Object> planOffsets = (Map<String, Object>) finalLastRun.get("plan_offsets");
+        assertThat(planOffsets).hasSize(threadCount);
+        for (UUID planId : planIds) {
+            assertThat(planOffsets).containsKey(planId.toString());
+            assertThat(planOffsets.get(planId.toString())).isEqualTo(2);
+        }
     }
 }

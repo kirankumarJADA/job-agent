@@ -106,19 +106,37 @@ public class BoardDiscoveryService {
             return 0;
         }
         try {
-            String col = (searchPlanId != null) ? "scan_offset_" + searchPlanId : "scan_offset";
-            List<Map<String, Object>> rows = db.queryForList(
-                    "select last_run->>? as plan_offset, last_run->>'scan_offset' as default_offset from job_sources where id = ?",
-                    col, sourceId);
-            if (!rows.isEmpty()) {
-                Object val = rows.get(0).get("plan_offset");
-                if (val == null) {
-                    val = rows.get(0).get("default_offset");
+            if (searchPlanId != null) {
+                String planIdStr = searchPlanId.toString();
+                String legacyKey = "scan_offset_" + searchPlanId;
+                List<Map<String, Object>> rows = db.queryForList("""
+                        select
+                            last_run->'plan_offsets'->>? as plan_offset,
+                            last_run->>? as legacy_plan_offset
+                        from job_sources where id = ?
+                        """, planIdStr, legacyKey, sourceId);
+                if (!rows.isEmpty()) {
+                    Object val = rows.get(0).get("plan_offset");
+                    if (val == null) {
+                        val = rows.get(0).get("legacy_plan_offset");
+                    }
+                    if (val != null) {
+                        int offset = Integer.parseInt(String.valueOf(val));
+                        scanOffsets.put(memoryKey, offset);
+                        return offset;
+                    }
                 }
-                if (val != null) {
-                    int offset = Integer.parseInt(String.valueOf(val));
-                    scanOffsets.put(memoryKey, offset);
-                    return offset;
+            } else {
+                List<Map<String, Object>> rows = db.queryForList(
+                        "select last_run->>'scan_offset' as default_offset from job_sources where id = ?",
+                        sourceId);
+                if (!rows.isEmpty()) {
+                    Object val = rows.get(0).get("default_offset");
+                    if (val != null) {
+                        int offset = Integer.parseInt(String.valueOf(val));
+                        scanOffsets.put(memoryKey, offset);
+                        return offset;
+                    }
                 }
             }
         } catch (Exception e) {
@@ -244,7 +262,7 @@ public class BoardDiscoveryService {
             }
         } catch (BoardConfigException e) {
             return finish(sourceId, kind, correlationId, started, counts, ingested, false,
-                    FailureCategory.CONFIGURATION, e.getMessage(), mode);
+                    FailureCategory.CONFIGURATION, e.getMessage(), mode, searchPlanId);
         }
 
         long deadlineNanos = (timeoutMs != null && timeoutMs > 0)
@@ -265,7 +283,7 @@ public class BoardDiscoveryService {
         // Pre-request deadline check
         if (System.nanoTime() >= deadlineNanos) {
             return finish(sourceId, kind, correlationId, started, counts, ingested, false,
-                    FailureCategory.TIMEOUT, "Execution timed out before listing request (" + timeoutMs + "ms)", mode);
+                    FailureCategory.TIMEOUT, "Execution timed out before listing request (" + timeoutMs + "ms)", mode, searchPlanId);
         }
 
         BoardAdapter.ListingResult listing;
@@ -288,7 +306,7 @@ public class BoardDiscoveryService {
             log.warn("Search plan {} source {} exceeded timeout ({}ms) during listing request",
                     searchPlanId, sourceId, timeoutMs);
             return finish(sourceId, kind, correlationId, started, counts, ingested, false,
-                    FailureCategory.TIMEOUT, "Source execution exceeded timeout (" + timeoutMs + "ms) during listing", mode);
+                    FailureCategory.TIMEOUT, "Source execution exceeded timeout (" + timeoutMs + "ms)", mode, searchPlanId);
         }
 
         // Fail-closed fencing guard: verify lease ownership before performing any ingestion writes
@@ -431,7 +449,7 @@ public class BoardDiscoveryService {
         }
 
         return finish(sourceId, kind, correlationId, started, counts, ingested, isComplete,
-                failureCat, failureDetail, mode);
+                failureCat, failureDetail, mode, searchPlanId);
     }
 
     private JobDiscoveryService.IngestResult ingest(UUID sourceId, PlatformKind kind, NormalizedJob job, String employer,
@@ -650,6 +668,13 @@ public class BoardDiscoveryService {
     private SourceRunReport finish(UUID sourceId, PlatformKind kind, String correlationId, long startedNanos,
                                    Map<String, Object> counts, List<JobDiscoveryService.IngestResult> ingested,
                                    boolean complete, FailureCategory failure, String detail, Mode mode) {
+        return finish(sourceId, kind, correlationId, startedNanos, counts, ingested, complete, failure, detail, mode, null);
+    }
+
+    private SourceRunReport finish(UUID sourceId, PlatformKind kind, String correlationId, long startedNanos,
+                                   Map<String, Object> counts, List<JobDiscoveryService.IngestResult> ingested,
+                                   boolean complete, FailureCategory failure, String detail, Mode mode,
+                                   UUID searchPlanId) {
         long durationMs = Duration.ofNanos(System.nanoTime() - startedNanos).toMillis();
         counts.put("duration_ms", durationMs);
         counts.put("complete", complete);
@@ -666,27 +691,50 @@ public class BoardDiscoveryService {
         health.put("checked_at", Instant.now().toString());
         health.put("detail", summary(counts));
         if (failure != null) health.put("error", failure.name() + (detail == null ? "" : ": " + truncate(detail)));
-        if (ok) {
-            db.update("""
-                    update job_sources set last_run_at = now(), last_attempted_at = now(), last_success_at = now(),
-                        failure_streak = 0, last_run = ?::jsonb,
-                        health = ?::jsonb || jsonb_build_object('failure_streak', 0, 'circuit', 'closed'),
-                        health_status = 'HEALTHY', consecutive_failures = 0, last_successful_run_at = now(), error_summary = null
-                    where id = ?
-                    """, lastRunJson, toJson(health), sourceId);
+
+        Runnable persistAction = () -> {
+            if (ok) {
+                db.update("""
+                        update job_sources set last_run_at = now(), last_attempted_at = now(), last_success_at = now(),
+                            failure_streak = 0,
+                            last_run = ?::jsonb || jsonb_build_object('plan_offsets', coalesce(last_run->'plan_offsets', '{}'::jsonb)),
+                            health = ?::jsonb || jsonb_build_object('failure_streak', 0, 'circuit', 'closed'),
+                            health_status = 'HEALTHY', consecutive_failures = 0, last_successful_run_at = now(), error_summary = null
+                        where id = ?
+                        """, lastRunJson, toJson(health), sourceId);
+            } else {
+                String errSummary = failure.name() + (detail == null ? "" : ": " + truncate(detail));
+                db.update("""
+                        update job_sources set last_run_at = now(), last_attempted_at = now(),
+                            failure_streak = failure_streak + 1,
+                            last_run = ?::jsonb || jsonb_build_object('plan_offsets', coalesce(last_run->'plan_offsets', '{}'::jsonb)),
+                            health = ?::jsonb || jsonb_build_object('failure_streak', failure_streak + 1,
+                                'circuit', case when failure_streak + 1 >= %d then 'open' else 'closed' end),
+                            health_status = case when failure_streak + 1 >= %d then 'UNHEALTHY' else 'DEGRADED' end,
+                            consecutive_failures = consecutive_failures + 1,
+                            error_summary = ?
+                        where id = ?
+                        """.formatted(circuitOpenAfter, circuitOpenAfter),
+                        lastRunJson, toJson(health), errSummary, sourceId);
+            }
+
+            if (searchPlanId != null && counts.containsKey("scan_offset")) {
+                db.update("""
+                        update job_sources set
+                            last_run = jsonb_set(
+                                coalesce(last_run, '{}'::jsonb),
+                                '{plan_offsets}',
+                                coalesce(last_run->'plan_offsets', '{}'::jsonb) || jsonb_build_object(?::text, ?::int)
+                            )
+                        where id = ?
+                        """, searchPlanId.toString(), counts.get("scan_offset"), sourceId);
+            }
+        };
+
+        if (transactionTemplate != null) {
+            transactionTemplate.executeWithoutResult(txStatus -> persistAction.run());
         } else {
-            String errSummary = failure.name() + (detail == null ? "" : ": " + truncate(detail));
-            db.update("""
-                    update job_sources set last_run_at = now(), last_attempted_at = now(),
-                        failure_streak = failure_streak + 1, last_run = ?::jsonb,
-                        health = ?::jsonb || jsonb_build_object('failure_streak', failure_streak + 1,
-                            'circuit', case when failure_streak + 1 >= %d then 'open' else 'closed' end),
-                        health_status = case when failure_streak + 1 >= %d then 'UNHEALTHY' else 'DEGRADED' end,
-                        consecutive_failures = consecutive_failures + 1,
-                        error_summary = ?
-                    where id = ?
-                    """.formatted(circuitOpenAfter, circuitOpenAfter),
-                    lastRunJson, toJson(health), errSummary, sourceId);
+            persistAction.run();
         }
 
         // V055 run history
