@@ -71,6 +71,69 @@ export interface MatchBreakdown {
   concerns?: string[];
   why?: string;
   decision?: string;
+  stage_scores?: Record<string, number>;
+  rerank_narrative?: string;
+}
+
+export interface SearchPlan {
+  id: string;
+  profileId?: string;
+  profile_id?: string;
+  name: string;
+  targetTitles: string[];
+  target_titles?: string[];
+  queryFacets: Record<string, any>;
+  query_facets?: Record<string, any>;
+  targetSources: string[];
+  target_sources?: string[];
+  searchFrequency: 'HOURLY' | 'DAILY' | 'WEEKLY' | 'MANUAL';
+  search_frequency?: 'HOURLY' | 'DAILY' | 'WEEKLY' | 'MANUAL';
+  maxResultsPerRun: number;
+  max_results_per_run?: number;
+  active: boolean;
+  lastRunAt?: string | null;
+  last_run_at?: string | null;
+  lastExecutionStatus?: 'SUCCESS' | 'FAILED' | 'PARTIAL' | 'RUNNING' | 'SKIPPED' | null;
+  last_execution_status?: 'SUCCESS' | 'FAILED' | 'PARTIAL' | 'RUNNING' | 'SKIPPED' | null;
+  lastExecutionError?: string | null;
+  last_execution_error?: string | null;
+  lastExecutionResults?: number;
+  last_execution_results?: number;
+  createdAt?: string;
+  created_at?: string;
+  updatedAt?: string;
+  updated_at?: string;
+}
+
+export interface ExpandedQueryPlan {
+  searchPlanId: string;
+  planName: string;
+  originalTitles: string[];
+  expandedTitles: string[];
+  primaryKeywords: string[];
+  negativeKeywords: string[];
+  targetLocations: string[];
+  remoteTypes: string[];
+  seniorityLevels: string[];
+  targetSources: string[];
+  maxResults: number;
+}
+
+export interface SearchPlanExecutionSummary {
+  searchPlanId: string;
+  planName: string;
+  status: 'SUCCESS' | 'PARTIAL' | 'FAILED' | 'SKIPPED' | 'QUEUED' | 'ACCEPTED';
+  sourcesQueried: number;
+  sourcesSucceeded: number;
+  sourcesFailed: number;
+  jobsIngested: number;
+  jobsMatched: number;
+  errors: string[];
+  notes: string[];
+  expandedQuery?: ExpandedQueryPlan;
+  providerFacetSupport?: Record<string, string>;
+  executionId?: string;
+  statusUrl?: string;
 }
 
 export interface JobDetailResponse {

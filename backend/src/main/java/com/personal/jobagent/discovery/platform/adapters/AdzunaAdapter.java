@@ -133,11 +133,13 @@ public class AdzunaAdapter implements BoardAdapter {
     @Override
     public ListingResult list(BoardRef board, CrawlContext context) {
         String country = board.identifier();
+        String what = board.params() != null ? board.params().get("what") : null;
+        String where = board.params() != null ? board.params().get("where") : null;
         Crawl crawl = new Crawl(context);
         ListingResult result = crawl.run(() -> {
             for (int page = 1; ; page++) {
                 crawl.beforePage();
-                String body = context.http().get(buildUri(country, page), SafeHttpClient.Accept.JSON);
+                String body = context.http().get(buildUri(country, page, what, where), SafeHttpClient.Accept.JSON);
                 crawl.afterPage();
                 if (parsePage(body, crawl, context.now(), country) == 0) return; // past the last page
             }
@@ -153,10 +155,24 @@ public class AdzunaAdapter implements BoardAdapter {
                         : result.failureDetail(), null);
     }
 
-    URI buildUri(String country, int page) {
-        return Parsing.uri("https://" + HOST + "/v1/api/jobs/" + Parsing.enc(country) + "/search/" + page
-                + "?app_id=" + Parsing.enc(appId) + "&app_key=" + Parsing.enc(appKey)
-                + "&results_per_page=" + PAGE_SIZE);
+    public URI buildUri(String country, int page) {
+        return buildUri(country, page, null, null);
+    }
+
+    public URI buildUri(String country, int page, String what, String where) {
+        StringBuilder uri = new StringBuilder("https://").append(HOST)
+                .append("/v1/api/jobs/").append(Parsing.enc(country))
+                .append("/search/").append(page)
+                .append("?app_id=").append(Parsing.enc(appId))
+                .append("&app_key=").append(Parsing.enc(appKey))
+                .append("&results_per_page=").append(PAGE_SIZE);
+        if (what != null && !what.isBlank()) {
+            uri.append("&what=").append(Parsing.enc(what.trim()));
+        }
+        if (where != null && !where.isBlank()) {
+            uri.append("&where=").append(Parsing.enc(where.trim()));
+        }
+        return Parsing.uri(uri.toString());
     }
 
     /** Adds this page's valid records; returns how many records the page actually contained (0 = past the last page). */

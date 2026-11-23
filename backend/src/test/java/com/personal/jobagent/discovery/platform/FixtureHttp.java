@@ -29,6 +29,7 @@ public final class FixtureHttp implements SafeHttpClient.Transport {
 
     private final List<Rule> rules = new ArrayList<>();
     public final List<Request> requests = new ArrayList<>();
+    public final List<Duration> capturedTimeouts = new ArrayList<>();
     private final Map<String, InetAddress[]> dns = new LinkedHashMap<>();
 
     public static String fixture(String name) {
@@ -116,6 +117,7 @@ public final class FixtureHttp implements SafeHttpClient.Transport {
     @Override
     public SafeHttpClient.RawResponse exchange(String method, URI uri, Map<String, String> headers, byte[] body,
                                                Duration timeout, int maxBytes) throws IOException {
+        capturedTimeouts.add(timeout);
         requests.add(new Request(method, uri, headers, body == null ? null : new String(body, StandardCharsets.UTF_8)));
         for (Rule rule : rules) {
             if (!rule.method().equals(method) || !rule.match().test(uri)) continue;

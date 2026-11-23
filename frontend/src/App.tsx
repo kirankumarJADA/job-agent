@@ -11,6 +11,7 @@ import { JobsFeedPage } from './pages/JobsFeedPage';
 import { JobDetailPage } from './pages/JobDetailPage';
 import { ProfilePage } from './pages/ProfilePage';
 import { PreferencesPage } from './pages/PreferencesPage';
+import { SearchPlansPage } from './pages/SearchPlansPage';
 import { ModelsPage } from './pages/ModelsPage';
 import { SourcesPage } from './pages/SourcesPage';
 import { LogsPage } from './pages/LogsPage';
@@ -107,6 +108,7 @@ export default function App() {
             <Route path="/jobs/:id" element={<JobDetailPage />} />
             <Route path="/profile" element={<ProfilePage />} />
             <Route path="/preferences" element={<PreferencesPage />} />
+            <Route path="/search-plans" element={<SearchPlansPage />} />
             <Route path="/models" element={<ModelsPage />} />
             <Route path="/sources" element={<SourcesPage />} />
             <Route path="/logs" element={<LogsPage />} />

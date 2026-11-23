@@ -2,6 +2,8 @@ package com.personal.jobagent.discovery.platform;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.discovery.JobDiscoveryService;
+import com.personal.jobagent.discovery.plan.ExecutionFencedException;
+import com.personal.jobagent.discovery.plan.SearchPlanRepository;
 import com.personal.jobagent.discovery.platform.adapters.TsentaJobSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -84,6 +86,92 @@ public class BoardDiscoveryService {
     private final int circuitOpenAfter;
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private com.personal.jobagent.discovery.DiscoveryMetrics metrics;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private SearchPlanRepository searchPlanRepository;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private org.springframework.transaction.support.TransactionTemplate transactionTemplate;
+
+    private final java.util.concurrent.ConcurrentHashMap<String, Integer> scanOffsets = new java.util.concurrent.ConcurrentHashMap<>();
+
+    public int getPersistedScanOffset(UUID sourceId, UUID searchPlanId) {
+        if (sourceId == null) {
+            throw new IllegalArgumentException("sourceId must not be null when reading persisted scan offset");
+        }
+        String memoryKey = (searchPlanId != null) ? searchPlanId + ":" + sourceId : sourceId.toString();
+        if (db == null) {
+            return scanOffsets.getOrDefault(memoryKey, 0);
+        }
+
+        List<Map<String, Object>> rows;
+        try {
+            if (searchPlanId != null) {
+                String planIdStr = searchPlanId.toString();
+                String legacyKey = "scan_offset_" + searchPlanId;
+                rows = db.queryForList("""
+                        select
+                            last_run->'plan_offsets'->>? as plan_offset,
+                            last_run->>? as legacy_plan_offset
+                        from job_sources where id = ?
+                        """, planIdStr, legacyKey, sourceId);
+            } else {
+                rows = db.queryForList(
+                        "select last_run->>'scan_offset' as default_offset from job_sources where id = ?",
+                        sourceId);
+            }
+        } catch (Exception e) {
+            log.error("Failed to query persisted scan offset for source {} (searchPlan: {}): {}",
+                    sourceId, searchPlanId, e.getMessage());
+            throw new IllegalStateException("Failed to query persisted scan offset for source " + sourceId
+                    + " (database query failure; failing closed): " + e.getMessage(), e);
+        }
+
+        if (rows.isEmpty()) {
+            throw new IllegalStateException("Job source " + sourceId
+                    + " does not exist in database; cannot determine authoritative scan offset (failing closed)");
+        }
+
+        Map<String, Object> row = rows.get(0);
+        Object val;
+        if (searchPlanId != null) {
+            val = row.get("plan_offset");
+            if (val == null) {
+                val = row.get("legacy_plan_offset");
+            }
+        } else {
+            val = row.get("default_offset");
+        }
+
+        if (val != null) {
+            try {
+                int offset = Integer.parseInt(String.valueOf(val));
+                if (offset < 0) {
+                    throw new IllegalStateException("Negative persisted scan offset for source " + sourceId
+                            + ": " + offset + " is invalid (failing closed)");
+                }
+                scanOffsets.put(memoryKey, offset);
+                return offset;
+            } catch (NumberFormatException e) {
+                throw new IllegalStateException("Malformed persisted scan offset for source " + sourceId
+                        + ": '" + val + "' is not a valid integer (failing closed)", e);
+            }
+        }
+
+        // Source row exists, but no offset recorded for this plan: authoritatively start at 0
+        scanOffsets.put(memoryKey, 0);
+        return 0;
+    }
+
+    public void setSearchPlanRepository(SearchPlanRepository searchPlanRepository) {
+        this.searchPlanRepository = searchPlanRepository;
+    }
+
+    public void setTransactionTemplate(org.springframework.transaction.support.TransactionTemplate transactionTemplate) {
+        this.transactionTemplate = transactionTemplate;
+    }
+
+    public void setTransactionManager(org.springframework.transaction.PlatformTransactionManager transactionManager) {
+        this.transactionTemplate = transactionManager != null ? new org.springframework.transaction.support.TransactionTemplate(transactionManager) : null;
+    }
 
     @org.springframework.beans.factory.annotation.Autowired
     public BoardDiscoveryService(JdbcTemplate db, JobDiscoveryService ingestion, PlatformRegistry registry,
@@ -119,8 +207,24 @@ public class BoardDiscoveryService {
         return PlatformKind.lookup(kind).flatMap(registry::adapter).isPresent();
     }
 
-    /** Run a persisted source by id. */
+    /** Run a persisted source by id with default/empty query params. */
     public SourceRunReport run(UUID sourceId, Mode mode) {
+        return run(sourceId, mode, Map.of());
+    }
+
+    /** Run a persisted source by id with targeted query params. */
+    public SourceRunReport run(UUID sourceId, Mode mode, Map<String, String> queryParams) {
+        return run(sourceId, mode, queryParams, null, null);
+    }
+
+    /** Run a persisted source by id with targeted query params and search plan lease fencing. */
+    public SourceRunReport run(UUID sourceId, Mode mode, Map<String, String> queryParams, UUID searchPlanId, UUID executionOwnerToken) {
+        return run(sourceId, mode, queryParams, searchPlanId, executionOwnerToken, null, null);
+    }
+
+    /** Run a persisted source by id with targeted query params, search plan lease fencing, max results budget and timeout. */
+    public SourceRunReport run(UUID sourceId, Mode mode, Map<String, String> queryParams, UUID searchPlanId, UUID executionOwnerToken,
+                               Integer maxResults, Long timeoutMs) {
         List<Map<String, Object>> rows = db.queryForList("""
                 select s.kind, s.org_identifier, s.enabled, s.policy, c.name as company_name
                 from job_sources s left join companies c on c.id = s.company_id
@@ -138,10 +242,25 @@ public class BoardDiscoveryService {
                 kind.displayName() + " discovery is " + kind.readiness().name().toLowerCase() + ": " + kind.configHint(), false));
         String org = row.get("org_identifier") == null ? "" : String.valueOf(row.get("org_identifier"));
         String employer = row.get("company_name") == null ? null : String.valueOf(row.get("company_name"));
-        return run(sourceId, adapter, org, employer, mode);
+        return run(sourceId, adapter, org, employer, mode, queryParams, searchPlanId, executionOwnerToken, maxResults, timeoutMs);
     }
 
     SourceRunReport run(UUID sourceId, BoardAdapter adapter, String orgIdentifier, String employer, Mode mode) {
+        return run(sourceId, adapter, orgIdentifier, employer, mode, Map.of(), null, null, null, null);
+    }
+
+    SourceRunReport run(UUID sourceId, BoardAdapter adapter, String orgIdentifier, String employer, Mode mode, Map<String, String> queryParams) {
+        return run(sourceId, adapter, orgIdentifier, employer, mode, queryParams, null, null, null, null);
+    }
+
+    SourceRunReport run(UUID sourceId, BoardAdapter adapter, String orgIdentifier, String employer, Mode mode,
+                        Map<String, String> queryParams, UUID searchPlanId, UUID executionOwnerToken) {
+        return run(sourceId, adapter, orgIdentifier, employer, mode, queryParams, searchPlanId, executionOwnerToken, null, null);
+    }
+
+    public SourceRunReport run(UUID sourceId, BoardAdapter adapter, String orgIdentifier, String employer, Mode mode,
+                               Map<String, String> queryParams, UUID searchPlanId, UUID executionOwnerToken,
+                               Integer maxResults, Long timeoutMs) {
         String correlationId = UUID.randomUUID().toString();
         long started = System.nanoTime();
         Instant runStart = dbNow();
@@ -152,10 +271,19 @@ public class BoardDiscoveryService {
         BoardAdapter.BoardRef board;
         try {
             board = adapter.parseIdentifier(orgIdentifier);
+            if (queryParams != null && !queryParams.isEmpty()) {
+                Map<String, String> merged = new LinkedHashMap<>(board.params() != null ? board.params() : Map.of());
+                merged.putAll(queryParams);
+                board = new BoardAdapter.BoardRef(board.kind(), board.identifier(), merged);
+            }
         } catch (BoardConfigException e) {
             return finish(sourceId, kind, correlationId, started, counts, ingested, false,
-                    FailureCategory.CONFIGURATION, e.getMessage(), mode);
+                    FailureCategory.CONFIGURATION, e.getMessage(), mode, searchPlanId);
         }
+
+        long deadlineNanos = (timeoutMs != null && timeoutMs > 0)
+                ? started + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+                : Long.MAX_VALUE;
 
         boolean healthCheck = mode == Mode.HEALTH_CHECK;
         int pageCap = kind == PlatformKind.TSENTA ? (healthCheck ? 1 : tsentaMaxPages) : (healthCheck ? 2 : maxPages);
@@ -163,11 +291,23 @@ public class BoardDiscoveryService {
                 ? Math.min(healthCheck ? 3 : maxDetails, ((TsentaJobSource) adapter).maxDetailsPerRun())
                 : (healthCheck ? Math.min(5, maxDetails) : maxDetails);
         SafeHttpClient http = httpFactory.apply(kind);
-        BoardAdapter.CrawlContext context = new BoardAdapter.CrawlContext(http, pageCap, Instant.now(), employer);
+        if (timeoutMs != null && timeoutMs > 0) {
+            http = http.withDeadline(deadlineNanos);
+        }
+        BoardAdapter.CrawlContext context = new BoardAdapter.CrawlContext(http, pageCap, Instant.now(), employer, deadlineNanos);
+
+        // Pre-request deadline check
+        if (System.nanoTime() >= deadlineNanos) {
+            return finish(sourceId, kind, correlationId, started, counts, ingested, false,
+                    FailureCategory.TIMEOUT, "Execution timed out before listing request (" + timeoutMs + "ms)", mode, searchPlanId);
+        }
 
         BoardAdapter.ListingResult listing;
         try {
             listing = adapter.list(board, context);
+        } catch (SafeHttpClient.FetchException e) {
+            log.warn("Adapter {} fetch failed for source {}: category={} message={}", kind, sourceId, e.category(), e.getMessage());
+            listing = BoardAdapter.ListingResult.failed(e.category(), e.getMessage());
         } catch (RuntimeException e) {
             // An adapter bug must not take the sweep down; it is recorded, never hidden.
             log.warn("Adapter {} failed for source {}: {}", kind, sourceId, e.getClass().getSimpleName());
@@ -177,26 +317,111 @@ public class BoardDiscoveryService {
         counts.put("pages", listing.pagesFetched());
         String employerName = Normalize.first(employer, listing.employerName());
 
+        // Post-listing deadline check
+        if (System.nanoTime() >= deadlineNanos || listing.failure() == FailureCategory.TIMEOUT) {
+            log.warn("Search plan {} source {} exceeded timeout ({}ms) during listing request",
+                    searchPlanId, sourceId, timeoutMs);
+            return finish(sourceId, kind, correlationId, started, counts, ingested, false,
+                    FailureCategory.TIMEOUT, "Source execution exceeded timeout (" + timeoutMs + "ms)", mode, searchPlanId);
+        }
+
+        // Fail-closed fencing guard: verify lease ownership before performing any ingestion writes
+        if (searchPlanId != null || executionOwnerToken != null) {
+            if (searchPlanId == null || executionOwnerToken == null) {
+                throw new IllegalArgumentException("searchPlanId and executionOwnerToken must both be non-null when running with search plan fencing");
+            }
+            if (searchPlanRepository == null) {
+                throw new IllegalStateException("SearchPlanRepository is required for search plan lease fencing but is null (failing closed)");
+            }
+            if (!searchPlanRepository.isLeaseOwner(searchPlanId, executionOwnerToken)) {
+                log.warn("Search plan {} lost lease before ingestion; discarding {} entries", searchPlanId, listing.entries().size());
+                throw new ExecutionFencedException("Search plan execution lease lost or expired before ingestion for plan " + searchPlanId);
+            }
+        }
+
         boolean authoritative = !kind.isAggregator();
         Set<String> known = knownExternalIds(sourceId);
         int detailsUsed = 0;
         boolean detailBudgetGone = false;
-        for (BoardAdapter.ListingEntry entry : listing.entries()) {
+        boolean truncatedByBudget = false;
+        boolean truncatedByTimeout = false;
+
+        int maxEntriesToProcess = (maxResults != null && maxResults > 0) ? Math.max(maxResults * 20, 2000) : 5000;
+        int entriesProcessed = 0;
+        int resultCount = 0;
+
+        int totalEntries = listing.entries().size();
+        int startOffset = getPersistedScanOffset(sourceId, searchPlanId);
+        int offset = (totalEntries > 0) ? (startOffset % totalEntries) : 0;
+
+        for (int i = 0; i < totalEntries; i++) {
+            if (maxResults != null && maxResults > 0 && resultCount >= maxResults) {
+                truncatedByBudget = true;
+                log.info("Search plan {} source {} reached max results budget ({} new/updated jobs); ceasing further ingestion",
+                        searchPlanId, sourceId, maxResults);
+                break;
+            }
+            if (entriesProcessed >= maxEntriesToProcess) {
+                truncatedByBudget = true;
+                log.info("Search plan {} source {} reached max entry inspection cap ({}); halting",
+                        searchPlanId, sourceId, maxEntriesToProcess);
+                break;
+            }
+            if (System.nanoTime() >= deadlineNanos) {
+                truncatedByTimeout = true;
+                log.warn("Search plan {} source {} exceeded timeout ({}ms); ceasing further ingestion",
+                        searchPlanId, sourceId, timeoutMs);
+                break;
+            }
+
+            int entryIndex = (offset + i) % totalEntries;
+            BoardAdapter.ListingEntry entry = listing.entries().get(entryIndex);
+            entriesProcessed++;
+
             try {
                 if (!entry.needsDetail()) {
-                    ingest(sourceId, kind, entry.job(), employerName, counts, ingested);
+                    if (System.nanoTime() >= deadlineNanos) {
+                        truncatedByTimeout = true;
+                        break;
+                    }
+                    JobDiscoveryService.IngestResult res = ingest(sourceId, kind, entry.job(), employerName, counts, ingested, searchPlanId, executionOwnerToken);
+                    if (res != null && ("INSERTED".equals(res.action()) || "UPDATED".equals(res.action()))) {
+                        resultCount++;
+                    }
                 } else if (known.contains(entry.externalId())) {
-                    touch(sourceId, entry.externalId(), authoritative);
+                    if (System.nanoTime() >= deadlineNanos) {
+                        truncatedByTimeout = true;
+                        break;
+                    }
+                    touch(sourceId, entry.externalId(), authoritative, searchPlanId, executionOwnerToken);
                     bump(counts, "unchanged");
                 } else if (!detailBudgetGone && detailsUsed < detailBudget) {
+                    if (System.nanoTime() >= deadlineNanos) {
+                        truncatedByTimeout = true;
+                        break;
+                    }
                     detailsUsed++;
                     NormalizedJob job = adapter.detail(board, entry, context);
-                    ingest(sourceId, kind, job, employerName, counts, ingested);
+                    if (System.nanoTime() >= deadlineNanos) {
+                        truncatedByTimeout = true;
+                        break;
+                    }
+                    JobDiscoveryService.IngestResult res = ingest(sourceId, kind, job, employerName, counts, ingested, searchPlanId, executionOwnerToken);
+                    if (res != null && ("INSERTED".equals(res.action()) || "UPDATED".equals(res.action()))) {
+                        resultCount++;
+                    }
                 } else {
                     bump(counts, "deferred");
                 }
+            } catch (ExecutionFencedException e) {
+                log.warn("Search plan {} execution fenced out during ingestion: {}", searchPlanId, e.getMessage());
+                throw e;
             } catch (SafeHttpClient.FetchException e) {
                 bump(counts, "detail_failures");
+                if (e.category() == FailureCategory.TIMEOUT) {
+                    truncatedByTimeout = true;
+                    break;
+                }
                 if (e.category() == FailureCategory.BUDGET_EXHAUSTED || e.category() == FailureCategory.RATE_LIMITED
                         || e.category() == FailureCategory.ACCESS_DENIED) {
                     detailBudgetGone = true; // stop asking; the rest wait for the next run
@@ -206,46 +431,76 @@ public class BoardDiscoveryService {
             }
         }
         counts.put("requests", http.requestsMade());
+        counts.put("result_count", resultCount);
 
-        // Safe deletion guard: a complete listing that returned 0 entries must NEVER remove or
-        // unlist active jobs, in any mode. An empty result is indistinguishable from a silent
-        // upstream failure - a board emptied by mistake, lapsed auth, a changed feed shape - so it
-        // is never treated as authoritative, not even for an admin-triggered manual sync.
-        // Removal requires a complete, non-failed listing that actually returned entries.
-        // Do not reintroduce a mode-based bypass here: see C1 in docs/ROBIN_WAVE2_RELEASE_READINESS.md.
-        if (listing.complete() && listing.failure() == null && !listing.entries().isEmpty()) {
-            counts.put("removed", markUnlisted(sourceId, runStart, authoritative));
+        int nextOffset = (totalEntries > 0) ? (offset + entriesProcessed) % totalEntries : 0;
+        counts.put("scan_offset", nextOffset);
+        if (searchPlanId != null) {
+            counts.put("scan_offset_" + searchPlanId, nextOffset);
+        }
+
+        // Safe deletion guard:
+        // A listing truncated by maxResults or timeout must NEVER remove or unlist active jobs.
+        // Removal requires a complete, non-failed listing that was NOT truncated and actually returned entries.
+        boolean isDeadlineExceeded = System.nanoTime() >= deadlineNanos;
+        if (!truncatedByBudget && !truncatedByTimeout && !isDeadlineExceeded
+                && listing.complete() && listing.failure() == null && !listing.entries().isEmpty()) {
+            counts.put("removed", markUnlisted(sourceId, runStart, authoritative, searchPlanId, executionOwnerToken));
+        } else if (truncatedByBudget || truncatedByTimeout || isDeadlineExceeded) {
+            log.info("Listing was truncated (budget={}, timeout={}, deadlineExceeded={}); skipping markUnlisted to protect active jobs for source {}",
+                    truncatedByBudget, truncatedByTimeout, isDeadlineExceeded, sourceId);
         } else if (listing.complete() && listing.failure() == null && listing.entries().isEmpty()) {
             log.warn("Safe deletion guard activated: listing completed with 0 jobs for source {} in {} mode; skipping markUnlisted",
                     sourceId, mode);
         }
-        return finish(sourceId, kind, correlationId, started, counts, ingested, listing.complete(),
-                listing.failure(), listing.failureDetail(), mode);
+
+        boolean isComplete = listing.complete() && !truncatedByBudget && !truncatedByTimeout && !isDeadlineExceeded;
+        FailureCategory failureCat = listing.failure();
+        String failureDetail = listing.failureDetail();
+        if ((truncatedByTimeout || isDeadlineExceeded) && failureCat == null) {
+            failureCat = FailureCategory.TIMEOUT;
+            failureDetail = "Source execution exceeded timeout (" + timeoutMs + "ms)";
+        }
+
+        return finish(sourceId, kind, correlationId, started, counts, ingested, isComplete,
+                failureCat, failureDetail, mode, searchPlanId);
     }
 
-    private void ingest(UUID sourceId, PlatformKind kind, NormalizedJob job, String employer,
-                        Map<String, Object> counts, List<JobDiscoveryService.IngestResult> ingested) {
+    private JobDiscoveryService.IngestResult ingest(UUID sourceId, PlatformKind kind, NormalizedJob job, String employer,
+                                                    Map<String, Object> counts, List<JobDiscoveryService.IngestResult> ingested) {
+        return ingest(sourceId, kind, job, employer, counts, ingested, null, null);
+    }
+
+    private JobDiscoveryService.IngestResult ingest(UUID sourceId, PlatformKind kind, NormalizedJob job, String employer,
+                                                    Map<String, Object> counts, List<JobDiscoveryService.IngestResult> ingested,
+                                                    UUID searchPlanId, UUID executionOwnerToken) {
         if (job == null || job.externalId() == null || job.title() == null) {
             bump(counts, "skipped_invalid");
-            return;
+            return null;
         }
         if (Boolean.FALSE.equals(job.active())) {
-            closeObservation(sourceId, job.externalId(), !kind.isAggregator());
+            closeObservation(sourceId, job.externalId(), !kind.isAggregator(), searchPlanId, executionOwnerToken);
             bump(counts, "closed");
-            return;
+            return null;
         }
         if (kind.isAggregator() && job.applicationUrl() == null) {
             // Without the employer's own application URL the posting cannot be
             // applied to honestly; it is not stored with an aggregator URL instead.
             bump(counts, "skipped_no_employer_url");
-            return;
+            return null;
         }
-        JobDiscoveryService.IngestResult result = ingestion.ingestJob(new JobDiscoveryService.IngestJobCommand(
+        JobDiscoveryService.IngestJobCommand cmd = new JobDiscoveryService.IngestJobCommand(
                 sourceId, job.externalId(), null, Normalize.first(employer, job.employerName()), job.title(),
                 job.locationRaw(), job.city(), job.country(), job.remoteType(), job.employmentType(), null,
                 job.salaryMin(), job.salaryMax(), job.salaryCurrency(),
                 job.descriptionText() == null ? "" : job.descriptionText(), job.skills(),
-                job.applicationUrl(), job.sourceUrl(), job.postedAt(), job.salaryPeriod(), job.requisitionId()));
+                job.applicationUrl(), job.sourceUrl(), job.postedAt(), job.salaryPeriod(), job.requisitionId());
+        JobDiscoveryService.IngestResult result = (searchPlanId != null && executionOwnerToken != null)
+                ? ingestion.ingestJob(cmd, searchPlanId, executionOwnerToken)
+                : ingestion.ingestJob(cmd);
+        if (result == null) {
+            return null;
+        }
         ingested.add(result);
         switch (result.action()) {
             case "INSERTED" -> bump(counts, "created");
@@ -256,6 +511,7 @@ public class BoardDiscoveryService {
         if (metrics != null) {
             metrics.recordJobIngestion(kind.name(), result.action(), result.crossSource());
         }
+        return result;
     }
 
     private Set<String> knownExternalIds(UUID sourceId) {
@@ -271,50 +527,90 @@ public class BoardDiscoveryService {
     }
 
     private void touch(UUID sourceId, String externalId, boolean authoritative) {
-        db.update("update job_source_observations set last_seen_at = now() where source_id = ? and external_job_id = ?",
-                sourceId, externalId);
-        db.update("""
-                update jobs set last_seen_at = now(),
-                    deleted_at = case
-                        when ? then null
-                        when exists (
-                            select 1 from job_source_observations o
-                            join job_sources s on s.id = o.source_id
-                            where o.job_id = jobs.id
-                              and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA')
-                              and o.source_status in ('MISSING', 'CLOSED')
-                        ) then deleted_at
-                        else null
-                    end
-                where id in (select job_id from job_source_observations where source_id = ? and external_job_id = ?)
-                """, authoritative, sourceId, externalId);
+        touch(sourceId, externalId, authoritative, null, null);
+    }
+
+    private void touch(UUID sourceId, String externalId, boolean authoritative, UUID searchPlanId, UUID executionOwnerToken) {
+        Runnable block = () -> {
+            if (searchPlanId != null || executionOwnerToken != null) {
+                if (searchPlanId == null || executionOwnerToken == null) {
+                    throw new IllegalArgumentException("searchPlanId and executionOwnerToken must both be non-null when running with search plan fencing");
+                }
+                if (searchPlanRepository == null) {
+                    throw new IllegalStateException("SearchPlanRepository is required for search plan lease fencing but is null (failing closed)");
+                }
+                searchPlanRepository.assertLeaseOwnership(searchPlanId, executionOwnerToken);
+            }
+            db.update("update job_source_observations set last_seen_at = now() where source_id = ? and external_job_id = ?",
+                    sourceId, externalId);
+            db.update("""
+                    update jobs set last_seen_at = now(),
+                        deleted_at = case
+                            when ? then null
+                            when exists (
+                                select 1 from job_source_observations o
+                                join job_sources s on s.id = o.source_id
+                                where o.job_id = jobs.id
+                                  and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA')
+                                  and o.source_status in ('MISSING', 'CLOSED')
+                            ) then deleted_at
+                            else null
+                        end
+                    where id in (select job_id from job_source_observations where source_id = ? and external_job_id = ?)
+                    """, authoritative, sourceId, externalId);
+        };
+        if (transactionTemplate != null) {
+            transactionTemplate.executeWithoutResult(status -> block.run());
+        } else {
+            block.run();
+        }
     }
 
     /** The source itself says the posting is closed. */
     private void closeObservation(UUID sourceId, String externalId, boolean authoritative) {
-        db.update("""
-                update job_source_observations set source_status = 'CLOSED', removed_at = now()
-                where source_id = ? and external_job_id = ? and source_status <> 'CLOSED'
-                """, sourceId, externalId);
-        if (authoritative) {
+        closeObservation(sourceId, externalId, authoritative, null, null);
+    }
+
+    private void closeObservation(UUID sourceId, String externalId, boolean authoritative, UUID searchPlanId, UUID executionOwnerToken) {
+        Runnable block = () -> {
+            if (searchPlanId != null || executionOwnerToken != null) {
+                if (searchPlanId == null || executionOwnerToken == null) {
+                    throw new IllegalArgumentException("searchPlanId and executionOwnerToken must both be non-null when running with search plan fencing");
+                }
+                if (searchPlanRepository == null) {
+                    throw new IllegalStateException("SearchPlanRepository is required for search plan lease fencing but is null (failing closed)");
+                }
+                searchPlanRepository.assertLeaseOwnership(searchPlanId, executionOwnerToken);
+            }
             db.update("""
-                    update jobs j set deleted_at = now()
-                    where j.deleted_at is null
-                      and j.id in (select job_id from job_source_observations where source_id = ? and external_job_id = ?)
-                      and not exists (select 1 from job_source_observations o
-                                      join job_sources s on s.id = o.source_id
-                                      where o.job_id = j.id
-                                        and o.source_status = 'SEEN'
-                                        and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA'))
+                    update job_source_observations set source_status = 'CLOSED', removed_at = now()
+                    where source_id = ? and external_job_id = ? and source_status <> 'CLOSED'
                     """, sourceId, externalId);
+            if (authoritative) {
+                db.update("""
+                        update jobs j set deleted_at = now()
+                        where j.deleted_at is null
+                          and j.id in (select job_id from job_source_observations where source_id = ? and external_job_id = ?)
+                          and not exists (select 1 from job_source_observations o
+                                          join job_sources s on s.id = o.source_id
+                                          where o.job_id = j.id
+                                            and o.source_status = 'SEEN'
+                                            and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA'))
+                        """, sourceId, externalId);
+            } else {
+                db.update("""
+                        update jobs j set deleted_at = now()
+                        where j.deleted_at is null
+                          and j.id in (select job_id from job_source_observations where source_id = ? and external_job_id = ?)
+                          and not exists (select 1 from job_source_observations o
+                                          where o.job_id = j.id and o.source_id is not null and o.source_status = 'SEEN')
+                        """, sourceId, externalId);
+            }
+        };
+        if (transactionTemplate != null) {
+            transactionTemplate.executeWithoutResult(status -> block.run());
         } else {
-            db.update("""
-                    update jobs j set deleted_at = now()
-                    where j.deleted_at is null
-                      and j.id in (select job_id from job_source_observations where source_id = ? and external_job_id = ?)
-                      and not exists (select 1 from job_source_observations o
-                                      where o.job_id = j.id and o.source_id is not null and o.source_status = 'SEEN')
-                    """, sourceId, externalId);
+            block.run();
         }
     }
 
@@ -324,32 +620,53 @@ public class BoardDiscoveryService {
      * aggregator observations cannot keep the job alive.
      */
     private int markUnlisted(UUID sourceId, Instant runStart, boolean authoritative) {
-        java.sql.Timestamp since = java.sql.Timestamp.from(runStart);
-        db.update("""
-                update job_source_observations set source_status = 'MISSING', removed_at = now()
-                where source_id = ? and source_status = 'SEEN' and last_seen_at < ?
-                """, sourceId, since);
-        if (authoritative) {
-            return db.update("""
-                    update jobs j set deleted_at = now()
-                    where j.deleted_at is null
-                      and exists (select 1 from job_source_observations o
-                                  where o.job_id = j.id and o.source_id = ? and o.source_status in ('MISSING','CLOSED'))
-                      and not exists (select 1 from job_source_observations o
-                                      join job_sources s on s.id = o.source_id
-                                      where o.job_id = j.id
-                                        and o.source_status = 'SEEN'
-                                        and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA'))
-                    """, sourceId);
-        } else {
-            return db.update("""
-                    update jobs j set deleted_at = now()
-                    where j.deleted_at is null
-                      and exists (select 1 from job_source_observations o
-                                  where o.job_id = j.id and o.source_id = ? and o.source_status in ('MISSING','CLOSED'))
-                      and not exists (select 1 from job_source_observations o
+        return markUnlisted(sourceId, runStart, authoritative, null, null);
+    }
+
+    private int markUnlisted(UUID sourceId, Instant runStart, boolean authoritative, UUID searchPlanId, UUID executionOwnerToken) {
+        java.util.function.Supplier<Integer> block = () -> {
+            if (searchPlanId != null || executionOwnerToken != null) {
+                if (searchPlanId == null || executionOwnerToken == null) {
+                    throw new IllegalArgumentException("searchPlanId and executionOwnerToken must both be non-null when running with search plan fencing");
+                }
+                if (searchPlanRepository == null) {
+                    throw new IllegalStateException("SearchPlanRepository is required for search plan lease fencing but is null (failing closed)");
+                }
+                searchPlanRepository.assertLeaseOwnership(searchPlanId, executionOwnerToken);
+            }
+            java.sql.Timestamp since = java.sql.Timestamp.from(runStart);
+            db.update("""
+                    update job_source_observations set source_status = 'MISSING', removed_at = now()
+                    where source_id = ? and source_status = 'SEEN' and last_seen_at < ?
+                    """, sourceId, since);
+            if (authoritative) {
+                return db.update("""
+                        update jobs j set deleted_at = now()
+                        where j.deleted_at is null
+                          and exists (select 1 from job_source_observations o
+                                      where o.job_id = j.id and o.source_id = ? and o.source_status in ('MISSING','CLOSED'))
+                          and not exists (select 1 from job_source_observations o
+                                          join job_sources s on s.id = o.source_id
+                                          where o.job_id = j.id
+                                            and o.source_status = 'SEEN'
+                                            and s.kind not in ('TSENTA', 'FREEHIRE', 'ARBEITNOW', 'ADZUNA'))
+                        """, sourceId);
+            } else {
+                return db.update("""
+                        update jobs j set deleted_at = now()
+                        where j.deleted_at is null
+                          and exists (select 1 from job_source_observations o
+                                      where o.job_id = j.id and o.source_id = ? and o.source_status in ('MISSING','CLOSED'))
+                          and not exists (select 1 from job_source_observations o
                                       where o.job_id = j.id and o.source_id is not null and o.source_status = 'SEEN')
-                    """, sourceId);
+                        """, sourceId);
+            }
+        };
+        if (transactionTemplate != null) {
+            Integer res = transactionTemplate.execute(status -> block.get());
+            return res != null ? res : 0;
+        } else {
+            return block.get();
         }
     }
 
@@ -365,6 +682,13 @@ public class BoardDiscoveryService {
     private SourceRunReport finish(UUID sourceId, PlatformKind kind, String correlationId, long startedNanos,
                                    Map<String, Object> counts, List<JobDiscoveryService.IngestResult> ingested,
                                    boolean complete, FailureCategory failure, String detail, Mode mode) {
+        return finish(sourceId, kind, correlationId, startedNanos, counts, ingested, complete, failure, detail, mode, null);
+    }
+
+    private SourceRunReport finish(UUID sourceId, PlatformKind kind, String correlationId, long startedNanos,
+                                   Map<String, Object> counts, List<JobDiscoveryService.IngestResult> ingested,
+                                   boolean complete, FailureCategory failure, String detail, Mode mode,
+                                   UUID searchPlanId) {
         long durationMs = Duration.ofNanos(System.nanoTime() - startedNanos).toMillis();
         counts.put("duration_ms", durationMs);
         counts.put("complete", complete);
@@ -381,27 +705,59 @@ public class BoardDiscoveryService {
         health.put("checked_at", Instant.now().toString());
         health.put("detail", summary(counts));
         if (failure != null) health.put("error", failure.name() + (detail == null ? "" : ": " + truncate(detail)));
-        if (ok) {
-            db.update("""
-                    update job_sources set last_run_at = now(), last_attempted_at = now(), last_success_at = now(),
-                        failure_streak = 0, last_run = ?::jsonb,
-                        health = ?::jsonb || jsonb_build_object('failure_streak', 0, 'circuit', 'closed'),
-                        health_status = 'HEALTHY', consecutive_failures = 0, last_successful_run_at = now(), error_summary = null
-                    where id = ?
-                    """, lastRunJson, toJson(health), sourceId);
+
+        Runnable persistAction = () -> {
+            if (db == null) {
+                return;
+            }
+            if (ok) {
+                db.update("""
+                        update job_sources set last_run_at = now(), last_attempted_at = now(), last_success_at = now(),
+                            failure_streak = 0,
+                            last_run = ?::jsonb || jsonb_build_object('plan_offsets', coalesce(last_run->'plan_offsets', '{}'::jsonb)),
+                            health = ?::jsonb || jsonb_build_object('failure_streak', 0, 'circuit', 'closed'),
+                            health_status = 'HEALTHY', consecutive_failures = 0, last_successful_run_at = now(), error_summary = null
+                        where id = ?
+                        """, lastRunJson, toJson(health), sourceId);
+            } else {
+                String errSummary = failure.name() + (detail == null ? "" : ": " + truncate(detail));
+                db.update("""
+                        update job_sources set last_run_at = now(), last_attempted_at = now(),
+                            failure_streak = failure_streak + 1,
+                            last_run = ?::jsonb || jsonb_build_object('plan_offsets', coalesce(last_run->'plan_offsets', '{}'::jsonb)),
+                            health = ?::jsonb || jsonb_build_object('failure_streak', failure_streak + 1,
+                                'circuit', case when failure_streak + 1 >= %d then 'open' else 'closed' end),
+                            health_status = case when failure_streak + 1 >= %d then 'UNHEALTHY' else 'DEGRADED' end,
+                            consecutive_failures = consecutive_failures + 1,
+                            error_summary = ?
+                        where id = ?
+                        """.formatted(circuitOpenAfter, circuitOpenAfter),
+                        lastRunJson, toJson(health), errSummary, sourceId);
+            }
+
+            if (searchPlanId != null && counts.containsKey("scan_offset")) {
+                db.update("""
+                        update job_sources set
+                            last_run = jsonb_set(
+                                coalesce(last_run, '{}'::jsonb),
+                                '{plan_offsets}',
+                                coalesce(last_run->'plan_offsets', '{}'::jsonb) || jsonb_build_object(?::text, ?::int)
+                            )
+                        where id = ?
+                        """, searchPlanId.toString(), counts.get("scan_offset"), sourceId);
+            }
+        };
+
+        if (transactionTemplate != null) {
+            transactionTemplate.executeWithoutResult(txStatus -> persistAction.run());
         } else {
-            String errSummary = failure.name() + (detail == null ? "" : ": " + truncate(detail));
-            db.update("""
-                    update job_sources set last_run_at = now(), last_attempted_at = now(),
-                        failure_streak = failure_streak + 1, last_run = ?::jsonb,
-                        health = ?::jsonb || jsonb_build_object('failure_streak', failure_streak + 1,
-                            'circuit', case when failure_streak + 1 >= %d then 'open' else 'closed' end),
-                        health_status = case when failure_streak + 1 >= %d then 'UNHEALTHY' else 'DEGRADED' end,
-                        consecutive_failures = consecutive_failures + 1,
-                        error_summary = ?
-                    where id = ?
-                    """.formatted(circuitOpenAfter, circuitOpenAfter),
-                    lastRunJson, toJson(health), errSummary, sourceId);
+            persistAction.run();
+        }
+
+        // Write newly calculated offset to local cache only after successful persistence
+        if (counts.containsKey("scan_offset")) {
+            String memoryKey = (searchPlanId != null) ? searchPlanId + ":" + sourceId : sourceId.toString();
+            scanOffsets.put(memoryKey, (Integer) counts.get("scan_offset"));
         }
 
         // V055 run history

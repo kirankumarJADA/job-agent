@@ -6,6 +6,7 @@ import com.personal.jobagent.jobs.JobMatchService;
 import com.personal.jobagent.notifications.NotificationEvents;
 import com.personal.jobagent.qa.ApplicationAnswerService;
 import org.awaitility.Awaitility;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -68,6 +69,12 @@ class CrossFeatureIntegrationIT {
     /** One job's isolated package: match score + cover letter + answer. */
     private record JobPackage(UUID jobId, String company, String title,
                               int score, UUID coverLetterId, String clTitle, UUID answerId) {
+    }
+
+    @BeforeEach
+    void setUp() {
+        UUID profileId = profileId();
+        jdbcTemplate.update("update preference_sets set application_mode = 'MANUAL' where profile_id = ?", profileId);
     }
 
     private JobFixture seedJob(String company, String title, List<String> skills) {

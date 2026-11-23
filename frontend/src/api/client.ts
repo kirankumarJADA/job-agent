@@ -1,4 +1,4 @@
-import type { ApplicationSummary } from '../types';
+import type { ApplicationSummary, ExpandedQueryPlan, SearchPlan, SearchPlanExecutionSummary } from '../types';
 
 export const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1';
 
@@ -203,4 +203,42 @@ export function fetchApplications(): Promise<ApplicationListResponse> {
 
 export function fetchRegistrationPolicy(): Promise<RegistrationPolicy> {
   return apiFetch<RegistrationPolicy>('/auth/registration-policy');
+}
+
+export function fetchSearchPlans(): Promise<SearchPlan[]> {
+  return apiFetch<SearchPlan[]>('/search-plans');
+}
+
+export function fetchSearchPlan(id: string): Promise<SearchPlan> {
+  return apiFetch<SearchPlan>(`/search-plans/${id}`);
+}
+
+export function createSearchPlan(plan: Partial<SearchPlan>): Promise<SearchPlan> {
+  return apiFetch<SearchPlan>('/search-plans', {
+    method: 'POST',
+    body: JSON.stringify(plan),
+  });
+}
+
+export function updateSearchPlan(id: string, plan: Partial<SearchPlan>): Promise<SearchPlan> {
+  return apiFetch<SearchPlan>(`/search-plans/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(plan),
+  });
+}
+
+export function deleteSearchPlan(id: string): Promise<void> {
+  return apiFetch<void>(`/search-plans/${id}`, {
+    method: 'DELETE',
+  });
+}
+
+export function runSearchPlan(id: string): Promise<SearchPlanExecutionSummary> {
+  return apiFetch<SearchPlanExecutionSummary>(`/search-plans/${id}/run`, {
+    method: 'POST',
+  });
+}
+
+export function expandSearchPlan(id: string): Promise<ExpandedQueryPlan> {
+  return apiFetch<ExpandedQueryPlan>(`/search-plans/${id}/expand`);
 }

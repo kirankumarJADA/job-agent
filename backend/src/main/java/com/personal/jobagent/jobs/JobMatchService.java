@@ -4,8 +4,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.common.AutomationMetrics;
 import com.personal.jobagent.common.JdbcConversions;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.discovery.plan.ExecutionFencedException;
+import com.personal.jobagent.discovery.plan.SearchPlanRepository;
+import com.personal.jobagent.jobs.rerank.MultiStageReranker;
+import com.personal.jobagent.jobs.rerank.RerankResult;
 import com.personal.jobagent.notifications.NotificationEvents;
 import com.personal.jobagent.notifications.NotificationService;
+import org.springframework.beans.factory.annotation.Autowired;
 import com.personal.jobagent.preferences.PreferenceSetRecord;
 import com.personal.jobagent.preferences.ScoringWeights;
 import com.personal.jobagent.profile.ProfileRepository;
@@ -68,6 +73,7 @@ public class JobMatchService {
     private final AutomationMetrics metrics;
     private final SemanticSkillMatcher semanticSkillMatcher;
     private final ObjectMapper objectMapper;
+    private final MultiStageReranker multiStageReranker;
 
     public JobMatchService(JobRepository jobRepository,
                            SemanticSkillMatcher semanticSkillMatcher,
@@ -77,6 +83,20 @@ public class JobMatchService {
                            PlatformTransactionManager transactionManager,
                            AutomationMetrics metrics,
                            ObjectMapper objectMapper) {
+        this(jobRepository, semanticSkillMatcher, profileRepository, jdbcTemplate,
+                notificationService, transactionManager, metrics, objectMapper, null);
+    }
+
+    @Autowired
+    public JobMatchService(JobRepository jobRepository,
+                           SemanticSkillMatcher semanticSkillMatcher,
+                           ProfileRepository profileRepository,
+                           JdbcTemplate jdbcTemplate,
+                           NotificationService notificationService,
+                           PlatformTransactionManager transactionManager,
+                           AutomationMetrics metrics,
+                           ObjectMapper objectMapper,
+                           MultiStageReranker multiStageReranker) {
         this.jobRepository = jobRepository;
         this.profileRepository = profileRepository;
         this.jdbcTemplate = jdbcTemplate;
@@ -85,6 +105,14 @@ public class JobMatchService {
         this.metrics = metrics;
         this.semanticSkillMatcher = semanticSkillMatcher;
         this.objectMapper = objectMapper;
+        this.multiStageReranker = multiStageReranker;
+    }
+
+    @Autowired(required = false)
+    private SearchPlanRepository searchPlanRepository;
+
+    public void setSearchPlanRepository(SearchPlanRepository searchPlanRepository) {
+        this.searchPlanRepository = searchPlanRepository;
     }
 
     public record MatchResult(UUID jobId, int overall, String recommendation,
@@ -130,17 +158,47 @@ public class JobMatchService {
      *                    treated as unset, and the documented default weights apply).
      */
     public MatchResult evaluateMatch(UUID jobId, UUID profileId, PreferenceSetRecord preferences) {
+        return evaluateMatch(jobId, profileId, preferences, null, null);
+    }
+
+    /**
+     * Evaluates a job match under optional search plan execution lease fencing.
+     * When searchPlanId and executionOwnerToken are supplied, atomically verifies that
+     * the worker holds an active lease via FOR NO KEY UPDATE lock on search_plans before
+     * performing any job_matches or outbox writes.
+     */
+    public MatchResult evaluateMatch(UUID jobId, UUID profileId, PreferenceSetRecord preferences,
+                                     UUID searchPlanId, UUID executionOwnerToken) {
+        EffectiveMatchingCriteria criteria = EffectiveMatchingCriteria.fromPreferences(profileId, preferences);
+        return evaluateMatch(jobId, profileId, criteria, searchPlanId, executionOwnerToken);
+    }
+
+    /**
+     * Evaluates a job match under effective criteria and optional search plan execution lease fencing.
+     */
+    public MatchResult evaluateMatch(UUID jobId, UUID profileId, EffectiveMatchingCriteria criteria,
+                                     UUID searchPlanId, UUID executionOwnerToken) {
+        if ((searchPlanId == null) != (executionOwnerToken == null)) {
+            throw new IllegalArgumentException("searchPlanId and executionOwnerToken must both be provided or both be null");
+        }
+        if (searchPlanId != null && executionOwnerToken != null && searchPlanRepository == null) {
+            throw new IllegalStateException("SearchPlanRepository is required for fenced match evaluation");
+        }
+        if (criteria == null) {
+            criteria = EffectiveMatchingCriteria.fromPreferences(profileId, null);
+        }
+
         JobRecord job = jobRepository.findById(jobId)
                 .orElseThrow(() -> new IllegalArgumentException("Job not found: " + jobId));
 
-        List<String> allowedRemoteTypes = preferences == null ? List.of() : preferences.remoteTypes();
-        List<String> allowedExperienceLevels = preferences == null ? List.of() : preferences.experienceLevels();
-        List<String> allowedLocations = preferences == null ? List.of() : preferences.locationsAllowed();
-        List<String> allowedTitles = preferences == null ? List.of() : preferences.titles();
-        String sponsorshipPolicy = preferences == null ? null : preferences.sponsorshipPolicy();
-        Number desiredSalaryMin = preferences == null ? null : preferences.salaryMinGbp();
+        List<String> allowedRemoteTypes = criteria.remoteTypes();
+        List<String> allowedExperienceLevels = criteria.experienceLevels();
+        List<String> allowedLocations = criteria.locationsAllowed();
+        List<String> allowedTitles = criteria.titles();
+        String sponsorshipPolicy = criteria.sponsorshipPolicy();
+        Number desiredSalaryMin = criteria.salaryMinGbp();
 
-        Map<String, Integer> weights = resolveWeights(preferences == null ? null : preferences.scoringWeights());
+        Map<String, Integer> weights = resolveWeights(criteria.scoringWeights());
 
         SkillOverlap skillOverlap = computeSkillOverlap(job, profileId);
         double remoteFit = computeRemoteFit(job, allowedRemoteTypes);
@@ -166,8 +224,35 @@ public class JobMatchService {
         String recommendation = overall >= APPLY_THRESHOLD ? "APPLY"
                 : overall >= REVIEW_THRESHOLD ? "REVIEW" : "SKIP";
 
+        RerankResult rerankResult = multiStageReranker != null
+                ? multiStageReranker.rerank(job, profileId, criteria)
+                : null;
+
+        // Authoritative decision: when MultiStageReranker is available, its multi-stage
+        // evaluation is authoritative for score, recommendation, and eligibility.
+        // An absolutely ineligible job (Stage 1 failed) is strictly forced to score 0 and SKIP.
+        final int finalScore;
+        final String finalRecommendation;
+        if (rerankResult != null) {
+            if (!rerankResult.eligible()) {
+                finalScore = 0;
+                finalRecommendation = "SKIP";
+            } else {
+                finalScore = rerankResult.overallScore();
+                finalRecommendation = rerankResult.recommendation();
+            }
+        } else {
+            finalScore = overall;
+            finalRecommendation = recommendation;
+        }
+
         // Persist the decision + emit the event atomically.
         boolean notified = Boolean.TRUE.equals(transactionTemplate.execute(tx -> {
+            // Fencing guard: verify lease ownership before performing any job_matches or outbox writes
+            if (searchPlanId != null && executionOwnerToken != null) {
+                searchPlanRepository.assertLeaseOwnership(searchPlanId, executionOwnerToken);
+            }
+
             // The decision belongs to (job, profile) — it is a function of THIS
             // candidate's skills and preferences — so it is stored against the
             // owner in job_matches, not on the shared jobs row where a second
@@ -184,10 +269,10 @@ public class JobMatchService {
                     """,
                     profileId,
                     jobId,
-                    overall,
-                    recommendation,
-                    breakdownJson(job, overall, recommendation, skillOverlap, remoteFit, salaryFit,
-                            desiredSalaryMin, allowedRemoteTypes, allowedTitles, experience, visa, location, categories));
+                    finalScore,
+                    finalRecommendation,
+                    breakdownJson(job, finalScore, finalRecommendation, skillOverlap, remoteFit, salaryFit,
+                            desiredSalaryMin, allowedRemoteTypes, allowedTitles, experience, visa, location, categories, rerankResult));
 
             // Catalogue-level marker only: "this posting has been evaluated".
             // Shared on purpose and carrying no candidate data, which is why it
@@ -197,7 +282,7 @@ public class JobMatchService {
                     where id = ? and status in ('DISCOVERED','ANALYSED')
                     """, jobId);
 
-            if (!"APPLY".equals(recommendation)) {
+            if (!"APPLY".equals(finalRecommendation)) {
                 return false;
             }
 
@@ -210,11 +295,11 @@ public class JobMatchService {
             payload.put("profile_id", profileId.toString());
             payload.put("job_title", job.title());
             payload.put("company", job.companyNameRaw() != null ? job.companyNameRaw() : "");
-            payload.put("score", overall);
-            payload.put("recommendation", recommendation);
+            payload.put("score", finalScore);
+            payload.put("recommendation", finalRecommendation);
             payload.put("message", "New job match — " + job.title()
                     + (job.companyNameRaw() != null ? " at " + job.companyNameRaw() : ""));
-            payload.put("detail", "Scored " + overall + "/100 (skills "
+            payload.put("detail", "Scored " + finalScore + "/100 (skills "
                     + Math.round(skillOverlap.ratio() * 100) + "%, remote " + Math.round(remoteFit * 100)
                     + "%, salary " + Math.round(salaryFit * 100) + "%)");
 
@@ -228,9 +313,9 @@ public class JobMatchService {
             return true;
         }));
 
-        metrics.matchRecorded(recommendation);
-        log.info("Job {} matched: score={} recommendation={} notified={}", jobId, overall, recommendation, notified);
-        return new MatchResult(jobId, overall, recommendation, skillOverlap.ratio(), remoteFit, salaryFit,
+        metrics.matchRecorded(finalRecommendation);
+        log.info("Job {} matched: score={} recommendation={} notified={}", jobId, finalScore, finalRecommendation, notified);
+        return new MatchResult(jobId, finalScore, finalRecommendation, skillOverlap.ratio(), remoteFit, salaryFit,
                 experience.score() == null ? 0.5 : experience.score(),
                 visa.score() == null ? 0.5 : visa.score(),
                 location.score() == null ? 0.5 : location.score(),
@@ -469,7 +554,8 @@ public class JobMatchService {
                                  Number desiredSalaryMin, List<String> allowedRemoteTypes,
                                  List<String> allowedTitles,
                                  CategoryScore experience, CategoryScore visa, CategoryScore location,
-                                 List<CategoryScore> categories) {
+                                 List<CategoryScore> categories,
+                                 RerankResult rerank) {
         StringBuilder why = new StringBuilder();
         if (skillOverlap.listedSkills() == 0) {
             why.append("The job lists no skills, so skill match was scored neutral (50%). ");
@@ -615,6 +701,10 @@ public class JobMatchService {
         breakdown.put("concerns", concerns);
         breakdown.put("why", why.toString());
         breakdown.put("decision", decision);
+        if (rerank != null) {
+            breakdown.put("stage_scores", rerank.stageScores());
+            breakdown.put("rerank_narrative", rerank.narrativeWhy());
+        }
         return JdbcConversions.toJson(breakdown, objectMapper);
     }
 }

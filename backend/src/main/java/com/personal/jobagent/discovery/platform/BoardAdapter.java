@@ -100,10 +100,22 @@ public interface BoardAdapter {
     }
 
     /** Per-run knobs. {@code now} lets parsers reject implausible future dates deterministically. */
-    record CrawlContext(SafeHttpClient http, int maxPages, Instant now, String employerName) {
+    record CrawlContext(SafeHttpClient http, int maxPages, Instant now, String employerName, long deadlineNanos) {
+        public CrawlContext(SafeHttpClient http, int maxPages, Instant now, String employerName) {
+            this(http, maxPages, now, employerName, Long.MAX_VALUE);
+        }
+
         public CrawlContext {
             if (maxPages <= 0) maxPages = 50;
             if (now == null) now = Instant.now();
+        }
+
+        public boolean isDeadlineExceeded() {
+            return System.nanoTime() >= deadlineNanos;
+        }
+
+        public long remainingDeadlineMs() {
+            return Math.max(0L, java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime()));
         }
     }
 }
