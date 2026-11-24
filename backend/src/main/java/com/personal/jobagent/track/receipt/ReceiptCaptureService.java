@@ -64,19 +64,28 @@ public class ReceiptCaptureService {
     private final ReceiptVerificationPolicy verificationPolicy;
     private final ReceiptTrustStore trust;
     private final ReceiptStore store;
+    private final SubmissionEvidenceRepository evidenceRepository;
 
     @Autowired
     public ReceiptCaptureService(ReceiptVerificationPolicy verificationPolicy,
                                  @Autowired(required = false) ReceiptTrustStore trust,
-                                 @Autowired(required = false) ReceiptStore store) {
+                                 @Autowired(required = false) ReceiptStore store,
+                                 @Autowired(required = false) SubmissionEvidenceRepository evidenceRepository) {
         this.verificationPolicy = verificationPolicy != null ? verificationPolicy : new ReceiptVerificationPolicy();
         this.trust = trust;
         this.store = store;
+        this.evidenceRepository = evidenceRepository;
+    }
+
+    public ReceiptCaptureService(ReceiptVerificationPolicy verificationPolicy,
+                                 ReceiptTrustStore trust,
+                                 ReceiptStore store) {
+        this(verificationPolicy, trust, store, null);
     }
 
     /** No trusted state and no durable store: every capture fails closed. */
     public ReceiptCaptureService(ReceiptVerificationPolicy verificationPolicy) {
-        this(verificationPolicy, null, null);
+        this(verificationPolicy, null, null, null);
     }
 
     public record CaptureReceiptCommand(
@@ -164,12 +173,149 @@ public class ReceiptCaptureService {
             boolean genuine
     ) {}
 
-    /** The durable verified receipt for this plan, if one has been captured. Never throws for a missing store. */
-    public Optional<StoredReceipt> findVerifiedReceipt(UUID profileId, UUID planId) {
-        if (store == null) {
+    public enum VerificationStatus {
+        NOT_FOUND,
+        VERIFIED,
+        INVALID
+    }
+
+    /** Result of revalidating a durable stored receipt against its linked encrypted raw evidence. */
+    public record StoredReceiptVerification(
+            VerificationStatus status,
+            Optional<StoredReceipt> verifiedReceipt,
+            String failureReason
+    ) {
+        public static StoredReceiptVerification notFound() {
+            return new StoredReceiptVerification(VerificationStatus.NOT_FOUND, Optional.empty(), null);
+        }
+
+        public static StoredReceiptVerification verified(StoredReceipt receipt) {
+            return new StoredReceiptVerification(VerificationStatus.VERIFIED, Optional.of(receipt), null);
+        }
+
+        public static StoredReceiptVerification invalid(String reason) {
+            return new StoredReceiptVerification(VerificationStatus.INVALID, Optional.empty(), reason);
+        }
+
+        public boolean isVerified() {
+            return status == VerificationStatus.VERIFIED && verifiedReceipt.isPresent();
+        }
+
+        public boolean isInvalid() {
+            return status == VerificationStatus.INVALID;
+        }
+    }
+
+    /** Raw stored receipt row lookup without post-capture evidence revalidation (internal/replay conflict use only). */
+    Optional<StoredReceipt> findStoredReceipt(UUID profileId, UUID planId) {
+        if (store == null || profileId == null || planId == null) {
             return Optional.empty();
         }
         return store.findByPlan(profileId, planId);
+    }
+
+    /**
+     * Revalidates a durable stored receipt against ownership, linked raw evidence provenance,
+     * AES-GCM decryption, and SHA-256 digests in both submission_evidence and submission_receipts.
+     *
+     * <p>Note: {@link org.springframework.dao.DataAccessException} is intentionally allowed to propagate
+     * so callers like tracking can distinguish infrastructure outages (503) from tampered evidence.
+     */
+    public StoredReceiptVerification revalidateStoredReceipt(UUID profileId, UUID applicationId, UUID planId) {
+        if (profileId == null || applicationId == null || planId == null || store == null) {
+            return StoredReceiptVerification.notFound();
+        }
+        Optional<StoredReceipt> storedOpt = store.findByPlan(profileId, planId);
+        if (storedOpt.isEmpty()) {
+            return StoredReceiptVerification.notFound();
+        }
+        return revalidateLoadedReceipt(profileId, applicationId, planId, storedOpt.get());
+    }
+
+    private StoredReceiptVerification revalidateLoadedReceipt(
+            UUID profileId, UUID applicationId, UUID planId, StoredReceipt stored) {
+        if (trust == null || evidenceRepository == null) {
+            return StoredReceiptVerification.invalid(
+                    "receipt verification is unavailable, so this stored receipt cannot be trusted.");
+        }
+        if (!profileId.equals(stored.profileId())
+                || !applicationId.equals(stored.applicationId())
+                || !planId.equals(stored.planId())) {
+            return StoredReceiptVerification.invalid("stored receipt does not belong to this application or plan.");
+        }
+        if (!trust.ownsPlan(profileId, applicationId, planId)) {
+            return StoredReceiptVerification.invalid("stored receipt plan ownership could not be verified.");
+        }
+        if (!WORKER_PRINCIPAL.equals(stored.workerPrincipal())
+                || stored.approvalAuditId() == null
+                || stored.sandboxRegistrationId() == null
+                || stored.evidenceId() == null
+                || stored.evidenceSha256() == null
+                || stored.evidenceSha256().isBlank()
+                || stored.employerConfirmationId() == null
+                || stored.employerConfirmationId().isBlank()
+                || stored.atsPlatform() == null
+                || stored.atsPlatform().isBlank()) {
+            return StoredReceiptVerification.invalid("stored receipt is missing required verification metadata.");
+        }
+
+        Optional<SubmissionEvidenceRepository.StoredEvidence> evidenceOpt =
+                evidenceRepository.findById(profileId, applicationId, planId, stored.evidenceId());
+        if (evidenceOpt.isEmpty()) {
+            return StoredReceiptVerification.invalid("linked submission evidence could not be found for this receipt.");
+        }
+        SubmissionEvidenceRepository.StoredEvidence ev = evidenceOpt.get();
+        if (!stored.evidenceId().equals(ev.id())
+                || !profileId.equals(ev.profileId())
+                || !applicationId.equals(ev.applicationId())
+                || !planId.equals(ev.planId())) {
+            return StoredReceiptVerification.invalid("linked submission evidence association does not match this receipt.");
+        }
+        if (!WORKER_PRINCIPAL.equals(ev.workerPrincipal())
+                || !SubmissionEvidenceRepository.RECORDED_VIA_WORKER_COMPLETE.equals(ev.recordedVia())) {
+            return StoredReceiptVerification.invalid("linked submission evidence was not recorded by an authenticated browser worker.");
+        }
+        if (!Objects.equals(trim(stored.employerConfirmationId()), trim(ev.employerConfirmationId()))
+                || !Objects.equals(trim(stored.atsPlatform()), trim(ev.atsPlatform()))) {
+            return StoredReceiptVerification.invalid("stored receipt confirmation details do not match linked evidence.");
+        }
+        if (ev.rawEvidenceSha256() == null
+                || !ev.rawEvidenceSha256().equalsIgnoreCase(stored.evidenceSha256().trim())) {
+            return StoredReceiptVerification.invalid("stored receipt digest does not match linked evidence digest.");
+        }
+
+        Optional<String> decrypted;
+        try {
+            decrypted = evidenceRepository.decryptRawEvidence(ev);
+        } catch (EvidenceIntegrityException e) {
+            log.warn("Stored evidence integrity verification failed for plan {}: {}", planId, e.getMessage());
+            return StoredReceiptVerification.invalid("stored raw evidence failed decryption or integrity verification.");
+        }
+        if (decrypted.isEmpty()) {
+            return StoredReceiptVerification.invalid("stored raw evidence ciphertext is missing or unavailable.");
+        }
+
+        String recomputedSha256 = ReceiptVerificationPolicy.computeEvidenceSha256(decrypted.get());
+        if (!recomputedSha256.equalsIgnoreCase(ev.rawEvidenceSha256())
+                || !recomputedSha256.equalsIgnoreCase(stored.evidenceSha256().trim())) {
+            return StoredReceiptVerification.invalid("recomputed raw evidence SHA-256 does not match stored receipt.");
+        }
+        return StoredReceiptVerification.verified(stored);
+    }
+
+    /** True only when a stored receipt exists AND passes full encrypted-evidence integrity revalidation. */
+    public boolean isStoredReceiptIntegrityVerified(UUID profileId, UUID applicationId, UUID planId) {
+        return revalidateStoredReceipt(profileId, applicationId, planId).isVerified();
+    }
+
+    /** The durable verified receipt for this plan, ONLY if it passes linked encrypted-evidence revalidation. */
+    public Optional<StoredReceipt> findVerifiedReceipt(UUID profileId, UUID planId) {
+        Optional<StoredReceipt> stored = findStoredReceipt(profileId, planId);
+        if (stored.isEmpty()) {
+            return Optional.empty();
+        }
+        return revalidateLoadedReceipt(profileId, stored.get().applicationId(), planId, stored.get())
+                .verifiedReceipt();
     }
 
     /**
@@ -177,7 +323,7 @@ public class ReceiptCaptureService {
      * different evidence (digest or employer confirmation id).
      */
     public boolean isReplayConflicting(UUID profileId, UUID planId, String receiptSha256, String confirmationId) {
-        return findVerifiedReceipt(profileId, planId)
+        return findStoredReceipt(profileId, planId)
                 .map(existing -> conflicts(existing, receiptSha256, confirmationId))
                 .orElse(false);
     }
@@ -247,6 +393,15 @@ public class ReceiptCaptureService {
                         "Replay conflict detected for plan " + cmd.planId()
                                 + ": a receipt was already captured from different evidence",
                         "RECEIPT_REPLAY_REJECTED");
+            }
+            if (evidenceRepository != null) {
+                StoredReceiptVerification check = revalidateLoadedReceipt(
+                        cmd.profileId(), cmd.applicationId(), cmd.planId(), existing.get());
+                if (!check.isVerified()) {
+                    throw new InvalidReceiptException(
+                            "Stored receipt failed evidence integrity revalidation for plan " + cmd.planId(),
+                            "RECEIPT_EVIDENCE_INTEGRITY_FAILED");
+                }
             }
             log.info("Receipt replay for plan {} matched the stored receipt {}; returning it unchanged",
                     cmd.planId(), existing.get().receiptId());

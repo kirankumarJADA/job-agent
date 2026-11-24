@@ -156,6 +156,16 @@ public class SubmissionEvidenceRepository {
                 (rs, n) -> map(rs), planId, applicationId, profileId).stream().findFirst();
     }
 
+    /** Owner- and plan-scoped read: evidence for exactly this id, plan, application and profile. */
+    public Optional<StoredEvidence> findById(UUID profileId, UUID applicationId, UUID planId, UUID evidenceId) {
+        if (profileId == null || applicationId == null || planId == null || evidenceId == null) {
+            return Optional.empty();
+        }
+        return db.query(
+                "select " + COLUMNS + " from submission_evidence where id = ? and plan_id = ? and application_id = ? and profile_id = ?",
+                (rs, n) -> map(rs), evidenceId, planId, applicationId, profileId).stream().findFirst();
+    }
+
     private Optional<StoredEvidence> findById(UUID id) {
         return db.query("select " + COLUMNS + " from submission_evidence where id = ?", (rs, n) -> map(rs), id)
                 .stream().findFirst();
@@ -181,6 +191,9 @@ public class SubmissionEvidenceRepository {
             plaintext = cipher.decrypt(evidence.rawEvidenceCiphertext());
         } catch (RuntimeException e) {
             throw new EvidenceIntegrityException("stored raw evidence could not be decrypted", e);
+        }
+        if (plaintext == null || plaintext.isBlank()) {
+            throw new EvidenceIntegrityException("stored raw evidence failed its integrity check");
         }
         String digest = ReceiptVerificationPolicy.computeEvidenceSha256(plaintext);
         if (!digest.equalsIgnoreCase(evidence.rawEvidenceSha256())) {

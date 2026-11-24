@@ -504,7 +504,9 @@ class ReceiptVerificationTest {
             assertThat(receipt.attemptHistory()).singleElement().satisfies(a -> assertThat(a.attemptId()).isEqualTo(PLAN_ID));
             assertThat(fixture.receiptCount()).isEqualTo(1);
             assertThat(fixture.auditRows.get()).isEqualTo(1);
-            assertThat(captureService.findVerifiedReceipt(PROFILE_ID, PLAN_ID)).isPresent();
+            assertThat(captureService.findStoredReceipt(PROFILE_ID, PLAN_ID)).isPresent();
+            // Fail closed when linked encrypted evidence repository is unavailable
+            assertThat(captureService.findVerifiedReceipt(PROFILE_ID, PLAN_ID)).isEmpty();
         }
 
         @Test
@@ -598,6 +600,142 @@ class ReceiptVerificationTest {
             assertThatThrownBy(() -> policy.validateOrThrow(evidence))
                     .isInstanceOf(InvalidReceiptException.class)
                     .hasMessageContaining("Unauthenticated or untrusted evidence provenance rejected");
+        }
+    }
+
+    @Nested
+    @DisplayName("Post-capture stored receipt & encrypted evidence revalidation")
+    class PostCaptureRevalidation {
+
+        private static final String TEST_AES_KEY = java.util.Base64.getEncoder().encodeToString(new byte[] {
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+                17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32
+        });
+
+        private SubmissionEvidenceRepository.StoredEvidence storedEvidence;
+        private ReceiptCaptureService revalidatingService;
+        private com.personal.jobagent.security.SecretCipher validCipher;
+        private boolean throwDbOutage;
+
+        @BeforeEach
+        void setUpRevalidation() {
+            validCipher = new com.personal.jobagent.security.SecretCipher(TEST_AES_KEY);
+            throwDbOutage = false;
+            CaptureReceiptCommand cmd = validCommandBuilder().build();
+            workerRecorded(cmd);
+            UUID evidenceId = fixture.workerEvidence(PROFILE_ID, APPLICATION_ID, PLAN_ID)
+                    .orElseThrow()
+                    .evidenceId();
+            String sha = validSha256();
+            storedEvidence = new SubmissionEvidenceRepository.StoredEvidence(
+                    evidenceId, PLAN_ID, APPLICATION_ID, PROFILE_ID,
+                    ReceiptCaptureService.WORKER_PRINCIPAL,
+                    SubmissionEvidenceRepository.RECORDED_VIA_WORKER_COMPLETE,
+                    "WORKDAY", TARGET_URL, "CONFIRMED", "WD-CONF-987654",
+                    List.of("PLATFORM_SUBMISSION_CONFIRMED"), "Confirmation captured",
+                    sha, CANONICAL_RAW_EVIDENCE.getBytes(java.nio.charset.StandardCharsets.UTF_8).length,
+                    SubmissionEvidenceRepository.RAW_STORED, SUBMITTED_AT,
+                    validCipher.encrypt(CANONICAL_RAW_EVIDENCE));
+
+            revalidatingService = new ReceiptCaptureService(policy, fixture, fixture, stubEvidenceRepo(validCipher));
+            revalidatingService.captureReceipt(cmd);
+        }
+
+        private SubmissionEvidenceRepository stubEvidenceRepo(com.personal.jobagent.security.SecretCipher cipher) {
+            return new SubmissionEvidenceRepository(null, new com.fasterxml.jackson.databind.ObjectMapper(), cipher) {
+                @Override
+                public java.util.Optional<StoredEvidence> findById(UUID profileId, UUID applicationId, UUID planId, UUID evidenceId) {
+                    if (throwDbOutage) {
+                        throw new org.springframework.dao.DataAccessResourceFailureException("db unreachable");
+                    }
+                    if (storedEvidence == null
+                            || !profileId.equals(storedEvidence.profileId())
+                            || !applicationId.equals(storedEvidence.applicationId())
+                            || !planId.equals(storedEvidence.planId())
+                            || !evidenceId.equals(storedEvidence.id())) {
+                        return java.util.Optional.empty();
+                    }
+                    return java.util.Optional.of(storedEvidence);
+                }
+            };
+        }
+
+        @Test
+        void untamperedStoredReceiptAndEvidencePassRevalidation() {
+            var res = revalidatingService.revalidateStoredReceipt(PROFILE_ID, APPLICATION_ID, PLAN_ID);
+            assertThat(res.isVerified()).isTrue();
+            assertThat(revalidatingService.isStoredReceiptIntegrityVerified(PROFILE_ID, APPLICATION_ID, PLAN_ID)).isTrue();
+            assertThat(revalidatingService.findVerifiedReceipt(PROFILE_ID, PLAN_ID)).isPresent();
+        }
+
+        @Test
+        void postCaptureTamperedCiphertextFailsClosed() {
+            storedEvidence = new SubmissionEvidenceRepository.StoredEvidence(
+                    storedEvidence.id(), storedEvidence.planId(), storedEvidence.applicationId(), storedEvidence.profileId(),
+                    storedEvidence.workerPrincipal(), storedEvidence.recordedVia(), storedEvidence.atsPlatform(),
+                    storedEvidence.targetUrl(), storedEvidence.confirmationCategory(), storedEvidence.employerConfirmationId(),
+                    storedEvidence.observedSignals(), storedEvidence.evidenceText(), storedEvidence.rawEvidenceSha256(),
+                    storedEvidence.rawEvidenceByteLength(), storedEvidence.rawEvidenceStatus(), storedEvidence.recordedAt(),
+                    validCipher.encrypt("<div id='confirmation'>Confirmation: WD-CONF-987654 TAMPERED</div>"));
+
+            var res = revalidatingService.revalidateStoredReceipt(PROFILE_ID, APPLICATION_ID, PLAN_ID);
+            assertThat(res.isVerified()).isFalse();
+            assertThat(res.isInvalid()).isTrue();
+            assertThat(res.verifiedReceipt()).isEmpty();
+            assertThat(revalidatingService.isStoredReceiptIntegrityVerified(PROFILE_ID, APPLICATION_ID, PLAN_ID)).isFalse();
+            assertThat(revalidatingService.findVerifiedReceipt(PROFILE_ID, PLAN_ID)).isEmpty();
+        }
+
+        @Test
+        void postCaptureEvidenceDigestMismatchFailsClosed() {
+            storedEvidence = new SubmissionEvidenceRepository.StoredEvidence(
+                    storedEvidence.id(), storedEvidence.planId(), storedEvidence.applicationId(), storedEvidence.profileId(),
+                    storedEvidence.workerPrincipal(), storedEvidence.recordedVia(), storedEvidence.atsPlatform(),
+                    storedEvidence.targetUrl(), storedEvidence.confirmationCategory(), storedEvidence.employerConfirmationId(),
+                    storedEvidence.observedSignals(), storedEvidence.evidenceText(), "0".repeat(64),
+                    storedEvidence.rawEvidenceByteLength(), storedEvidence.rawEvidenceStatus(), storedEvidence.recordedAt(),
+                    storedEvidence.rawEvidenceCiphertext());
+
+            assertThat(revalidatingService.revalidateStoredReceipt(PROFILE_ID, APPLICATION_ID, PLAN_ID).isInvalid()).isTrue();
+            assertThat(revalidatingService.isStoredReceiptIntegrityVerified(PROFILE_ID, APPLICATION_ID, PLAN_ID)).isFalse();
+        }
+
+        @Test
+        void missingLinkedEvidenceFailsClosed() {
+            storedEvidence = null;
+
+            assertThat(revalidatingService.revalidateStoredReceipt(PROFILE_ID, APPLICATION_ID, PLAN_ID).isInvalid()).isTrue();
+            assertThat(revalidatingService.isStoredReceiptIntegrityVerified(PROFILE_ID, APPLICATION_ID, PLAN_ID)).isFalse();
+        }
+
+        @Test
+        void missingDecryptionKeyFailsClosed() {
+            ReceiptCaptureService noKeyService = new ReceiptCaptureService(
+                    policy, fixture, fixture, stubEvidenceRepo(new com.personal.jobagent.security.SecretCipher("")));
+
+            assertThat(noKeyService.revalidateStoredReceipt(PROFILE_ID, APPLICATION_ID, PLAN_ID).isInvalid()).isTrue();
+            assertThat(noKeyService.isStoredReceiptIntegrityVerified(PROFILE_ID, APPLICATION_ID, PLAN_ID)).isFalse();
+        }
+
+        @Test
+        void nonWorkerEvidenceProvenanceFailsClosed() {
+            storedEvidence = new SubmissionEvidenceRepository.StoredEvidence(
+                    storedEvidence.id(), storedEvidence.planId(), storedEvidence.applicationId(), storedEvidence.profileId(),
+                    storedEvidence.workerPrincipal(), "FORGED", storedEvidence.atsPlatform(),
+                    storedEvidence.targetUrl(), storedEvidence.confirmationCategory(), storedEvidence.employerConfirmationId(),
+                    storedEvidence.observedSignals(), storedEvidence.evidenceText(), storedEvidence.rawEvidenceSha256(),
+                    storedEvidence.rawEvidenceByteLength(), storedEvidence.rawEvidenceStatus(), storedEvidence.recordedAt(),
+                    storedEvidence.rawEvidenceCiphertext());
+
+            assertThat(revalidatingService.revalidateStoredReceipt(PROFILE_ID, APPLICATION_ID, PLAN_ID).isInvalid()).isTrue();
+            assertThat(revalidatingService.isStoredReceiptIntegrityVerified(PROFILE_ID, APPLICATION_ID, PLAN_ID)).isFalse();
+        }
+
+        @Test
+        void databaseOutagePropagatesDataAccessException() {
+            throwDbOutage = true;
+            assertThatThrownBy(() -> revalidatingService.isStoredReceiptIntegrityVerified(PROFILE_ID, APPLICATION_ID, PLAN_ID))
+                    .isInstanceOf(org.springframework.dao.DataAccessException.class);
         }
     }
 }

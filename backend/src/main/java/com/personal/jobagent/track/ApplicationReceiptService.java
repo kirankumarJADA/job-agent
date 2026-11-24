@@ -560,18 +560,22 @@ public class ApplicationReceiptService {
                     "receipt verification is unavailable, so this submission cannot be shown as confirmed.");
         }
 
-        Optional<StoredReceipt> stored;
+        ReceiptCaptureService.StoredReceiptVerification storedVerification;
         try {
-            stored = receiptCaptureService.findVerifiedReceipt(profileId, plan.id);
+            storedVerification = receiptCaptureService.revalidateStoredReceipt(profileId, app.applicationId, plan.id);
         } catch (RuntimeException e) {
-            log.warn("Could not read stored receipt for plan {}: {}", plan.id, e.getMessage());
-            return unverified(reportedId, reportedSignals, "the stored receipt could not be read.");
+            log.warn("Could not revalidate stored receipt for plan {}: {}", plan.id, e.getMessage());
+            return unverified(reportedId, reportedSignals, "the stored receipt could not be verified.");
         }
-        if (stored.isPresent()) {
-            return new ConfirmationEvidence(true, redactSensitive(stored.get().employerConfirmationId()),
-                    stored.get().observedSignals(),
+        if (storedVerification.isVerified()) {
+            StoredReceipt verifiedReceipt = storedVerification.verifiedReceipt().orElseThrow();
+            return new ConfirmationEvidence(true, redactSensitive(verifiedReceipt.employerConfirmationId()),
+                    verifiedReceipt.observedSignals(),
                     redactSensitive(reported.summary() != null ? reported.summary()
-                            : "Submission confirmed with verified " + stored.get().atsPlatform() + " platform evidence."));
+                            : "Submission confirmed with verified " + verifiedReceipt.atsPlatform() + " platform evidence."));
+        }
+        if (storedVerification.isInvalid()) {
+            return unverified(reportedId, reportedSignals, storedVerification.failureReason());
         }
 
         StoredEvidence evidence;

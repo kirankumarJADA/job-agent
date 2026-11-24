@@ -853,6 +853,141 @@ class ApplicationReceiptIT {
         assertThat(res.getResponse().getContentAsString()).doesNotContain("SuperSecretToken123", "sensitive_payload");
     }
 
+    @Test
+    void postCaptureTamperingInvalidatesBothStoredReceiptAndTrackingStatus() throws Exception {
+        Prepared p = preparedWorkdayApplication("Post-Capture Integrity Engineer");
+        registerSandbox(devProfileId, p.targetUrl());
+        approveQueueAndClaim(p.planId());
+        String raw = "<div id='confirmation'>Confirmation: WD-POST-1</div>";
+        assertThat(workerComplete(p.planId(), submittedBody(submissionEvidence("WD-POST-1", raw))).getResponse().getStatus())
+                .isEqualTo(204);
+
+        // Before tampering: receipt is confirmed, 1 receipt row exists, and /track is VERIFIED.
+        mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/receipt").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.confirmation.confirmed").value(true))
+                .andExpect(jsonPath("$.reconciliation.required").value(false));
+        assertThat(count("select count(*) from submission_receipts where plan_id = ?", p.planId())).isEqualTo(1);
+        mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/track").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("APPLIED"))
+                .andExpect(jsonPath("$.basis").value("VERIFIED"))
+                .andExpect(jsonPath("$.submission.state").value("CONFIRMED"));
+
+        // Post-capture tampering of encrypted evidence AFTER submission_receipts was written.
+        jdbc.execute("alter table submission_evidence disable trigger submission_evidence_immutable");
+        try {
+            jdbc.update("update submission_evidence set raw_evidence_ciphertext = ? where plan_id = ?",
+                    cipher.encrypt("<div id='confirmation'>Confirmation: WD-POST-1 (tampered)</div>"), p.planId());
+        } finally {
+            jdbc.execute("alter table submission_evidence enable trigger submission_evidence_immutable");
+        }
+
+        // Receipt endpoint must revalidate and refuse confirmed=true without leaking tampered text.
+        MvcResult receiptRes = mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/receipt").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.confirmation.confirmed").value(false))
+                .andExpect(jsonPath("$.reconciliation.required").value(true))
+                .andReturn();
+        assertThat(receiptRes.getResponse().getContentAsString()).doesNotContain("(tampered)");
+
+        // Tracking view must drop to UNVERIFIED and never trust submission_receipts row existence alone.
+        mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/track").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("APPLIED"))
+                .andExpect(jsonPath("$.basis").value("UNVERIFIED"))
+                .andExpect(jsonPath("$.submission.state").value("UNVERIFIED"))
+                .andExpect(jsonPath("$.acknowledgement.state").value(org.hamcrest.Matchers.not("VERIFIED")));
+
+        // Direct evidence retrieval must reject tampered ciphertext with 409 Conflict and zero leakage.
+        MvcResult evidenceRes = mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/receipts/" + p.planId() + "/evidence").session(devSession))
+                .andExpect(status().isConflict())
+                .andReturn();
+        assertThat(evidenceRes.getResponse().getContentAsString())
+                .contains("integrity check")
+                .doesNotContain("WD-POST-1", "(tampered)", "payload");
+    }
+
+    @Test
+    void postCaptureReceiptDigestMismatchFailsClosedOnReceiptAndTracking() throws Exception {
+        Prepared p = preparedWorkdayApplication("Digest Mismatch Engineer");
+        registerSandbox(devProfileId, p.targetUrl());
+        approveQueueAndClaim(p.planId());
+        String raw = "<div id='confirmation'>Confirmation: WD-DIGEST-1</div>";
+        assertThat(workerComplete(p.planId(), submittedBody(submissionEvidence("WD-DIGEST-1", raw))).getResponse().getStatus())
+                .isEqualTo(204);
+        assertThat(count("select count(*) from submission_receipts where plan_id = ?", p.planId())).isEqualTo(1);
+
+        jdbc.execute("alter table submission_receipts disable trigger submission_receipts_immutable");
+        try {
+            jdbc.update("update submission_receipts set evidence_sha256 = ? where plan_id = ?",
+                    "f".repeat(64), p.planId());
+        } finally {
+            jdbc.execute("alter table submission_receipts enable trigger submission_receipts_immutable");
+        }
+
+        mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/receipt").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.confirmation.confirmed").value(false))
+                .andExpect(jsonPath("$.reconciliation.required").value(true));
+
+        mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/track").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.basis").value("UNVERIFIED"))
+                .andExpect(jsonPath("$.submission.state").value("UNVERIFIED"))
+                .andExpect(jsonPath("$.acknowledgement.state").value(org.hamcrest.Matchers.not("VERIFIED")));
+    }
+
+    @Test
+    void postCaptureMissingLinkedEvidenceOrMissingKeyFailsClosedOnReceiptAndTracking() throws Exception {
+        Prepared p = preparedWorkdayApplication("Missing Evidence Engineer");
+        registerSandbox(devProfileId, p.targetUrl());
+        approveQueueAndClaim(p.planId());
+        String raw = "<div id='confirmation'>Confirmation: WD-MISSING-1</div>";
+        assertThat(workerComplete(p.planId(), submittedBody(submissionEvidence("WD-MISSING-1", raw))).getResponse().getStatus())
+                .isEqualTo(204);
+        assertThat(count("select count(*) from submission_receipts where plan_id = ?", p.planId())).isEqualTo(1);
+
+        // Missing key: real DB rows exist, but cipher has no decryption key.
+        var noKeyEvidenceRepo = new com.personal.jobagent.track.receipt.SubmissionEvidenceRepository(
+                jdbc, json, new com.personal.jobagent.security.SecretCipher(""));
+        var noKeyCapture = new ReceiptCaptureService(
+                new com.personal.jobagent.track.receipt.ReceiptVerificationPolicy(),
+                trustStore,
+                new com.personal.jobagent.track.receipt.JdbcReceiptStore(jdbc, json, audit, null),
+                noKeyEvidenceRepo);
+        assertThat(noKeyCapture.revalidateStoredReceipt(devProfileId, p.applicationId(), p.planId()).isInvalid()).isTrue();
+        assertThat(noKeyCapture.isStoredReceiptIntegrityVerified(devProfileId, p.applicationId(), p.planId())).isFalse();
+
+        // Point stored receipt at another plan's evidence_id (no receipt row on otherPlan -> satisfies FK & unique key, wrong plan scope).
+        Prepared otherPlan = preparedWorkdayApplication("Other Plan Evidence");
+        approveQueueAndClaim(otherPlan.planId());
+        String otherRaw = "<div id='confirmation'>Confirmation: WD-OTHER-1</div>";
+        assertThat(workerComplete(otherPlan.planId(), submittedBody(submissionEvidence("WD-OTHER-1", otherRaw)))
+                .getResponse().getStatus()).isEqualTo(204);
+        UUID foreignEvidenceId = jdbc.queryForObject(
+                "select id from submission_evidence where plan_id = ?", UUID.class, otherPlan.planId());
+
+        jdbc.execute("alter table submission_receipts disable trigger submission_receipts_immutable");
+        try {
+            jdbc.update("update submission_receipts set evidence_id = ? where plan_id = ?",
+                    foreignEvidenceId, p.planId());
+        } finally {
+            jdbc.execute("alter table submission_receipts enable trigger submission_receipts_immutable");
+        }
+
+        mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/receipt").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.confirmation.confirmed").value(false))
+                .andExpect(jsonPath("$.reconciliation.required").value(true));
+
+        mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/track").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.basis").value("UNVERIFIED"))
+                .andExpect(jsonPath("$.submission.state").value("UNVERIFIED"))
+                .andExpect(jsonPath("$.acknowledgement.state").value(org.hamcrest.Matchers.not("VERIFIED")));
+    }
+
     private static String sha256Hex(byte[] content) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(content);

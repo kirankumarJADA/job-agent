@@ -19,6 +19,8 @@ import com.personal.jobagent.track.TrackVocabulary.LinkStatus;
 import com.personal.jobagent.track.TrackVocabulary.ReportKind;
 import com.personal.jobagent.track.TrackVocabulary.TimePrecision;
 import com.personal.jobagent.track.TrackVocabulary.Verification;
+import com.personal.jobagent.track.receipt.ReceiptCaptureService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -56,10 +58,18 @@ public class TrackRepository {
 
     private final JdbcTemplate db;
     private final ObjectMapper json;
+    private final ReceiptCaptureService receiptCaptureService;
 
-    public TrackRepository(JdbcTemplate db, ObjectMapper json) {
+    @Autowired
+    public TrackRepository(JdbcTemplate db, ObjectMapper json,
+                           @Autowired(required = false) ReceiptCaptureService receiptCaptureService) {
         this.db = db;
         this.json = json;
+        this.receiptCaptureService = receiptCaptureService;
+    }
+
+    public TrackRepository(JdbcTemplate db, ObjectMapper json) {
+        this(db, json, null);
     }
 
     // ── writes ───────────────────────────────────────────────────────────
@@ -366,26 +376,34 @@ public class TrackRepository {
                 "OK".equals(byStep.get("CV")) && "OK".equals(byStep.get("COVER_LETTER")) && "OK".equals(byStep.get("ANSWERS")),
                 byStep.containsValue("FAILED"))));
 
-        boolean receiptsTablePresent = Boolean.TRUE.equals(db.queryForObject(
-                "select to_regclass('submission_receipts') is not null", Boolean.class));
-        String verifiedReceiptExpr = receiptsTablePresent
-                ? "exists (select 1 from submission_receipts sr where sr.plan_id = p.id and sr.profile_id = p.profile_id)"
-                : "false";
-        Map<UUID, PlanState> plans = new HashMap<>();
+        boolean receiptTablesPresent = Boolean.TRUE.equals(db.queryForObject(
+                "select to_regclass('submission_receipts') is not null and to_regclass('submission_evidence') is not null",
+                Boolean.class));
+        record PlanRow(UUID applicationId, UUID planId, String status, boolean submitApproved, String reconciliationNote) {}
+        List<PlanRow> planRows = new ArrayList<>();
         db.query("""
-                select distinct on (p.application_id) p.application_id, p.status, p.submit_approved, p.result::text as result,
-                       """ + verifiedReceiptExpr + """
-                 as verified_receipt
+                select distinct on (p.application_id) p.application_id, p.id as plan_id, p.status, p.submit_approved, p.result::text as result
                 from automation_plans p join applications a on a.id = p.application_id and a.profile_id = p.profile_id
                 where a.profile_id = ?""" + appFilter + "\n" + """
                 order by p.application_id, p.created_at desc, p.id desc
                 """, (ResultSet rs) -> {
             String status = rs.getString("status");
-            plans.put((UUID) rs.getObject("application_id"),
-                    new PlanState(status, rs.getBoolean("submit_approved"),
-                            "RECONCILIATION_REQUIRED".equals(status) ? reconciliationNoteOf(rs.getString("result")) : null,
-                            rs.getBoolean("verified_receipt")));
+            planRows.add(new PlanRow(
+                    (UUID) rs.getObject("application_id"),
+                    (UUID) rs.getObject("plan_id"),
+                    status,
+                    rs.getBoolean("submit_approved"),
+                    "RECONCILIATION_REQUIRED".equals(status) ? reconciliationNoteOf(rs.getString("result")) : null));
         }, args);
+        Map<UUID, PlanState> plans = new HashMap<>();
+        for (PlanRow row : planRows) {
+            boolean verifiedReceipt = receiptTablesPresent
+                    && receiptCaptureService != null
+                    && "SUBMITTED".equals(row.status())
+                    && receiptCaptureService.isStoredReceiptIntegrityVerified(profileId, row.applicationId(), row.planId());
+            plans.put(row.applicationId(),
+                    new PlanState(row.status(), row.submitApproved(), row.reconciliationNote(), verifiedReceipt));
+        }
 
         Map<UUID, List<StatusChange>> changes = new HashMap<>();
         Map<UUID, List<CandidateReport>> reports = new HashMap<>();
