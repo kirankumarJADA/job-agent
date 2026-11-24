@@ -6,6 +6,7 @@ import { BrowserWorker } from './browser_worker.js';
 import { StepType } from './plan.js';
 import { computePlanOutcome } from './outcome.js';
 import { initiateHandoff, isHandoffEligibleError } from './handoff.js';
+import { StateStore } from './store.js';
 
 const args = new Map();
 for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i], process.argv[i + 1] ?? true);
@@ -86,53 +87,262 @@ function requestShutdown(signal) {
 process.on('SIGTERM', () => requestShutdown('SIGTERM'));
 process.on('SIGINT', () => requestShutdown('SIGINT'));
 
+// ── resilient HTTP client retry & dead-letter poison-pill handling ────────
+/**
+ * Determines whether an HTTP status code represents a transient cloud infrastructure error
+ * that is eligible for retry (502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout).
+ */
+export function isRetryableStatus(status) {
+  const s = Number(status);
+  return s === 502 || s === 503 || s === 504;
+}
+
+/**
+ * Determines whether an error is a transient network/fetch failure.
+ */
+export function isRetryableNetworkError(error) {
+  if (!error) return false;
+  if (error.status && isRetryableStatus(error.status)) return true;
+  const msg = String(error.message || '').toLowerCase();
+  const code = String(error.code || '').toUpperCase();
+  const name = String(error.name || '');
+  return code === 'ECONNRESET' || code === 'ETIMEDOUT' || code === 'ECONNREFUSED' ||
+         (name === 'TypeError' && msg.includes('fetch')) ||
+         msg.includes('fetch failed') || msg.includes('network') || msg.includes('econnreset') || msg.includes('etimedout');
+}
+
+/**
+ * Calculates exponential backoff with full jitter according to the architecture specification:
+ * ceiling = min(maxDelayMs, baseDelayMs * 2^attempt)
+ * sleep = floor(randomFn() * ceiling)
+ */
+export function calculateBackoff(attempt, baseDelayMs = 500, maxDelayMs = 10000, randomFn = Math.random) {
+  const cap = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attempt));
+  const jittered = randomFn() * cap;
+  return Math.floor(jittered);
+}
+
+/**
+ * Resilient HTTP client wrapper executing fetch with exponential backoff and full jitter
+ * for transient cloud 502/503/504 errors and network disconnects.
+ */
+export async function fetchWithRetry(url, options = {}, {
+  maxRetries = 3,
+  baseDelayMs = 500,
+  maxDelayMs = 10000,
+  randomFn = Math.random,
+  sleepFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  fetchFn = (u, opt) => fetch(u, opt),
+  onRetry = null,
+} = {}) {
+  let attempt = 0;
+  while (true) {
+    let response = null;
+    let error = null;
+    try {
+      response = await fetchFn(url, options);
+    } catch (err) {
+      error = err;
+    }
+
+    if (response) {
+      if (response.ok || response.status === 204) {
+        return response;
+      }
+
+      if (attempt < maxRetries && isRetryableStatus(response.status)) {
+        const delay = calculateBackoff(attempt, baseDelayMs, maxDelayMs, randomFn);
+        if (typeof onRetry === 'function') {
+          onRetry({ attempt, status: response.status, delay, error: null });
+        }
+        await sleepFn(delay);
+        attempt += 1;
+        continue;
+      }
+
+      return response;
+    } else {
+      if (attempt < maxRetries && isRetryableNetworkError(error)) {
+        const delay = calculateBackoff(attempt, baseDelayMs, maxDelayMs, randomFn);
+        if (typeof onRetry === 'function') {
+          onRetry({ attempt, status: null, delay, error });
+        }
+        await sleepFn(delay);
+        attempt += 1;
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+export const MAX_PLAN_CRASHES = 3;
+
+/**
+ * Tracks crashes and provides terminal isolation for poison-pill plans.
+ */
+export class DeadLetterRegistry {
+  constructor({ maxCrashes = MAX_PLAN_CRASHES, persistPath = process.env.WORKER_DEAD_LETTER_PATH || null } = {}) {
+    this.maxCrashes = maxCrashes;
+    this.persistPath = persistPath;
+    this.crashes = new Map();
+    this.deadLetters = new Map();
+    if (this.persistPath) this.#load();
+  }
+
+  recordCrash(planId, error) {
+    if (!planId) return 0;
+    const list = this.crashes.get(planId) || [];
+    list.push({ at: Date.now(), message: error?.message || String(error) });
+    this.crashes.set(planId, list);
+    if (list.length >= this.maxCrashes) {
+      this.markDeadLetter(planId, `Poison-pill plan exceeded max crash limit (${list.length}/${this.maxCrashes}): ${error?.message || ''}`);
+    }
+    this.#save();
+    return list.length;
+  }
+
+  getCrashCount(planId) {
+    return this.crashes.get(planId)?.length || 0;
+  }
+
+  isDeadLetter(planId) {
+    return this.deadLetters.has(planId);
+  }
+
+  getDeadLetter(planId) {
+    return this.deadLetters.get(planId);
+  }
+
+  markDeadLetter(planId, reason) {
+    if (!planId) return;
+    this.deadLetters.set(planId, {
+      at: Date.now(),
+      reason: String(reason || 'POISON_PILL_PLAN'),
+      crashes: this.getCrashCount(planId),
+    });
+    this.#save();
+  }
+
+  clear(planId) {
+    if (planId) {
+      this.crashes.delete(planId);
+      this.deadLetters.delete(planId);
+    } else {
+      this.crashes.clear();
+      this.deadLetters.clear();
+    }
+    this.#save();
+  }
+
+  #load() {
+    try {
+      if (this.persistPath && fs.existsSync(this.persistPath)) {
+        const data = JSON.parse(fs.readFileSync(this.persistPath, 'utf8'));
+        if (data.deadLetters) {
+          for (const [k, v] of Object.entries(data.deadLetters)) this.deadLetters.set(k, v);
+        }
+        if (data.crashes) {
+          for (const [k, v] of Object.entries(data.crashes)) this.crashes.set(k, v);
+        }
+      }
+    } catch {}
+  }
+
+  #save() {
+    try {
+      if (this.persistPath) {
+        const obj = {
+          deadLetters: Object.fromEntries(this.deadLetters),
+          crashes: Object.fromEntries(this.crashes),
+        };
+        fs.mkdirSync(path.dirname(this.persistPath), { recursive: true });
+        const tmp = `${this.persistPath}.tmp-${process.pid}`;
+        fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), { mode: 0o600 });
+        fs.renameSync(tmp, this.persistPath);
+      }
+    } catch {}
+  }
+}
+
+export const defaultDeadLetterRegistry = new DeadLetterRegistry();
+
 const eventSink = (event) => {
   process.stdout.write(`${JSON.stringify(event)}\n`);
   if (!eventUrl) return;
   const body = JSON.stringify({ eventId: `${event.planId ?? 'plan'}:${event.type}:${event.stepId ?? ''}`, ...event });
   (async () => {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      try {
-        const response = await fetch(eventUrl, { method: 'POST', headers: { ...authHeaders(), 'content-type': 'application/json' }, body });
-        if (response.ok) return;
-      } catch {}
-      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
-    }
+    try {
+      await fetchWithRetry(eventUrl, {
+        method: 'POST',
+        headers: { ...authHeaders(), 'content-type': 'application/json' },
+        body,
+      });
+    } catch {}
   })();
 };
 
-async function apiCall(url, body = null) {
-  const headers = { ...authHeaders(), 'content-type': 'application/json' };
+export async function apiCall(url, body = null, {
+  retryConfig = {},
+  authHeadersFn = authHeaders,
+  fetchFn = (u, opt) => fetch(u, opt),
+} = {}) {
+  const headers = { ...authHeadersFn(), 'content-type': 'application/json' };
   const options = { method: 'POST', headers };
   if (body) options.body = JSON.stringify(body);
-  const response = await fetch(url, options);
+  const response = await fetchWithRetry(url, options, { fetchFn, ...retryConfig });
   if (response.status === 204) return null;
   if (!response.ok) throw new Error(`BACKEND_REQUEST_FAILED:${response.status}`);
   return response.json();
 }
 
-async function reportOutcome(planId, outcome, detail, result = null) {
-  if (!completeUrl) return;
-  // The completion report is the single most important call the worker makes:
-  // a transient backend blip must not end with the plan stranded in RUNNING
-  // (which the backend sweeper would then reclaim for re-execution). Retry a
-  // few times before giving up — the sweeper is the backstop either way.
-  let lastError = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+export async function reportOutcome(planId, outcome, detail, result = null, {
+  apiCallFn = apiCall,
+  completeUrlVal = completeUrl,
+  retryConfig = {},
+} = {}) {
+  const targetUrl = completeUrlVal || completeUrl;
+  if (!targetUrl) return;
+  const url = targetUrl.replace('{id}', encodeURIComponent(planId));
+  const body = { outcome, detail, result };
+
+  const {
+    maxRetries = 3,
+    baseDelayMs = 500,
+    maxDelayMs = 10000,
+    randomFn = Math.random,
+    sleepFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    onRetry = null,
+  } = retryConfig;
+
+  let attempt = 0;
+  while (true) {
     try {
-      await apiCall(completeUrl.replace('{id}', encodeURIComponent(planId)), { outcome, detail, result });
+      await apiCallFn(url, body, { retryConfig });
       return;
     } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+      const statusMatch = String(error.message || '').match(/BACKEND_REQUEST_FAILED:(\d+)/);
+      const status = statusMatch ? parseInt(statusMatch[1], 10) : error.status;
+      const isRetryable = (status && isRetryableStatus(status)) || isRetryableNetworkError(error);
+
+      if (attempt < maxRetries && isRetryable) {
+        const delay = calculateBackoff(attempt, baseDelayMs, maxDelayMs, randomFn);
+        if (typeof onRetry === 'function') {
+          onRetry({ attempt, status, delay, error });
+        }
+        await sleepFn(delay);
+        attempt += 1;
+        continue;
+      }
+      throw error;
     }
   }
-  throw lastError ?? new Error('REPORT_OUTCOME_FAILED');
 }
 
-async function sendHeartbeat(planId) {
-  if (!heartbeatUrl) return;
-  await apiCall(heartbeatUrl.replace('{id}', encodeURIComponent(planId)));
+export async function sendHeartbeat(planId, { apiCallFn = apiCall, heartbeatUrlVal = heartbeatUrl } = {}) {
+  const target = heartbeatUrlVal || heartbeatUrl;
+  if (!target) return;
+  await apiCallFn(target.replace('{id}', encodeURIComponent(planId)));
 }
 
 async function downloadArtifact(baseUrl, artifact, destination) {
@@ -140,7 +350,7 @@ async function downloadArtifact(baseUrl, artifact, destination) {
   if (url.origin !== new URL(baseUrl).origin || !url.pathname.startsWith('/api/v1/automation/plans/')) {
     throw new Error(`ARTIFACT_URL_REJECTED:${artifact.kind}`);
   }
-  const response = await fetch(url, { headers: authHeaders() });
+  const response = await fetchWithRetry(url, { headers: authHeaders() });
   if (!response.ok) throw new Error(`ARTIFACT_DOWNLOAD_FAILED:${artifact.kind}:${response.status}`);
   const bytes = Buffer.from(await response.arrayBuffer());
   const expected = artifact.sha256;
@@ -247,6 +457,8 @@ export async function executePollCycle({
   verificationResolverFn = verificationResolver,
   identityResolverFn = identityResolver,
   credentialResolverFn = credentialResolver,
+  deadLetterRegistry = defaultDeadLetterRegistry,
+  maxCrashLimit = MAX_PLAN_CRASHES,
 } = {}) {
   let planId = null;
   let plan = null;
@@ -255,6 +467,26 @@ export async function executePollCycle({
     const claimed = await apiCallFn(pollUrl);
     if (!claimed?.id) return { status: 'NO_PLAN' };
     planId = String(claimed.id);
+
+    // Terminal isolation: check if this plan is already isolated as a poison-pill dead letter
+    if (deadLetterRegistry.isDeadLetter(planId)) {
+      const dl = deadLetterRegistry.getDeadLetter(planId);
+      console.error(JSON.stringify({ type: 'PLAN_DEAD_LETTER_BLOCKED', planId, reason: dl.reason }));
+      await reportOutcomeFn(planId, 'FAILED', `DEAD_LETTER_POISON_PILL: ${dl.reason}`, [{
+        type: 'PLAN_ERROR',
+        outcome: 'FAILED',
+        reason: 'DEAD_LETTER_POISON_PILL',
+        message: `Plan was previously isolated as dead-letter poison-pill: ${dl.reason}`,
+        deadLetter: true,
+      }]).catch(() => {});
+      await eventSinkFn({
+        type: 'PLAN_DEAD_LETTER_ISOLATED',
+        planId,
+        reason: dl.reason,
+      });
+      return { status: 'DEAD_LETTER', planId, outcome: 'FAILED', detail: dl.reason };
+    }
+
     plan = planFromClaim(planId, claimed);
     if (plan.planType === 'GREENHOUSE') {
       const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
@@ -262,7 +494,7 @@ export async function executePollCycle({
       const backendBase = new URL(apiRoot);
       const packageUrl = new URL(`${backendBase.pathname.replace(/\/$/, '')}/plans/${encodeURIComponent(planId)}/package`, backendBase);
       const baseUrl = backendBase.origin;
-      const response = await fetch(packageUrl, { headers: authHeadersFn() });
+      const response = await fetchWithRetry(packageUrl, { headers: authHeadersFn() });
       if (!response.ok) throw new Error(`GREENHOUSE_PACKAGE_FAILED:${response.status}`);
       plan.package = await response.json();
       plan.fields = plan.package.fields ?? [];
@@ -407,6 +639,8 @@ export async function executePollCycle({
       ]);
     }
     await reportOutcomeFn(planId, outcome, detail, result);
+    // Successful execution clears past crash tracking for this plan
+    deadLetterRegistry.clear(planId);
     console.log(JSON.stringify({ type: 'PLAN_ENDED', planId, outcome }));
     return { status: 'COMPLETED', planId, outcome, detail, result };
   } catch (error) {
@@ -450,13 +684,33 @@ export async function executePollCycle({
         return { status: 'HANDOFF_FAILED', planId, error: handoffErr.message };
       }
     } else {
+      let isDead = false;
+      if (planId) {
+        const crashCount = deadLetterRegistry.recordCrash(planId, error);
+        if (deadLetterRegistry.isDeadLetter(planId) || crashCount >= maxCrashLimit) {
+          isDead = true;
+          deadLetterRegistry.markDeadLetter(planId, `Repeated crashes (${crashCount}/${maxCrashLimit}): ${error.message}`);
+        }
+      }
+
       const outcome = error.name === 'HardStopError'
         // MFA_REQUIRED (Phase 7: Workday) is the same bucket as CAPTCHA/
         // anti-bot — a genuine stop condition requiring the human, never a
         // logic failure on Robin's part, and never auto-retried either way.
         ? (/CAPTCHA|ANTI_BOT|ACCESS_DENIED|MFA_REQUIRED/i.test(String(error.reason)) ? 'BLOCKED_ANTI_BOT' : 'FAILED')
         : 'FAILED';
-      console.error(JSON.stringify({ type: 'POLL_ERROR', planId, outcome, error: error.message }));
+
+      const reason = isDead ? 'DEAD_LETTER_POISON_PILL' : (error.name === 'HardStopError' ? error.reason : null);
+      const detail = isDead ? `DEAD_LETTER_POISON_PILL: ${error.message}` : String(error.message);
+
+      console.error(JSON.stringify({
+        type: isDead ? 'PLAN_DEAD_LETTER' : 'POLL_ERROR',
+        planId,
+        outcome,
+        error: error.message,
+        crashes: planId ? deadLetterRegistry.getCrashCount(planId) : 1,
+      }));
+
       // Persist WHY this plan stopped so the review panel can show the candidate
       // a real reason (missing info, CAPTCHA, a lost lease, …) instead of a bare
       // "failed" with no explanation — reuses the existing generic `result`
@@ -465,16 +719,86 @@ export async function executePollCycle({
       const errorResult = [{
         type: 'PLAN_ERROR',
         outcome,
-        reason: error.name === 'HardStopError' ? error.reason : null,
+        reason,
         message: String(error.message),
+        deadLetter: isDead,
       }];
-      if (planId) await reportOutcomeFn(planId, outcome, String(error.message), errorResult).catch(() => {});
-      return { status: 'ERROR', planId, outcome, error: error.message };
+
+      if (planId) {
+        await reportOutcomeFn(planId, outcome, detail, errorResult).catch(() => {});
+        if (isDead) {
+          await eventSinkFn({
+            type: 'PLAN_DEAD_LETTER_ISOLATED',
+            planId,
+            crashes: deadLetterRegistry.getCrashCount(planId),
+            error: error.message,
+          });
+        }
+      }
+
+      return {
+        status: isDead ? 'DEAD_LETTER' : 'ERROR',
+        planId,
+        outcome,
+        error: error.message,
+        detail,
+      };
     }
   } finally {
     if (heartbeat) clearInterval(heartbeat);
     runtimeObj.runner = null;
   }
+}
+
+/**
+ * Creates a poll handler with error recovery and logging to safely execute poll cycles.
+ */
+export function createPollHandler({
+  pollUrl,
+  apiCallFn = apiCall,
+  reportOutcomeFn = reportOutcome,
+  sendHeartbeatFn = sendHeartbeat,
+  initiateHandoffFn = initiateHandoff,
+  authHeadersFn = authHeaders,
+  runtimeObj = runtime,
+  statePathVal = statePath,
+  artifactDirVal = artifactDir,
+  eventSinkFn = eventSink,
+  verificationResolverFn = verificationResolver,
+  identityResolverFn = identityResolver,
+  credentialResolverFn = credentialResolver,
+  deadLetterRegistry = defaultDeadLetterRegistry,
+  maxCrashLimit = MAX_PLAN_CRASHES,
+} = {}) {
+  let executing = false;
+  return async function poll() {
+    if (executing || runtimeObj.shuttingDown) return;
+    executing = true;
+    try {
+      return await executePollCycle({
+        pollUrl,
+        apiCallFn,
+        reportOutcomeFn,
+        sendHeartbeatFn,
+        initiateHandoffFn,
+        authHeadersFn,
+        runtimeObj,
+        statePathVal,
+        artifactDirVal,
+        eventSinkFn,
+        verificationResolverFn,
+        identityResolverFn,
+        credentialResolverFn,
+        deadLetterRegistry,
+        maxCrashLimit,
+      });
+    } catch (error) {
+      console.error(JSON.stringify({ type: 'POLL_LOOP_ERROR', error: error?.message }));
+      return { status: 'POLL_ERROR', error: error?.message };
+    } finally {
+      executing = false;
+    }
+  };
 }
 
 // Robin x Tsenta hardening: guards the entire dispatch below so this module
@@ -494,31 +818,22 @@ if (planFile) {
     .catch((error) => { process.stderr.write(`${JSON.stringify({ type: 'WORKER_ERROR', error: error.message })}\n`); process.exitCode = 1; });
 } else if (pollUrl) {
   console.log(JSON.stringify({ type: 'WORKER_READY', mode: 'POLLING', pollUrl, pollIntervalMs }));
-  let executing = false;
-
-  async function poll() {
-    if (executing || runtime.shuttingDown) return;
-    executing = true;
-    try {
-      await executePollCycle({
-        pollUrl,
-        apiCallFn: apiCall,
-        reportOutcomeFn: reportOutcome,
-        sendHeartbeatFn: sendHeartbeat,
-        initiateHandoffFn: initiateHandoff,
-        authHeadersFn: authHeaders,
-        runtimeObj: runtime,
-        statePathVal: statePath,
-        artifactDirVal: artifactDir,
-        eventSinkFn: eventSink,
-        verificationResolverFn: verificationResolver,
-        identityResolverFn: identityResolver,
-        credentialResolverFn: credentialResolver,
-      });
-    } finally {
-      executing = false;
-    }
-  }
+  const poll = createPollHandler({
+    pollUrl,
+    apiCallFn: apiCall,
+    reportOutcomeFn: reportOutcome,
+    sendHeartbeatFn: sendHeartbeat,
+    initiateHandoffFn: initiateHandoff,
+    authHeadersFn: authHeaders,
+    runtimeObj: runtime,
+    statePathVal: statePath,
+    artifactDirVal: artifactDir,
+    eventSinkFn: eventSink,
+    verificationResolverFn: verificationResolver,
+    identityResolverFn: identityResolver,
+    credentialResolverFn: credentialResolver,
+    deadLetterRegistry: defaultDeadLetterRegistry,
+  });
   
   runtime.pollTimer = setInterval(poll, pollIntervalMs);
   poll();
