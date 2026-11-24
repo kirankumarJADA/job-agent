@@ -1290,4 +1290,99 @@ class BoardDiscoveryServiceTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("sourceId must not be null");
     }
+
+    @Test
+    void upstream500ListingFailurePreservesGlobalScanOffset() {
+        Map<String, Object> sourceRow = new java.util.HashMap<>();
+        sourceRow.put("default_offset", "42");
+        when(db.queryForList(contains("select last_run->>'scan_offset'"), eq(SOURCE)))
+                .thenReturn(List.of(sourceRow));
+
+        Scripted a = new Scripted();
+        a.listing = ListingResult.failed(FailureCategory.UPSTREAM_ERROR, "HTTP 500 Internal Server Error");
+
+        var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.SCHEDULED);
+
+        assertThat(report.ok()).isFalse();
+        assertThat(report.counts().get("scan_offset")).isEqualTo(42);
+        verify(db).update(contains("failure_streak = failure_streak + 1"), contains("\"scan_offset\":42"), anyString(), any(), eq(SOURCE));
+    }
+
+    @Test
+    void upstreamRateLimitedListingFailurePreservesGlobalScanOffset() {
+        Map<String, Object> sourceRow = new java.util.HashMap<>();
+        sourceRow.put("default_offset", "15");
+        when(db.queryForList(contains("select last_run->>'scan_offset'"), eq(SOURCE)))
+                .thenReturn(List.of(sourceRow));
+
+        Scripted a = new Scripted();
+        a.listing = ListingResult.failed(FailureCategory.RATE_LIMITED, "HTTP 429 Too Many Requests");
+
+        var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.SCHEDULED);
+
+        assertThat(report.ok()).isFalse();
+        assertThat(report.counts().get("scan_offset")).isEqualTo(15);
+        verify(db).update(contains("failure_streak = failure_streak + 1"), contains("\"scan_offset\":15"), anyString(), any(), eq(SOURCE));
+    }
+
+    @Test
+    void upstreamListingFailurePreservesPlanSpecificScanOffset() {
+        UUID planId = UUID.randomUUID();
+        UUID token = UUID.randomUUID();
+
+        com.personal.jobagent.discovery.plan.SearchPlanRepository searchPlanRepo =
+                mock(com.personal.jobagent.discovery.plan.SearchPlanRepository.class);
+        when(searchPlanRepo.isLeaseOwner(planId, token)).thenReturn(true);
+        service.setSearchPlanRepository(searchPlanRepo);
+
+        Map<String, Object> planRow = new java.util.HashMap<>();
+        planRow.put("plan_offset", "88");
+        when(db.queryForList(contains("last_run->'plan_offsets'"), any(Object[].class)))
+                .thenReturn(List.of(planRow));
+
+        Scripted a = new Scripted();
+        a.listing = ListingResult.failed(FailureCategory.UPSTREAM_ERROR, "HTTP 500");
+
+        var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), planId, token, 10, 60000L);
+
+        assertThat(report.ok()).isFalse();
+        assertThat(report.counts().get("scan_offset")).isEqualTo(88);
+        verify(db).update(contains("jsonb_set"), eq(planId.toString()), eq(88), eq(SOURCE));
+    }
+
+    @Test
+    void successfulEmptyListingSetsScanOffsetToZero() {
+        Map<String, Object> sourceRow = new java.util.HashMap<>();
+        sourceRow.put("default_offset", "25");
+        when(db.queryForList(contains("select last_run->>'scan_offset'"), eq(SOURCE)))
+                .thenReturn(List.of(sourceRow));
+
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(List.of(), 1, null);
+
+        var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.SCHEDULED);
+
+        assertThat(report.ok()).isTrue();
+        assertThat(report.counts().get("scan_offset")).isEqualTo(0);
+    }
+
+    @Test
+    void successfulListingAdvancesScanOffsetNormally() {
+        Map<String, Object> sourceRow = new java.util.HashMap<>();
+        sourceRow.put("default_offset", "2");
+        when(db.queryForList(contains("select last_run->>'scan_offset'"), eq(SOURCE)))
+                .thenReturn(List.of(sourceRow));
+
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(List.of(full("1"), full("2"), full("3"), full("4"), full("5")), 1, null);
+
+        // Process with maxResults = 2, so 2 entries are processed starting at offset 2 (entries 2 and 3)
+        // nextOffset = (2 + 2) % 5 = 4
+        var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), null, null, 2, 60000L);
+
+        assertThat(report.ok()).isTrue();
+        assertThat(report.counts().get("scan_offset")).isEqualTo(4);
+    }
 }
