@@ -199,7 +199,11 @@ class SubmissionCompletionServiceTest {
         assertInvalid(List.of(with("confirmationNumber", 12345)));
         assertInvalid(List.of(with("signals", "PLATFORM_SUBMISSION_CONFIRMED")));
         assertInvalid(List.of(with("signals", List.of(" "))));
+        assertInvalid(List.of(with("summary", 12345)));
+        assertInvalid(List.of(with("summary", "x".repeat(SubmissionCompletionService.MAX_EVIDENCE_TEXT + 1))));
         assertInvalid(List.of(with("rawEvidence", Map.of("dom", "<div/>"))));
+        assertThat(SubmissionCompletionService.validate("WORKDAY",
+                List.of(with("summary", "x".repeat(SubmissionCompletionService.MAX_EVIDENCE_TEXT)))).valid()).isTrue();
         assertThat(SubmissionCompletionService.validate("WORKDAY", List.of(validEntry())).valid()).isTrue();
         Map<String, Object> minimal = validEntry();
         minimal.remove("confirmationNumber");

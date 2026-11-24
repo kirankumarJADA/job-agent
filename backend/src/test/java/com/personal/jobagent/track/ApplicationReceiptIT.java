@@ -353,8 +353,11 @@ class ApplicationReceiptIT {
                 .andExpect(jsonPath("$.basis").value("VERIFIED"))
                 .andExpect(jsonPath("$.submission.state").value("CONFIRMED"));
 
-        // An attempt id that is not this application's is 404, never another attempt's receipt
-        mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/receipts/" + UUID.randomUUID()).session(devSession))
+        // An attempt id that is not this application's is 404, never another attempt's receipt or evidence
+        UUID unknownAttemptId = UUID.randomUUID();
+        mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/receipts/" + unknownAttemptId).session(devSession))
+                .andExpect(status().isNotFound());
+        mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/receipts/" + unknownAttemptId + "/evidence").session(devSession))
                 .andExpect(status().isNotFound());
 
         // Reading it again does not create anything new
@@ -586,12 +589,19 @@ class ApplicationReceiptIT {
         }
         registerSandbox(devProfileId, p.targetUrl());
 
-        mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/receipt").session(devSession))
+        MvcResult receiptRes = mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/receipt").session(devSession))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.confirmation.confirmed").value(false))
-                .andExpect(jsonPath("$.reconciliation.required").value(true));
-        mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/receipts/" + p.planId() + "/evidence").session(devSession))
-                .andExpect(status().isConflict());
+                .andExpect(jsonPath("$.reconciliation.required").value(true))
+                .andReturn();
+        assertThat(receiptRes.getResponse().getContentAsString()).doesNotContain("(edited)");
+
+        MvcResult evidenceRes = mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/receipts/" + p.planId() + "/evidence").session(devSession))
+                .andExpect(status().isConflict())
+                .andReturn();
+        assertThat(evidenceRes.getResponse().getContentAsString())
+                .contains("integrity check")
+                .doesNotContain("WD-TAMPER-1", "(edited)", "payload", "submission_receipts", "receiptId");
         assertThat(count("select count(*) from submission_receipts where plan_id = ?", p.planId())).isZero();
     }
 

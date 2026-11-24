@@ -366,11 +366,16 @@ public class TrackRepository {
                 "OK".equals(byStep.get("CV")) && "OK".equals(byStep.get("COVER_LETTER")) && "OK".equals(byStep.get("ANSWERS")),
                 byStep.containsValue("FAILED"))));
 
+        boolean receiptsTablePresent = Boolean.TRUE.equals(db.queryForObject(
+                "select to_regclass('submission_receipts') is not null", Boolean.class));
+        String verifiedReceiptExpr = receiptsTablePresent
+                ? "exists (select 1 from submission_receipts sr where sr.plan_id = p.id and sr.profile_id = p.profile_id)"
+                : "false";
         Map<UUID, PlanState> plans = new HashMap<>();
         db.query("""
                 select distinct on (p.application_id) p.application_id, p.status, p.submit_approved, p.result::text as result,
-                       exists (select 1 from submission_receipts sr
-                               where sr.plan_id = p.id and sr.profile_id = p.profile_id) as verified_receipt
+                       """ + verifiedReceiptExpr + """
+                 as verified_receipt
                 from automation_plans p join applications a on a.id = p.application_id and a.profile_id = p.profile_id
                 where a.profile_id = ?""" + appFilter + "\n" + """
                 order by p.application_id, p.created_at desc, p.id desc
