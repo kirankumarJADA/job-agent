@@ -3,7 +3,9 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { BrowserWorker } from './browser_worker.js';
+import { StepType } from './plan.js';
 import { computePlanOutcome } from './outcome.js';
+import { initiateHandoff, isHandoffEligibleError } from './handoff.js';
 
 const args = new Map();
 for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i], process.argv[i + 1] ?? true);
@@ -230,6 +232,251 @@ function planFromClaim(planId, claimed) {
   };
 }
 
+export async function executePollCycle({
+  pollUrl,
+  apiCallFn = apiCall,
+  reportOutcomeFn = reportOutcome,
+  sendHeartbeatFn = sendHeartbeat,
+  runner = null,
+  initiateHandoffFn = initiateHandoff,
+  authHeadersFn = authHeaders,
+  runtimeObj = runtime,
+  statePathVal = statePath,
+  artifactDirVal = artifactDir,
+  eventSinkFn = eventSink,
+  verificationResolverFn = verificationResolver,
+  identityResolverFn = identityResolver,
+  credentialResolverFn = credentialResolver,
+} = {}) {
+  let planId = null;
+  let plan = null;
+  let heartbeat;
+  try {
+    const claimed = await apiCallFn(pollUrl);
+    if (!claimed?.id) return { status: 'NO_PLAN' };
+    planId = String(claimed.id);
+    plan = planFromClaim(planId, claimed);
+    if (plan.planType === 'GREENHOUSE') {
+      const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
+      if (apiRoot === pollUrl) throw new Error('INVALID_WORKER_POLL_URL');
+      const backendBase = new URL(apiRoot);
+      const packageUrl = new URL(`${backendBase.pathname.replace(/\/$/, '')}/plans/${encodeURIComponent(planId)}/package`, backendBase);
+      const baseUrl = backendBase.origin;
+      const response = await fetch(packageUrl, { headers: authHeadersFn() });
+      if (!response.ok) throw new Error(`GREENHOUSE_PACKAGE_FAILED:${response.status}`);
+      plan.package = await response.json();
+      plan.fields = plan.package.fields ?? [];
+      if (plan.package.planId !== planId || plan.package.applicationId !== plan.correlation.applicationId
+          || plan.package.jobId !== plan.correlation.jobId || plan.package.expectedUrl !== plan.targetUrl) {
+        throw new Error('GREENHOUSE_PACKAGE_CORRELATION_MISMATCH');
+      }
+      plan.requiredGaps = plan.package.requiredGaps ?? [];
+      await materializeArtifacts(plan, baseUrl);
+    } else if (zohoRecruitPackageNeedsMaterialization(plan)) {
+      // Robin x Tsenta continuation: unlike GREENHOUSE, the package is
+      // already embedded in the claimed plan JSON (ZohoRecruitExecutionPlanService
+      // builds it directly, with no live-DOM-dependent fields to fetch
+      // separately) — only the document bytes themselves need downloading,
+      // reusing the exact same correlation/checksum-verified download path.
+      // Triggers whenever a package exists at all (cv-only, cover-letter-
+      // only, or both) — see zohoRecruitPackageNeedsMaterialization's own
+      // comment for the bug this replaced (gating on `.cv` alone silently
+      // skipped a cover-letter-only package).
+      const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
+      if (apiRoot === pollUrl) throw new Error('INVALID_WORKER_POLL_URL');
+      await materializeArtifacts(plan, new URL(apiRoot).origin);
+    } else if (ashbyPackageNeedsMaterialization(plan)) {
+      // Phase 14: same reasoning as ZOHO_RECRUIT above — AshbyExecutionPlanService
+      // embeds the package directly in the claimed plan JSON (cv only, no
+      // cover letter — see that service's own module comment), so only the
+      // résumé bytes themselves need downloading via the same shared path.
+      const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
+      if (apiRoot === pollUrl) throw new Error('INVALID_WORKER_POLL_URL');
+      await materializeArtifacts(plan, new URL(apiRoot).origin);
+    } else if (workdayPackageNeedsMaterialization(plan)) {
+      const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
+      if (apiRoot === pollUrl) throw new Error('INVALID_WORKER_POLL_URL');
+      await materializeArtifacts(plan, new URL(apiRoot).origin);
+    }
+
+    // Heartbeat on an interval while executing. A single missed beat is
+    // tolerated (network jitter), but if the backend stays unreachable the
+    // run must STOP: the backend's stale-plan sweeper will reclaim the plan
+    // for re-execution, and continuing to drive a real employer form with
+    // no live lease risks two workers operating the same application at
+    // once. Stopping is always the safe direction.
+    const runnerInstance = runner ?? new BrowserWorker({
+      statePath: statePathVal,
+      artifactDir: artifactDirVal,
+      eventSink: eventSinkFn,
+      verificationResolver: verificationResolverFn,
+      identityResolver: identityResolverFn,
+      credentialResolver: credentialResolverFn,
+    });
+    runtimeObj.runner = runnerInstance;
+    let missedHeartbeats = 0;
+    heartbeat = setInterval(() => {
+      sendHeartbeatFn(planId)
+        .then(() => { missedHeartbeats = 0; })
+        .catch(() => {
+          missedHeartbeats += 1;
+          if (missedHeartbeats >= 3) {
+            console.error(JSON.stringify({ type: 'WORKER_LEASE_LOST', planId, missedHeartbeats }));
+            runnerInstance.requestAbort();
+          }
+        });
+    }, 30_000);
+    const runResult = await runnerInstance.execute(plan, { approve: false, headless: true });
+    // Phase 4: a GREENHOUSE plan whose last step is REAL_SUBMIT_CLICK has
+    // just attempted (or confirmed an already-completed) real submission —
+    // its outcome depends on what the worker actually observed, never a
+    // hardcoded assumption. Every other GREENHOUSE plan still ends at
+    // validate-form exactly as before, always awaiting human review.
+    const isSubmitAttempt = plan.planType === 'GREENHOUSE'
+      && plan.steps.at(-1)?.type === 'REAL_SUBMIT_CLICK';
+    // Phase 14: Ashby's own counterpart — see outcome.js's isAshbySubmitAttempt
+    // for the same reasoning (only the last step's exact type decides this,
+    // never an assumption about what a given run "should" have done).
+    const isAshbySubmitAttempt = plan.planType === 'ASHBY'
+      && plan.steps.at(-1)?.type === 'ASHBY_SUBMIT_CLICK';
+    const { outcome, detail, result } = computePlanOutcome(plan, runResult);
+    if (plan.planType === 'GREENHOUSE' && !isSubmitAttempt) {
+      await Promise.allSettled([
+        eventSinkFn({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
+          applicationId: plan.correlation.applicationId, requiredGaps: plan.requiredGaps }),
+      ]);
+    } else if (plan.planType === 'ZOHO_RECRUIT') {
+      const zoho = runResult.zohoRecruitResult ?? {};
+      await Promise.allSettled([
+        eventSinkFn({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
+          applicationId: plan.correlation.applicationId, requiredGaps: zoho.requiredGaps ?? [],
+          filled: zoho.filled ?? [], fields: zoho.fields ?? [],
+          resumeUploadState: zoho.resumeUploadState ?? 'NO_FIELD',
+          coverLetterUploadState: zoho.coverLetterUploadState ?? 'NO_FIELD' }),
+      ]);
+    } else if (plan.planType === 'LEVER') {
+      const lever = runResult.leverResult ?? {};
+      await Promise.allSettled([
+        eventSinkFn({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
+          applicationId: plan.correlation.applicationId, requiredGaps: lever.requiredGaps ?? [],
+          filled: lever.filled ?? [], fields: lever.fields ?? [],
+          resumeUploadState: lever.resumeUploadState ?? 'NO_FIELD' }),
+      ]);
+    } else if (plan.planType === 'WORKDAY') {
+      const isWorkdaySubmitAttempt = plan.steps.at(-1)?.type === StepType.WORKDAY_SUBMIT_CLICK;
+      if (!isWorkdaySubmitAttempt) {
+        const workday = runResult.workdayResult ?? {};
+        if (plan.steps.some((s) => s.type === StepType.WORKDAY_APPLY)) {
+          await Promise.allSettled([
+            eventSinkFn({
+              type: 'HUMAN_REVIEW_REQUIRED',
+              planId,
+              jobId: plan.correlation.jobId,
+              applicationId: plan.correlation.applicationId,
+              requiredGaps: workday.requiredGaps ?? [],
+              filledCategories: workday.filledCategories ?? [],
+              step: workday.step ?? 'APPLICATION_STEP',
+              cvUploadState: workday.cvUploadState ?? 'NO_FIELD',
+              coverLetterUploadState: workday.coverLetterUploadState ?? 'NO_FIELD',
+            }),
+          ]);
+        } else {
+          await Promise.allSettled([
+            eventSinkFn({
+              type: 'HUMAN_REVIEW_REQUIRED',
+              planId,
+              jobId: plan.correlation.jobId,
+              applicationId: plan.correlation.applicationId,
+              loginStatus: plan.credentialSaved === true ? (workday.status ?? 'FORM_NOT_FOUND') : 'CREDENTIAL_REQUIRED',
+            }),
+          ]);
+        }
+      }
+    } else if (plan.planType === 'ASHBY' && !isAshbySubmitAttempt) {
+      // Phase 14: mirrors the ZOHO_RECRUIT/LEVER review-notification shape
+      // exactly. A genuine submit attempt (isAshbySubmitAttempt) is
+      // deliberately excluded — same as GREENHOUSE's own isSubmitAttempt
+      // guard — since that outcome is either SUBMITTED or a distinct
+      // "submission unconfirmed" state, never a form-preparation review.
+      const ashby = runResult.ashbyResult ?? {};
+      await Promise.allSettled([
+        eventSinkFn({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
+          applicationId: plan.correlation.applicationId, requiredGaps: ashby.requiredGaps ?? [],
+          filled: ashby.filled ?? [], fields: ashby.fields ?? [],
+          resumeUploadState: ashby.resumeUploadState ?? 'NO_FIELD' }),
+      ]);
+    }
+    await reportOutcomeFn(planId, outcome, detail, result);
+    console.log(JSON.stringify({ type: 'PLAN_ENDED', planId, outcome }));
+    return { status: 'COMPLETED', planId, outcome, detail, result };
+  } catch (error) {
+    if (runtimeObj.shuttingDown) {
+      // A shutdown-triggered abort must NOT mark the plan FAILED: leave it
+      // RUNNING so the backend's stale-plan sweeper reclaims and re-executes
+      // it (completed steps are skipped; no plan contains a submit step).
+      console.error(JSON.stringify({ type: 'PLAN_DEFERRED_ON_SHUTDOWN', planId }));
+      return { status: 'DEFERRED_ON_SHUTDOWN', planId };
+    } else if (isHandoffEligibleError(error) && pollUrl && planId && plan) {
+      // Phase 3: Candidate handoff for security challenges (Option B: External Human Completion)
+      console.log(JSON.stringify({ type: 'HANDOFF_INITIATING', planId, reason: error.reason || error.message }));
+      const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
+      const backendBase = new URL(apiRoot).origin;
+      try {
+        const handoffResult = await initiateHandoffFn({
+          plan,
+          error,
+          backendBase,
+          authHeaders: authHeadersFn,
+        });
+        console.log(JSON.stringify({
+          type: 'HANDOFF_TRANSFERRED_TO_HUMAN',
+          planId,
+          sessionId: handoffResult?.sessionId,
+          reason: error.reason || error.message,
+        }));
+        // Under Option B (External Human Completion), the worker terminates cleanly
+        // and releases its execution lease immediately. The candidate will complete
+        // and submit the application directly on the employer site.
+        return { status: 'HANDOFF', planId, sessionId: handoffResult?.sessionId };
+      } catch (handoffErr) {
+        console.error(JSON.stringify({ type: 'HANDOFF_ERROR', planId, error: handoffErr.message }));
+        const errorResult = [{
+          type: 'PLAN_ERROR',
+          outcome: 'BLOCKED_ANTI_BOT',
+          reason: error.reason || null,
+          message: String(error.message),
+        }];
+        await reportOutcomeFn(planId, 'BLOCKED_ANTI_BOT', String(error.message), errorResult).catch(() => {});
+        return { status: 'HANDOFF_FAILED', planId, error: handoffErr.message };
+      }
+    } else {
+      const outcome = error.name === 'HardStopError'
+        // MFA_REQUIRED (Phase 7: Workday) is the same bucket as CAPTCHA/
+        // anti-bot — a genuine stop condition requiring the human, never a
+        // logic failure on Robin's part, and never auto-retried either way.
+        ? (/CAPTCHA|ANTI_BOT|ACCESS_DENIED|MFA_REQUIRED/i.test(String(error.reason)) ? 'BLOCKED_ANTI_BOT' : 'FAILED')
+        : 'FAILED';
+      console.error(JSON.stringify({ type: 'POLL_ERROR', planId, outcome, error: error.message }));
+      // Persist WHY this plan stopped so the review panel can show the candidate
+      // a real reason (missing info, CAPTCHA, a lost lease, …) instead of a bare
+      // "failed" with no explanation — reuses the existing generic `result`
+      // column and `transitionWithResult` path, the same one ZOHO_RECRUIT_OUTCOME
+      // already relies on; no backend change was needed for this.
+      const errorResult = [{
+        type: 'PLAN_ERROR',
+        outcome,
+        reason: error.name === 'HardStopError' ? error.reason : null,
+        message: String(error.message),
+      }];
+      if (planId) await reportOutcomeFn(planId, outcome, String(error.message), errorResult).catch(() => {});
+      return { status: 'ERROR', planId, outcome, error: error.message };
+    }
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
+    runtimeObj.runner = null;
+  }
+}
+
 // Robin x Tsenta hardening: guards the entire dispatch below so this module
 // can be safely `import`ed (e.g. by worker.test.js, to unit-test
 // `materializeArtifacts`/`zohoRecruitPackageNeedsMaterialization` directly)
@@ -251,193 +498,28 @@ if (planFile) {
 
   async function poll() {
     if (executing || runtime.shuttingDown) return;
-    let planId = null;
-    let heartbeat;
+    executing = true;
     try {
-      const claimed = await apiCall(pollUrl);
-      if (!claimed?.id) return;
-      executing = true;
-      planId = String(claimed.id);
-      const plan = planFromClaim(planId, claimed);
-      if (plan.planType === 'GREENHOUSE') {
-        const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
-        if (apiRoot === pollUrl) throw new Error('INVALID_WORKER_POLL_URL');
-        const backendBase = new URL(apiRoot);
-        const packageUrl = new URL(`${backendBase.pathname.replace(/\/$/, '')}/plans/${encodeURIComponent(planId)}/package`, backendBase);
-        const baseUrl = backendBase.origin;
-        const response = await fetch(packageUrl, { headers: authHeaders() });
-        if (!response.ok) throw new Error(`GREENHOUSE_PACKAGE_FAILED:${response.status}`);
-        plan.package = await response.json();
-        plan.fields = plan.package.fields ?? [];
-        if (plan.package.planId !== planId || plan.package.applicationId !== plan.correlation.applicationId
-            || plan.package.jobId !== plan.correlation.jobId || plan.package.expectedUrl !== plan.targetUrl) {
-          throw new Error('GREENHOUSE_PACKAGE_CORRELATION_MISMATCH');
-        }
-        plan.requiredGaps = plan.package.requiredGaps ?? [];
-        await materializeArtifacts(plan, baseUrl);
-      } else if (zohoRecruitPackageNeedsMaterialization(plan)) {
-        // Robin x Tsenta continuation: unlike GREENHOUSE, the package is
-        // already embedded in the claimed plan JSON (ZohoRecruitExecutionPlanService
-        // builds it directly, with no live-DOM-dependent fields to fetch
-        // separately) — only the document bytes themselves need downloading,
-        // reusing the exact same correlation/checksum-verified download path.
-        // Triggers whenever a package exists at all (cv-only, cover-letter-
-        // only, or both) — see zohoRecruitPackageNeedsMaterialization's own
-        // comment for the bug this replaced (gating on `.cv` alone silently
-        // skipped a cover-letter-only package).
-        const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
-        if (apiRoot === pollUrl) throw new Error('INVALID_WORKER_POLL_URL');
-        await materializeArtifacts(plan, new URL(apiRoot).origin);
-      } else if (ashbyPackageNeedsMaterialization(plan)) {
-        // Phase 14: same reasoning as ZOHO_RECRUIT above — AshbyExecutionPlanService
-        // embeds the package directly in the claimed plan JSON (cv only, no
-        // cover letter — see that service's own module comment), so only the
-        // résumé bytes themselves need downloading via the same shared path.
-        const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
-        if (apiRoot === pollUrl) throw new Error('INVALID_WORKER_POLL_URL');
-        await materializeArtifacts(plan, new URL(apiRoot).origin);
-      } else if (workdayPackageNeedsMaterialization(plan)) {
-        const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
-        if (apiRoot === pollUrl) throw new Error('INVALID_WORKER_POLL_URL');
-        await materializeArtifacts(plan, new URL(apiRoot).origin);
-      }
-
-      // Heartbeat on an interval while executing. A single missed beat is
-      // tolerated (network jitter), but if the backend stays unreachable the
-      // run must STOP: the backend's stale-plan sweeper will reclaim the plan
-      // for re-execution, and continuing to drive a real employer form with
-      // no live lease risks two workers operating the same application at
-      // once. Stopping is always the safe direction.
-      const runner = new BrowserWorker({ statePath, artifactDir, eventSink, verificationResolver, identityResolver, credentialResolver });
-      runtime.runner = runner;
-      let missedHeartbeats = 0;
-      heartbeat = setInterval(() => {
-        sendHeartbeat(planId)
-          .then(() => { missedHeartbeats = 0; })
-          .catch(() => {
-            missedHeartbeats += 1;
-            if (missedHeartbeats >= 3) {
-              console.error(JSON.stringify({ type: 'WORKER_LEASE_LOST', planId, missedHeartbeats }));
-              runner.requestAbort();
-            }
-          });
-      }, 30_000);
-      const runResult = await runner.execute(plan, { approve: false, headless: true });
-      // Phase 4: a GREENHOUSE plan whose last step is REAL_SUBMIT_CLICK has
-      // just attempted (or confirmed an already-completed) real submission —
-      // its outcome depends on what the worker actually observed, never a
-      // hardcoded assumption. Every other GREENHOUSE plan still ends at
-      // validate-form exactly as before, always awaiting human review.
-      const isSubmitAttempt = plan.planType === 'GREENHOUSE'
-        && plan.steps.at(-1)?.type === 'REAL_SUBMIT_CLICK';
-      // Phase 14: Ashby's own counterpart — see outcome.js's isAshbySubmitAttempt
-      // for the same reasoning (only the last step's exact type decides this,
-      // never an assumption about what a given run "should" have done).
-      const isAshbySubmitAttempt = plan.planType === 'ASHBY'
-        && plan.steps.at(-1)?.type === 'ASHBY_SUBMIT_CLICK';
-      const { outcome, detail, result } = computePlanOutcome(plan, runResult);
-      if (plan.planType === 'GREENHOUSE' && !isSubmitAttempt) {
-        await Promise.allSettled([
-          eventSink({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
-            applicationId: plan.correlation.applicationId, requiredGaps: plan.requiredGaps }),
-        ]);
-      } else if (plan.planType === 'ZOHO_RECRUIT') {
-        const zoho = runResult.zohoRecruitResult ?? {};
-        await Promise.allSettled([
-          eventSink({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
-            applicationId: plan.correlation.applicationId, requiredGaps: zoho.requiredGaps ?? [],
-            filled: zoho.filled ?? [], fields: zoho.fields ?? [],
-            resumeUploadState: zoho.resumeUploadState ?? 'NO_FIELD',
-            coverLetterUploadState: zoho.coverLetterUploadState ?? 'NO_FIELD' }),
-        ]);
-      } else if (plan.planType === 'LEVER') {
-        const lever = runResult.leverResult ?? {};
-        await Promise.allSettled([
-          eventSink({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
-            applicationId: plan.correlation.applicationId, requiredGaps: lever.requiredGaps ?? [],
-            filled: lever.filled ?? [], fields: lever.fields ?? [],
-            resumeUploadState: lever.resumeUploadState ?? 'NO_FIELD' }),
-        ]);
-      } else if (plan.planType === 'WORKDAY') {
-        const isWorkdaySubmitAttempt = plan.steps.at(-1)?.type === StepType.WORKDAY_SUBMIT_CLICK;
-        if (!isWorkdaySubmitAttempt) {
-          const workday = runResult.workdayResult ?? {};
-          if (plan.steps.some((s) => s.type === StepType.WORKDAY_APPLY)) {
-            await Promise.allSettled([
-              eventSink({
-                type: 'HUMAN_REVIEW_REQUIRED',
-                planId,
-                jobId: plan.correlation.jobId,
-                applicationId: plan.correlation.applicationId,
-                requiredGaps: workday.requiredGaps ?? [],
-                filledCategories: workday.filledCategories ?? [],
-                step: workday.step ?? 'APPLICATION_STEP',
-                cvUploadState: workday.cvUploadState ?? 'NO_FIELD',
-                coverLetterUploadState: workday.coverLetterUploadState ?? 'NO_FIELD',
-              }),
-            ]);
-          } else {
-            await Promise.allSettled([
-              eventSink({
-                type: 'HUMAN_REVIEW_REQUIRED',
-                planId,
-                jobId: plan.correlation.jobId,
-                applicationId: plan.correlation.applicationId,
-                loginStatus: plan.credentialSaved === true ? (workday.status ?? 'FORM_NOT_FOUND') : 'CREDENTIAL_REQUIRED',
-              }),
-            ]);
-          }
-        }
-      } else if (plan.planType === 'ASHBY' && !isAshbySubmitAttempt) {
-        // Phase 14: mirrors the ZOHO_RECRUIT/LEVER review-notification shape
-        // exactly. A genuine submit attempt (isAshbySubmitAttempt) is
-        // deliberately excluded — same as GREENHOUSE's own isSubmitAttempt
-        // guard — since that outcome is either SUBMITTED or a distinct
-        // "submission unconfirmed" state, never a form-preparation review.
-        const ashby = runResult.ashbyResult ?? {};
-        await Promise.allSettled([
-          eventSink({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
-            applicationId: plan.correlation.applicationId, requiredGaps: ashby.requiredGaps ?? [],
-            filled: ashby.filled ?? [], fields: ashby.fields ?? [],
-            resumeUploadState: ashby.resumeUploadState ?? 'NO_FIELD' }),
-        ]);
-      }
-      await reportOutcome(planId, outcome, detail, result);
-      console.log(JSON.stringify({ type: 'PLAN_ENDED', planId, outcome }));
-    } catch (error) {
-      if (runtime.shuttingDown) {
-        // A shutdown-triggered abort must NOT mark the plan FAILED: leave it
-        // RUNNING so the backend's stale-plan sweeper reclaims and re-executes
-        // it (completed steps are skipped; no plan contains a submit step).
-        console.error(JSON.stringify({ type: 'PLAN_DEFERRED_ON_SHUTDOWN', planId }));
-      } else {
-        const outcome = error.name === 'HardStopError'
-          // MFA_REQUIRED (Phase 7: Workday) is the same bucket as CAPTCHA/
-          // anti-bot — a genuine stop condition requiring the human, never a
-          // logic failure on Robin's part, and never auto-retried either way.
-          ? (/CAPTCHA|ANTI_BOT|ACCESS_DENIED|MFA_REQUIRED/i.test(String(error.reason)) ? 'BLOCKED_ANTI_BOT' : 'FAILED')
-          : 'FAILED';
-        console.error(JSON.stringify({ type: 'POLL_ERROR', planId, outcome, error: error.message }));
-        // Persist WHY this plan stopped so the review panel can show the candidate
-        // a real reason (missing info, CAPTCHA, a lost lease, …) instead of a bare
-        // "failed" with no explanation — reuses the existing generic `result`
-        // column and `transitionWithResult` path, the same one ZOHO_RECRUIT_OUTCOME
-        // already relies on; no backend change was needed for this.
-        const errorResult = [{
-          type: 'PLAN_ERROR',
-          outcome,
-          reason: error.name === 'HardStopError' ? error.reason : null,
-          message: String(error.message),
-        }];
-        if (planId) await reportOutcome(planId, outcome, String(error.message), errorResult).catch(() => {});
-      }
+      await executePollCycle({
+        pollUrl,
+        apiCallFn: apiCall,
+        reportOutcomeFn: reportOutcome,
+        sendHeartbeatFn: sendHeartbeat,
+        initiateHandoffFn: initiateHandoff,
+        authHeadersFn: authHeaders,
+        runtimeObj: runtime,
+        statePathVal: statePath,
+        artifactDirVal: artifactDir,
+        eventSinkFn: eventSink,
+        verificationResolverFn: verificationResolver,
+        identityResolverFn: identityResolver,
+        credentialResolverFn: credentialResolver,
+      });
     } finally {
-      if (heartbeat) clearInterval(heartbeat);
       executing = false;
-      runtime.runner = null;
     }
   }
-
+  
   runtime.pollTimer = setInterval(poll, pollIntervalMs);
   poll();
 } else {
