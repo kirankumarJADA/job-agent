@@ -45,6 +45,7 @@ class AutomationControllerReviewTest {
     private AshbyExecutionPlanService ashbyPlans;
     private WorkdayExecutionPlanService workdayPlans;
     private AutomationController controller;
+    private SubmissionCompletionService submissions;
     private final UUID cvVersionId = UUID.randomUUID();
     private final UUID coverVersionId = UUID.randomUUID();
 
@@ -75,9 +76,13 @@ class AutomationControllerReviewTest {
         greenhousePlans = mock(GreenhouseExecutionPlanService.class);
         ashbyPlans = mock(AshbyExecutionPlanService.class);
         workdayPlans = mock(WorkdayExecutionPlanService.class);
+        submissions = mock(SubmissionCompletionService.class);
+        when(submissions.completeWorkerSubmission(any(), any(), any(), any()))
+                .thenReturn(SubmissionCompletionService.Result.illegal("plan is not RUNNING and approved"));
         controller = new AutomationController(plans, audit, owner, "worker-secret",
                 executionPackages, notifications, new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()),
-                applyReadiness, documentSelector, applicationStatus, greenhousePlans, ashbyPlans, workdayPlans);
+                applyReadiness, documentSelector, applicationStatus, greenhousePlans, ashbyPlans, workdayPlans,
+                new com.personal.jobagent.common.MaintenanceModeService(false), submissions);
     }
 
     /** Phase 8.2: approval re-runs the readiness gate server-side. */
@@ -212,10 +217,10 @@ class AutomationControllerReviewTest {
 
     /**
      * Approval stays human-only. A worker-identity SUBMITTED report with no
-     * properly-approved plan behind it is rejected too — here specifically
-     * because {@code completeRealSubmission} is never stubbed, so the
-     * Mockito-default {@code false} makes the transition fail, exactly as it
-     * would for a real, un-approved plan. The worker's own ability to report
+     * properly-approved plan behind it is rejected too — the completion
+     * service reports an illegal transition (its repository guard refuses a
+     * plan that is not RUNNING with submit_approved=true), and the controller
+     * surfaces that as 409. The worker's own ability to report
      * SUBMITTED for a plan that genuinely did go through prepare-submit is
      * covered separately below (Phase 4), not by this test.
      */
@@ -294,7 +299,7 @@ class AutomationControllerReviewTest {
         ResponseEntity<?> response = controller.complete(planId, new AutomationController.OutcomeRequest("SUBMITTED", "confirmed on page"));
 
         assertThat(response.getStatusCode().value()).isEqualTo(403);
-        verify(plans, never()).completeRealSubmission(any());
+        verifyNoInteractions(submissions);
     }
 
     @Test
@@ -306,36 +311,76 @@ class AutomationControllerReviewTest {
 
         assertThat(blank.getStatusCode().value()).isEqualTo(400);
         assertThat(missing.getStatusCode().value()).isEqualTo(400);
-        verify(plans, never()).completeRealSubmission(any());
+        verifyNoInteractions(submissions);
     }
 
-    /** The one successful path: worker, real evidence, repository guard passes. */
+    /**
+     * The one successful path: worker identity, structured evidence, and the
+     * completion service's atomic transaction committed. The worker principal
+     * passed on is the authenticated principal, never a body field.
+     */
     @Test
     void completeRecordsAConfirmedRealSubmissionAndMirrorsItOntoTheApplication() {
         when(owner.isWorkerRequest()).thenReturn(true);
-        when(plans.completeRealSubmission(planId)).thenReturn(true);
+        when(owner.actorOr(anyString())).thenReturn("worker");
+        List<Map<String, Object>> evidence = List.of(Map.of("type", "SUBMISSION_EVIDENCE", "planType", "GREENHOUSE",
+                "category", "CONFIRMED", "confirmed", true, "evidence", "confirmation container rendered"));
+        when(submissions.completeWorkerSubmission(planId, "worker", "page text matched the expected confirmation", evidence))
+                .thenReturn(new SubmissionCompletionService.Result(SubmissionCompletionService.Outcome.SUBMITTED,
+                        null, UUID.randomUUID(), "STORED_ENCRYPTED"));
         when(plans.findById(planId)).thenReturn(Optional.of(row("SUBMITTED", planPayload(), true)));
         when(plans.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
 
-        ResponseEntity<?> response = controller.complete(planId,
-                new AutomationController.OutcomeRequest("SUBMITTED", "page text matched the expected confirmation"));
+        ResponseEntity<?> response = controller.complete(planId, new AutomationController.OutcomeRequest(
+                "SUBMITTED", "page text matched the expected confirmation", evidence));
 
         assertThat(response.getStatusCode().value()).isEqualTo(204);
-        verify(plans).completeRealSubmission(planId);
+        verify(submissions).completeWorkerSubmission(planId, "worker", "page text matched the expected confirmation", evidence);
         verify(applicationStatus).apply(eq(profileId), eq(applicationId), eq("APPLICATION_SUBMITTED"),
                 anyString(), eq("worker"), any());
     }
 
-    /** The repository's own atomic guard failing must not be papered over. */
+    /** The completion service's atomic guard failing must not be papered over. */
     @Test
     void completeRejectsASubmittedOutcomeWhenTheRepositoryGuardFails() {
         when(owner.isWorkerRequest()).thenReturn(true);
-        when(plans.completeRealSubmission(planId)).thenReturn(false);
 
         ResponseEntity<?> response = controller.complete(planId,
                 new AutomationController.OutcomeRequest("SUBMITTED", "page text matched the expected confirmation"));
 
         assertThat(response.getStatusCode().value()).isEqualTo(409);
+        verify(applicationStatus, never()).apply(any(), any(), any(), any(), any(), any());
+    }
+
+    /** SUBMITTED without valid structured evidence never reaches SUBMITTED: it lands in reconciliation. */
+    @Test
+    void completeWithoutStructuredEvidenceRequiresReconciliationInsteadOfSubmitted() {
+        when(owner.isWorkerRequest()).thenReturn(true);
+        when(submissions.completeWorkerSubmission(any(), any(), any(), any()))
+                .thenReturn(new SubmissionCompletionService.Result(
+                        SubmissionCompletionService.Outcome.RECONCILIATION_REQUIRED,
+                        "no structured result was reported", null, null));
+
+        ResponseEntity<?> response = controller.complete(planId,
+                new AutomationController.OutcomeRequest("SUBMITTED", "page text matched the expected confirmation"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(422);
+        assertThat(String.valueOf(response.getBody())).contains("SUBMISSION_EVIDENCE_REQUIRED", "RECONCILIATION_REQUIRED");
+        verify(applicationStatus, never()).apply(any(), any(), any(), any(), any(), any());
+    }
+
+    /** Without a completion service wired, a real submission can never be recorded. */
+    @Test
+    void completeFailsClosedWithoutACompletionService() {
+        AutomationController unwired = new AutomationController(plans, audit, owner, "worker-secret",
+                executionPackages, notifications, new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()),
+                applyReadiness, documentSelector, applicationStatus, greenhousePlans, ashbyPlans, workdayPlans);
+        when(owner.isWorkerRequest()).thenReturn(true);
+
+        ResponseEntity<?> response = unwired.complete(planId,
+                new AutomationController.OutcomeRequest("SUBMITTED", "page text matched the expected confirmation"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(503);
         verify(applicationStatus, never()).apply(any(), any(), any(), any(), any(), any());
     }
 

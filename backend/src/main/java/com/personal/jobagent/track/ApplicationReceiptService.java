@@ -2,9 +2,13 @@ package com.personal.jobagent.track;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.track.receipt.InvalidReceiptException;
+import com.personal.jobagent.track.receipt.JdbcReceiptTrustStore;
 import com.personal.jobagent.track.receipt.ReceiptCaptureService;
 import com.personal.jobagent.track.receipt.ReceiptCaptureService.CaptureReceiptCommand;
+import com.personal.jobagent.track.receipt.ReceiptStore.StoredReceipt;
 import com.personal.jobagent.track.receipt.ReceiptVerificationPolicy;
+import com.personal.jobagent.track.receipt.SubmissionEvidenceRepository;
+import com.personal.jobagent.track.receipt.SubmissionEvidenceRepository.StoredEvidence;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -45,17 +49,21 @@ public class ApplicationReceiptService {
     private final JdbcTemplate db;
     private final ObjectMapper json;
     private final ReceiptCaptureService receiptCaptureService;
+    private final SubmissionEvidenceRepository evidenceRepository;
 
     @Autowired
     public ApplicationReceiptService(JdbcTemplate db, ObjectMapper json,
-                                     @Autowired(required = false) ReceiptCaptureService receiptCaptureService) {
+                                     @Autowired(required = false) ReceiptCaptureService receiptCaptureService,
+                                     @Autowired(required = false) SubmissionEvidenceRepository evidenceRepository) {
         this.db = db;
         this.json = json;
         this.receiptCaptureService = receiptCaptureService;
+        this.evidenceRepository = evidenceRepository;
     }
 
+    /** Without the capture service and evidence store, no submission can ever be shown as confirmed. */
     public ApplicationReceiptService(JdbcTemplate db, ObjectMapper json) {
-        this(db, json, null);
+        this(db, json, null, null);
     }
 
     public record DocumentReceipt(
@@ -236,6 +244,11 @@ public class ApplicationReceiptService {
                     break;
                 }
             }
+        }
+        if (attemptId != null && selected == null) {
+            // An attempt id that is not one of this application's plans is "not found" —
+            // never silently answered with a different attempt's receipt.
+            return Optional.empty();
         }
         if (selected == null) {
             selected = plans.get(plans.size() - 1);
@@ -474,49 +487,17 @@ public class ApplicationReceiptService {
             return new AuthorizationRecord(false, "EXPLICIT_CANDIDATE_APPROVAL", null, null);
         }
         try {
-            // First attempt exact verified candidate approval query (%_SUBMIT_APPROVED recorded by AutomationController)
-            List<Map<String, Object>> rows = db.queryForList("""
-                    select al.actor, al.created_at, al.after_state from audit_logs al
-                    where al.entity_id = ?
-                      and al.entity_type = 'AUTOMATION_PLAN'
-                      and al.action like '%_SUBMIT_APPROVED'
-                      and al.action != 'REAL_SUBMISSION_PREPARED'
-                      and al.after_state is not null
-                      and (al.after_state ->> 'approvedForSubmission') = 'true'
-                      and exists (
-                          select 1 from automation_plans ap
-                          join applications a on a.id = ap.application_id
-                          join profiles p on p.id = a.profile_id and p.id = ap.profile_id
-                          join users u on u.id = p.user_id
-                          where ap.id = al.entity_id
-                            and ap.application_id = ?
-                            and p.id = ?
-                            and (lower(trim(al.actor)) = lower(trim(u.email)) or al.actor = u.id::text or al.actor = p.id::text)
-                            and lower(trim(al.actor)) not in ('worker', 'system', 'anonymous', 'service')
-                      )
-                    order by al.created_at desc limit 1
-                    """, planId, applicationId, profileId);
+            // The one strict query (shared with receipt verification): this exact plan's
+            // <PLANTYPE>_SUBMIT_APPROVED row, approvedForSubmission=true, written by the
+            // owning candidate's own account. There is deliberately no looser fallback.
+            List<Map<String, Object>> rows = db.queryForList(JdbcReceiptTrustStore.STRICT_APPROVAL_SQL,
+                    planId, applicationId, profileId);
             if (!rows.isEmpty()) {
                 Map<String, Object> r = rows.get(0);
-                return new AuthorizationRecord(true, "EXPLICIT_CANDIDATE_APPROVAL",
-                        instantFromTimestamp(r.get("created_at")), (String) r.get("actor"));
-            }
-            // Fallback for mocked/stubbed environments with simpler schemas
-            List<Map<String, Object>> fallbackRows = db.queryForList("""
-                    select actor, created_at, after_state from audit_logs
-                    where action like '%_SUBMIT_APPROVED'
-                      and action != 'REAL_SUBMISSION_PREPARED'
-                      and (entity_id = ? or entity_id = ?)
-                    order by created_at desc limit 1
-                    """, planId, applicationId);
-            for (Map<String, Object> r : fallbackRows) {
-                String actor = (String) r.get("actor");
-                if (actor != null && !actor.isBlank()
-                        && !actor.equalsIgnoreCase("worker")
-                        && !actor.equalsIgnoreCase("system")
-                        && !actor.equalsIgnoreCase("anonymous")) {
-                    return new AuthorizationRecord(true, "EXPLICIT_CANDIDATE_APPROVAL",
-                            instantFromTimestamp(r.get("created_at")), actor);
+                Object actor = r.get("actor");
+                Instant approvedAt = instantFromTimestamp(r.get("created_at"));
+                if (actor instanceof String a && !a.isBlank() && approvedAt != null) {
+                    return new AuthorizationRecord(true, "EXPLICIT_CANDIDATE_APPROVAL", approvedAt, a);
                 }
             }
         } catch (Exception e) {
@@ -526,7 +507,42 @@ public class ApplicationReceiptService {
         return new AuthorizationRecord(false, "MISSING_ATTESTATION", null, null);
     }
 
-    @SuppressWarnings("unchecked")
+    /** What the worker reported in the plan's result JSON. Display only — never proof of anything. */
+    private record ReportedConfirmation(String confirmationId, List<String> signals, String summary) {}
+
+    private ReportedConfirmation reportedConfirmation(String resultJson) {
+        String confirmationId = null;
+        List<String> signals = new ArrayList<>();
+        String summary = null;
+        for (Object r : readJsonList(resultJson)) {
+            if (r instanceof Map<?, ?> m) {
+                Object number = m.get("confirmationNumber");
+                if (number != null && !String.valueOf(number).isBlank()) {
+                    confirmationId = String.valueOf(number);
+                }
+                if (m.get("signals") instanceof List<?> sigs) {
+                    for (Object s : sigs) {
+                        if (s != null) signals.add(String.valueOf(s));
+                    }
+                }
+                if (m.get("summary") != null) {
+                    summary = String.valueOf(m.get("summary"));
+                }
+            }
+        }
+        return new ReportedConfirmation(confirmationId, List.copyOf(signals), summary);
+    }
+
+    /**
+     * Fail-closed confirmation. {@code confirmed=true} is returned in exactly
+     * one case: a durable, verified receipt exists for this plan — either one
+     * captured earlier, or one captured now from the evidence the authenticated
+     * worker recorded at completion time. Plan status {@code SUBMITTED} alone,
+     * a confirmation number in the result JSON, a missing capture service,
+     * missing or unreadable raw evidence, and any verification or persistence
+     * failure all yield {@code confirmed=false}. Observed signals are reported
+     * exactly as recorded and are never synthesised.
+     */
     private ConfirmationEvidence extractConfirmation(UUID profileId, AppHeader app, PlanRow plan, String atsKind,
                                                     AuthorizationRecord auth, boolean isSubmitted,
                                                     IdentityReceipt identity, List<AnswerReceipt> answers,
@@ -535,119 +551,128 @@ public class ApplicationReceiptService {
         if (!isSubmitted) {
             return new ConfirmationEvidence(false, null, List.of(), "Application has not been confirmed as submitted.");
         }
+        ReportedConfirmation reported = reportedConfirmation(plan.resultJson);
+        String reportedId = redactSensitive(reported.confirmationId());
+        List<String> reportedSignals = reported.signals();
 
-        List<Object> results = readJsonList(plan.resultJson);
-        String confirmationId = null;
-        List<String> signals = new ArrayList<>();
-        String summary = "Application successfully submitted and confirmed with employer ATS platform evidence.";
-        String rawEvidence = null;
-        String sha256 = null;
-        String provenance = null;
-        boolean sandboxPosting = false;
-        boolean candidateAuthorizedSandbox = false;
+        if (receiptCaptureService == null || evidenceRepository == null) {
+            return unverified(reportedId, reportedSignals,
+                    "receipt verification is unavailable, so this submission cannot be shown as confirmed.");
+        }
 
-        for (Object r : results) {
-            if (r instanceof Map<?, ?> m) {
-                if (m.containsKey("confirmationNumber")) {
-                    confirmationId = String.valueOf(m.get("confirmationNumber"));
-                }
-                if (m.get("signals") instanceof List<?> sigs) {
-                    for (Object s : sigs) signals.add(String.valueOf(s));
-                }
-                if (m.get("summary") != null) {
-                    summary = String.valueOf(m.get("summary"));
-                }
-                if (m.containsKey("rawEvidence")) {
-                    rawEvidence = String.valueOf(m.get("rawEvidence"));
-                } else if (m.containsKey("rawEvidencePayload")) {
-                    rawEvidence = String.valueOf(m.get("rawEvidencePayload"));
-                } else if (m.containsKey("domEvidence")) {
-                    rawEvidence = String.valueOf(m.get("domEvidence"));
-                }
-                if (m.containsKey("receiptSha256")) {
-                    sha256 = String.valueOf(m.get("receiptSha256"));
-                } else if (m.containsKey("sha256")) {
-                    sha256 = String.valueOf(m.get("sha256"));
-                }
-                if (m.containsKey("evidenceProvenance")) {
-                    provenance = String.valueOf(m.get("evidenceProvenance"));
-                } else if (m.containsKey("provenance")) {
-                    provenance = String.valueOf(m.get("provenance"));
-                }
-                if (m.containsKey("sandboxPosting")) {
-                    sandboxPosting = Boolean.parseBoolean(String.valueOf(m.get("sandboxPosting")));
-                }
-                if (m.containsKey("candidateAuthorizedSandbox")) {
-                    candidateAuthorizedSandbox = Boolean.parseBoolean(String.valueOf(m.get("candidateAuthorizedSandbox")));
-                }
+        Optional<StoredReceipt> stored;
+        try {
+            stored = receiptCaptureService.findVerifiedReceipt(profileId, plan.id);
+        } catch (RuntimeException e) {
+            log.warn("Could not read stored receipt for plan {}: {}", plan.id, e.getMessage());
+            return unverified(reportedId, reportedSignals, "the stored receipt could not be read.");
+        }
+        if (stored.isPresent()) {
+            return new ConfirmationEvidence(true, redactSensitive(stored.get().employerConfirmationId()),
+                    stored.get().observedSignals(),
+                    redactSensitive(reported.summary() != null ? reported.summary()
+                            : "Submission confirmed with verified " + stored.get().atsPlatform() + " platform evidence."));
+        }
+
+        StoredEvidence evidence;
+        String rawEvidence;
+        try {
+            evidence = evidenceRepository.findForPlan(profileId, app.applicationId, plan.id).orElse(null);
+            if (evidence == null) {
+                return unverified(reportedId, reportedSignals,
+                        "no evidence was recorded by the authenticated worker for this attempt.");
             }
+            rawEvidence = evidenceRepository.decryptRawEvidence(evidence).orElse(null);
+        } catch (RuntimeException e) {
+            log.warn("Stored evidence for plan {} could not be read: {}", plan.id, e.getMessage());
+            return unverified(reportedId, reportedSignals,
+                    "the stored evidence could not be decrypted or failed its integrity check.");
+        }
+        if (rawEvidence == null) {
+            return unverified(reportedId, reportedSignals,
+                    "no raw DOM/screenshot evidence was stored for this attempt (" + evidence.rawEvidenceStatus() + ").");
         }
 
-        if (confirmationId == null || confirmationId.isBlank()) {
-            return new ConfirmationEvidence(false, null, List.of(), "No confirmation signals observed from platform.");
+        try {
+            CaptureReceiptCommand cmd = CaptureReceiptCommand.builder()
+                    .profileId(profileId)
+                    .applicationId(app.applicationId)
+                    .planId(plan.id)
+                    .jobId(app.jobId)
+                    .jobTitle(app.jobTitle)
+                    .company(app.company)
+                    .applicationUrl(plan.targetUrl != null ? plan.targetUrl : app.applicationUrl)
+                    .atsPlatform(evidence.atsPlatform())
+                    .employerConfirmationId(evidence.employerConfirmationId())
+                    .rawEvidencePayload(rawEvidence)
+                    .receiptSha256(evidence.rawEvidenceSha256())
+                    .submittedAt(evidence.recordedAt())
+                    .submittedIdentity(identity)
+                    .submittedAnswers(answers)
+                    .cv(cvReceipt)
+                    .coverLetter(clReceipt)
+                    .observedSignals(evidence.observedSignals())
+                    .summary(reported.summary())
+                    .attemptNumber(attemptNumber)
+                    .build();
+            SubmissionReceipt captured = receiptCaptureService.captureReceipt(cmd);
+            return new ConfirmationEvidence(true, redactSensitive(captured.confirmation().confirmationId()),
+                    captured.confirmation().observedSignals(), redactSensitive(captured.confirmation().summary()));
+        } catch (InvalidReceiptException e) {
+            log.warn("Receipt verification failed for plan {} [{}]: {}", plan.id, e.getReasonCode(), e.getMessage());
+            return unverified(reportedId, evidence.observedSignals(),
+                    "[" + e.getReasonCode() + "] " + e.getMessage());
+        } catch (RuntimeException e) {
+            log.error("Receipt verification errored for plan {}: {}", plan.id, e.getMessage());
+            return unverified(reportedId, evidence.observedSignals(), "receipt verification failed.");
         }
+    }
 
-        // Genuine employer confirmation identifier only: requisitionId and receiptId fallbacks are rejected
-        if (ReceiptVerificationPolicy.isMockOrSynthetic(confirmationId)) {
-            return new ConfirmationEvidence(false, redactSensitive(confirmationId), List.of(), "Unverified submission: mock or synthetic confirmation identifier rejected.");
-        }
-        if (ReceiptVerificationPolicy.isRequisitionOrReceiptFallback(confirmationId)) {
-            return new ConfirmationEvidence(false, redactSensitive(confirmationId), List.of(), "Unverified submission: requisition fallback cannot be substituted for employer confirmation ID.");
-        }
-
-        if (signals.isEmpty()) {
-            signals.add("PLATFORM_SUBMISSION_CONFIRMED");
-        }
-
-        // Connect with ReceiptCaptureService if available and raw evidence is present
-        if (receiptCaptureService != null && rawEvidence != null && !rawEvidence.isBlank()) {
-            try {
-                CaptureReceiptCommand cmd = CaptureReceiptCommand.builder()
-                        .profileId(profileId)
-                        .applicationId(app.applicationId)
-                        .planId(plan.id)
-                        .jobId(app.jobId)
-                        .jobTitle(app.jobTitle)
-                        .company(app.company)
-                        .applicationUrl(plan.targetUrl != null ? plan.targetUrl : app.applicationUrl)
-                        .atsPlatform(atsKind)
-                        .employerConfirmationId(confirmationId)
-                        .rawEvidencePayload(rawEvidence)
-                        .receiptSha256(sha256 != null ? sha256 : ReceiptVerificationPolicy.computeEvidenceSha256(rawEvidence))
-                        .submittedAt(plan.updatedAt)
-                        .attestationConfirmed(true)
-                        .attestationActor(auth != null ? auth.actor() : null)
-                        .submittedIdentity(identity)
-                        .submittedAnswers(answers)
-                        .cv(cvReceipt)
-                        .coverLetter(clReceipt)
-                        .observedSignals(signals)
-                        .summary(summary)
-                        .sandboxPosting(sandboxPosting)
-                        .candidateAuthorizedSandbox(candidateAuthorizedSandbox)
-                        .evidenceProvenance(provenance)
-                        .attemptNumber(attemptNumber)
-                        .build();
-
-                receiptCaptureService.captureReceipt(cmd);
-                return new ConfirmationEvidence(true, redactSensitive(confirmationId), signals, redactSensitive(summary));
-            } catch (InvalidReceiptException e) {
-                log.warn("Receipt capture validation failed for application {}: {}", app.applicationId, e.getMessage());
-                return new ConfirmationEvidence(false, redactSensitive(confirmationId), signals, "Unverified submission: " + e.getMessage());
-            }
-        }
-
-        return new ConfirmationEvidence(true, redactSensitive(confirmationId), signals, redactSensitive(summary));
+    private static ConfirmationEvidence unverified(String reportedId, List<String> signals, String why) {
+        return new ConfirmationEvidence(false, reportedId, signals == null ? List.of() : signals,
+                redactSensitive("Unverified submission: " + why));
     }
 
     /**
-     * Captures and verifies a genuine submission receipt directly via {@link ReceiptCaptureService}.
+     * Called after the worker completion transaction commits: attempts to
+     * capture the verified receipt for this plan. Idempotent. Returns whether
+     * a verified receipt now exists; never throws.
      */
-    public Optional<SubmissionReceipt> captureVerifiedReceipt(CaptureReceiptCommand cmd) {
-        if (receiptCaptureService == null || cmd == null) {
+    public boolean tryCaptureForPlan(UUID profileId, UUID applicationId, UUID planId) {
+        try {
+            return getReceipt(profileId, applicationId, planId)
+                    .filter(r -> planId.equals(r.receiptId()))
+                    .map(r -> r.confirmation() != null && r.confirmation().confirmed())
+                    .orElse(false);
+        } catch (RuntimeException e) {
+            log.warn("Post-completion receipt capture failed for plan {}: {}", planId, e.getMessage());
+            return false;
+        }
+    }
+
+    /** The raw evidence the worker recorded for one attempt, decrypted and digest-checked. */
+    public record RawEvidence(UUID evidenceId, UUID attemptId, String sha256, int byteLength,
+                              Instant recordedAt, String payload) {}
+
+    /**
+     * Owner-scoped access to the decrypted raw evidence of one attempt. Empty
+     * when the attempt does not belong to this profile and application, or no
+     * raw evidence was stored for it.
+     *
+     * @throws com.personal.jobagent.track.receipt.EvidenceIntegrityException when the stored ciphertext fails decryption or its integrity check
+     */
+    public Optional<RawEvidence> getRawEvidence(UUID profileId, UUID applicationId, UUID attemptId) {
+        if (evidenceRepository == null || profileId == null || applicationId == null || attemptId == null) {
             return Optional.empty();
         }
-        return Optional.of(receiptCaptureService.captureReceipt(cmd));
+        Optional<StoredEvidence> evidence = evidenceRepository.findForPlan(profileId, applicationId, attemptId);
+        if (evidence.isEmpty()) {
+            return Optional.empty();
+        }
+        StoredEvidence e = evidence.get();
+        return evidenceRepository.decryptRawEvidence(e).map(payload -> new RawEvidence(
+                e.id(), e.planId(), e.rawEvidenceSha256(),
+                e.rawEvidenceByteLength() == null ? 0 : e.rawEvidenceByteLength(), e.recordedAt(), payload));
     }
 
     @SuppressWarnings("unchecked")

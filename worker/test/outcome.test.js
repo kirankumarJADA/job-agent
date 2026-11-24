@@ -23,7 +23,29 @@ test('a confirmed real submission reports SUBMITTED with the actual evidence, ne
   const { outcome, detail, result } = computePlanOutcome(plan, runResult);
   assert.equal(outcome, 'SUBMITTED');
   assert.match(detail, /Thanks for applying/);
-  assert.equal(result, null);
+  assert.deepEqual(result, [{
+    type: 'SUBMISSION_EVIDENCE', planType: 'GREENHOUSE', category: 'CONFIRMED', confirmed: true,
+    evidence: 'page text matched "Thanks for applying"',
+  }]);
+});
+
+test('a confirmed submission forwards only the evidence the submit step observed, and never self-asserted provenance', () => {
+  const plan = { planType: 'WORKDAY', steps: [{ type: 'WORKDAY_APPLY' }, { type: 'WORKDAY_SUBMIT_CLICK' }] };
+  const runResult = { workdaySubmitResult: {
+    confirmed: true, category: 'CONFIRMED', evidence: 'confirmation page rendered',
+    confirmationNumber: ' WD-123 ', signals: ['PLATFORM_SUBMISSION_CONFIRMED', ' '], rawEvidence: '<div>WD-123</div>',
+    evidenceProvenance: 'AUTHENTICATED_BROWSER_WORKER', sandboxPosting: true, candidateAuthorizedSandbox: true,
+  } };
+  const { outcome, result } = computePlanOutcome(plan, runResult);
+  assert.equal(outcome, 'SUBMITTED');
+  assert.deepEqual(result, [{
+    type: 'SUBMISSION_EVIDENCE', planType: 'WORKDAY', category: 'CONFIRMED', confirmed: true,
+    evidence: 'confirmation page rendered', confirmationNumber: 'WD-123',
+    signals: ['PLATFORM_SUBMISSION_CONFIRMED'], rawEvidence: '<div>WD-123</div>',
+  }]);
+  for (const forbidden of ['evidenceProvenance', 'sandboxPosting', 'candidateAuthorizedSandbox']) {
+    assert.equal(forbidden in result[0], false, `${forbidden} must never be self-asserted by the worker`);
+  }
 });
 
 test('an unconfirmed real-submit click reports RECONCILIATION_REQUIRED, never a fabricated SUBMITTED', () => {
@@ -206,7 +228,10 @@ test('a confirmed Ashby real submission reports SUBMITTED with the actual eviden
   const { outcome, detail, result } = computePlanOutcome(plan, runResult);
   assert.equal(outcome, 'SUBMITTED');
   assert.match(detail, /success:true, not blocked/);
-  assert.equal(result, null);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].type, 'SUBMISSION_EVIDENCE');
+  assert.equal(result[0].planType, 'ASHBY');
+  assert.equal(result[0].confirmed, true);
 });
 
 test('an unconfirmed Ashby submit click reports RECONCILIATION_REQUIRED, never a fabricated SUBMITTED', () => {

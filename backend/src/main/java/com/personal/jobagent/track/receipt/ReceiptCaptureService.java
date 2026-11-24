@@ -1,7 +1,5 @@
 package com.personal.jobagent.track.receipt;
 
-import com.personal.jobagent.common.UuidV7;
-import com.personal.jobagent.security.OwnerContext;
 import com.personal.jobagent.track.ApplicationReceiptService.AnswerReceipt;
 import com.personal.jobagent.track.ApplicationReceiptService.AttemptSummary;
 import com.personal.jobagent.track.ApplicationReceiptService.AuthorizationRecord;
@@ -11,128 +9,74 @@ import com.personal.jobagent.track.ApplicationReceiptService.FailureDetails;
 import com.personal.jobagent.track.ApplicationReceiptService.IdentityReceipt;
 import com.personal.jobagent.track.ApplicationReceiptService.ReconciliationDetails;
 import com.personal.jobagent.track.ApplicationReceiptService.SubmissionReceipt;
+import com.personal.jobagent.track.receipt.ReceiptStore.InsertResult;
+import com.personal.jobagent.track.receipt.ReceiptStore.NewReceipt;
+import com.personal.jobagent.track.receipt.ReceiptStore.StoredReceipt;
+import com.personal.jobagent.track.receipt.ReceiptTrustStore.SandboxRegistration;
+import com.personal.jobagent.track.receipt.ReceiptTrustStore.VerifiedApproval;
+import com.personal.jobagent.track.receipt.ReceiptTrustStore.WorkerEvidence;
 import com.personal.jobagent.track.receipt.ReceiptVerificationPolicy.ReceiptEvidence;
-import com.personal.jobagent.track.receipt.ReceiptVerificationPolicy.VerificationOutcome;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import java.net.URI;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
+import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Phase 20 / Wave 3 Agent A: Hardened Receipt Capture Service.
+ * Captures a verified submission receipt for one automation plan attempt.
  *
- * <p>Captures and verifies genuine application receipts from ATS platforms
- * (Workday, Greenhouse, Ashby, Lever, Zoho Recruit).
+ * <p><b>What the caller supplies, and what it does not.</b> The command carries
+ * the evidence to verify (confirmation id, signals, raw DOM/screenshot payload,
+ * digest) and display data. It carries <em>no</em> trust decisions: candidate
+ * approval, worker provenance and sandbox authorization are all resolved from
+ * {@link ReceiptTrustStore}, i.e. from persisted server state. There are no
+ * caller-supplied booleans or provenance strings to forge.
  *
- * <p>Trust Boundary Hardening:
- * <ul>
- *   <li><b>Zero Caller-Supplied Attestation Trust:</b> Never accepts caller-supplied booleans
- *       as proof of candidate approval; resolves attestation strictly from immutable audit records.</li>
- *   <li><b>Strict Application & Profile Ownership:</b> Validates that the application exists and is
- *       owned by the caller profile against persisted records before capturing receipts.</li>
- *   <li><b>Evidence Provenance:</b> Requires verified browser-worker execution provenance.</li>
- *   <li><b>Zero Manufactured Signals:</b> Observed signals cannot be synthesized or manufactured.</li>
- *   <li><b>Zero Summary Substitution:</b> Rejects summary substitution; requires canonical DOM/screenshot evidence.</li>
- *   <li><b>Durable Persistence Gate:</b> Durably persists the receipt audit record before describing
- *       the receipt as captured; never reports {@code genuine=true} until all verifications pass.</li>
- * </ul>
+ * <p><b>Binding.</b> The command's evidence must match, field for field, the
+ * evidence the authenticated worker recorded for this exact plan at completion
+ * time ({@code submission_evidence}): same raw-evidence digest, same employer
+ * confirmation id, same platform, same signals. Evidence that did not arrive
+ * through the worker completion path therefore cannot produce a receipt.
+ *
+ * <p><b>Durability.</b> A receipt is reported as captured only after
+ * {@link ReceiptStore#insertIfAbsent} commits the receipt row together with its
+ * audit row. Without a store (or when it fails) capture throws — it never falls
+ * back to memory. Concurrent and replayed captures for the same plan are
+ * resolved by the database's unique constraints; a replay whose evidence
+ * differs from the stored receipt is rejected.
  */
 @Service
 public class ReceiptCaptureService {
 
     private static final Logger log = LoggerFactory.getLogger(ReceiptCaptureService.class);
 
+    public static final String WORKER_PRINCIPAL = "worker";
+    public static final String WORKER_PROVENANCE = "AUTHENTICATED_BROWSER_WORKER";
+
     private final ReceiptVerificationPolicy verificationPolicy;
-    private final JdbcTemplate db;
-    private final OwnerContext ownerContext;
-
-    // In-memory trusted audit, ownership, and provenance registries for isolated testing / fallback
-    public record TrustedAttestationRecord(
-            UUID applicationId,
-            UUID profileId,
-            UUID planId,
-            String actor,
-            String action,
-            boolean approvedForSubmission
-    ) {}
-
-    private final Set<TrustedAttestationRecord> inMemoryAuditRecords = ConcurrentHashMap.newKeySet();
-    private final Map<UUID, UUID> inMemoryApplicationOwners = new ConcurrentHashMap<>();
-    private final Map<String, SubmissionReceipt> inMemoryPersistedReceipts = new ConcurrentHashMap<>();
-    private final Set<String> inMemoryVerifiedProvenances = ConcurrentHashMap.newKeySet();
+    private final ReceiptTrustStore trust;
+    private final ReceiptStore store;
 
     @Autowired
     public ReceiptCaptureService(ReceiptVerificationPolicy verificationPolicy,
-                                 @Autowired(required = false) JdbcTemplate db,
-                                 @Autowired(required = false) OwnerContext ownerContext) {
+                                 @Autowired(required = false) ReceiptTrustStore trust,
+                                 @Autowired(required = false) ReceiptStore store) {
         this.verificationPolicy = verificationPolicy != null ? verificationPolicy : new ReceiptVerificationPolicy();
-        this.db = db;
-        this.ownerContext = ownerContext;
+        this.trust = trust;
+        this.store = store;
     }
 
-    public ReceiptCaptureService(ReceiptVerificationPolicy verificationPolicy, JdbcTemplate db) {
-        this(verificationPolicy, db, null);
-    }
-
+    /** No trusted state and no durable store: every capture fails closed. */
     public ReceiptCaptureService(ReceiptVerificationPolicy verificationPolicy) {
         this(verificationPolicy, null, null);
-    }
-
-    /**
-     * Seeds in-memory application ownership for unit testing.
-     */
-    public void recordApplicationOwnership(UUID applicationId, UUID profileId) {
-        if (applicationId != null && profileId != null) {
-            inMemoryApplicationOwners.put(applicationId, profileId);
-        }
-    }
-
-    /**
-     * Seeds in-memory trusted candidate attestation audit record with full details for unit testing.
-     */
-    public void recordAuditAttestation(UUID applicationId, UUID profileId, UUID planId, String actor, String action, boolean approvedForSubmission) {
-        if (applicationId != null && profileId != null) {
-            inMemoryAuditRecords.add(new TrustedAttestationRecord(
-                    applicationId, profileId, planId, actor, action, approvedForSubmission
-            ));
-        }
-    }
-
-    /**
-     * Seeds in-memory trusted candidate attestation audit record for unit testing (defaults to GREENHOUSE_SUBMIT_APPROVED).
-     */
-    public void recordAuditAttestation(UUID applicationId, UUID profileId, String actor) {
-        recordAuditAttestation(applicationId, profileId, null, actor, "GREENHOUSE_SUBMIT_APPROVED", true);
-    }
-
-    /**
-     * Seeds in-memory verified browser-worker provenance for unit testing.
-     */
-    public void recordVerifiedProvenance(UUID applicationId, String provenance) {
-        if (applicationId != null && provenance != null) {
-            inMemoryVerifiedProvenances.add(applicationId + ":" + provenance.trim().toUpperCase(Locale.ROOT));
-        }
-    }
-
-    public void recordVerifiedProvenance(UUID planId, UUID applicationId, String provenance) {
-        if (applicationId != null && provenance != null) {
-            inMemoryVerifiedProvenances.add(applicationId + ":" + provenance.trim().toUpperCase(Locale.ROOT));
-        }
-        if (planId != null && provenance != null) {
-            inMemoryVerifiedProvenances.add(planId + ":" + provenance.trim().toUpperCase(Locale.ROOT));
-        }
     }
 
     public record CaptureReceiptCommand(
@@ -147,20 +91,14 @@ public class ReceiptCaptureService {
             String employerConfirmationId,
             String receiptSha256,
             Instant submittedAt,
-            boolean attestationConfirmed, // Note: Caller boolean is NOT trusted; verified against audit logs!
-            String attestationActor,
             IdentityReceipt submittedIdentity,
             List<AnswerReceipt> submittedAnswers,
             DocumentReceipt cv,
             DocumentReceipt coverLetter,
             List<String> observedSignals,
             String summary,
-            boolean sandboxPosting,
-            boolean candidateAuthorizedSandbox,
             String rawEvidencePayload,
-            int attemptNumber,
-            String evidenceProvenance,
-            UUID auditAttestationId
+            int attemptNumber
     ) {
         public static Builder builder() {
             return new Builder();
@@ -178,20 +116,14 @@ public class ReceiptCaptureService {
             private String employerConfirmationId;
             private String receiptSha256;
             private Instant submittedAt;
-            private boolean attestationConfirmed;
-            private String attestationActor = "CANDIDATE";
             private IdentityReceipt submittedIdentity;
             private List<AnswerReceipt> submittedAnswers = List.of();
             private DocumentReceipt cv;
             private DocumentReceipt coverLetter;
             private List<String> observedSignals = List.of();
             private String summary;
-            private boolean sandboxPosting = false;
-            private boolean candidateAuthorizedSandbox = false; // NON-PERMISSIVE DEFAULT
             private String rawEvidencePayload;
             private int attemptNumber = 1;
-            private String evidenceProvenance; // NON-PERMISSIVE DEFAULT (null - must be provided & verified)
-            private UUID auditAttestationId;
 
             public Builder profileId(UUID profileId) { this.profileId = profileId; return this; }
             public Builder applicationId(UUID applicationId) { this.applicationId = applicationId; return this; }
@@ -204,33 +136,27 @@ public class ReceiptCaptureService {
             public Builder employerConfirmationId(String id) { this.employerConfirmationId = id; return this; }
             public Builder receiptSha256(String sha256) { this.receiptSha256 = sha256; return this; }
             public Builder submittedAt(Instant submittedAt) { this.submittedAt = submittedAt; return this; }
-            public Builder attestationConfirmed(boolean confirmed) { this.attestationConfirmed = confirmed; return this; }
-            public Builder attestationActor(String actor) { this.attestationActor = actor; return this; }
             public Builder submittedIdentity(IdentityReceipt identity) { this.submittedIdentity = identity; return this; }
             public Builder submittedAnswers(List<AnswerReceipt> answers) { this.submittedAnswers = answers; return this; }
             public Builder cv(DocumentReceipt cv) { this.cv = cv; return this; }
             public Builder coverLetter(DocumentReceipt coverLetter) { this.coverLetter = coverLetter; return this; }
             public Builder observedSignals(List<String> signals) { this.observedSignals = signals; return this; }
             public Builder summary(String summary) { this.summary = summary; return this; }
-            public Builder sandboxPosting(boolean sandbox) { this.sandboxPosting = sandbox; return this; }
-            public Builder candidateAuthorizedSandbox(boolean auth) { this.candidateAuthorizedSandbox = auth; return this; }
             public Builder rawEvidencePayload(String payload) { this.rawEvidencePayload = payload; return this; }
             public Builder attemptNumber(int num) { this.attemptNumber = num; return this; }
-            public Builder evidenceProvenance(String provenance) { this.evidenceProvenance = provenance; return this; }
-            public Builder auditAttestationId(UUID auditAttestationId) { this.auditAttestationId = auditAttestationId; return this; }
 
             public CaptureReceiptCommand build() {
                 return new CaptureReceiptCommand(profileId, applicationId, planId, jobId, jobTitle, company,
                         applicationUrl, atsPlatform, employerConfirmationId, receiptSha256, submittedAt,
-                        attestationConfirmed, attestationActor, submittedIdentity, submittedAnswers, cv,
-                        coverLetter, observedSignals, summary, sandboxPosting, candidateAuthorizedSandbox,
-                        rawEvidencePayload, attemptNumber, evidenceProvenance, auditAttestationId);
+                        submittedIdentity, submittedAnswers, cv, coverLetter, observedSignals, summary,
+                        rawEvidencePayload, attemptNumber);
             }
         }
     }
 
     public record GenuineReceiptRecord(
             SubmissionReceipt submissionReceipt,
+            UUID storedReceiptId,
             String receiptSha256,
             String employerConfirmationId,
             String atsPlatform,
@@ -238,473 +164,305 @@ public class ReceiptCaptureService {
             boolean genuine
     ) {}
 
-    /**
-     * Verifies that the target application exists and belongs to the specified profile.
-     */
-    public boolean verifyApplicationOwnership(UUID applicationId, UUID profileId) {
-        if (applicationId == null || profileId == null) {
-            return false;
+    /** The durable verified receipt for this plan, if one has been captured. Never throws for a missing store. */
+    public Optional<StoredReceipt> findVerifiedReceipt(UUID profileId, UUID planId) {
+        if (store == null) {
+            return Optional.empty();
         }
-        if (db != null) {
-            try {
-                Integer count = db.queryForObject(
-                        "select count(*) from applications where id = ? and profile_id = ?",
-                        Integer.class, applicationId, profileId);
-                if (count != null && count > 0) {
-                    return true;
-                }
-            } catch (Exception e) {
-                log.warn("Database error verifying application ownership: {}", e.getMessage());
-            }
-        }
-        UUID recordedOwner = inMemoryApplicationOwners.get(applicationId);
-        return recordedOwner != null && recordedOwner.equals(profileId);
+        return store.findByPlan(profileId, planId);
     }
 
     /**
-     * Resolves candidate approval from trusted immutable audit records.
-     * Never trusts caller-supplied booleans!
+     * True when a receipt already captured for this plan was captured from
+     * different evidence (digest or employer confirmation id).
+     */
+    public boolean isReplayConflicting(UUID profileId, UUID planId, String receiptSha256, String confirmationId) {
+        return findVerifiedReceipt(profileId, planId)
+                .map(existing -> conflicts(existing, receiptSha256, confirmationId))
+                .orElse(false);
+    }
+
+    /**
+     * Verifies the command against trusted server state and the receipt policy,
+     * then durably persists it.
      *
-     * <p>Requirements:
-     * <ul>
-     *   <li>Verifies exact application and automation plan</li>
-     *   <li>Verifies plan ownership and candidate profile</li>
-     *   <li>Verifies actual platform approval action (%_SUBMIT_APPROVED, NOT REAL_SUBMISSION_PREPARED)</li>
-     *   <li>Checks approval state recorded in after_state (approvedForSubmission = true)</li>
-     *   <li>Verifies actor corresponds to the authenticated candidate (not worker, system, or anonymous)</li>
-     * </ul>
-     */
-    public boolean resolveAuditAttestation(UUID applicationId, UUID profileId, UUID planId, String candidateActor) {
-        if (applicationId == null || profileId == null) {
-            return false;
-        }
-        if (db != null) {
-            try {
-                String sql = """
-                        select count(*) from audit_logs al
-                        join automation_plans ap on ap.id = al.entity_id
-                        join applications a on a.id = ap.application_id
-                        join profiles p on p.id = a.profile_id and p.id = ap.profile_id
-                        join users u on u.id = p.user_id
-                        where a.id = ?
-                          and p.id = ?
-                          and (? is null or ap.id = ?)
-                          and al.entity_type = 'AUTOMATION_PLAN'
-                          and al.action like '%_SUBMIT_APPROVED'
-                          and al.action != 'REAL_SUBMISSION_PREPARED'
-                          and al.after_state is not null
-                          and (al.after_state ->> 'approvedForSubmission') = 'true'
-                          and (
-                                lower(trim(al.actor)) = lower(trim(u.email))
-                                or al.actor = u.id::text
-                                or al.actor = p.id::text
-                                or (? is not null and lower(trim(al.actor)) = lower(trim(?)))
-                          )
-                          and lower(trim(al.actor)) not in ('worker', 'system', 'anonymous', 'service')
-                        """;
-                Integer count = db.queryForObject(sql, Integer.class,
-                        applicationId, profileId,
-                        planId, planId,
-                        candidateActor, candidateActor);
-                if (count != null && count > 0) {
-                    return true;
-                }
-            } catch (Exception e) {
-                log.warn("Database error checking audit logs for attestation: {}", e.getMessage());
-            }
-        }
-        return checkInMemoryAttestation(applicationId, profileId, planId, candidateActor);
-    }
-
-    public boolean resolveAuditAttestation(UUID applicationId, UUID profileId, UUID planId) {
-        return resolveAuditAttestation(applicationId, profileId, planId, null);
-    }
-
-    public boolean resolveAuditAttestation(UUID applicationId, UUID profileId) {
-        return resolveAuditAttestation(applicationId, profileId, null, null);
-    }
-
-    private boolean checkInMemoryAttestation(UUID applicationId, UUID profileId, UUID planId, String candidateActor) {
-        for (TrustedAttestationRecord rec : inMemoryAuditRecords) {
-            if (rec.applicationId().equals(applicationId) && rec.profileId().equals(profileId)) {
-                if (planId != null && rec.planId() != null && !rec.planId().equals(planId)) {
-                    continue;
-                }
-                if (rec.action() == null || !rec.action().endsWith("_SUBMIT_APPROVED")
-                        || "REAL_SUBMISSION_PREPARED".equals(rec.action())) {
-                    continue;
-                }
-                if (!rec.approvedForSubmission()) {
-                    continue;
-                }
-                if (rec.actor() == null || rec.actor().isBlank()) {
-                    continue;
-                }
-                String actorLower = rec.actor().trim().toLowerCase(Locale.ROOT);
-                if (actorLower.equals("worker") || actorLower.equals("system") || actorLower.equals("anonymous")) {
-                    continue;
-                }
-                if (candidateActor != null && !candidateActor.isBlank()) {
-                    if (!actorLower.equalsIgnoreCase(candidateActor.trim())) {
-                        continue;
-                    }
-                }
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Verifies that the evidence provenance is authentic and not an unverified caller-supplied string.
-     * Enforces that request-supplied provenance strings never authenticate without verification.
-     */
-    public boolean verifyEvidenceProvenance(String provenance, UUID applicationId, UUID planId) {
-        if (provenance == null || !ReceiptVerificationPolicy.ALLOWED_PROVENANCES.contains(provenance.trim().toUpperCase(Locale.ROOT))) {
-            return false;
-        }
-        String normalized = provenance.trim().toUpperCase(Locale.ROOT);
-        // Authenticated worker request in security context
-        if (ownerContext != null && ownerContext.isWorkerRequest()) {
-            return true;
-        }
-        // Worker execution verified in immutable audit logs
-        if (db != null) {
-            try {
-                String sql = """
-                        select count(*) from audit_logs
-                        where (
-                            (? is not null and entity_id = ?)
-                            or entity_id in (select id from automation_plans where application_id = ?)
-                        )
-                        and entity_type = 'AUTOMATION_PLAN'
-                        and action = 'AUTOMATION_PLAN_SUBMITTED'
-                        and lower(trim(actor)) = 'worker'
-                        """;
-                Integer count = db.queryForObject(sql, Integer.class, planId, planId, applicationId);
-                if (count != null && count > 0) {
-                    return true;
-                }
-            } catch (Exception e) {
-                log.warn("Database error verifying worker execution provenance: {}", e.getMessage());
-            }
-        }
-        // In-memory verified registry check for isolated test execution
-        return inMemoryVerifiedProvenances.contains(applicationId + ":" + normalized)
-                || (planId != null && inMemoryVerifiedProvenances.contains(planId + ":" + normalized));
-    }
-
-    /**
-     * Checks if a receipt payload replay conflicts with an already captured receipt.
-     */
-    public boolean isReplayConflicting(UUID applicationId, String idempotencyKey, String confirmationId) {
-        String key = applicationId + ":" + idempotencyKey;
-        SubmissionReceipt existing = inMemoryPersistedReceipts.get(key);
-        if (existing != null) {
-            String existingConf = existing.confirmation() != null ? existing.confirmation().confirmationId() : null;
-            return !Objects.equals(existingConf, confirmationId);
-        }
-        return false;
-    }
-
-    /**
-     * Captures and validates a genuine application submission receipt against all invariants,
-     * resolving attestation from trusted audit records and persisting durably before returning.
-     *
-     * @param cmd capture command containing confirmation evidence
-     * @return genuine, persisted {@link SubmissionReceipt}
-     * @throws InvalidReceiptException if any invariant, ownership, attestation, or persistence check fails
+     * @return the persisted receipt
+     * @throws InvalidReceiptException when any verification or persistence step fails
      */
     public SubmissionReceipt captureReceipt(CaptureReceiptCommand cmd) {
+        return capture(cmd).submissionReceipt();
+    }
+
+    /** As {@link #captureReceipt}, also returning the stored receipt id and verification time. */
+    public GenuineReceiptRecord captureGenuineReceipt(CaptureReceiptCommand cmd) {
+        return capture(cmd);
+    }
+
+    private GenuineReceiptRecord capture(CaptureReceiptCommand cmd) {
         if (cmd == null) {
             throw new InvalidReceiptException("CaptureReceiptCommand cannot be null", "MISSING_COMMAND");
         }
-
         if (cmd.profileId() == null) {
             throw new InvalidReceiptException("profileId is required", "MISSING_PROFILE_ID");
         }
         if (cmd.applicationId() == null) {
             throw new InvalidReceiptException("applicationId is required", "MISSING_APPLICATION_ID");
         }
-
-        // Trust Boundary 1: Verify application & profile ownership against persisted records
-        if (!verifyApplicationOwnership(cmd.applicationId(), cmd.profileId())) {
+        if (cmd.planId() == null) {
+            throw new InvalidReceiptException("planId is required: a receipt is bound to one exact automation plan",
+                    "MISSING_PLAN_ID");
+        }
+        if (trust == null || store == null) {
             throw new InvalidReceiptException(
-                    "Cross-profile receipt injection rejected: profile " + cmd.profileId() + " does not own application " + cmd.applicationId(),
-                    "CROSS_PROFILE_RECEIPT_REJECTED"
-            );
+                    "Durable receipt persistence is unavailable: a receipt cannot be verified or captured",
+                    "RECEIPT_PERSISTENCE_UNAVAILABLE");
         }
 
-        // Caller-supplied attestation must be affirmative AND backed by audit log
-        if (!cmd.attestationConfirmed()) {
+        // Trust boundary 1: plan, application and profile belong together in persisted records.
+        if (!trusted(() -> trust.ownsPlan(cmd.profileId(), cmd.applicationId(), cmd.planId()))) {
             throw new InvalidReceiptException(
-                    "Candidate attestation record is missing or not confirmed in audit log",
-                    "MISSING_CANDIDATE_ATTESTATION"
-            );
+                    "Cross-profile receipt injection rejected: profile " + cmd.profileId()
+                            + " does not own plan " + cmd.planId() + " for application " + cmd.applicationId(),
+                    "CROSS_PROFILE_RECEIPT_REJECTED");
         }
 
-        // Trust Boundary 2: Resolve candidate approval from trusted immutable audit records
-        boolean auditConfirmed = resolveAuditAttestation(cmd.applicationId(), cmd.profileId(), cmd.planId(), cmd.attestationActor());
-        if (!auditConfirmed) {
-            throw new InvalidReceiptException(
-                    "Candidate attestation record is missing or not confirmed in audit log: caller-supplied approval rejected",
-                    "MISSING_CANDIDATE_ATTESTATION"
-            );
-        }
-
-        // Trust Boundary 3: Authenticated browser-worker evidence provenance (fails closed)
-        if (cmd.evidenceProvenance() == null || cmd.evidenceProvenance().isBlank()) {
-            throw new InvalidReceiptException(
-                    "Evidence provenance is required: must originate from authenticated browser-worker",
-                    "MISSING_EVIDENCE_PROVENANCE"
-            );
-        }
-        String provenance = cmd.evidenceProvenance().trim();
-        if (!ReceiptVerificationPolicy.ALLOWED_PROVENANCES.contains(provenance.toUpperCase(Locale.ROOT))) {
-            throw new InvalidReceiptException(
-                    "Unauthenticated evidence provenance rejected: " + cmd.evidenceProvenance(),
-                    "UNAUTHENTICATED_EVIDENCE_PROVENANCE"
-            );
-        }
-        if (!verifyEvidenceProvenance(provenance, cmd.applicationId(), cmd.planId())) {
-            throw new InvalidReceiptException(
-                    "Request-supplied provenance rejected: provenance '" + provenance + "' could not be verified against worker execution records",
-                    "UNAUTHENTICATED_EVIDENCE_PROVENANCE"
-            );
-        }
-
-        // Trust Boundary 4: Zero manufactured confirmation signals
-        if (cmd.observedSignals() == null || cmd.observedSignals().isEmpty()) {
-            throw new InvalidReceiptException(
-                    "Observed confirmation signals are required and cannot be empty or manufactured",
-                    "MISSING_CONFIRMATION_SIGNALS"
-            );
-        }
-
-        // Trust Boundary 5: Raw evidence payload is required — summary substitution is rejected
+        // Raw evidence must exist before anything is compared or hashed.
         if (cmd.rawEvidencePayload() == null || cmd.rawEvidencePayload().isBlank()) {
             throw new InvalidReceiptException(
                     "Confirmation evidence is required: canonical DOM evidence or screenshot bytes cannot be empty",
-                    "MISSING_RAW_EVIDENCE"
-            );
+                    "MISSING_RAW_EVIDENCE");
         }
         if (ReceiptVerificationPolicy.isSummarySubstitution(cmd.rawEvidencePayload())) {
             throw new InvalidReceiptException(
                     "Raw evidence payload cannot be substituted with a summary text: actual DOM/screenshot evidence required",
-                    "SUMMARY_SUBSTITUTION_REJECTED"
-            );
+                    "SUMMARY_SUBSTITUTION_REJECTED");
+        }
+        String computedSha256 = ReceiptVerificationPolicy.computeEvidenceSha256(cmd.rawEvidencePayload());
+
+        // Trust boundary 2: a receipt already captured for this plan is final.
+        Optional<StoredReceipt> existing = trusted(() -> store.findByPlan(cmd.profileId(), cmd.planId()));
+        if (existing.isPresent()) {
+            if (conflicts(existing.get(), computedSha256, cmd.employerConfirmationId())) {
+                throw new InvalidReceiptException(
+                        "Replay conflict detected for plan " + cmd.planId()
+                                + ": a receipt was already captured from different evidence",
+                        "RECEIPT_REPLAY_REJECTED");
+            }
+            log.info("Receipt replay for plan {} matched the stored receipt {}; returning it unchanged",
+                    cmd.planId(), existing.get().receiptId());
+            return toRecord(existing.get(), cmd);
         }
 
-        // Trust Boundary 6: Replay conflict detection
-        String idempotencyKey = "receipt-sha256:" + (cmd.receiptSha256() != null ? cmd.receiptSha256().trim().toLowerCase(Locale.ROOT) : "");
-        if (isReplayConflicting(cmd.applicationId(), idempotencyKey, cmd.employerConfirmationId())) {
+        // Trust boundary 3: the candidate's own approval of this exact plan, from the audit log.
+        VerifiedApproval approval = trusted(() -> trust.verifiedApproval(cmd.profileId(), cmd.applicationId(), cmd.planId()))
+                .orElseThrow(() -> new InvalidReceiptException(
+                        "Candidate attestation record is missing or not confirmed in audit log for plan " + cmd.planId(),
+                        "MISSING_CANDIDATE_ATTESTATION"));
+
+        // Trust boundary 4: evidence the authenticated worker recorded for this plan.
+        WorkerEvidence worker = trusted(() -> trust.workerEvidence(cmd.profileId(), cmd.applicationId(), cmd.planId()))
+                .orElseThrow(() -> new InvalidReceiptException(
+                        "No evidence was recorded by the authenticated worker completion path for plan " + cmd.planId(),
+                        "UNAUTHENTICATED_EVIDENCE_PROVENANCE"));
+        if (!WORKER_PRINCIPAL.equals(worker.workerPrincipal())
+                || !SubmissionEvidenceRepository.RECORDED_VIA_WORKER_COMPLETE.equals(worker.recordedVia())) {
             throw new InvalidReceiptException(
-                    "Replay conflict detected for application " + cmd.applicationId() + ": conflicting evidence hash or confirmation ID",
-                    "RECEIPT_REPLAY_REJECTED"
-            );
+                    "Evidence for plan " + cmd.planId() + " was not recorded by the authenticated worker completion path",
+                    "UNAUTHENTICATED_EVIDENCE_PROVENANCE");
+        }
+        if (worker.recordedAt() == null || approval.approvedAt() == null) {
+            throw new InvalidReceiptException(
+                    "submittedAt timestamp is required: the worker completion time or approval time is missing",
+                    "MISSING_SUBMITTED_AT");
+        }
+        if (approval.approvedAt().isAfter(worker.recordedAt())) {
+            throw new InvalidReceiptException(
+                    "Candidate approval for plan " + cmd.planId() + " post-dates the recorded submission",
+                    "APPROVAL_AFTER_SUBMISSION");
         }
 
-        ReceiptEvidence evidence = new ReceiptEvidence(
+        // Trust boundary 5: the command's evidence is the worker's evidence, field for field.
+        if (worker.rawEvidenceSha256() == null) {
+            throw new InvalidReceiptException(
+                    "No raw evidence was stored by the worker completion path for plan " + cmd.planId()
+                            + " (" + worker.rawEvidenceStatus() + ")",
+                    "MISSING_RAW_EVIDENCE");
+        }
+        if (!computedSha256.equalsIgnoreCase(worker.rawEvidenceSha256())) {
+            throw new InvalidReceiptException(
+                    "Evidence digest does not match the evidence recorded by the authenticated worker",
+                    "EVIDENCE_NOT_BOUND_TO_WORKER");
+        }
+        if (!Objects.equals(trim(cmd.employerConfirmationId()), trim(worker.employerConfirmationId()))) {
+            throw new InvalidReceiptException(
+                    "Employer confirmation id does not match the confirmation recorded by the authenticated worker",
+                    "EVIDENCE_NOT_BOUND_TO_WORKER");
+        }
+        if (cmd.atsPlatform() == null
+                || !cmd.atsPlatform().trim().equalsIgnoreCase(String.valueOf(worker.atsPlatform()).trim())) {
+            throw new InvalidReceiptException(
+                    "ATS platform does not match the platform recorded by the authenticated worker",
+                    "EVIDENCE_NOT_BOUND_TO_WORKER");
+        }
+        if (cmd.observedSignals() == null || cmd.observedSignals().isEmpty()) {
+            throw new InvalidReceiptException(
+                    "Observed confirmation signals are required and cannot be empty or manufactured",
+                    "MISSING_CONFIRMATION_SIGNALS");
+        }
+        if (!new HashSet<>(cmd.observedSignals()).equals(new HashSet<>(worker.observedSignals()))) {
+            throw new InvalidReceiptException(
+                    "Observed signals do not match the signals recorded by the authenticated worker",
+                    "EVIDENCE_NOT_BOUND_TO_WORKER");
+        }
+
+        // Trust boundary 6: candidate-owned sandbox, from server-side registration only.
+        String platform = cmd.atsPlatform().trim().toUpperCase(Locale.ROOT);
+        Optional<SandboxRegistration> registration = worker.targetUrl() == null ? Optional.empty()
+                : trusted(() -> trust.activeSandboxRegistration(cmd.profileId(), platform, worker.targetUrl()));
+        boolean sandboxPosting = registration.isPresent()
+                && hostWithinDomain(worker.targetUrl(), registration.get().permittedDomain());
+        boolean candidateAuthorizedSandbox = registration.isPresent()
+                && cmd.profileId().equals(registration.get().profileId())
+                && registration.get().revokedAt() == null;
+
+        // Every invariant of the receipt policy, with trust inputs taken from server state only.
+        verificationPolicy.validateOrThrow(new ReceiptEvidence(
                 cmd.employerConfirmationId(),
                 cmd.receiptSha256(),
-                cmd.atsPlatform(),
-                cmd.submittedAt(),
+                platform,
+                worker.recordedAt(),
                 cmd.profileId(),
                 cmd.applicationId(),
-                true, // Proven by trusted audit log check!
-                cmd.sandboxPosting(),
-                cmd.candidateAuthorizedSandbox(),
-                cmd.observedSignals(),
+                true,
+                sandboxPosting,
+                candidateAuthorizedSandbox,
+                worker.observedSignals(),
                 cmd.rawEvidencePayload(),
-                provenance
-        );
+                WORKER_PROVENANCE));
 
-        // Enforce all invariants & mock rejection
-        verificationPolicy.validateOrThrow(evidence);
+        // Durable persistence: receipt + audit in one transaction, idempotent per plan.
+        NewReceipt newReceipt = new NewReceipt(
+                cmd.profileId(),
+                cmd.applicationId(),
+                cmd.planId(),
+                cmd.attemptNumber() > 0 ? cmd.attemptNumber() : 1,
+                worker.evidenceId(),
+                computedSha256,
+                platform,
+                cmd.employerConfirmationId().trim(),
+                List.copyOf(worker.observedSignals()),
+                approval.auditId(),
+                approval.actor(),
+                approval.approvedAt(),
+                worker.workerPrincipal(),
+                registration.get().id(),
+                ReceiptVerificationPolicy.POLICY_VERSION);
+        InsertResult result;
+        try {
+            result = store.insertIfAbsent(newReceipt);
+        } catch (RuntimeException e) {
+            log.error("Durable receipt persistence failed for plan {}: {}", cmd.planId(), e.getMessage());
+            throw new InvalidReceiptException(
+                    "Durable persistence failed: the receipt was not captured", "RECEIPT_PERSISTENCE_FAILED");
+        }
+        if (result == null || result.receipt() == null) {
+            throw new InvalidReceiptException(
+                    "Durable persistence failed: the receipt was not captured", "RECEIPT_PERSISTENCE_FAILED");
+        }
+        if (!result.inserted() && conflicts(result.receipt(), computedSha256, cmd.employerConfirmationId())) {
+            throw new InvalidReceiptException(
+                    "Replay conflict detected for plan " + cmd.planId()
+                            + ": a concurrent capture stored different evidence",
+                    "RECEIPT_REPLAY_REJECTED");
+        }
+        log.info("Captured verified submission receipt {} for plan={} app={} platform={} sha256={}",
+                result.receipt().receiptId(), cmd.planId(), cmd.applicationId(), platform, computedSha256);
+        return toRecord(result.receipt(), cmd);
+    }
 
-        UUID receiptId = UUID.randomUUID();
-        String normalizedPlatform = cmd.atsPlatform().trim().toUpperCase(Locale.ROOT);
-        String confirmationId = cmd.employerConfirmationId().trim();
-        Instant submittedAt = cmd.submittedAt();
-        int attemptNum = cmd.attemptNumber() > 0 ? cmd.attemptNumber() : 1;
-
-        List<String> signals = new ArrayList<>(cmd.observedSignals());
-
-        String summary = cmd.summary() != null && !cmd.summary().isBlank()
-                ? cmd.summary().trim()
-                : "Application successfully submitted and confirmed with genuine " + normalizedPlatform + " platform evidence.";
-
+    private GenuineReceiptRecord toRecord(StoredReceipt stored, CaptureReceiptCommand cmd) {
+        AuthorizationRecord authorization = new AuthorizationRecord(
+                true, "EXPLICIT_CANDIDATE_APPROVAL", stored.approvedAt(), stored.approvalActor());
         ConfirmationEvidence confirmation = new ConfirmationEvidence(
                 true,
-                confirmationId,
-                signals,
-                summary
-        );
-
-        AuthorizationRecord authorization = new AuthorizationRecord(
-                true,
-                "EXPLICIT_CANDIDATE_APPROVAL",
-                submittedAt,
-                cmd.attestationActor() != null ? cmd.attestationActor() : "CANDIDATE"
-        );
-
-        IdentityReceipt identity = cmd.submittedIdentity() != null
-                ? cmd.submittedIdentity()
-                : new IdentityReceipt(null, null, null, null, null, null, null);
-
-        List<AnswerReceipt> answers = cmd.submittedAnswers() != null
-                ? cmd.submittedAnswers()
-                : List.of();
-
-        AttemptSummary summaryItem = new AttemptSummary(
-                receiptId,
-                attemptNum,
-                normalizedPlatform,
-                idempotencyKey,
-                "SUBMITTED",
-                true,
-                submittedAt,
-                submittedAt,
-                true
-        );
-
+                stored.employerConfirmationId(),
+                stored.observedSignals(),
+                cmd.summary() != null && !cmd.summary().isBlank()
+                        ? cmd.summary().trim()
+                        : "Submission confirmed with verified " + stored.atsPlatform() + " platform evidence.");
+        Instant submittedAt = cmd.submittedAt() != null ? cmd.submittedAt() : stored.capturedAt();
+        AttemptSummary attempt = new AttemptSummary(
+                stored.planId(), stored.attemptNumber(), stored.atsPlatform(), stored.idempotencyKey(),
+                "SUBMITTED", true, submittedAt, submittedAt, true);
         SubmissionReceipt receipt = new SubmissionReceipt(
-                receiptId,
-                cmd.applicationId(),
+                stored.receiptId(),
+                stored.applicationId(),
                 cmd.jobId(),
                 cmd.jobTitle(),
                 cmd.company(),
                 cmd.applicationUrl(),
-                normalizedPlatform,
-                attemptNum,
+                stored.atsPlatform(),
+                stored.attemptNumber(),
                 true,
-                idempotencyKey,
+                stored.idempotencyKey(),
                 "SUBMITTED",
                 true,
                 submittedAt,
                 submittedAt,
-                submittedAt,
+                stored.capturedAt(),
                 authorization,
-                identity,
-                answers,
+                cmd.submittedIdentity() != null ? cmd.submittedIdentity()
+                        : new IdentityReceipt(null, null, null, null, null, null, null),
+                cmd.submittedAnswers() != null ? cmd.submittedAnswers() : List.of(),
                 cmd.cv(),
                 cmd.coverLetter(),
                 confirmation,
                 new ReconciliationDetails(false, null, null),
                 new FailureDetails(false, null, null),
-                List.of(summaryItem)
-        );
-
-        // Trust Boundary 7: Durable persistence before describing receipt as captured
-        persistDurable(receipt, cmd.rawEvidencePayload(), cmd.receiptSha256(), cmd.profileId(), cmd.applicationId(), authorization.actor());
-
-        log.info("Captured and durably persisted genuine submission receipt for app={} platform={} confId={} sha256={}",
-                cmd.applicationId(), normalizedPlatform, confirmationId, cmd.receiptSha256());
-
-        return receipt;
+                List.of(attempt));
+        return new GenuineReceiptRecord(receipt, stored.receiptId(), stored.evidenceSha256(),
+                stored.employerConfirmationId(), stored.atsPlatform(), stored.capturedAt(), true);
     }
 
-    private void persistDurable(SubmissionReceipt receipt, String rawEvidencePayload, String receiptSha256,
-                                UUID profileId, UUID applicationId, String actor) {
-        String key = applicationId + ":" + receipt.idempotencyKey();
-        inMemoryPersistedReceipts.put(key, receipt);
+    private static boolean conflicts(StoredReceipt existing, String receiptSha256, String confirmationId) {
+        return receiptSha256 == null
+                || !existing.evidenceSha256().equalsIgnoreCase(receiptSha256.trim())
+                || !Objects.equals(existing.employerConfirmationId(), trim(confirmationId));
+    }
 
-        if (db != null) {
-            try {
-                db.update("""
-                        insert into audit_logs (id, actor, action, entity_type, entity_id, before_state, after_state, created_at)
-                        values (?, ?, 'SUBMISSION_RECEIPT_CAPTURED', 'APPLICATION_RECEIPT', ?, null, ?::jsonb, now())
-                        """,
-                        UuidV7.generate(),
-                        actor != null ? actor : "CANDIDATE",
-                        applicationId,
-                        "{\"receiptId\":\"" + receipt.receiptId() + "\",\"sha256\":\"" + receiptSha256 + "\",\"platform\":\"" + receipt.atsKind() + "\"}"
-                );
-            } catch (Exception e) {
-                log.error("Failed to persist receipt durably into audit_logs: {}", e.getMessage(), e);
-                inMemoryPersistedReceipts.remove(key);
-                throw new InvalidReceiptException(
-                        "Durable persistence failed: receipt cannot be described as captured without persistence: " + e.getMessage(),
-                        "RECEIPT_PERSISTENCE_FAILED"
-                );
+    /** True when the URL is https and its host equals the permitted domain or is a subdomain of it. */
+    static boolean hostWithinDomain(String url, String permittedDomain) {
+        if (url == null || permittedDomain == null || permittedDomain.isBlank()) {
+            return false;
+        }
+        try {
+            URI uri = URI.create(url.trim());
+            String host = uri.getHost();
+            if (host == null || !"https".equalsIgnoreCase(uri.getScheme())) {
+                return false;
             }
+            String h = host.toLowerCase(Locale.ROOT);
+            String d = permittedDomain.trim().toLowerCase(Locale.ROOT);
+            return h.equals(d) || h.endsWith("." + d);
+        } catch (IllegalArgumentException e) {
+            return false;
         }
     }
 
-    /**
-     * Captures and validates genuine receipt returning a detailed {@link GenuineReceiptRecord}.
-     * Does NOT report genuine=true until all trusted verification and persistence requirements pass.
-     */
-    public GenuineReceiptRecord captureGenuineReceipt(CaptureReceiptCommand cmd) {
-        // Enforces all trust boundaries, audit checks, ownership, and persistence before genuine=true
-        SubmissionReceipt receipt = captureReceipt(cmd);
-        return new GenuineReceiptRecord(
-                receipt,
-                cmd.receiptSha256(),
-                cmd.employerConfirmationId(),
-                cmd.atsPlatform().trim().toUpperCase(Locale.ROOT),
-                Instant.now(),
-                true
-        );
+    private static String trim(String s) {
+        return s == null ? null : s.trim();
     }
 
-    /**
-     * Verifies an existing submission receipt against genuine receipt policy with explicit provenance.
-     * Raw evidence payload is required — summary substitution is strictly rejected.
-     */
-    public VerificationOutcome verifyExistingReceipt(SubmissionReceipt receipt, String receiptSha256,
-                                                     String rawEvidencePayload, UUID profileId,
-                                                     boolean sandboxPosting, boolean candidateAuthorizedSandbox,
-                                                     String evidenceProvenance) {
-        if (evidenceProvenance == null || evidenceProvenance.isBlank()) {
+    /** Reads trusted state; any failure to read it fails closed rather than being treated as "absent". */
+    private static <T> T trusted(java.util.function.Supplier<T> read) {
+        try {
+            return read.get();
+        } catch (InvalidReceiptException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            log.warn("Trusted receipt state could not be read: {}", e.getMessage());
             throw new InvalidReceiptException(
-                    "Evidence provenance is required: must originate from authenticated browser-worker",
-                    "MISSING_EVIDENCE_PROVENANCE"
-            );
+                    "Trusted receipt state is unavailable: the receipt cannot be verified", "TRUST_STATE_UNAVAILABLE");
         }
-        verificationPolicy.validateReceipt(receipt, receiptSha256, rawEvidencePayload, profileId,
-                sandboxPosting, candidateAuthorizedSandbox, evidenceProvenance);
-        return verificationPolicy.evaluate(new ReceiptEvidence(
-                receipt.confirmation() != null ? receipt.confirmation().confirmationId() : null,
-                receiptSha256,
-                receipt.atsKind(),
-                receipt.submittedAt(),
-                profileId,
-                receipt.applicationId(),
-                receipt.authorization() != null && receipt.authorization().approved(),
-                sandboxPosting,
-                candidateAuthorizedSandbox,
-                receipt.confirmation() != null ? receipt.confirmation().observedSignals() : List.of(),
-                rawEvidencePayload,
-                evidenceProvenance
-        ));
-    }
-
-    /**
-     * Backward-compatible overload without provenance — fails closed by passing null provenance.
-     */
-    public VerificationOutcome verifyExistingReceipt(SubmissionReceipt receipt, String receiptSha256,
-                                                     String rawEvidencePayload, UUID profileId,
-                                                     boolean sandboxPosting, boolean candidateAuthorizedSandbox) {
-        return verifyExistingReceipt(receipt, receiptSha256, rawEvidencePayload, profileId,
-                sandboxPosting, candidateAuthorizedSandbox, null); // Fails closed!
-    }
-
-    /**
-     * Helper to compute deterministic SHA-256 confirmation evidence digest.
-     */
-    public static String computeReceiptSha256(String employerConfirmationId, String atsPlatform,
-                                             Instant submittedAt, UUID profileId, UUID applicationId,
-                                             boolean attestationConfirmed, List<String> observedSignals) {
-        String canonicalPayload = ReceiptVerificationPolicy.buildCanonicalEvidencePayload(
-                employerConfirmationId,
-                atsPlatform,
-                submittedAt,
-                profileId,
-                applicationId,
-                attestationConfirmed,
-                observedSignals
-        );
-        return ReceiptVerificationPolicy.computeEvidenceSha256(canonicalPayload);
     }
 }

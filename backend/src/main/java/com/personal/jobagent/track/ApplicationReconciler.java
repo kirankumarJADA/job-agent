@@ -67,6 +67,13 @@ public final class ApplicationReconciler {
     static final String ROBIN_SUBMISSION_NOTE = "Robin has not submitted this application: real submission is disabled. "
             + "Preparing, approving or queueing a package is never a submission.";
 
+    static final String ROBIN_VERIFIED_SUBMISSION =
+            "Robin submitted this application and confirmed it with platform evidence observed at the time of submission.";
+
+    static final String ROBIN_UNVERIFIED_SUBMISSION =
+            "Robin's worker reported submitting this application, but the employer confirmation evidence could not be "
+                    + "verified. Check directly with the employer that it was received.";
+
     private enum Source { STATUS, REPORT, RECEIPT, MESSAGE }
 
     private record Signal(Stage stage, Basis basis, Instant time, TimePrecision precision, Instant recordedAt,
@@ -266,18 +273,21 @@ public final class ApplicationReconciler {
             status = Stage.STOPPED;
             basis = Basis.INTERNAL;
             reason = "This application was marked as failed in Robin, so Robin stopped working on it.";
-        } else if (s.plan() != null && "SUBMITTED".equals(s.plan().status())) {
-            // Phase 15: Robin's own worker confirmed a real submission
-            // (Greenhouse REAL_SUBMIT_CLICK or Ashby ASHBY_SUBMIT_CLICK) with
-            // platform evidence it actually observed for that exact click —
-            // AutomationPlanRepository#completeRealSubmission's own atomic
-            // guard (RUNNING + submit_approved=true) is what makes this status
-            // itself trustworthy; VERIFIED is the strongest basis this model
-            // has, since it is Robin's own system-verified fact, never a
-            // candidate statement or an unverified employer email.
+        } else if (s.plan() != null && "SUBMITTED".equals(s.plan().status()) && s.plan().verifiedReceipt()) {
+            // A real submission recorded by the authenticated worker AND a
+            // durable receipt that passed every server-side verification
+            // (candidate approval, worker-recorded evidence, digest, sandbox
+            // registration). Only then is this the strongest basis.
             status = Stage.APPLIED;
             basis = Basis.VERIFIED;
-            reason = "Robin submitted this application and confirmed it with platform evidence observed at the time of submission.";
+            reason = ROBIN_VERIFIED_SUBMISSION;
+        } else if (s.plan() != null && "SUBMITTED".equals(s.plan().status())) {
+            // Sprint 2.2.1: SUBMITTED alone is the worker's report of what it
+            // observed. Without a verified receipt it is applied-but-unverified,
+            // never VERIFIED.
+            status = Stage.APPLIED;
+            basis = Basis.UNVERIFIED;
+            reason = ROBIN_UNVERIFIED_SUBMISSION;
         } else {
             Stage recordedStage = stageForRecorded(recorded);
             boolean recordedAhead = recordedStage != null
@@ -333,6 +343,7 @@ public final class ApplicationReconciler {
         // 8. Submission and acknowledgement dimensions.
         boolean verifiedReceipt = liveReceipts.stream().anyMatch(r -> r.verification() == Verification.VERIFIED);
         boolean robinSubmitted = s.plan() != null && "SUBMITTED".equals(s.plan().status());
+        boolean robinSubmissionVerified = robinSubmitted && s.plan().verifiedReceipt();
         Signal submissionSignal = eligible.stream()
                 .filter(x -> x.stage() != Stage.WITHDRAWN && x.stage() != Stage.APPLYING)
                 .max(Comparator.comparingInt((Signal x) -> x.basis().strength).thenComparing(Signal::sortTime))
@@ -344,9 +355,12 @@ public final class ApplicationReconciler {
         } else if (verifiedReceipt) {
             submission = new SubmissionView(SubmissionState.CONFIRMED, "Confirmed by verified employer evidence",
                     "A verified employer acknowledgement identifies this application.");
-        } else if (robinSubmitted) {
+        } else if (robinSubmissionVerified) {
             submission = new SubmissionView(SubmissionState.CONFIRMED, "Confirmed by Robin submission",
-                    "Robin submitted this application and confirmed it with platform evidence observed at the time of submission.");
+                    ROBIN_VERIFIED_SUBMISSION);
+        } else if (robinSubmitted) {
+            submission = new SubmissionView(SubmissionState.UNVERIFIED, "Submission not verified",
+                    ROBIN_UNVERIFIED_SUBMISSION);
         } else if (submissionSignal != null) {
             submission = new SubmissionView(SubmissionState.UNVERIFIED, "Not verified", switch (submissionSignal.basis()) {
                 case CANDIDATE_REPORTED -> "You reported this; no employer evidence has verified it.";
@@ -382,6 +396,11 @@ public final class ApplicationReconciler {
                     : "A real submission attempt could not be confirmed (" + note + "). Robin will never retry it automatically; verify with the employer whether your application was received.";
             attention.add(new Attention("RECONCILIATION_REQUIRED", detail, null, null));
         }
+        if (robinSubmitted && !robinSubmissionVerified) {
+            attention.add(new Attention("RECEIPT_UNVERIFIED",
+                    "Robin's worker reported this submission, but its employer confirmation could not be verified. "
+                            + "Check directly with the employer that your application was received.", null, null));
+        }
         if (s.preparation() != null && s.preparation().failed()) {
             attention.add(new Attention("PREPARATION_FAILED",
                     "A preparation step failed. Re-run preparation to retry it.", null, null));
@@ -397,8 +416,10 @@ public final class ApplicationReconciler {
             unknowns.add("Some events have no known date; Robin orders them by when they were recorded.");
         }
 
-        String robinSubmissionNote = robinSubmitted
-                ? "Robin submitted this application and confirmed it with platform evidence observed at the time of submission."
+        String robinSubmissionNote = robinSubmissionVerified
+                ? ROBIN_VERIFIED_SUBMISSION
+                : robinSubmitted
+                ? ROBIN_UNVERIFIED_SUBMISSION
                 : (s.plan() != null && "RECONCILIATION_REQUIRED".equals(s.plan().status())
                 ? "A real submission was attempted by Robin, but the employer's acceptance could not be confirmed. Robin will never retry it automatically."
                 : ROBIN_SUBMISSION_NOTE);

@@ -607,10 +607,10 @@ public class ApplicationReceiptSecurityTest {
                             NOW, approvalTime)
             ));
 
-            // Audit log query returns explicit candidate approval record
+            // The strict approval query (plan + application + profile) returns the candidate's record
             when(db.queryForList(
-                    contains("from audit_logs"),
-                    eq(planId), eq(appId)
+                    contains("from audit_logs al"),
+                    eq(planId), eq(appId), eq(profileId)
             )).thenReturn(List.of(
                     Map.of("actor", "verified-candidate@example.local", "created_at", Timestamp.from(approvalTime))
             ));
@@ -623,8 +623,34 @@ public class ApplicationReceiptSecurityTest {
             assertThat(receipt.get().authorization().actor()).isEqualTo("verified-candidate@example.local");
             assertThat(receipt.get().authorization().approvedAt()).isEqualTo(approvalTime);
             assertThat(receipt.get().submitted()).isTrue();
-            assertThat(receipt.get().confirmation().confirmed()).isTrue();
+            // Approval alone is not confirmation: no verified worker evidence, so never confirmed.
+            assertThat(receipt.get().confirmation().confirmed()).isFalse();
             assertThat(receipt.get().confirmation().confirmationId()).isEqualTo("WD-CONF-7788");
+            assertThat(receipt.get().reconciliation().required()).isTrue();
+        }
+
+        @Test
+        @DisplayName("Adversarial: a loose audit row matched only by entity id (old fallback) is never authorization")
+        void testLooseFallbackAuditRowDoesNotAuthorize() throws Exception {
+            UUID profileId = UUID.randomUUID();
+            UUID appId = UUID.randomUUID();
+            UUID jobId = UUID.randomUUID();
+            UUID planId = UUID.randomUUID();
+
+            stubApplication(db, profileId, appId, jobId, "SUBMITTED");
+            stubPlans(db, profileId, appId, List.of(
+                    new PlanData(planId, "SUBMITTED", true, "idemp-loose",
+                            "{\"planType\":\"WORKDAY\",\"steps\":[]}", "[]", NOW, NOW)));
+            // Only the removed two-parameter fallback shape would have matched this row.
+            when(db.queryForList(contains("from audit_logs"), eq(planId), eq(appId)))
+                    .thenReturn(List.of(Map.of("actor", "anyone@example.local", "created_at", Timestamp.from(NOW))));
+
+            Optional<SubmissionReceipt> receipt = service.getReceipt(profileId, appId, null);
+
+            assertThat(receipt).isPresent();
+            assertThat(receipt.get().authorization().approved()).isFalse();
+            assertThat(receipt.get().authorization().actor()).isNull();
+            assertThat(receipt.get().confirmation().confirmed()).isFalse();
         }
 
         @Test

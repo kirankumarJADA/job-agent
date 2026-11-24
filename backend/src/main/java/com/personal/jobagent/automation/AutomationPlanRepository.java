@@ -277,7 +277,7 @@ public class AutomationPlanRepository {
      * caller-supplied selector, so no params are needed here. The worker's
      * own {@code #validateAshbyPlan} independently re-checks the same shape
      * (last step, exactly one, preceded by {@code ASHBY_APPLY}) before ever
-     * running it. {@link #completeRealSubmission} and
+     * running it. {@link #completeRealSubmissionWithResult} and
      * {@code AutomationController}'s {@code /complete} endpoint need no
      * changes at all — both are already ATS-agnostic (no {@code planType}
      * check), so Ashby's real submission inherits every downstream safety
@@ -355,9 +355,30 @@ public class AutomationPlanRepository {
      * reached only after an explicit human approval. {@code SUBMITTED} is a
      * true dead end: no method in this class ever transitions out of it, and
      * {@code claimNext}/{@code claim} never select it.
+     *
+     * <p><b>Sprint 2.2.1:</b> the status and the worker's structured outcome
+     * evidence are written by ONE guarded statement. There is no variant that
+     * reaches {@code SUBMITTED} without a result, and no path that writes the
+     * result in a separate statement after the transition. Callers run this
+     * inside the same transaction that records the worker's evidence row
+     * ({@code SubmissionCompletionService}).
+     *
+     * @return false (nothing written) unless the plan was RUNNING with submit_approved=true
      */
-    public boolean completeRealSubmission(UUID id) {
-        return db.update("update automation_plans set status='SUBMITTED',updated_at=now() where id=? and status='RUNNING' and submit_approved=true", id) == 1;
+    public boolean completeRealSubmissionWithResult(UUID id, List<Object> result) {
+        if (result == null || result.isEmpty()) {
+            throw new IllegalArgumentException("a real submission cannot be recorded without its outcome evidence");
+        }
+        String value;
+        try {
+            value = json.writeValueAsString(result);
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to serialise submission outcome result", e);
+        }
+        return db.update("""
+                update automation_plans set status='SUBMITTED', result=?::jsonb, heartbeat_at=null, updated_at=now()
+                where id=? and status='RUNNING' and submit_approved=true
+                """, value, id) == 1;
     }
 
     public boolean appendStep(UUID id, int index, String stepId, String status, Map<String, Object> result, String screenshot) {

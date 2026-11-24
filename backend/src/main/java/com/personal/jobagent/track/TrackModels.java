@@ -46,10 +46,18 @@ public final class TrackModels {
      *     outcome.js} persists); {@code null} for every other status,
      *     including {@code SUBMITTED} (a confirmed submission's own evidence
      *     lives in the audit trail, not duplicated here).
+     * @param verifiedReceipt Sprint 2.2.1: true only when a durable, verified
+     *     {@code submission_receipts} row exists for this plan. A plan in
+     *     {@code SUBMITTED} without one is shown as applied-but-unverified,
+     *     never as verified.
      */
-    public record PlanState(String status, boolean submitApproved, String reconciliationNote) {
+    public record PlanState(String status, boolean submitApproved, String reconciliationNote, boolean verifiedReceipt) {
+        public PlanState(String status, boolean submitApproved, String reconciliationNote) {
+            this(status, submitApproved, reconciliationNote, false);
+        }
+
         public PlanState(String status, boolean submitApproved) {
-            this(status, submitApproved, null);
+            this(status, submitApproved, null, false);
         }
     }
 

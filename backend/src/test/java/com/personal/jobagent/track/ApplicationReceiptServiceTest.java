@@ -71,7 +71,7 @@ class ApplicationReceiptServiceTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void buildsCompleteReceiptForConfirmedSubmissionWithDocumentsAndIdentity() throws Exception {
+    void buildsCompleteReceiptButNeverConfirmsWithoutVerifiedWorkerEvidence() throws Exception {
         stubApplication();
 
         String planJson = json.writeValueAsString(Map.of(
@@ -128,7 +128,8 @@ class ApplicationReceiptServiceTest {
         when(db.queryForMap(contains("from cv_versions where id"), eq(CV_VERSION_ID), eq(PROFILE_ID)))
                 .thenReturn(Map.of("title", "Tailored Systems CV", "val", "{\"passed\":true}"));
 
-        when(db.queryForList(contains("from audit_logs"), eq(PLAN_ID_1), eq(APP_ID)))
+        // The strict approval query is keyed by plan, application AND profile; there is no looser fallback.
+        when(db.queryForList(contains("from audit_logs al"), eq(PLAN_ID_1), eq(APP_ID), eq(PROFILE_ID)))
                 .thenReturn(List.of(Map.of("actor", "ada@example.com", "created_at", Timestamp.from(Instant.parse("2026-10-01T10:06:00Z")))));
 
         var receiptOpt = service.getReceipt(PROFILE_ID, APP_ID, null);
@@ -167,13 +168,16 @@ class ApplicationReceiptServiceTest {
         assertThat(receipt.authorization().actor()).isEqualTo("ada@example.com");
         assertThat(receipt.authorization().approvedAt()).isEqualTo(Instant.parse("2026-10-01T10:06:00Z"));
 
-        // Platform confirmation evidence
-        assertThat(receipt.confirmation().confirmed()).isTrue();
+        // Status SUBMITTED and a confirmation number in the result JSON are NOT proof: without the
+        // receipt capture service and worker-recorded evidence, the submission is never shown as confirmed.
+        assertThat(receipt.confirmation().confirmed()).isFalse();
         assertThat(receipt.confirmation().confirmationId()).isEqualTo("WD-CONF-987654");
-        assertThat(receipt.confirmation().observedSignals()).contains("PLATFORM_SUBMISSION_CONFIRMED", "FORM_DISAPPEARED");
+        assertThat(receipt.confirmation().observedSignals()).containsExactly("PLATFORM_SUBMISSION_CONFIRMED", "FORM_DISAPPEARED");
+        assertThat(receipt.confirmation().summary()).startsWith("Unverified submission:");
 
-        // Reconciliation & failure
-        assertThat(receipt.reconciliation().required()).isFalse();
+        // Unverified submission therefore requires reconciliation
+        assertThat(receipt.reconciliation().required()).isTrue();
+        assertThat(receipt.reconciliation().reason()).isEqualTo("UNVERIFIED_RECEIPT_EVIDENCE");
         assertThat(receipt.failure().failed()).isFalse();
     }
 

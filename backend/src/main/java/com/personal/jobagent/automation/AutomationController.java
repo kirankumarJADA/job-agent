@@ -62,6 +62,7 @@ public class AutomationController {
     private final AshbyExecutionPlanService ashbyPlans;
     private final WorkdayExecutionPlanService workdayPlans;
     private final MaintenanceModeService maintenanceMode;
+    private final SubmissionCompletionService submissions;
 
     @Autowired
     public AutomationController(AutomationPlanRepository plans,
@@ -77,7 +78,8 @@ public class AutomationController {
                                 GreenhouseExecutionPlanService greenhousePlans,
                                 AshbyExecutionPlanService ashbyPlans,
                                 WorkdayExecutionPlanService workdayPlans,
-                                @Autowired(required = false) MaintenanceModeService maintenanceMode) {
+                                @Autowired(required = false) MaintenanceModeService maintenanceMode,
+                                @Autowired(required = false) SubmissionCompletionService submissions) {
         this.plans = plans;
         this.audit = audit;
         this.ownerContext = ownerContext;
@@ -92,6 +94,27 @@ public class AutomationController {
         this.ashbyPlans = ashbyPlans;
         this.workdayPlans = workdayPlans;
         this.maintenanceMode = maintenanceMode != null ? maintenanceMode : new MaintenanceModeService(false);
+        this.submissions = submissions;
+    }
+
+    /** Without a {@link SubmissionCompletionService}, a real submission can never be recorded (fails closed). */
+    public AutomationController(AutomationPlanRepository plans,
+                                AuditLogWriter audit,
+                                OwnerContext ownerContext,
+                                String workerToken,
+                                ExecutionPackageService executionPackages,
+                                NotificationService notifications,
+                                AutomationMetrics metrics,
+                                com.personal.jobagent.apply.ApplyReadinessService applyReadiness,
+                                ApplyDocumentSelector documentSelector,
+                                com.personal.jobagent.application.ApplicationStatusService applicationStatus,
+                                GreenhouseExecutionPlanService greenhousePlans,
+                                AshbyExecutionPlanService ashbyPlans,
+                                WorkdayExecutionPlanService workdayPlans,
+                                MaintenanceModeService maintenanceMode) {
+        this(plans, audit, ownerContext, workerToken, executionPackages, notifications, metrics,
+                applyReadiness, documentSelector, applicationStatus, greenhousePlans, ashbyPlans, workdayPlans,
+                maintenanceMode, null);
     }
 
     public AutomationController(AutomationPlanRepository plans,
@@ -406,6 +429,9 @@ public class AutomationController {
             return ResponseEntity.status(400).body(Map.of(
                     "error", "a real submission attempt can never resolve to HUMAN_REQUIRED; report RECONCILIATION_REQUIRED instead"));
         }
+        if ("SUBMITTED".equals(outcome)) {
+            return completeRealSubmission(id, r);
+        }
         boolean ok = switch (outcome == null ? "" : outcome) {
             case "HUMAN_REQUIRED", "COMPLETED", "FAILED", "BLOCKED_ANTI_BOT", "RECONCILIATION_REQUIRED" -> {
                 String to = outcome.equals("HUMAN_REQUIRED") ? "AWAITING_APPROVAL" : outcome;
@@ -413,7 +439,6 @@ public class AutomationController {
                         ? plans.transitionWithResult(id, "RUNNING", to, new java.util.ArrayList<>(r.result()))
                         : plans.transition(id, "RUNNING", to);
             }
-            case "SUBMITTED" -> plans.completeRealSubmission(id);
             default -> false;
         };
         if (!ok) {
@@ -422,11 +447,57 @@ public class AutomationController {
         audit.write(new AuditEntry(ownerContext.actorOr("worker"), "AUTOMATION_PLAN_" + outcome, "AUTOMATION_PLAN", id,
                 null, Map.of("detail", r.detail() == null ? "" : r.detail()), null, UuidV7.generate()));
         metrics.planOutcome(outcome);
-        if ("SUBMITTED".equals(outcome)) {
-            markApplicationSubmitted(id, r.detail());
-        }
         notifyPlanOutcome(id, outcome, r.detail());
         return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * Sprint 2.2.1: the worker-only SUBMITTED branch. The caller has already
+     * been checked to be the authenticated worker and to have supplied a
+     * non-blank detail. The structured evidence, the SUBMITTED transition and
+     * the audit row are written atomically by {@link SubmissionCompletionService};
+     * a report without valid structured evidence lands in
+     * RECONCILIATION_REQUIRED (never SUBMITTED, never retried automatically).
+     */
+    private ResponseEntity<?> completeRealSubmission(UUID id, OutcomeRequest r) {
+        if (submissions == null) {
+            return ResponseEntity.status(503).body(Map.of(
+                    "error", "real submissions cannot be recorded: the submission evidence store is unavailable"));
+        }
+        // The worker principal comes from the authenticated security context, never from the body.
+        String workerPrincipal = ownerContext.actorOr("worker");
+        SubmissionCompletionService.Result result;
+        try {
+            result = submissions.completeWorkerSubmission(id, workerPrincipal, r.detail(), r.result());
+        } catch (org.springframework.dao.DataAccessException e) {
+            // The completion transaction rolled back: no evidence, no SUBMITTED, no audit row.
+            log.error("Real submission for plan {} could not be recorded: {}", id, e.getMostSpecificCause().getMessage());
+            return ResponseEntity.status(503).body(Map.of(
+                    "error", "the submission could not be recorded; nothing was written",
+                    "code", "SUBMISSION_RECORDING_UNAVAILABLE"));
+        }
+        switch (result.outcome()) {
+            case SUBMITTED -> {
+                metrics.planOutcome("SUBMITTED");
+                markApplicationSubmitted(id, r.detail());
+                notifyPlanOutcome(id, "SUBMITTED", r.detail());
+                return ResponseEntity.noContent().build();
+            }
+            case RECONCILIATION_REQUIRED -> {
+                metrics.planOutcome("RECONCILIATION_REQUIRED");
+                notifyPlanOutcome(id, "RECONCILIATION_REQUIRED",
+                        "A submission was reported without verifiable evidence: " + result.reason());
+                return ResponseEntity.status(422).body(Map.of(
+                        "error", "a real submission requires structured SUBMISSION_EVIDENCE; the attempt now requires reconciliation",
+                        "code", "SUBMISSION_EVIDENCE_REQUIRED",
+                        "status", "RECONCILIATION_REQUIRED",
+                        "reason", result.reason()));
+            }
+            default -> {
+                return ResponseEntity.status(409).body(Map.of(
+                        "error", "illegal or unsafe transition", "reason", String.valueOf(result.reason())));
+            }
+        }
     }
 
     /** True when the plan's own stored last step is a real submission click (GREENHOUSE or ASHBY). */
@@ -446,7 +517,7 @@ public class AutomationController {
      * reads) reflects it, not just the automation plan row. Deliberately
      * tolerant of an unexpected current application status: the
      * automation_plans row reaching SUBMITTED is the authoritative,
-     * database-guarded fact (completeRealSubmission's own atomic guard); a
+     * database-guarded fact (completeRealSubmissionWithResult's own atomic guard); a
      * mismatch here is logged, not allowed to undo or mask that fact.
      */
     private void markApplicationSubmitted(UUID planId, String detail) {

@@ -62,12 +62,42 @@ function reconciliationResult(planType, submitResult) {
   }];
 }
 
+/**
+ * Sprint 2.2.1: the structured evidence a confirmed real submission reports.
+ * The backend refuses to record SUBMITTED without exactly one such entry
+ * (category CONFIRMED, confirmed true, non-blank evidence) and moves the
+ * attempt to RECONCILIATION_REQUIRED instead. Only fields the worker actually
+ * observed are included: a confirmation number, signals or raw DOM evidence
+ * are sent when the submit step captured them, and are otherwise omitted —
+ * never invented. Provenance, sandbox and approval status are deliberately
+ * NOT sent: the backend derives all three from its own records.
+ */
+function submissionEvidenceResult(planType, submitResult) {
+  const entry = {
+    type: 'SUBMISSION_EVIDENCE',
+    planType,
+    category: 'CONFIRMED',
+    confirmed: true,
+    evidence: String(submitResult.evidence ?? ''),
+  };
+  if (typeof submitResult.confirmationNumber === 'string' && submitResult.confirmationNumber.trim()) {
+    entry.confirmationNumber = submitResult.confirmationNumber.trim();
+  }
+  if (Array.isArray(submitResult.signals) && submitResult.signals.length > 0) {
+    entry.signals = submitResult.signals.map((s) => String(s)).filter((s) => s.trim().length > 0);
+  }
+  if (typeof submitResult.rawEvidence === 'string' && submitResult.rawEvidence.trim()) {
+    entry.rawEvidence = submitResult.rawEvidence;
+  }
+  return [entry];
+}
+
 export function computePlanOutcome(plan, runResult) {
   const isSubmitAttempt = plan.planType === 'GREENHOUSE' && plan.steps.at(-1)?.type === 'REAL_SUBMIT_CLICK';
   if (isSubmitAttempt) {
     const submitResult = runResult.submitResult;
     if (submitResult?.confirmed) {
-      return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: null };
+      return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: submissionEvidenceResult('GREENHOUSE', submitResult) };
     }
     // Phase 15: never HUMAN_REQUIRED (which the backend's own precondition
     // now treats as a plain, re-approvable preparation outcome) — a real
@@ -90,7 +120,7 @@ export function computePlanOutcome(plan, runResult) {
   if (isAshbySubmitAttempt) {
     const submitResult = runResult.ashbySubmitResult;
     if (submitResult?.confirmed) {
-      return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: null };
+      return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: submissionEvidenceResult('ASHBY', submitResult) };
     }
     // Phase 15: same reasoning as the GREENHOUSE branch above.
     return {
@@ -105,7 +135,7 @@ export function computePlanOutcome(plan, runResult) {
   if (isWorkdaySubmitAttempt) {
     const submitResult = runResult.workdaySubmitResult;
     if (submitResult?.confirmed) {
-      return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: null };
+      return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: submissionEvidenceResult('WORKDAY', submitResult) };
     }
     return {
       outcome: 'RECONCILIATION_REQUIRED',

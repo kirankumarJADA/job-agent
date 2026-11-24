@@ -122,9 +122,25 @@ class ApplicationReconcilerTest {
     }
 
     @Test
-    void aConfirmedRobinSubmissionIsAppliedAndVerified() {
+    void aSubmittedPlanWithoutAVerifiedReceiptIsAppliedButNeverVerified() {
         S s = new S();
         s.plan = new PlanState("SUBMITTED", true);
+        TrackState state = reconcile(s);
+        assertThat(state.status()).isEqualTo(Stage.APPLIED);
+        assertThat(state.basis()).isEqualTo(Basis.UNVERIFIED);
+        assertThat(state.basis()).isNotEqualTo(Basis.VERIFIED);
+        assertThat(state.submission().state()).isEqualTo(SubmissionState.UNVERIFIED);
+        assertThat(state.robinSubmitted()).isTrue();
+        assertThat(state.robinSubmissionNote()).contains("could not be verified");
+        assertThat(state.reason()).doesNotContain("confirmed it with platform evidence");
+        assertThat(state.attention()).extracting(a -> a.code()).contains("RECEIPT_UNVERIFIED");
+        assertThat(state.unknowns()).contains("Whether the employer received this application is not verified.");
+    }
+
+    @Test
+    void aConfirmedRobinSubmissionIsAppliedAndVerified() {
+        S s = new S();
+        s.plan = new PlanState("SUBMITTED", true, null, true);
         TrackState state = reconcile(s);
         assertThat(state.status()).isEqualTo(Stage.APPLIED);
         assertThat(state.basis()).isEqualTo(Basis.VERIFIED);

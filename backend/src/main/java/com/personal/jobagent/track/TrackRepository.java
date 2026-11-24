@@ -368,7 +368,9 @@ public class TrackRepository {
 
         Map<UUID, PlanState> plans = new HashMap<>();
         db.query("""
-                select distinct on (p.application_id) p.application_id, p.status, p.submit_approved, p.result::text as result
+                select distinct on (p.application_id) p.application_id, p.status, p.submit_approved, p.result::text as result,
+                       exists (select 1 from submission_receipts sr
+                               where sr.plan_id = p.id and sr.profile_id = p.profile_id) as verified_receipt
                 from automation_plans p join applications a on a.id = p.application_id and a.profile_id = p.profile_id
                 where a.profile_id = ?""" + appFilter + "\n" + """
                 order by p.application_id, p.created_at desc, p.id desc
@@ -376,7 +378,8 @@ public class TrackRepository {
             String status = rs.getString("status");
             plans.put((UUID) rs.getObject("application_id"),
                     new PlanState(status, rs.getBoolean("submit_approved"),
-                            "RECONCILIATION_REQUIRED".equals(status) ? reconciliationNoteOf(rs.getString("result")) : null));
+                            "RECONCILIATION_REQUIRED".equals(status) ? reconciliationNoteOf(rs.getString("result")) : null,
+                            rs.getBoolean("verified_receipt")));
         }, args);
 
         Map<UUID, List<StatusChange>> changes = new HashMap<>();
