@@ -69,8 +69,7 @@ public class MultiStageReranker {
         // STAGE 1: Hard Eligibility Gate
         // ─────────────────────────────────────────────────────────────
         boolean titleEligible = allowedTitles.isEmpty() || HardFilterService.matchesAnyTitle(job.title(), allowedTitles);
-        boolean salaryEligible = salaryMinGbp == null || salaryMinGbp <= 0 || job.salaryMax() == null
-                || job.salaryMax().doubleValue() >= (salaryMinGbp * 0.80);
+        boolean salaryEligible = HardFilterService.matchesSalary(job, salaryMinGbp);
         boolean remoteEligible = allowedRemoteTypes.isEmpty() || job.remoteType() == null
                 || "UNKNOWN".equalsIgnoreCase(job.remoteType())
                 || allowedRemoteTypes.stream().anyMatch(r -> r.equalsIgnoreCase(job.remoteType()));
@@ -142,7 +141,7 @@ public class MultiStageReranker {
         if (!titleEligible || !salaryEligible || !remoteEligible || !locationEligible || !sponsorshipEligible || !exclusionsEligible || !companyEligible) {
             List<String> reasons = new ArrayList<>();
             if (!titleEligible) reasons.add("Title '" + job.title() + "' does not match target roles");
-            if (!salaryEligible) reasons.add("Salary is below 80% of minimum threshold (£" + salaryMinGbp + ")");
+            if (!salaryEligible) reasons.add("Salary is below minimum threshold (£" + salaryMinGbp + ")");
             if (!remoteEligible) reasons.add("Remote type '" + job.remoteType() + "' does not match preferences");
             if (!locationEligible) reasons.add("Location does not match target areas");
             if (!sponsorshipEligible) reasons.add(sponsorshipReason);
@@ -160,7 +159,8 @@ public class MultiStageReranker {
                             "skills_overlap", 0.0,
                             "seniority_alignment", 0.0,
                             "title_fit", 0.0,
-                            "salary_fit", 0.0
+                            "salary_fit", 0.0,
+                            "visa_fit", visaScore
                     ),
                     List.of(),
                     job.skillsExtracted() != null ? job.skillsExtracted() : List.of(),
@@ -230,6 +230,7 @@ public class MultiStageReranker {
         double wSeniority = 20.0;
         double wSalary = 10.0;
         double wLocation = 10.0;
+        double wVisa = 10.0;
 
         if (configuredWeights != null && !configuredWeights.isEmpty()) {
             if (configuredWeights.get("skill") instanceof Number n) wSkill = n.doubleValue();
@@ -237,12 +238,14 @@ public class MultiStageReranker {
             if (configuredWeights.get("salary") instanceof Number n) wSalary = n.doubleValue();
             if (configuredWeights.get("location") instanceof Number n) wLocation = n.doubleValue();
             if (configuredWeights.get("title") instanceof Number n) wTitle = n.doubleValue();
+            if (configuredWeights.get("visa") instanceof Number n) wVisa = n.doubleValue();
         }
 
         boolean titleApplicable = !allowedTitles.isEmpty();
         boolean seniorityApplicable = !allowedExperienceLevels.isEmpty();
         boolean locationApplicable = !allowedLocations.isEmpty() || !allowedRemoteTypes.isEmpty();
         boolean salaryApplicable = salaryMinGbp != null && salaryMinGbp > 0;
+        boolean visaApplicable = sponsorshipPolicy != null && "REQUIRED".equalsIgnoreCase(sponsorshipPolicy.trim());
         boolean skillApplicable = true;
 
         double totalWeight = 0.0;
@@ -267,6 +270,10 @@ public class MultiStageReranker {
         if (locationApplicable) {
             totalWeight += wLocation;
             weightedSum += wLocation * 1.0; // Passed hard filter
+        }
+        if (visaApplicable) {
+            totalWeight += wVisa;
+            weightedSum += wVisa * visaScore;
         }
 
         double compositeScore = totalWeight > 0.0 ? (weightedSum / totalWeight) : 0.5;
@@ -296,6 +303,11 @@ public class MultiStageReranker {
         if (salaryScore >= 0.90 && salaryMinGbp != null && salaryMinGbp > 0) {
             highlights.add("Compensation meets target minimum threshold");
         }
+        if (visaApplicable && visaScore >= 1.0) {
+            highlights.add("Employer holds confirmed visa sponsorship licence");
+        } else if (visaApplicable && visaScore < 0.60) {
+            concerns.add("Employer visa sponsorship status is unconfirmed");
+        }
 
         String narrative = String.format(Locale.ROOT,
                 "Multi-stage reranking scored %d/100 (%s). Skills: %d%%, Title Fit: %d%%, Seniority: %d%%, Salary: %d%%.",
@@ -314,7 +326,8 @@ public class MultiStageReranker {
                 "skills_overlap", skillScore,
                 "seniority_alignment", seniorityScore,
                 "title_fit", titleScore,
-                "salary_fit", salaryScore
+                "salary_fit", salaryScore,
+                "visa_fit", visaScore
         );
 
         return new RerankResult(
@@ -355,14 +368,17 @@ public class MultiStageReranker {
 
         // Exact match in preferred set
         if (preferred.contains(jobLevel)) {
-            // If candidate targets ENTRY and job is ENTRY, reward exact foundation match
-            if (preferred.contains(SeniorityClassifier.Level.ENTRY) && jobLevel == SeniorityClassifier.Level.ENTRY) {
-                return 1.0;
+            // When candidate targets ENTRY (junior/career starter), reward exact ENTRY foundation roles (1.0)
+            // and apply progression calibration (0.92) to MID roles to protect entry-level trajectory
+            if (preferred.contains(SeniorityClassifier.Level.ENTRY)) {
+                if (jobLevel == SeniorityClassifier.Level.ENTRY) {
+                    return 1.0;
+                }
+                if (jobLevel == SeniorityClassifier.Level.MID) {
+                    return 0.92;
+                }
             }
-            if (jobLevel == SeniorityClassifier.Level.MID) {
-                return 0.92;
-            }
-            return 0.95;
+            return 1.0;
         }
 
         // Distance penalty

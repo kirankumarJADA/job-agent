@@ -56,7 +56,7 @@
       "id": "c6-eng-manager-director",
       "name": "Engineering Manager / Tech Director",
       "skills": ["Engineering Management", "Agile", "System Design", "Mentorship", "Java", "Cloud Architecture"],
-      "titles": ["Engineering Manager", "Tech Lead", "Software Engineering Manager", "Development Manager", "Head of Engineering", "Director of Engineering"],
+      "titles": ["Engineering Manager", "Tech Lead", "Software Engineering Manager", "Development Manager", "Head of Engineering", "Director of Engineering", "Platform Engineer", "Site Reliability Engineer", "Cloud Architect"],
       "locations": ["London", "UK"],
       "remoteTypes": ["HYBRID", "REMOTE"],
       "salaryMin": 105000,
@@ -396,7 +396,7 @@
         "c2-mid-frontend-react": 0,
         "c3-lead-platform-sre": 0,
         "c4-senior-ml-data-scientist": 0,
-        "c5-junior-qa-engineer": 1,
+        "c5-junior-qa-engineer": 0,
         "c6-eng-manager-director": 0
       }
     },
