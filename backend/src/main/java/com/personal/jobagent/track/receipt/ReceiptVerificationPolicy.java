@@ -81,27 +81,6 @@ public class ReceiptVerificationPolicy {
             String rawEvidencePayload,
             String evidenceProvenance
     ) {
-        /**
-         * Backward-compatible 11-argument constructor defaulting evidenceProvenance to AUTHENTICATED_BROWSER_WORKER.
-         */
-        public ReceiptEvidence(
-                String employerConfirmationId,
-                String receiptSha256,
-                String atsPlatform,
-                Instant submittedAt,
-                UUID profileId,
-                UUID applicationId,
-                boolean attestationConfirmed,
-                boolean sandboxPosting,
-                boolean candidateAuthorizedSandbox,
-                List<String> observedSignals,
-                String rawEvidencePayload
-        ) {
-            this(employerConfirmationId, receiptSha256, atsPlatform, submittedAt, profileId,
-                    applicationId, attestationConfirmed, sandboxPosting, candidateAuthorizedSandbox,
-                    observedSignals, rawEvidencePayload, "AUTHENTICATED_BROWSER_WORKER");
-        }
-
         public static Builder builder() {
             return new Builder();
         }
@@ -118,7 +97,7 @@ public class ReceiptVerificationPolicy {
             private boolean candidateAuthorizedSandbox = false; // NON-PERMISSIVE DEFAULT
             private List<String> observedSignals = List.of();
             private String rawEvidencePayload;
-            private String evidenceProvenance = "AUTHENTICATED_BROWSER_WORKER";
+            private String evidenceProvenance; // NON-PERMISSIVE DEFAULT (null - must be verified)
 
             public Builder employerConfirmationId(String id) { this.employerConfirmationId = id; return this; }
             public Builder receiptSha256(String sha) { this.receiptSha256 = sha; return this; }
@@ -424,11 +403,12 @@ public class ReceiptVerificationPolicy {
     }
 
     /**
-     * Validates an existing {@link SubmissionReceipt} against policy invariants.
+     * Validates an existing {@link SubmissionReceipt} against policy invariants with explicit evidence provenance.
      * Requires raw canonical DOM evidence — summary substitution is strictly rejected.
      */
     public void validateReceipt(SubmissionReceipt receipt, String receiptSha256, String rawEvidencePayload,
-                                UUID profileId, boolean sandboxPosting, boolean candidateAuthorizedSandbox) {
+                                UUID profileId, boolean sandboxPosting, boolean candidateAuthorizedSandbox,
+                                String evidenceProvenance) {
         if (receipt == null) {
             throw new InvalidReceiptException("SubmissionReceipt cannot be null", "MISSING_RECEIPT");
         }
@@ -461,26 +441,46 @@ public class ReceiptVerificationPolicy {
                 candidateAuthorizedSandbox,
                 signals,
                 rawEvidencePayload,
-                "AUTHENTICATED_BROWSER_WORKER"
+                evidenceProvenance
         );
 
         validateOrThrow(evidence);
     }
 
     /**
-     * Validates an existing {@link SubmissionReceipt} enforcing strict profile ownership.
+     * Backward-compatible overload without provenance — fails closed by passing null provenance.
+     */
+    public void validateReceipt(SubmissionReceipt receipt, String receiptSha256, String rawEvidencePayload,
+                                UUID profileId, boolean sandboxPosting, boolean candidateAuthorizedSandbox) {
+        validateReceipt(receipt, receiptSha256, rawEvidencePayload, profileId, sandboxPosting, candidateAuthorizedSandbox, null);
+    }
+
+    /**
+     * Validates an existing {@link SubmissionReceipt} enforcing strict profile ownership with explicit provenance.
      */
     public void validateReceiptWithProfileOwnership(SubmissionReceipt receipt, String receiptSha256,
                                                     String rawEvidencePayload, UUID expectedProfileId,
                                                     UUID callerProfileId, boolean sandboxPosting,
-                                                    boolean candidateAuthorizedSandbox) {
+                                                    boolean candidateAuthorizedSandbox,
+                                                    String evidenceProvenance) {
         if (callerProfileId == null || !callerProfileId.equals(expectedProfileId)) {
             throw new InvalidReceiptException(
                     "Cross-profile receipt access rejected: caller profile " + callerProfileId + " does not own application receipt",
                     "CROSS_PROFILE_RECEIPT_REJECTED"
             );
         }
-        validateReceipt(receipt, receiptSha256, rawEvidencePayload, callerProfileId, sandboxPosting, candidateAuthorizedSandbox);
+        validateReceipt(receipt, receiptSha256, rawEvidencePayload, callerProfileId, sandboxPosting, candidateAuthorizedSandbox, evidenceProvenance);
+    }
+
+    /**
+     * Backward-compatible overload without provenance — fails closed by passing null provenance.
+     */
+    public void validateReceiptWithProfileOwnership(SubmissionReceipt receipt, String receiptSha256,
+                                                    String rawEvidencePayload, UUID expectedProfileId,
+                                                    UUID callerProfileId, boolean sandboxPosting,
+                                                    boolean candidateAuthorizedSandbox) {
+        validateReceiptWithProfileOwnership(receipt, receiptSha256, rawEvidencePayload, expectedProfileId,
+                callerProfileId, sandboxPosting, candidateAuthorizedSandbox, null);
     }
 
     private static Map<String, String> reason(String code, String message) {

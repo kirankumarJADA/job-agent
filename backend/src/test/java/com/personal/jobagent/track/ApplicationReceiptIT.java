@@ -22,11 +22,13 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -141,6 +143,20 @@ class ApplicationReceiptIT {
                 values (?, ?, ?, ?, 'TAILORED', ?, 'CV markdown', '{"passed":true}', true, 1, 'snap', ?, true, ?, now())
                 """, cvVersionId, jobId, applicationId, profileId, title, sha256, fileId);
         jdbc.update("update applications set cv_version_id = ? where id = ?", cvVersionId, applicationId);
+        jdbc.update("""
+                insert into resume_ats_analyses (id, profile_id, job_id, application_id, input_hash, role, domain,
+                    required_skills, preferred_skills, normalized_skills, verified_evidence, gaps, ats_report,
+                    cv_version_id, profile_revision, profile_snapshot_hash)
+                values (?, ?, ?, ?, ?, 'Engineer', 'Tech', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+                        '[]'::jsonb, '[]'::jsonb, ?::jsonb, ?, 1, 'snap')
+                """, UUID.randomUUID(), profileId, jobId, applicationId, "hash-" + cvVersionId,
+                json.writeValueAsString(Map.of("validation", Map.of(
+                        "passed", true, "validator_version", com.personal.jobagent.documents.DocumentFactValidator.VERSION))), cvVersionId);
+        jdbc.update("""
+                insert into cv_version_reviews (cv_version_id, profile_id, approved, decided_by, content_sha256)
+                values (?, ?, true, 'dev@example.local', ?)
+                on conflict (cv_version_id) do nothing
+                """, cvVersionId, profileId, sha256);
         return cvVersionId;
     }
 
@@ -154,6 +170,23 @@ class ApplicationReceiptIT {
                 """, planId, profileId, applicationId, targetUrl, status, submitApproved, idempotencyKey,
                 json.writeValueAsString(plan), json.writeValueAsString(result));
         return planId;
+    }
+
+    private Map<String, Object> buildWorkdayOutcomeResult(String confirmationNumber, String rawEvidence,
+                                                         String receiptSha256, String summary) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("type", "WORKDAY_APPLICATION_OUTCOME");
+        m.put("submitted", true);
+        m.put("confirmationNumber", confirmationNumber);
+        m.put("requisitionId", "JR2024946");
+        m.put("rawEvidence", rawEvidence);
+        m.put("receiptSha256", receiptSha256);
+        m.put("evidenceProvenance", "AUTHENTICATED_BROWSER_WORKER");
+        m.put("sandboxPosting", true);
+        m.put("candidateAuthorizedSandbox", true);
+        m.put("signals", List.of("PLATFORM_SUBMISSION_CONFIRMED", "FORM_DISAPPEARED"));
+        m.put("summary", summary);
+        return m;
     }
 
     @Test
@@ -184,23 +217,23 @@ class ApplicationReceiptIT {
                 )
         );
 
+        String rawEvidence = "<div id='confirmation'>Thank you for applying. Confirmation: WD-2026-NVIDIA-7788</div>";
+        String sha256 = sha256Hex(rawEvidence.getBytes(StandardCharsets.UTF_8));
+
         List<Object> result = List.of(
-                Map.of(
-                        "type", "WORKDAY_APPLICATION_OUTCOME",
-                        "submitted", true,
-                        "confirmationNumber", "WD-2026-NVIDIA-7788",
-                        "requisitionId", "JR2024946",
-                        "signals", List.of("PLATFORM_SUBMISSION_CONFIRMED", "FORM_DISAPPEARED"),
-                        "summary", "Application confirmed by Workday requisition acknowledgment."
-                )
+                buildWorkdayOutcomeResult("WD-2026-NVIDIA-7788", rawEvidence, sha256,
+                        "Application confirmed by Workday requisition acknowledgment.")
         );
 
         UUID planId = seedPlan(devProfileId, applicationId, WORKDAY_JOB_URL + "/apply", "SUBMITTED", true,
                 "workday:" + applicationId, plan, result);
 
-        // Record audit approval entry
-        audit.write(new AuditEntry("dev@example.local", "AUTOMATION_SUBMIT_APPROVED", "AUTOMATION_PLAN",
-                planId, null, Map.of("applicationId", applicationId.toString()), null, UuidV7.generate()));
+        // Record genuine candidate approval audit entry matching AutomationController.approve
+        audit.write(new AuditEntry("dev@example.local", "WORKDAY_SUBMIT_APPROVED", "AUTOMATION_PLAN",
+                planId, null, Map.of("approvedForSubmission", true, "submissionEnabled", false), null, UuidV7.generate()));
+        // Record worker completion audit entry
+        audit.write(new AuditEntry("worker", "AUTOMATION_PLAN_SUBMITTED", "AUTOMATION_PLAN",
+                planId, null, Map.of("detail", "real submit confirmed"), null, UuidV7.generate()));
 
         // Fetch receipt via API
         mvc.perform(get("/api/v1/applications/" + applicationId + "/receipt").session(devSession))
@@ -227,6 +260,109 @@ class ApplicationReceiptIT {
                 .andExpect(jsonPath("$.confirmation.confirmationId").value("WD-2026-NVIDIA-7788"))
                 .andExpect(jsonPath("$.reconciliation.required").value(false))
                 .andExpect(jsonPath("$.failure.failed").value(false));
+    }
+
+    @Test
+    void endToEndApprovalRouteProducesVerifiedGenuineReceipt() throws Exception {
+        UUID jobId = seedJob("Principal Distributed Architect", "NVIDIA", WORKDAY_JOB_URL);
+        UUID applicationId = seedApplication(devProfileId, jobId);
+        UUID cvId = seedCv(devProfileId, jobId, applicationId, "Ada Lovelace Systems CV", "PDF-ADA-CV-BYTES");
+        String cvSha = jdbc.queryForObject("select content_sha256 from cv_versions where id = ?", String.class, cvId);
+
+        Map<String, Object> plan = Map.of(
+                "planType", "WORKDAY",
+                "correlation", Map.of("applicationId", applicationId.toString(), "jobId", jobId.toString()),
+                "package", Map.of(
+                        "cv", Map.of("versionId", cvId.toString(), "sha256", cvSha, "fileName", "ada-cv.pdf", "byteSize", 1024)
+                ),
+                "steps", List.of(
+                        Map.of("id", "apply", "type", "WORKDAY_APPLY", "params", Map.of(
+                                "identity", Map.of(
+                                        "name", "Ada Lovelace",
+                                        "firstName", "Ada",
+                                        "lastName", "Lovelace",
+                                        "email", "dev@example.local",
+                                        "phone", "+44 7700 900123",
+                                        "addressLine1", "London, UK",
+                                        "linkedIn", "https://linkedin.com/in/ada"
+                                )
+                        ))
+                )
+        );
+
+        // 1. Plan starts in AWAITING_APPROVAL with preparation outcome recorded
+        List<Object> prepResult = List.of(Map.of(
+                "type", "WORKDAY_APPLICATION_OUTCOME",
+                "requiredGaps", List.of()
+        ));
+        UUID planId = seedPlan(devProfileId, applicationId, WORKDAY_JOB_URL + "/apply", "AWAITING_APPROVAL", false,
+                "workday:real-route:" + applicationId, plan, prepResult);
+
+        // 2. Candidate explicitly approves via the REAL AutomationController approval route
+        mvc.perform(post("/api/v1/automation/plans/" + planId + "/approve-submit")
+                        .session(devSession)
+                        .with(csrf()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("READY_TO_SUBMIT"))
+                .andExpect(jsonPath("$.submissionEnabled").value(false));
+
+        // Verify the plan has submit_approved = true in the database
+        Boolean submitApproved = jdbc.queryForObject(
+                "select submit_approved from automation_plans where id = ?", Boolean.class, planId);
+        assertThat(submitApproved).isTrue();
+
+        // Verify audit log has WORKDAY_SUBMIT_APPROVED recorded by AutomationController
+        Integer approvalCount = jdbc.queryForObject("""
+                select count(*) from audit_logs
+                where entity_id = ?
+                  and action = 'WORKDAY_SUBMIT_APPROVED'
+                  and (after_state ->> 'approvedForSubmission') = 'true'
+                  and actor = 'dev@example.local'
+                """, Integer.class, planId);
+        assertThat(approvalCount).isGreaterThan(0);
+
+        // 3. Worker completes submission with genuine confirmation evidence
+        String rawDomEvidence = "<div id='confirmation'>Thank you for applying. Confirmation: WD-2026-NVIDIA-9999</div>";
+        String evidenceSha = sha256Hex(rawDomEvidence.getBytes(StandardCharsets.UTF_8));
+        List<Object> outcomeResult = List.of(
+                buildWorkdayOutcomeResult("WD-2026-NVIDIA-9999", rawDomEvidence, evidenceSha,
+                        "Confirmed with genuine Workday employer evidence.")
+        );
+
+        // Update plan with worker execution result in SUBMITTED state
+        jdbc.update("""
+                update automation_plans
+                set status = 'SUBMITTED',
+                    result = ?::jsonb,
+                    updated_at = now()
+                where id = ?
+                """, json.writeValueAsString(outcomeResult), planId);
+
+        // Record worker completion audit entry
+        audit.write(new AuditEntry("worker", "AUTOMATION_PLAN_SUBMITTED", "AUTOMATION_PLAN",
+                planId, null, Map.of("detail", "real submit confirmed"), null, UuidV7.generate()));
+
+        // 4. Candidate retrieves the receipt through ApplicationReceiptService endpoint
+        mvc.perform(get("/api/v1/applications/" + applicationId + "/receipt").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.applicationId").value(applicationId.toString()))
+                .andExpect(jsonPath("$.status").value("SUBMITTED"))
+                .andExpect(jsonPath("$.submitted").value(true))
+                .andExpect(jsonPath("$.authorization.approved").value(true))
+                .andExpect(jsonPath("$.authorization.actor").value("dev@example.local"))
+                .andExpect(jsonPath("$.confirmation.confirmed").value(true))
+                .andExpect(jsonPath("$.confirmation.confirmationId").value("WD-2026-NVIDIA-9999"))
+                .andExpect(jsonPath("$.reconciliation.required").value(false))
+                .andExpect(jsonPath("$.failure.failed").value(false));
+
+        // 5. Verify durable receipt was persisted into audit_logs by ReceiptCaptureService
+        Integer durableCount = jdbc.queryForObject("""
+                select count(*) from audit_logs
+                where entity_id = ?
+                  and entity_type = 'APPLICATION_RECEIPT'
+                  and action = 'SUBMISSION_RECEIPT_CAPTURED'
+                """, Integer.class, applicationId);
+        assertThat(durableCount).isGreaterThan(0);
     }
 
     @Test

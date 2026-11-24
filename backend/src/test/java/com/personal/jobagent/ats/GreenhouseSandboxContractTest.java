@@ -117,6 +117,7 @@ class GreenhouseSandboxContractTest {
                 .attestationConfirmed(true)
                 .sandboxPosting(true)
                 .candidateAuthorizedSandbox(true)
+                .evidenceProvenance("AUTHENTICATED_BROWSER_WORKER")
                 .observedSignals(List.of("PLATFORM_SUBMISSION_CONFIRMED"))
                 .build();
 
@@ -148,6 +149,7 @@ class GreenhouseSandboxContractTest {
                 .attestationConfirmed(true)
                 .sandboxPosting(false) // Non-sandbox
                 .candidateAuthorizedSandbox(true)
+                .evidenceProvenance("AUTHENTICATED_BROWSER_WORKER")
                 .observedSignals(List.of("PLATFORM_SUBMISSION_CONFIRMED"))
                 .build();
 
@@ -167,6 +169,7 @@ class GreenhouseSandboxContractTest {
                 .attestationConfirmed(true)
                 .sandboxPosting(true)
                 .candidateAuthorizedSandbox(false) // Not candidate authorized
+                .evidenceProvenance("AUTHENTICATED_BROWSER_WORKER")
                 .observedSignals(List.of("PLATFORM_SUBMISSION_CONFIRMED"))
                 .build();
 
@@ -196,6 +199,7 @@ class GreenhouseSandboxContractTest {
                 .attestationConfirmed(true)
                 .sandboxPosting(true)
                 .candidateAuthorizedSandbox(true)
+                .evidenceProvenance("AUTHENTICATED_BROWSER_WORKER")
                 .observedSignals(List.of("PLATFORM_SUBMISSION_CONFIRMED"))
                 .build();
 

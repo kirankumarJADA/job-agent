@@ -54,6 +54,7 @@ class ReceiptVerificationTest {
         captureService = new ReceiptCaptureService(policy);
         captureService.recordApplicationOwnership(APPLICATION_ID, PROFILE_ID);
         captureService.recordAuditAttestation(APPLICATION_ID, PROFILE_ID, "ada@example.com");
+        captureService.recordVerifiedProvenance(APPLICATION_ID, "AUTHENTICATED_BROWSER_WORKER");
     }
 
     private static String validSha256() {
@@ -83,7 +84,8 @@ class ReceiptVerificationTest {
                 .observedSignals(List.of("PLATFORM_SUBMISSION_CONFIRMED", "FORM_DISAPPEARED"))
                 .summary("Confirmed by Workday employer requisition acknowledgment.")
                 .sandboxPosting(true)
-                .candidateAuthorizedSandbox(true);
+                .candidateAuthorizedSandbox(true)
+                .evidenceProvenance("AUTHENTICATED_BROWSER_WORKER");
     }
 
     @Nested
@@ -393,7 +395,8 @@ class ReceiptVerificationTest {
                     true,
                     true,
                     List.of("PLATFORM_SUBMISSION_CONFIRMED"),
-                    CANONICAL_RAW_EVIDENCE
+                    CANONICAL_RAW_EVIDENCE,
+                    "AUTHENTICATED_BROWSER_WORKER"
             );
 
             VerificationOutcome outcome = policy.evaluate(evidence);
@@ -404,13 +407,24 @@ class ReceiptVerificationTest {
         }
 
         @Test
-        @DisplayName("Verifies existing SubmissionReceipt against policy")
+        @DisplayName("Verifies existing SubmissionReceipt against policy with explicit provenance")
         void verifiesExistingSubmissionReceipt() {
             CaptureReceiptCommand cmd = validCommandBuilder().build();
             SubmissionReceipt receipt = captureService.captureReceipt(cmd);
 
-            var outcome = captureService.verifyExistingReceipt(receipt, cmd.receiptSha256(), CANONICAL_RAW_EVIDENCE, PROFILE_ID, true, true);
+            var outcome = captureService.verifyExistingReceipt(receipt, cmd.receiptSha256(), CANONICAL_RAW_EVIDENCE, PROFILE_ID, true, true, "AUTHENTICATED_BROWSER_WORKER");
             assertThat(outcome.verified()).isTrue();
+        }
+
+        @Test
+        @DisplayName("verifyExistingReceipt without provenance fails closed")
+        void verifyExistingReceiptWithoutProvenanceFailsClosed() {
+            CaptureReceiptCommand cmd = validCommandBuilder().build();
+            SubmissionReceipt receipt = captureService.captureReceipt(cmd);
+
+            assertThatThrownBy(() -> captureService.verifyExistingReceipt(receipt, cmd.receiptSha256(), CANONICAL_RAW_EVIDENCE, PROFILE_ID, true, true))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("MISSING_EVIDENCE_PROVENANCE"));
         }
     }
 
@@ -540,7 +554,8 @@ class ReceiptVerificationTest {
                     PROFILE_ID,
                     foreignProfile, // Cross-profile caller
                     true,
-                    true
+                    true,
+                    "AUTHENTICATED_BROWSER_WORKER"
             ))
                     .isInstanceOf(InvalidReceiptException.class)
                     .hasMessageContaining("Cross-profile receipt access rejected")
@@ -668,6 +683,125 @@ class ReceiptVerificationTest {
                     .isInstanceOf(InvalidReceiptException.class)
                     .hasMessageContaining("Unauthenticated evidence provenance rejected")
                     .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("UNAUTHENTICATED_EVIDENCE_PROVENANCE"));
+        }
+
+        @Test
+        @DisplayName("7b. Missing evidence provenance fails closed")
+        void testMissingEvidenceProvenanceFailsClosed() {
+            var cmd = validCommandBuilder()
+                    .evidenceProvenance(null)
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("Evidence provenance is required")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("MISSING_EVIDENCE_PROVENANCE"));
+        }
+
+        @Test
+        @DisplayName("7c. Request-supplied provenance without worker execution verification fails closed")
+        void testRequestSuppliedProvenanceWithoutWorkerVerificationFailsClosed() {
+            UUID unverifiedApp = UUID.randomUUID();
+            captureService.recordApplicationOwnership(unverifiedApp, PROFILE_ID);
+            captureService.recordAuditAttestation(unverifiedApp, PROFILE_ID, "ada@example.com");
+            // Intentionally do NOT call recordVerifiedProvenance for unverifiedApp
+
+            var cmd = validCommandBuilder()
+                    .applicationId(unverifiedApp)
+                    .evidenceProvenance("AUTHENTICATED_BROWSER_WORKER")
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("Request-supplied provenance rejected")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("UNAUTHENTICATED_EVIDENCE_PROVENANCE"));
+        }
+
+        @Test
+        @DisplayName("7d. REAL_SUBMISSION_PREPARED cannot be substituted for candidate approval")
+        void testRealSubmissionPreparedCannotBeSubstitutedForCandidateApproval() {
+            UUID preparedApp = UUID.randomUUID();
+            UUID planId = UUID.randomUUID();
+            captureService.recordApplicationOwnership(preparedApp, PROFILE_ID);
+            captureService.recordVerifiedProvenance(planId, preparedApp, "AUTHENTICATED_BROWSER_WORKER");
+            // Record REAL_SUBMISSION_PREPARED instead of a _SUBMIT_APPROVED action
+            captureService.recordAuditAttestation(preparedApp, PROFILE_ID, planId, "ada@example.com", "REAL_SUBMISSION_PREPARED", true);
+
+            var cmd = validCommandBuilder()
+                    .applicationId(preparedApp)
+                    .planId(planId)
+                    .attestationConfirmed(true)
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("Candidate attestation record is missing or not confirmed in audit log")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("MISSING_CANDIDATE_ATTESTATION"));
+        }
+
+        @Test
+        @DisplayName("7e. Unapproved after_state (approvedForSubmission=false) rejects attestation")
+        void testUnapprovedAfterStateRejectsAttestation() {
+            UUID unapprovedApp = UUID.randomUUID();
+            UUID planId = UUID.randomUUID();
+            captureService.recordApplicationOwnership(unapprovedApp, PROFILE_ID);
+            captureService.recordVerifiedProvenance(planId, unapprovedApp, "AUTHENTICATED_BROWSER_WORKER");
+            // approvedForSubmission = false
+            captureService.recordAuditAttestation(unapprovedApp, PROFILE_ID, planId, "ada@example.com", "WORKDAY_SUBMIT_APPROVED", false);
+
+            var cmd = validCommandBuilder()
+                    .applicationId(unapprovedApp)
+                    .planId(planId)
+                    .attestationConfirmed(true)
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("MISSING_CANDIDATE_ATTESTATION"));
+        }
+
+        @Test
+        @DisplayName("7f. Worker or system actor cannot approve candidate submission")
+        void testWorkerOrSystemActorCannotApproveCandidateSubmission() {
+            UUID workerApp = UUID.randomUUID();
+            UUID planId = UUID.randomUUID();
+            captureService.recordApplicationOwnership(workerApp, PROFILE_ID);
+            captureService.recordVerifiedProvenance(planId, workerApp, "AUTHENTICATED_BROWSER_WORKER");
+            // Actor is worker or system
+            captureService.recordAuditAttestation(workerApp, PROFILE_ID, planId, "worker", "WORKDAY_SUBMIT_APPROVED", true);
+
+            var cmd = validCommandBuilder()
+                    .applicationId(workerApp)
+                    .planId(planId)
+                    .attestationConfirmed(true)
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("MISSING_CANDIDATE_ATTESTATION"));
+        }
+
+        @Test
+        @DisplayName("7g. AutomationController platform approval actions are properly verified")
+        void testPlatformSpecificSubmitApprovalAccepted() {
+            for (String platform : List.of("GREENHOUSE", "ASHBY", "WORKDAY", "LEVER", "ZOHO_RECRUIT")) {
+                UUID app = UUID.randomUUID();
+                UUID plan = UUID.randomUUID();
+                captureService.recordApplicationOwnership(app, PROFILE_ID);
+                captureService.recordVerifiedProvenance(plan, app, "AUTHENTICATED_BROWSER_WORKER");
+                captureService.recordAuditAttestation(app, PROFILE_ID, plan, "ada@example.com", platform + "_SUBMIT_APPROVED", true);
+
+                var cmd = validCommandBuilder()
+                        .applicationId(app)
+                        .planId(plan)
+                        .atsPlatform(platform)
+                        .attestationConfirmed(true)
+                        .build();
+
+                SubmissionReceipt receipt = captureService.captureReceipt(cmd);
+                assertThat(receipt).isNotNull();
+                assertThat(receipt.authorization().approved()).isTrue();
+            }
         }
 
         @Test
