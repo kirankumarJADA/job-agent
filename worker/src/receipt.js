@@ -16,7 +16,8 @@ import crypto from 'node:crypto';
  * </ol>
  */
 
-export const MOCK_PREFIXES = Object.freeze(['MOCK-', 'TEST-', 'SAMPLE-']);
+export const MOCK_PREFIXES = Object.freeze(['MOCK-', 'TEST-', 'SAMPLE-', 'SIM-']);
+export const REQUISITION_PREFIXES = Object.freeze(['REQ-', 'REQUISITION-', 'JOB-REQ-', 'RECEIPT-']);
 
 export const GENUINE_ATS_PLATFORMS = Object.freeze([
   'GREENHOUSE',
@@ -37,7 +38,7 @@ export class InvalidReceiptError extends Error {
 
 /**
  * Checks whether a given string value starts with any mock or synthetic prefix.
- * Prefixes MOCK-*, TEST-*, SAMPLE-* are rejected case-insensitively.
+ * Prefixes MOCK-*, TEST-*, SAMPLE-*, SIM-* are rejected case-insensitively.
  *
  * @param {string|null|undefined} value
  * @returns {boolean}
@@ -46,6 +47,18 @@ export function isMockOrSynthetic(value) {
   if (value === null || value === undefined) return false;
   const s = String(value).trim().toUpperCase();
   return MOCK_PREFIXES.some((prefix) => s.startsWith(prefix));
+}
+
+/**
+ * Checks whether a given string value starts with any requisition or receipt fallback prefix.
+ *
+ * @param {string|null|undefined} value
+ * @returns {boolean}
+ */
+export function isRequisitionOrReceiptFallback(value) {
+  if (value === null || value === undefined) return false;
+  const s = String(value).trim().toUpperCase();
+  return REQUISITION_PREFIXES.some((prefix) => s.startsWith(prefix));
 }
 
 /**
@@ -72,7 +85,7 @@ export function canonicalJson(value) {
 
 /**
  * Normalizes confirmation evidence into canonical receipt structure.
- * Rejects mock/synthetic prefixes in confirmation ID.
+ * Rejects mock/synthetic prefixes in confirmation ID and requisition ID fallbacks.
  *
  * @param {object} params
  * @returns {object}
@@ -80,8 +93,6 @@ export function canonicalJson(value) {
 export function normalizeConfirmationEvidence({
   employerConfirmationId,
   confirmationNumber,
-  requisitionId,
-  receiptId,
   atsPlatform,
   planType,
   atsKind,
@@ -92,14 +103,24 @@ export function normalizeConfirmationEvidence({
   observedSignals = [],
   summary = '',
   rawEvidence = null,
+  sandboxPosting = false,
+  candidateAuthorizedSandbox = false,
 } = {}) {
-  const confId = employerConfirmationId || confirmationNumber || requisitionId || receiptId || '';
+  // Genuine employer confirmation identifier only: requisitionId and receiptId fallbacks are rejected
+  const confId = employerConfirmationId || confirmationNumber || '';
   const trimmedConfId = String(confId).trim();
 
   if (isMockOrSynthetic(trimmedConfId)) {
     throw new InvalidReceiptError(
       `Mock or synthetic confirmation ID prefix is rejected: ${trimmedConfId}`,
-      'MOCK_PREFIX_REJECTED'
+      'MOCK_CONFIRMATION_ID_REJECTED'
+    );
+  }
+
+  if (isRequisitionOrReceiptFallback(trimmedConfId)) {
+    throw new InvalidReceiptError(
+      `Requisition ID or receipt ID fallback cannot be substituted for employer confirmation ID: ${trimmedConfId}`,
+      'REQUISITION_ID_AS_CONFIRMATION_REJECTED'
     );
   }
 
@@ -134,23 +155,28 @@ export function normalizeConfirmationEvidence({
     applicationId: applicationId ? String(applicationId).trim() : '',
     atsPlatform: platform,
     attestationConfirmed: attestationConfirmed === true,
+    candidateAuthorizedSandbox: candidateAuthorizedSandbox === true,
     employerConfirmationId: trimmedConfId,
     observedSignals: signals,
     profileId: profileId ? String(profileId).trim() : '',
-    rawEvidence: rawEvidence ? canonicalJson(rawEvidence) : null,
+    rawEvidence: rawEvidence ? (typeof rawEvidence === 'string' ? rawEvidence.trim() : canonicalJson(rawEvidence)) : null,
+    sandboxPosting: sandboxPosting === true,
     submittedAt: isoSubmittedAt,
     summary: summary ? String(summary).trim() : '',
   };
 }
 
 /**
- * Computes deterministic SHA-256 confirmation evidence digest.
+ * Computes deterministic SHA-256 confirmation evidence digest directly from raw canonical evidence.
  *
  * @param {object} evidence
  * @returns {string} 64-character lowercase hexadecimal hash
  */
 export function hashConfirmationEvidence(evidence) {
   const normalized = normalizeConfirmationEvidence(evidence);
+  if (normalized.rawEvidence) {
+    return crypto.createHash('sha256').update(normalized.rawEvidence, 'utf8').digest('hex');
+  }
   const canonicalString = canonicalJson(normalized);
   return crypto.createHash('sha256').update(canonicalString, 'utf8').digest('hex');
 }
@@ -163,12 +189,12 @@ export function hashConfirmationEvidence(evidence) {
  */
 export function normalizeReceipt(data) {
   const normalized = normalizeConfirmationEvidence(data);
-  const receiptSha256 = hashConfirmationEvidence(normalized);
+  const receiptSha256 = data.receiptSha256 || hashConfirmationEvidence(normalized);
 
   if (isMockOrSynthetic(receiptSha256)) {
     throw new InvalidReceiptError(
       `Mock prefix in receipt SHA256 is rejected: ${receiptSha256}`,
-      'MOCK_PREFIX_REJECTED'
+      'MOCK_SHA256_REJECTED'
     );
   }
 
@@ -179,74 +205,111 @@ export function normalizeReceipt(data) {
 }
 
 /**
- * Validates all 7 genuine receipt invariants.
+ * Validates all 7 genuine receipt invariants and sandbox verification gates.
  *
  * @param {object} receipt
  * @returns {boolean} true if all invariants pass
  * @throws {InvalidReceiptError} if any invariant fails
  */
 export function verifyGenuineReceiptInvariants(receipt = {}) {
-  const errors = [];
-
   // 1. Employer confirmation ID
   const confId = receipt.employerConfirmationId;
   if (!confId || typeof confId !== 'string' || confId.trim().length === 0) {
-    errors.push('Missing employer confirmation ID');
-  } else if (isMockOrSynthetic(confId)) {
+    throw new InvalidReceiptError('Missing employer confirmation ID', 'MISSING_CONFIRMATION_ID');
+  }
+  if (isMockOrSynthetic(confId)) {
     throw new InvalidReceiptError(
       `Mock prefix in employer confirmation ID rejected: ${confId}`,
       'MOCK_CONFIRMATION_ID_REJECTED'
     );
   }
+  if (isRequisitionOrReceiptFallback(confId)) {
+    throw new InvalidReceiptError(
+      `Requisition ID or receipt ID fallback cannot be substituted for employer confirmation ID: ${confId}`,
+      'REQUISITION_ID_AS_CONFIRMATION_REJECTED'
+    );
+  }
 
-  // 2. receiptSha256
+  // Raw confirmation evidence payload is required
+  if (!receipt.rawEvidence || typeof receipt.rawEvidence !== 'string' || receipt.rawEvidence.trim().length === 0) {
+    throw new InvalidReceiptError(
+      'Confirmation evidence is required: canonical DOM evidence or screenshot bytes cannot be empty',
+      'MISSING_RAW_EVIDENCE'
+    );
+  }
+
+  // 2. receiptSha256 - compute from raw evidence and compare with caller-supplied digest
   const sha = receipt.receiptSha256;
   if (!sha || typeof sha !== 'string' || !/^[0-9a-fA-F]{64}$/.test(sha.trim())) {
-    errors.push('Missing or invalid 64-character hex receiptSha256');
-  } else if (isMockOrSynthetic(sha)) {
+    throw new InvalidReceiptError(
+      'Missing or invalid 64-character hex receiptSha256',
+      'INVALID_SHA256_FORMAT'
+    );
+  }
+  if (isMockOrSynthetic(sha)) {
     throw new InvalidReceiptError(
       `Mock prefix in receiptSha256 rejected: ${sha}`,
       'MOCK_SHA256_REJECTED'
+    );
+  }
+  const computedSha = crypto.createHash('sha256').update(receipt.rawEvidence, 'utf8').digest('hex');
+  if (sha.toLowerCase() !== computedSha.toLowerCase()) {
+    throw new InvalidReceiptError(
+      `Caller-supplied receiptSha256 does not match canonical raw evidence digest: expected ${computedSha} but was ${sha}`,
+      'SHA256_DIGEST_MISMATCH'
     );
   }
 
   // 3. atsPlatform
   const platform = receipt.atsPlatform ? String(receipt.atsPlatform).trim().toUpperCase() : '';
   if (!platform || !GENUINE_ATS_PLATFORMS.includes(platform)) {
-    errors.push(`Invalid or unsupported ATS platform: ${receipt.atsPlatform}`);
+    throw new InvalidReceiptError(
+      `Invalid or unsupported ATS platform: ${receipt.atsPlatform}`,
+      'UNSUPPORTED_ATS_PLATFORM'
+    );
   }
 
   // 4. submittedAt
   if (!receipt.submittedAt) {
-    errors.push('Missing submittedAt timestamp');
-  } else {
-    const time = new Date(receipt.submittedAt).getTime();
-    if (Number.isNaN(time)) {
-      errors.push('Invalid submittedAt timestamp format');
-    } else if (time > Date.now() + 86400000) {
-      errors.push('submittedAt cannot be in the future');
-    }
+    throw new InvalidReceiptError('Missing submittedAt timestamp', 'MISSING_SUBMITTED_AT');
+  }
+  const time = new Date(receipt.submittedAt).getTime();
+  if (Number.isNaN(time)) {
+    throw new InvalidReceiptError('Invalid submittedAt timestamp format', 'INVALID_SUBMITTED_AT');
+  }
+  if (time > Date.now() + 86400000) {
+    throw new InvalidReceiptError('submittedAt cannot be in the future', 'FUTURE_SUBMITTED_AT');
   }
 
   // 5. profileId
   if (!receipt.profileId || String(receipt.profileId).trim().length === 0) {
-    errors.push('Missing profileId');
+    throw new InvalidReceiptError('Missing profileId', 'MISSING_PROFILE_ID');
   }
 
   // 6. applicationId
   if (!receipt.applicationId || String(receipt.applicationId).trim().length === 0) {
-    errors.push('Missing applicationId');
+    throw new InvalidReceiptError('Missing applicationId', 'MISSING_APPLICATION_ID');
   }
 
   // 7. attestationConfirmed
   if (receipt.attestationConfirmed !== true) {
-    errors.push('Candidate attestation must be explicitly confirmed');
+    throw new InvalidReceiptError(
+      'Candidate attestation record is missing or not confirmed in audit log',
+      'MISSING_CANDIDATE_ATTESTATION'
+    );
   }
 
-  if (errors.length > 0) {
+  // Sandbox Verification Phase Safeguards
+  if (receipt.sandboxPosting !== true) {
     throw new InvalidReceiptError(
-      `Genuine receipt invariant validation failed: ${errors.join('; ')}`,
-      'INVARIANTS_FAILED'
+      'Real submission verification rejected: real submissions are disabled. Receipts are only accepted for candidate-owned sandbox postings',
+      'NON_SANDBOX_RECEIPT_REJECTED'
+    );
+  }
+  if (receipt.candidateAuthorizedSandbox !== true) {
+    throw new InvalidReceiptError(
+      'Unauthorized sandbox receipt rejected: candidate-owned sandbox must be explicitly verified and authorized',
+      'UNAUTHORIZED_SANDBOX'
     );
   }
 

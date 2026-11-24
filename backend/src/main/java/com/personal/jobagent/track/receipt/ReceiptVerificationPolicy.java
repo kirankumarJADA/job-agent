@@ -46,7 +46,8 @@ public class ReceiptVerificationPolicy {
     public static final String POLICY_VERSION = "genuine-ats-receipt-policy-v1";
     public static final Duration FUTURE_TOLERANCE = Duration.ofMinutes(5);
 
-    public static final Set<String> MOCK_PREFIXES = Set.of("MOCK-", "TEST-", "SAMPLE-");
+    public static final Set<String> MOCK_PREFIXES = Set.of("MOCK-", "TEST-", "SAMPLE-", "SIM-");
+    public static final Set<String> REQUISITION_PREFIXES = Set.of("REQ-", "REQUISITION-", "JOB-REQ-", "RECEIPT-");
 
     public static final Set<String> ALLOWED_ATS_PLATFORMS = Set.of(
             "GREENHOUSE",
@@ -82,9 +83,9 @@ public class ReceiptVerificationPolicy {
             private Instant submittedAt;
             private UUID profileId;
             private UUID applicationId;
-            private boolean attestationConfirmed;
-            private boolean sandboxPosting;
-            private boolean candidateAuthorizedSandbox = true;
+            private boolean attestationConfirmed = false;
+            private boolean sandboxPosting = false;
+            private boolean candidateAuthorizedSandbox = false; // NON-PERMISSIVE DEFAULT
             private List<String> observedSignals = List.of();
             private String rawEvidencePayload;
 
@@ -117,7 +118,7 @@ public class ReceiptVerificationPolicy {
 
     /**
      * Checks if a string value starts with any mock or synthetic prefix.
-     * Prefixes MOCK-*, TEST-*, SAMPLE-* are detected case-insensitively.
+     * Prefixes MOCK-*, TEST-*, SAMPLE-*, SIM-* are detected case-insensitively.
      */
     public static boolean isMockOrSynthetic(String value) {
         if (value == null || value.isBlank()) {
@@ -125,6 +126,23 @@ public class ReceiptVerificationPolicy {
         }
         String upper = value.trim().toUpperCase(Locale.ROOT);
         for (String prefix : MOCK_PREFIXES) {
+            if (upper.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Checks if a string value starts with any requisition or receipt fallback prefix.
+     * Prefixes REQ-*, REQUISITION-*, JOB-REQ-*, RECEIPT-* are rejected as confirmation IDs.
+     */
+    public static boolean isRequisitionOrReceiptFallback(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        String upper = value.trim().toUpperCase(Locale.ROOT);
+        for (String prefix : REQUISITION_PREFIXES) {
             if (upper.startsWith(prefix)) {
                 return true;
             }
@@ -194,6 +212,14 @@ public class ReceiptVerificationPolicy {
             throw new InvalidReceiptException("Receipt evidence cannot be null", "MISSING_EVIDENCE");
         }
 
+        // Ownership checks: profileId and applicationId must be present
+        if (evidence.profileId() == null) {
+            throw new InvalidReceiptException("profileId is required", "MISSING_PROFILE_ID");
+        }
+        if (evidence.applicationId() == null) {
+            throw new InvalidReceiptException("applicationId is required", "MISSING_APPLICATION_ID");
+        }
+
         // Invariant 1: Employer Confirmation ID
         if (evidence.employerConfirmationId() == null || evidence.employerConfirmationId().isBlank()) {
             throw new InvalidReceiptException("Employer confirmation ID is required", "MISSING_CONFIRMATION_ID");
@@ -204,8 +230,24 @@ public class ReceiptVerificationPolicy {
                     "MOCK_CONFIRMATION_ID_REJECTED"
             );
         }
+        if (isRequisitionOrReceiptFallback(evidence.employerConfirmationId())) {
+            throw new InvalidReceiptException(
+                    "Requisition ID or receipt ID fallback cannot be substituted for employer confirmation ID: " + evidence.employerConfirmationId(),
+                    "REQUISITION_ID_AS_CONFIRMATION_REJECTED"
+            );
+        }
 
-        // Invariant 2: receiptSha256
+        // Invariant 2: Raw confirmation evidence is strictly required
+        if (evidence.rawEvidencePayload() == null || evidence.rawEvidencePayload().isBlank()) {
+            throw new InvalidReceiptException(
+                    "Confirmation evidence is required: canonical DOM evidence or screenshot bytes cannot be empty",
+                    "MISSING_RAW_EVIDENCE"
+            );
+        }
+
+        // Compute SHA-256 directly from the captured canonical DOM evidence / raw bytes
+        String computedSha256 = computeEvidenceSha256(evidence.rawEvidencePayload());
+
         if (evidence.receiptSha256() == null || evidence.receiptSha256().isBlank()) {
             throw new InvalidReceiptException("receiptSha256 is required", "MISSING_RECEIPT_SHA256");
         }
@@ -221,14 +263,13 @@ public class ReceiptVerificationPolicy {
                     "INVALID_SHA256_FORMAT"
             );
         }
-        if (evidence.rawEvidencePayload() != null && !evidence.rawEvidencePayload().isBlank()) {
-            String computed = computeEvidenceSha256(evidence.rawEvidencePayload());
-            if (!computed.equalsIgnoreCase(evidence.receiptSha256().trim())) {
-                throw new InvalidReceiptException(
-                        "receiptSha256 does not match canonical evidence payload: expected " + computed + " but was " + evidence.receiptSha256(),
-                        "SHA256_DIGEST_MISMATCH"
-                );
-            }
+
+        // Never accept caller-supplied 64-character digest without comparing it to the actual evidence
+        if (!computedSha256.equalsIgnoreCase(evidence.receiptSha256().trim())) {
+            throw new InvalidReceiptException(
+                    "Caller-supplied receiptSha256 does not match canonical evidence digest: expected " + computedSha256 + " but was " + evidence.receiptSha256(),
+                    "SHA256_DIGEST_MISMATCH"
+            );
         }
 
         // Invariant 3: atsPlatform
@@ -261,29 +302,27 @@ public class ReceiptVerificationPolicy {
             );
         }
 
-        // Invariant 5: profileId
-        if (evidence.profileId() == null) {
-            throw new InvalidReceiptException("profileId is required", "MISSING_PROFILE_ID");
-        }
-
-        // Invariant 6: applicationId
-        if (evidence.applicationId() == null) {
-            throw new InvalidReceiptException("applicationId is required", "MISSING_APPLICATION_ID");
-        }
-
-        // Invariant 7: attestationConfirmed
+        // Invariant 7: attestationConfirmed (backed by verified candidate approval record)
         if (!evidence.attestationConfirmed()) {
             throw new InvalidReceiptException(
-                    "Candidate attestation must be confirmed for genuine submission receipt",
-                    "ATTESTATION_NOT_CONFIRMED"
+                    "Candidate attestation record is missing or not confirmed in audit log",
+                    "MISSING_CANDIDATE_ATTESTATION"
             );
         }
 
-        // Safeguard 2: Candidate-authorised sandbox restriction
-        if (evidence.sandboxPosting() && !evidence.candidateAuthorizedSandbox()) {
+        // Safeguard: Candidate-authorised sandbox restriction for the verification phase.
+        // Real submissions are disabled. Receipts are strictly accepted only for candidate-owned
+        // sandbox/test postings and require affirmative candidate authorization.
+        if (!evidence.sandboxPosting()) {
             throw new InvalidReceiptException(
-                    "Real submission verification rejected: real submissions must be verified only in candidate-owned sandbox/test posting",
-                    "UNAUTHORIZED_SANDBOX_POSTING"
+                    "Real submission verification rejected: real submissions are disabled. Receipts are only accepted for candidate-owned sandbox postings",
+                    "NON_SANDBOX_RECEIPT_REJECTED"
+            );
+        }
+        if (!evidence.candidateAuthorizedSandbox()) {
+            throw new InvalidReceiptException(
+                    "Unauthorized sandbox receipt rejected: candidate-owned sandbox must be explicitly verified and authorized",
+                    "UNAUTHORIZED_SANDBOX"
             );
         }
     }
@@ -298,9 +337,7 @@ public class ReceiptVerificationPolicy {
         reasons.add(reason("ALL_7_INVARIANTS_VERIFIED", "All 7 genuine receipt invariants verified successfully."));
         reasons.add(reason("CANDIDATE_ATTESTATION_CONFIRMED", "Candidate attestation is confirmed."));
         reasons.add(reason("ZERO_MOCK_PREFIXES_VERIFIED", "Confirmed zero mock or synthetic prefixes in receipt."));
-        if (evidence.sandboxPosting()) {
-            reasons.add(reason("CANDIDATE_AUTHORIZED_SANDBOX", "Candidate-authorized sandbox posting confirmed."));
-        }
+        reasons.add(reason("CANDIDATE_AUTHORIZED_SANDBOX", "Candidate-authorized sandbox posting confirmed."));
 
         List<String> signals = evidence.observedSignals() != null
                 ? new ArrayList<>(evidence.observedSignals()) : List.of();
@@ -311,8 +348,8 @@ public class ReceiptVerificationPolicy {
     /**
      * Validates an existing {@link SubmissionReceipt} against policy invariants.
      */
-    public void validateReceipt(SubmissionReceipt receipt, String receiptSha256, UUID profileId,
-                                boolean sandboxPosting, boolean candidateAuthorizedSandbox) {
+    public void validateReceipt(SubmissionReceipt receipt, String receiptSha256, String rawEvidencePayload,
+                                UUID profileId, boolean sandboxPosting, boolean candidateAuthorizedSandbox) {
         if (receipt == null) {
             throw new InvalidReceiptException("SubmissionReceipt cannot be null", "MISSING_RECEIPT");
         }
@@ -332,10 +369,35 @@ public class ReceiptVerificationPolicy {
                 sandboxPosting,
                 candidateAuthorizedSandbox,
                 signals,
-                null
+                rawEvidencePayload
         );
 
         validateOrThrow(evidence);
+    }
+
+    /**
+     * Overload for backward compatibility.
+     */
+    public void validateReceipt(SubmissionReceipt receipt, String receiptSha256, UUID profileId,
+                                boolean sandboxPosting, boolean candidateAuthorizedSandbox) {
+        validateReceipt(receipt, receiptSha256, receipt.confirmation() != null ? receipt.confirmation().summary() : null,
+                profileId, sandboxPosting, candidateAuthorizedSandbox);
+    }
+
+    /**
+     * Validates an existing {@link SubmissionReceipt} enforcing strict profile ownership.
+     */
+    public void validateReceiptWithProfileOwnership(SubmissionReceipt receipt, String receiptSha256,
+                                                    String rawEvidencePayload, UUID expectedProfileId,
+                                                    UUID callerProfileId, boolean sandboxPosting,
+                                                    boolean candidateAuthorizedSandbox) {
+        if (callerProfileId == null || !callerProfileId.equals(expectedProfileId)) {
+            throw new InvalidReceiptException(
+                    "Cross-profile receipt access rejected: caller profile " + callerProfileId + " does not own application receipt",
+                    "CROSS_PROFILE_RECEIPT_REJECTED"
+            );
+        }
+        validateReceipt(receipt, receiptSha256, rawEvidencePayload, callerProfileId, sandboxPosting, candidateAuthorizedSandbox);
     }
 
     private static Map<String, String> reason(String code, String message) {

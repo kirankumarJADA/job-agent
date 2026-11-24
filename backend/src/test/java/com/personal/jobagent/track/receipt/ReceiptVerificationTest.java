@@ -41,6 +41,10 @@ class ReceiptVerificationTest {
     private static final UUID JOB_ID = UUID.fromString("33333333-3333-3333-3333-333333333333");
     private static final Instant SUBMITTED_AT = Instant.parse("2026-11-20T14:30:00Z");
 
+    public static final String CANONICAL_RAW_EVIDENCE = """
+            {"domEvidence":"<div id='confirmation'>Thank you for applying. Confirmation: WD-CONF-987654</div>","screenshotSha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+            """;
+
     private ReceiptVerificationPolicy policy;
     private ReceiptCaptureService captureService;
 
@@ -51,15 +55,7 @@ class ReceiptVerificationTest {
     }
 
     private static String validSha256() {
-        return ReceiptCaptureService.computeReceiptSha256(
-                "WD-CONF-987654",
-                "WORKDAY",
-                SUBMITTED_AT,
-                PROFILE_ID,
-                APPLICATION_ID,
-                true,
-                List.of("PLATFORM_SUBMISSION_CONFIRMED", "FORM_DISAPPEARED")
-        );
+        return ReceiptVerificationPolicy.computeEvidenceSha256(CANONICAL_RAW_EVIDENCE);
     }
 
     private CaptureReceiptCommand.Builder validCommandBuilder() {
@@ -73,6 +69,7 @@ class ReceiptVerificationTest {
                 .applicationUrl("https://acme.wd5.myworkdayjobs.com/apply")
                 .atsPlatform("WORKDAY")
                 .employerConfirmationId("WD-CONF-987654")
+                .rawEvidencePayload(CANONICAL_RAW_EVIDENCE)
                 .receiptSha256(sha256)
                 .submittedAt(SUBMITTED_AT)
                 .attestationConfirmed(true)
@@ -83,7 +80,7 @@ class ReceiptVerificationTest {
                 .coverLetter(new DocumentReceipt(UUID.randomUUID(), "Cover Letter", "PDF", "sha-cl-456", 25000L, "COVER_LETTER", "cl.pdf", true))
                 .observedSignals(List.of("PLATFORM_SUBMISSION_CONFIRMED", "FORM_DISAPPEARED"))
                 .summary("Confirmed by Workday employer requisition acknowledgment.")
-                .sandboxPosting(false)
+                .sandboxPosting(true)
                 .candidateAuthorizedSandbox(true);
     }
 
@@ -168,7 +165,7 @@ class ReceiptVerificationTest {
 
             assertThatThrownBy(() -> captureService.captureReceipt(cmd))
                     .isInstanceOf(InvalidReceiptException.class)
-                    .hasMessageContaining("receiptSha256 does not match canonical evidence payload");
+                    .hasMessageContaining("receiptSha256 does not match canonical evidence");
         }
     }
 
@@ -190,20 +187,11 @@ class ReceiptVerificationTest {
                 "zoho_recruit"
         })
         void acceptsAllGenuineAtsPlatforms(String platform) {
-            String sha = ReceiptCaptureService.computeReceiptSha256(
-                    "CONF-123456",
-                    platform,
-                    SUBMITTED_AT,
-                    PROFILE_ID,
-                    APPLICATION_ID,
-                    true,
-                    List.of("PLATFORM_SUBMISSION_CONFIRMED")
-            );
-
             var cmd = validCommandBuilder()
                     .atsPlatform(platform)
                     .employerConfirmationId("CONF-123456")
-                    .receiptSha256(sha)
+                    .rawEvidencePayload(CANONICAL_RAW_EVIDENCE)
+                    .receiptSha256(validSha256())
                     .observedSignals(List.of("PLATFORM_SUBMISSION_CONFIRMED"))
                     .build();
 
@@ -292,7 +280,7 @@ class ReceiptVerificationTest {
 
             assertThatThrownBy(() -> captureService.captureReceipt(cmd))
                     .isInstanceOf(InvalidReceiptException.class)
-                    .hasMessageContaining("Candidate attestation must be confirmed");
+                    .hasMessageContaining("Candidate attestation record is missing or not confirmed");
         }
     }
 
@@ -323,7 +311,8 @@ class ReceiptVerificationTest {
 
             assertThatThrownBy(() -> captureService.captureReceipt(cmd))
                     .isInstanceOf(InvalidReceiptException.class)
-                    .hasMessageContaining("real submissions must be verified only in candidate-owned sandbox/test posting");
+                    .hasMessageContaining("candidate-owned sandbox must be explicitly verified and authorized")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("UNAUTHORIZED_SANDBOX"));
         }
     }
 
@@ -399,17 +388,17 @@ class ReceiptVerificationTest {
                     PROFILE_ID,
                     APPLICATION_ID,
                     true,
-                    false,
+                    true,
                     true,
                     List.of("PLATFORM_SUBMISSION_CONFIRMED"),
-                    null
+                    CANONICAL_RAW_EVIDENCE
             );
 
             VerificationOutcome outcome = policy.evaluate(evidence);
             assertThat(outcome.verified()).isTrue();
             assertThat(outcome.receiptSha256()).isEqualTo(sha);
             assertThat(outcome.reasons()).extracting(r -> r.get("code"))
-                    .contains("ALL_7_INVARIANTS_VERIFIED", "CANDIDATE_ATTESTATION_CONFIRMED", "ZERO_MOCK_PREFIXES_VERIFIED");
+                    .contains("ALL_7_INVARIANTS_VERIFIED", "CANDIDATE_ATTESTATION_CONFIRMED", "ZERO_MOCK_PREFIXES_VERIFIED", "CANDIDATE_AUTHORIZED_SANDBOX");
         }
 
         @Test
@@ -418,8 +407,142 @@ class ReceiptVerificationTest {
             CaptureReceiptCommand cmd = validCommandBuilder().build();
             SubmissionReceipt receipt = captureService.captureReceipt(cmd);
 
-            var outcome = captureService.verifyExistingReceipt(receipt, cmd.receiptSha256(), PROFILE_ID, false, true);
+            var outcome = captureService.verifyExistingReceipt(receipt, cmd.receiptSha256(), CANONICAL_RAW_EVIDENCE, PROFILE_ID, true, true);
             assertThat(outcome.verified()).isTrue();
+        }
+    }
+
+    @Nested
+    @DisplayName("Adversarial Receipt Security Tests (P0 Remediation & Gate Suite)")
+    class AdversarialReceiptSecurityTests {
+
+        @Test
+        @DisplayName("1. Adversarial: Missing raw confirmation evidence is rejected")
+        void testMissingRawEvidenceIsRejected() {
+            var cmdNull = validCommandBuilder().rawEvidencePayload(null).build();
+            var cmdBlank = validCommandBuilder().rawEvidencePayload("   ").build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmdNull))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("Confirmation evidence is required")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("MISSING_RAW_EVIDENCE"));
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmdBlank))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("Confirmation evidence is required")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("MISSING_RAW_EVIDENCE"));
+        }
+
+        @Test
+        @DisplayName("2. Adversarial: Arbitrary valid-looking 64-char SHA-256 is rejected without matching raw evidence")
+        void testArbitraryValidLookingSha256IsRejected() {
+            // Valid 64-char hex format, but fabricated and detached from actual raw evidence
+            String arbitrarySha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+            var cmd = validCommandBuilder()
+                    .rawEvidencePayload(CANONICAL_RAW_EVIDENCE)
+                    .receiptSha256(arbitrarySha)
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("Caller-supplied receiptSha256 does not match canonical evidence digest")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("SHA256_DIGEST_MISMATCH"));
+        }
+
+        @Test
+        @DisplayName("3. Adversarial: Tampered confirmation evidence is detected and rejected")
+        void testTamperedEvidenceIsRejected() {
+            String tamperedEvidence = CANONICAL_RAW_EVIDENCE + "<!-- attacker injected payload -->";
+            var cmd = validCommandBuilder()
+                    .rawEvidencePayload(tamperedEvidence)
+                    .receiptSha256(validSha256()) // Reusing original digest
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("Caller-supplied receiptSha256 does not match canonical evidence digest")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("SHA256_DIGEST_MISMATCH"));
+        }
+
+        @Test
+        @DisplayName("4. Adversarial: Non-sandbox receipt is rejected during verification phase")
+        void testNonSandboxReceiptIsRejected() {
+            var cmd = validCommandBuilder()
+                    .sandboxPosting(false)
+                    .candidateAuthorizedSandbox(true)
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("real submissions are disabled. Receipts are only accepted for candidate-owned sandbox postings")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("NON_SANDBOX_RECEIPT_REJECTED"));
+        }
+
+        @Test
+        @DisplayName("5. Adversarial: Unauthorised sandbox posting is rejected")
+        void testUnauthorizedSandboxIsRejected() {
+            var cmd = validCommandBuilder()
+                    .sandboxPosting(true)
+                    .candidateAuthorizedSandbox(false) // Candidate has not authorized this sandbox
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("candidate-owned sandbox must be explicitly verified and authorized")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("UNAUTHORIZED_SANDBOX"));
+        }
+
+        @Test
+        @DisplayName("6. Adversarial: Missing candidate attestation / audit approval is rejected")
+        void testMissingCandidateAttestationIsRejected() {
+            var cmd = validCommandBuilder()
+                    .attestationConfirmed(false)
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("Candidate attestation record is missing or not confirmed in audit log")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("MISSING_CANDIDATE_ATTESTATION"));
+        }
+
+        @ParameterizedTest(name = "7. Adversarial: Requisition ID fallback is rejected: {0}")
+        @ValueSource(strings = {
+                "REQ-2026-9876",
+                "req-workday-54321",
+                "REQUISITION-12345",
+                "JOB-REQ-9988",
+                "RECEIPT-776655"
+        })
+        void testRequisitionIdSubstitutedForConfirmationIdIsRejected(String requisitionId) {
+            var cmd = validCommandBuilder()
+                    .employerConfirmationId(requisitionId)
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("Requisition ID or receipt ID fallback cannot be substituted for employer confirmation ID")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("REQUISITION_ID_AS_CONFIRMATION_REJECTED"));
+        }
+
+        @Test
+        @DisplayName("8. Adversarial: Cross-profile receipt injection is rejected")
+        void testCrossProfileReceiptInjectionIsRejected() {
+            UUID foreignProfile = UUID.fromString("99999999-9999-9999-9999-999999999999");
+            CaptureReceiptCommand cmd = validCommandBuilder().build();
+            SubmissionReceipt receipt = captureService.captureReceipt(cmd);
+
+            assertThatThrownBy(() -> policy.validateReceiptWithProfileOwnership(
+                    receipt,
+                    cmd.receiptSha256(),
+                    CANONICAL_RAW_EVIDENCE,
+                    PROFILE_ID,
+                    foreignProfile, // Cross-profile caller
+                    true,
+                    true
+            ))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("Cross-profile receipt access rejected")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("CROSS_PROFILE_RECEIPT_REJECTED"));
         }
     }
 }

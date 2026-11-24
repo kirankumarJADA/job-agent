@@ -468,7 +468,8 @@ public class ApplicationReceiptService {
         } catch (Exception e) {
             log.warn("Could not read audit log for authorization: {}", e.getMessage());
         }
-        return new AuthorizationRecord(true, "EXPLICIT_CANDIDATE_APPROVAL", updatedAt, "CANDIDATE");
+        // Do NOT synthesize authorization when no audit log attestation record exists
+        return new AuthorizationRecord(false, "MISSING_ATTESTATION", null, null);
     }
 
     @SuppressWarnings("unchecked")
@@ -484,12 +485,9 @@ public class ApplicationReceiptService {
 
         for (Object r : results) {
             if (r instanceof Map<?, ?> m) {
+                // Genuine employer confirmation identifier only: requisitionId and receiptId fallbacks are rejected
                 if (m.containsKey("confirmationNumber")) {
                     confirmationId = String.valueOf(m.get("confirmationNumber"));
-                } else if (m.containsKey("requisitionId")) {
-                    confirmationId = String.valueOf(m.get("requisitionId"));
-                } else if (m.containsKey("receiptId")) {
-                    confirmationId = String.valueOf(m.get("receiptId"));
                 }
                 if (m.get("signals") instanceof List<?> sigs) {
                     for (Object s : sigs) signals.add(String.valueOf(s));

@@ -91,8 +91,8 @@ public class ReceiptCaptureService {
             private DocumentReceipt coverLetter;
             private List<String> observedSignals = List.of();
             private String summary;
-            private boolean sandboxPosting;
-            private boolean candidateAuthorizedSandbox = true;
+            private boolean sandboxPosting = false;
+            private boolean candidateAuthorizedSandbox = false; // NON-PERMISSIVE DEFAULT
             private String rawEvidencePayload;
             private int attemptNumber = 1;
 
@@ -269,9 +269,9 @@ public class ReceiptCaptureService {
      * Verifies an existing submission receipt against genuine receipt policy.
      */
     public VerificationOutcome verifyExistingReceipt(SubmissionReceipt receipt, String receiptSha256,
-                                                     UUID profileId, boolean sandboxPosting,
-                                                     boolean candidateAuthorizedSandbox) {
-        verificationPolicy.validateReceipt(receipt, receiptSha256, profileId, sandboxPosting, candidateAuthorizedSandbox);
+                                                     String rawEvidencePayload, UUID profileId,
+                                                     boolean sandboxPosting, boolean candidateAuthorizedSandbox) {
+        verificationPolicy.validateReceipt(receipt, receiptSha256, rawEvidencePayload, profileId, sandboxPosting, candidateAuthorizedSandbox);
         return verificationPolicy.evaluate(new ReceiptEvidence(
                 receipt.confirmation() != null ? receipt.confirmation().confirmationId() : null,
                 receiptSha256,
@@ -283,8 +283,18 @@ public class ReceiptCaptureService {
                 sandboxPosting,
                 candidateAuthorizedSandbox,
                 receipt.confirmation() != null ? receipt.confirmation().observedSignals() : List.of(),
-                null
+                rawEvidencePayload
         ));
+    }
+
+    /**
+     * Backward-compatible overload.
+     */
+    public VerificationOutcome verifyExistingReceipt(SubmissionReceipt receipt, String receiptSha256,
+                                                     UUID profileId, boolean sandboxPosting,
+                                                     boolean candidateAuthorizedSandbox) {
+        String evidencePayload = receipt.confirmation() != null ? receipt.confirmation().summary() : null;
+        return verifyExistingReceipt(receipt, receiptSha256, evidencePayload, profileId, sandboxPosting, candidateAuthorizedSandbox);
     }
 
     /**

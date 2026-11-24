@@ -300,39 +300,63 @@ test('apiCall: throws BACKEND_REQUEST_FAILED when 503 persists after max retries
   assert.equal(attempts, 4);
 });
 
-test('reportOutcome: retries with exponential backoff on 503 and delivers completion', async () => {
+test('reportOutcome: retries with exponential backoff on 503 via fetchWithRetry and delivers completion', async () => {
   let attempts = 0;
-  const mockApiCall = async () => {
+  const mockFetch = async () => {
     attempts += 1;
-    if (attempts < 3) throw new Error('BACKEND_REQUEST_FAILED:503');
-    return null;
+    if (attempts < 3) return { status: 503, ok: false };
+    return {
+      status: 200,
+      ok: true,
+      json: async () => ({ acknowledged: true }),
+    };
   };
 
   await reportOutcome('plan-100', 'COMPLETED', 'All steps confirmed', null, {
-    apiCallFn: mockApiCall,
     completeUrlVal: 'http://backend.invalid/plans/{id}/complete',
     retryConfig: { sleepFn: async () => {}, maxRetries: 3, baseDelayMs: 10 },
+    fetchFn: mockFetch,
   });
 
   assert.equal(attempts, 3);
 });
 
-test('reportOutcome: throws after exhausting retries under persistent 504', async () => {
+test('reportOutcome: throws after exhausting retries under persistent 504 with single retry owner', async () => {
   let attempts = 0;
-  const mockApiCall = async () => {
+  const mockFetch = async () => {
     attempts += 1;
-    throw new Error('BACKEND_REQUEST_FAILED:504');
+    return { status: 504, ok: false };
   };
 
   await assert.rejects(
     () => reportOutcome('plan-200', 'FAILED', 'Fatal error', null, {
-      apiCallFn: mockApiCall,
       completeUrlVal: 'http://backend.invalid/plans/{id}/complete',
       retryConfig: { sleepFn: async () => {}, maxRetries: 2, baseDelayMs: 10 },
+      fetchFn: mockFetch,
     }),
     /BACKEND_REQUEST_FAILED:504/
   );
   assert.equal(attempts, 3); // 1 initial + 2 retries
+});
+
+test('reportOutcome: does not introduce outer retry loop around apiCall (single retry owner architecture)', async () => {
+  let apiCallInvocations = 0;
+  const mockApiCall = async () => {
+    apiCallInvocations += 1;
+    throw new Error('BACKEND_REQUEST_FAILED:503');
+  };
+
+  await assert.rejects(
+    () => reportOutcome('plan-300', 'FAILED', 'Some error', null, {
+      apiCallFn: mockApiCall,
+      completeUrlVal: 'http://backend.invalid/plans/{id}/complete',
+      retryConfig: { maxRetries: 3 },
+    }),
+    /BACKEND_REQUEST_FAILED:503/
+  );
+
+  // Crucial: apiCall is invoked exactly ONCE by reportOutcome because fetchWithRetry inside apiCall is the sole retry owner
+  assert.equal(apiCallInvocations, 1);
 });
 
 test('createPollHandler: handles transient 502 during poll cycle without crashing process', async () => {
@@ -390,6 +414,18 @@ test('DeadLetterRegistry: state persists across reloads via persistPath', () => 
   } finally {
     fs.rmSync(path.dirname(tmpFile), { recursive: true, force: true });
   }
+});
+
+test('DeadLetterRegistry: operates strictly in-memory when persistPath is unset', () => {
+  const reg1 = new DeadLetterRegistry({ maxCrashes: 2, persistPath: null });
+  reg1.recordCrash('plan-mem-only', new Error('Crash 1'));
+  reg1.recordCrash('plan-mem-only', new Error('Crash 2'));
+  assert.equal(reg1.isDeadLetter('plan-mem-only'), true);
+
+  // New instance without persistPath starts completely clean (in-memory behavior)
+  const reg2 = new DeadLetterRegistry({ maxCrashes: 2, persistPath: null });
+  assert.equal(reg2.getCrashCount('plan-mem-only'), 0);
+  assert.equal(reg2.isDeadLetter('plan-mem-only'), false);
 });
 
 test('executePollCycle: repeated execution crashes trigger terminal isolation and report DEAD_LETTER_POISON_PILL', async () => {

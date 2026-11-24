@@ -180,6 +180,14 @@ export const MAX_PLAN_CRASHES = 3;
 
 /**
  * Tracks crashes and provides terminal isolation for poison-pill plans.
+ *
+ * STORAGE PERSISTENCE MODEL:
+ * - When `WORKER_DEAD_LETTER_PATH` is unset (or null), this registry operates
+ *   STRICTLY IN-MEMORY using JavaScript Map instances. In-memory state (crash counts
+ *   and dead-letter records) will be cleared upon worker process restart.
+ * - When `WORKER_DEAD_LETTER_PATH` is configured (e.g., pointing to a local or volume-mounted
+ *   JSON file), state is persisted atomically via write-and-rename and reloaded at startup.
+ *   This enables crash counts and dead-letter statuses to survive container restarts and spot termination.
  */
 export class DeadLetterRegistry {
   constructor({ maxCrashes = MAX_PLAN_CRASHES, persistPath = process.env.WORKER_DEAD_LETTER_PATH || null } = {}) {
@@ -296,47 +304,31 @@ export async function apiCall(url, body = null, {
   return response.json();
 }
 
+/**
+ * Reports plan completion or failure outcome to the backend.
+ *
+ * RETRY OWNERSHIP ARCHITECTURE:
+ * To eliminate nested/multiplicative retry cascades, `fetchWithRetry()` is the sole
+ * retry owner across the worker pipeline. `reportOutcome()` delegates directly to
+ * `apiCallFn()`, passing `retryConfig` and optional `fetchFn` downwards.
+ * This guarantees strictly bounded attempts (initial + maxRetries) and prevents
+ * catastrophic request amplification. POST requests to the completion endpoint are
+ * safe and idempotent under the backend's state machine.
+ */
 export async function reportOutcome(planId, outcome, detail, result = null, {
   apiCallFn = apiCall,
   completeUrlVal = completeUrl,
   retryConfig = {},
+  fetchFn,
 } = {}) {
   const targetUrl = completeUrlVal || completeUrl;
-  if (!targetUrl) return;
+  if (!targetUrl) return null;
   const url = targetUrl.replace('{id}', encodeURIComponent(planId));
   const body = { outcome, detail, result };
 
-  const {
-    maxRetries = 3,
-    baseDelayMs = 500,
-    maxDelayMs = 10000,
-    randomFn = Math.random,
-    sleepFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    onRetry = null,
-  } = retryConfig;
-
-  let attempt = 0;
-  while (true) {
-    try {
-      await apiCallFn(url, body, { retryConfig });
-      return;
-    } catch (error) {
-      const statusMatch = String(error.message || '').match(/BACKEND_REQUEST_FAILED:(\d+)/);
-      const status = statusMatch ? parseInt(statusMatch[1], 10) : error.status;
-      const isRetryable = (status && isRetryableStatus(status)) || isRetryableNetworkError(error);
-
-      if (attempt < maxRetries && isRetryable) {
-        const delay = calculateBackoff(attempt, baseDelayMs, maxDelayMs, randomFn);
-        if (typeof onRetry === 'function') {
-          onRetry({ attempt, status, delay, error });
-        }
-        await sleepFn(delay);
-        attempt += 1;
-        continue;
-      }
-      throw error;
-    }
-  }
+  const callOpts = { retryConfig };
+  if (fetchFn) callOpts.fetchFn = fetchFn;
+  return await apiCallFn(url, body, callOpts);
 }
 
 export async function sendHeartbeat(planId, { apiCallFn = apiCall, heartbeatUrlVal = heartbeatUrl } = {}) {
