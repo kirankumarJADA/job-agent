@@ -498,8 +498,8 @@ public class ApplicationReceiptService {
             }
         }
         if (signals.isEmpty()) {
-            signals.add("PLATFORM_SUBMISSION_CONFIRMED");
-            signals.add("FORM_DISAPPEARED");
+            // Do NOT manufacture confirmation signals when none exist in result
+            return new ConfirmationEvidence(false, redactSensitive(confirmationId), List.of(), "No confirmation signals observed from platform.");
         }
         return new ConfirmationEvidence(true, redactSensitive(confirmationId), signals, redactSensitive(summary));
     }

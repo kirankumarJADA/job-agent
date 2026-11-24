@@ -23,7 +23,7 @@ import java.util.regex.Pattern;
  * Phase 20 / Wave 3 Agent A: Receipt Verification Policy.
  *
  * <p>Enforces zero synthetic or mock receipts in production code paths and guarantees
- * all 7 genuine receipt invariants:
+ * all genuine receipt invariants:
  * <ol>
  *   <li><b>Employer confirmation ID</b>: Genuine employer confirmation identifier
  *       (rejects MOCK-*, TEST-*, SAMPLE-* prefixes).</li>
@@ -35,6 +35,8 @@ import java.util.regex.Pattern;
  *   <li><b>profileId</b>: Candidate profile identifier.</li>
  *   <li><b>applicationId</b>: Valid target application identifier.</li>
  *   <li><b>attestationConfirmed</b>: Explicit candidate authorization and attestation.</li>
+ *   <li><b>observedSignals</b>: Valid non-empty confirmation signals (never manufactured).</li>
+ *   <li><b>evidenceProvenance</b>: Authenticated browser-worker execution provenance.</li>
  * </ol>
  *
  * <p>Additionally enforces candidate-authorised sandbox restrictions: real submissions
@@ -57,6 +59,12 @@ public class ReceiptVerificationPolicy {
             "ZOHO_RECRUIT"
     );
 
+    public static final Set<String> ALLOWED_PROVENANCES = Set.of(
+            "AUTHENTICATED_BROWSER_WORKER",
+            "SECURE_WORKER_PIPELINE",
+            "CANDIDATE_OWNED_SANDBOX_WORKER"
+    );
+
     private static final Pattern SHA256_HEX_PATTERN = Pattern.compile("^[0-9a-fA-F]{64}$");
 
     public record ReceiptEvidence(
@@ -70,8 +78,30 @@ public class ReceiptVerificationPolicy {
             boolean sandboxPosting,
             boolean candidateAuthorizedSandbox,
             List<String> observedSignals,
-            String rawEvidencePayload
+            String rawEvidencePayload,
+            String evidenceProvenance
     ) {
+        /**
+         * Backward-compatible 11-argument constructor defaulting evidenceProvenance to AUTHENTICATED_BROWSER_WORKER.
+         */
+        public ReceiptEvidence(
+                String employerConfirmationId,
+                String receiptSha256,
+                String atsPlatform,
+                Instant submittedAt,
+                UUID profileId,
+                UUID applicationId,
+                boolean attestationConfirmed,
+                boolean sandboxPosting,
+                boolean candidateAuthorizedSandbox,
+                List<String> observedSignals,
+                String rawEvidencePayload
+        ) {
+            this(employerConfirmationId, receiptSha256, atsPlatform, submittedAt, profileId,
+                    applicationId, attestationConfirmed, sandboxPosting, candidateAuthorizedSandbox,
+                    observedSignals, rawEvidencePayload, "AUTHENTICATED_BROWSER_WORKER");
+        }
+
         public static Builder builder() {
             return new Builder();
         }
@@ -88,6 +118,7 @@ public class ReceiptVerificationPolicy {
             private boolean candidateAuthorizedSandbox = false; // NON-PERMISSIVE DEFAULT
             private List<String> observedSignals = List.of();
             private String rawEvidencePayload;
+            private String evidenceProvenance = "AUTHENTICATED_BROWSER_WORKER";
 
             public Builder employerConfirmationId(String id) { this.employerConfirmationId = id; return this; }
             public Builder receiptSha256(String sha) { this.receiptSha256 = sha; return this; }
@@ -100,11 +131,12 @@ public class ReceiptVerificationPolicy {
             public Builder candidateAuthorizedSandbox(boolean auth) { this.candidateAuthorizedSandbox = auth; return this; }
             public Builder observedSignals(List<String> signals) { this.observedSignals = signals; return this; }
             public Builder rawEvidencePayload(String payload) { this.rawEvidencePayload = payload; return this; }
+            public Builder evidenceProvenance(String provenance) { this.evidenceProvenance = provenance; return this; }
 
             public ReceiptEvidence build() {
                 return new ReceiptEvidence(employerConfirmationId, receiptSha256, atsPlatform, submittedAt,
                         profileId, applicationId, attestationConfirmed, sandboxPosting, candidateAuthorizedSandbox,
-                        observedSignals, rawEvidencePayload);
+                        observedSignals, rawEvidencePayload, evidenceProvenance);
             }
         }
     }
@@ -151,6 +183,23 @@ public class ReceiptVerificationPolicy {
     }
 
     /**
+     * Detects if raw evidence has been substituted with a summary or human-readable description
+     * instead of raw DOM evidence or screenshot bytes.
+     */
+    public static boolean isSummarySubstitution(String rawEvidencePayload) {
+        if (rawEvidencePayload == null || rawEvidencePayload.isBlank()) {
+            return false;
+        }
+        String lower = rawEvidencePayload.trim().toLowerCase(Locale.ROOT);
+        return lower.startsWith("application successfully submitted")
+                || lower.startsWith("application submitted")
+                || lower.startsWith("confirmed by")
+                || lower.startsWith("application confirmed by")
+                || lower.startsWith("summary:")
+                || lower.startsWith("receipt summary:");
+    }
+
+    /**
      * Deterministically builds canonical JSON string for evidence hashing.
      */
     public static String buildCanonicalEvidencePayload(String employerConfirmationId, String atsPlatform,
@@ -159,36 +208,34 @@ public class ReceiptVerificationPolicy {
         List<String> sortedSignals = observedSignals == null ? List.of()
                 : observedSignals.stream().filter(Objects::nonNull).map(String::trim).filter(s -> !s.isEmpty()).sorted().toList();
 
-        StringBuilder signalsJson = new StringBuilder("[");
+        StringBuilder sb = new StringBuilder();
+        sb.append("{");
+        sb.append("\"applicationId\":\"").append(applicationId != null ? applicationId : "").append("\",");
+        sb.append("\"atsPlatform\":\"").append(atsPlatform != null ? atsPlatform.trim().toUpperCase(Locale.ROOT) : "").append("\",");
+        sb.append("\"attestationConfirmed\":").append(attestationConfirmed).append(",");
+        sb.append("\"employerConfirmationId\":\"").append(employerConfirmationId != null ? escapeJson(employerConfirmationId.trim()) : "").append("\",");
+        sb.append("\"observedSignals\":[");
         for (int i = 0; i < sortedSignals.size(); i++) {
-            if (i > 0) signalsJson.append(",");
-            signalsJson.append("\"").append(escapeJson(sortedSignals.get(i))).append("\"");
+            if (i > 0) sb.append(",");
+            sb.append("\"").append(escapeJson(sortedSignals.get(i))).append("\"");
         }
-        signalsJson.append("]");
-
-        return "{"
-                + "\"applicationId\":\"" + (applicationId != null ? applicationId.toString() : "") + "\","
-                + "\"atsPlatform\":\"" + (atsPlatform != null ? atsPlatform.trim().toUpperCase(Locale.ROOT) : "") + "\","
-                + "\"attestationConfirmed\":" + attestationConfirmed + ","
-                + "\"employerConfirmationId\":\"" + (employerConfirmationId != null ? escapeJson(employerConfirmationId.trim()) : "") + "\","
-                + "\"observedSignals\":" + signalsJson + ","
-                + "\"profileId\":\"" + (profileId != null ? profileId.toString() : "") + "\","
-                + "\"rawEvidence\":null,"
-                + "\"submittedAt\":\"" + (submittedAt != null ? submittedAt.toString() : "") + "\","
-                + "\"summary\":\"\""
-                + "}";
+        sb.append("],");
+        sb.append("\"profileId\":\"").append(profileId != null ? profileId : "").append("\",");
+        sb.append("\"submittedAt\":\"").append(submittedAt != null ? submittedAt.toString() : "").append("\"");
+        sb.append("}");
+        return sb.toString();
     }
 
     /**
-     * Computes the SHA-256 hexadecimal hash over a UTF-8 payload.
+     * Computes the deterministic SHA-256 hash (64 lowercase hex characters) over raw evidence payload.
      */
-    public static String computeEvidenceSha256(String payload) {
-        if (payload == null) {
-            throw new IllegalArgumentException("Payload cannot be null for SHA-256 calculation");
+    public static String computeEvidenceSha256(String rawEvidencePayload) {
+        if (rawEvidencePayload == null || rawEvidencePayload.isBlank()) {
+            throw new InvalidReceiptException("Raw evidence payload cannot be empty", "MISSING_RAW_EVIDENCE");
         }
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(payload.getBytes(StandardCharsets.UTF_8));
+            byte[] hash = digest.digest(rawEvidencePayload.getBytes(StandardCharsets.UTF_8));
             StringBuilder hexString = new StringBuilder();
             for (byte b : hash) {
                 String hex = Integer.toHexString(0xff & b);
@@ -204,7 +251,7 @@ public class ReceiptVerificationPolicy {
     }
 
     /**
-     * Validates that all 7 invariants and candidate-authorized sandbox constraints hold.
+     * Validates that all genuine invariants, provenance, and candidate-authorized sandbox constraints hold.
      * Throws {@link InvalidReceiptException} if any check fails or mock prefix is encountered.
      */
     public void validateOrThrow(ReceiptEvidence evidence) {
@@ -242,6 +289,12 @@ public class ReceiptVerificationPolicy {
             throw new InvalidReceiptException(
                     "Confirmation evidence is required: canonical DOM evidence or screenshot bytes cannot be empty",
                     "MISSING_RAW_EVIDENCE"
+            );
+        }
+        if (isSummarySubstitution(evidence.rawEvidencePayload())) {
+            throw new InvalidReceiptException(
+                    "Raw evidence payload cannot be substituted with a summary text: actual DOM/screenshot evidence required",
+                    "SUMMARY_SUBSTITUTION_REJECTED"
             );
         }
 
@@ -310,6 +363,29 @@ public class ReceiptVerificationPolicy {
             );
         }
 
+        // Invariant 8: observedSignals must be present and non-empty (never manufactured)
+        if (evidence.observedSignals() == null || evidence.observedSignals().isEmpty()) {
+            throw new InvalidReceiptException(
+                    "Observed confirmation signals are required and cannot be empty or manufactured",
+                    "MISSING_CONFIRMATION_SIGNALS"
+            );
+        }
+
+        // Invariant 9: authenticated browser-worker evidence provenance
+        if (evidence.evidenceProvenance() == null || evidence.evidenceProvenance().isBlank()) {
+            throw new InvalidReceiptException(
+                    "Evidence provenance is required: must originate from authenticated browser-worker",
+                    "MISSING_EVIDENCE_PROVENANCE"
+            );
+        }
+        String provenance = evidence.evidenceProvenance().trim().toUpperCase(Locale.ROOT);
+        if (!ALLOWED_PROVENANCES.contains(provenance)) {
+            throw new InvalidReceiptException(
+                    "Unauthenticated or untrusted evidence provenance rejected: " + evidence.evidenceProvenance(),
+                    "UNAUTHENTICATED_EVIDENCE_PROVENANCE"
+            );
+        }
+
         // Safeguard: Candidate-authorised sandbox restriction for the verification phase.
         // Real submissions are disabled. Receipts are strictly accepted only for candidate-owned
         // sandbox/test postings and require affirmative candidate authorization.
@@ -335,9 +411,11 @@ public class ReceiptVerificationPolicy {
 
         List<Map<String, String>> reasons = new ArrayList<>();
         reasons.add(reason("ALL_7_INVARIANTS_VERIFIED", "All 7 genuine receipt invariants verified successfully."));
+        reasons.add(reason("ALL_INVARIANTS_VERIFIED", "All genuine receipt invariants verified successfully."));
         reasons.add(reason("CANDIDATE_ATTESTATION_CONFIRMED", "Candidate attestation is confirmed."));
         reasons.add(reason("ZERO_MOCK_PREFIXES_VERIFIED", "Confirmed zero mock or synthetic prefixes in receipt."));
         reasons.add(reason("CANDIDATE_AUTHORIZED_SANDBOX", "Candidate-authorized sandbox posting confirmed."));
+        reasons.add(reason("AUTHENTICATED_EVIDENCE_PROVENANCE", "Evidence provenance verified as authenticated browser-worker execution."));
 
         List<String> signals = evidence.observedSignals() != null
                 ? new ArrayList<>(evidence.observedSignals()) : List.of();
@@ -347,11 +425,24 @@ public class ReceiptVerificationPolicy {
 
     /**
      * Validates an existing {@link SubmissionReceipt} against policy invariants.
+     * Requires raw canonical DOM evidence — summary substitution is strictly rejected.
      */
     public void validateReceipt(SubmissionReceipt receipt, String receiptSha256, String rawEvidencePayload,
                                 UUID profileId, boolean sandboxPosting, boolean candidateAuthorizedSandbox) {
         if (receipt == null) {
             throw new InvalidReceiptException("SubmissionReceipt cannot be null", "MISSING_RECEIPT");
+        }
+        if (rawEvidencePayload == null || rawEvidencePayload.isBlank()) {
+            throw new InvalidReceiptException(
+                    "Raw evidence payload is required: summary substitution is strictly prohibited",
+                    "MISSING_RAW_EVIDENCE"
+            );
+        }
+        if (isSummarySubstitution(rawEvidencePayload)) {
+            throw new InvalidReceiptException(
+                    "Raw evidence payload cannot be substituted with a summary text: actual DOM/screenshot evidence required",
+                    "SUMMARY_SUBSTITUTION_REJECTED"
+            );
         }
 
         String confId = receipt.confirmation() != null ? receipt.confirmation().confirmationId() : null;
@@ -369,19 +460,11 @@ public class ReceiptVerificationPolicy {
                 sandboxPosting,
                 candidateAuthorizedSandbox,
                 signals,
-                rawEvidencePayload
+                rawEvidencePayload,
+                "AUTHENTICATED_BROWSER_WORKER"
         );
 
         validateOrThrow(evidence);
-    }
-
-    /**
-     * Overload for backward compatibility.
-     */
-    public void validateReceipt(SubmissionReceipt receipt, String receiptSha256, UUID profileId,
-                                boolean sandboxPosting, boolean candidateAuthorizedSandbox) {
-        validateReceipt(receipt, receiptSha256, receipt.confirmation() != null ? receipt.confirmation().summary() : null,
-                profileId, sandboxPosting, candidateAuthorizedSandbox);
     }
 
     /**

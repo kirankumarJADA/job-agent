@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -116,6 +117,7 @@ class GreenhouseSandboxContractTest {
                 .attestationConfirmed(true)
                 .sandboxPosting(true)
                 .candidateAuthorizedSandbox(true)
+                .observedSignals(List.of("PLATFORM_SUBMISSION_CONFIRMED"))
                 .build();
 
         ReceiptVerificationPolicy.VerificationOutcome outcome = receiptPolicy.evaluate(evidence);
@@ -146,6 +148,7 @@ class GreenhouseSandboxContractTest {
                 .attestationConfirmed(true)
                 .sandboxPosting(false) // Non-sandbox
                 .candidateAuthorizedSandbox(true)
+                .observedSignals(List.of("PLATFORM_SUBMISSION_CONFIRMED"))
                 .build();
 
         assertThatThrownBy(() -> receiptPolicy.evaluate(nonSandboxEvidence))
@@ -164,6 +167,7 @@ class GreenhouseSandboxContractTest {
                 .attestationConfirmed(true)
                 .sandboxPosting(true)
                 .candidateAuthorizedSandbox(false) // Not candidate authorized
+                .observedSignals(List.of("PLATFORM_SUBMISSION_CONFIRMED"))
                 .build();
 
         assertThatThrownBy(() -> receiptPolicy.evaluate(unauthorizedSandboxEvidence))
@@ -192,6 +196,7 @@ class GreenhouseSandboxContractTest {
                 .attestationConfirmed(true)
                 .sandboxPosting(true)
                 .candidateAuthorizedSandbox(true)
+                .observedSignals(List.of("PLATFORM_SUBMISSION_CONFIRMED"))
                 .build();
 
         assertThatThrownBy(() -> receiptPolicy.evaluate(reqIdEvidence))

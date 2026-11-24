@@ -52,6 +52,8 @@ class ReceiptVerificationTest {
     void setUp() {
         policy = new ReceiptVerificationPolicy();
         captureService = new ReceiptCaptureService(policy);
+        captureService.recordApplicationOwnership(APPLICATION_ID, PROFILE_ID);
+        captureService.recordAuditAttestation(APPLICATION_ID, PROFILE_ID, "ada@example.com");
     }
 
     private static String validSha256() {
@@ -543,6 +545,163 @@ class ReceiptVerificationTest {
                     .isInstanceOf(InvalidReceiptException.class)
                     .hasMessageContaining("Cross-profile receipt access rejected")
                     .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("CROSS_PROFILE_RECEIPT_REJECTED"));
+        }
+    }
+
+    @Nested
+    @DisplayName("Sprint 2.1 Adversarial Trust Boundary & Security Gate Tests")
+    class AdversarialTrustBoundaryAndSecurityTests {
+
+        @Test
+        @DisplayName("1. Fabricated evidence digest mismatch is rejected")
+        void testFabricatedEvidenceDigestMismatch() {
+            String fakeDigest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+            var cmd = validCommandBuilder()
+                    .rawEvidencePayload(CANONICAL_RAW_EVIDENCE)
+                    .receiptSha256(fakeDigest)
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("Caller-supplied receiptSha256 does not match canonical evidence digest")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("SHA256_DIGEST_MISMATCH"));
+        }
+
+        @Test
+        @DisplayName("2. Forged approval without audit record is rejected")
+        void testForgedApprovalWithoutAuditRecordIsRejected() {
+            UUID forgedAppId = UUID.randomUUID();
+            captureService.recordApplicationOwnership(forgedAppId, PROFILE_ID);
+            // Notice: recordAuditAttestation is intentionally NOT called for forgedAppId
+
+            var cmd = validCommandBuilder()
+                    .applicationId(forgedAppId)
+                    .attestationConfirmed(true) // Caller claims true!
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("Candidate attestation record is missing or not confirmed in audit log")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("MISSING_CANDIDATE_ATTESTATION"));
+        }
+
+        @Test
+        @DisplayName("3. Missing audit record rejects receipt even if caller claims true")
+        void testMissingAuditRecordRejectsReceiptEvenIfCallerClaimsTrue() {
+            UUID unapprovedApp = UUID.randomUUID();
+            captureService.recordApplicationOwnership(unapprovedApp, PROFILE_ID);
+
+            var cmd = validCommandBuilder()
+                    .applicationId(unapprovedApp)
+                    .attestationConfirmed(true)
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("MISSING_CANDIDATE_ATTESTATION"));
+        }
+
+        @Test
+        @DisplayName("4. Cross-profile application ownership mismatch is rejected")
+        void testCrossProfileApplicationOwnershipMismatchIsRejected() {
+            UUID foreignProfile = UUID.randomUUID();
+            UUID foreignApp = UUID.randomUUID();
+            captureService.recordApplicationOwnership(foreignApp, foreignProfile);
+            captureService.recordAuditAttestation(foreignApp, foreignProfile, "foreign@example.com");
+
+            // Caller with PROFILE_ID attempts to claim receipt for foreignApp
+            var cmd = validCommandBuilder()
+                    .applicationId(foreignApp)
+                    .profileId(PROFILE_ID)
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("Cross-profile receipt injection rejected")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("CROSS_PROFILE_RECEIPT_REJECTED"));
+        }
+
+        @Test
+        @DisplayName("5. Summary substitution is rejected")
+        void testSummarySubstitutionIsRejected() {
+            String summaryText = "Application submitted successfully on Workday for candidate Ada Lovelace.";
+            var cmd = validCommandBuilder()
+                    .rawEvidencePayload(summaryText)
+                    .receiptSha256(ReceiptVerificationPolicy.computeEvidenceSha256(summaryText))
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("Raw evidence payload cannot be substituted with a summary text")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("SUMMARY_SUBSTITUTION_REJECTED"));
+        }
+
+        @Test
+        @DisplayName("6. Empty or missing confirmation signals are rejected")
+        void testEmptyConfirmationSignalsRejected() {
+            var cmdEmpty = validCommandBuilder()
+                    .observedSignals(List.of())
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmdEmpty))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("Observed confirmation signals are required and cannot be empty or manufactured")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("MISSING_CONFIRMATION_SIGNALS"));
+
+            var cmdNull = validCommandBuilder()
+                    .observedSignals(null)
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmdNull))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("MISSING_CONFIRMATION_SIGNALS"));
+        }
+
+        @Test
+        @DisplayName("7. Unauthenticated evidence provenance is rejected")
+        void testUnauthenticatedProvenanceRejected() {
+            var cmd = validCommandBuilder()
+                    .evidenceProvenance("EXTERNAL_UNVERIFIED_CLIENT")
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("Unauthenticated evidence provenance rejected")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("UNAUTHENTICATED_EVIDENCE_PROVENANCE"));
+        }
+
+        @Test
+        @DisplayName("8. Conflicting receipt replay is rejected")
+        void testConflictingReplayRejected() {
+            var cmd1 = validCommandBuilder()
+                    .employerConfirmationId("WD-CONF-987654")
+                    .build();
+            captureService.captureReceipt(cmd1);
+
+            // Same app and receipt digest, but conflicting employerConfirmationId
+            var cmd2 = validCommandBuilder()
+                    .employerConfirmationId("WD-CONF-DIFFERENT-111")
+                    .build();
+
+            assertThatThrownBy(() -> captureService.captureReceipt(cmd2))
+                    .isInstanceOf(InvalidReceiptException.class)
+                    .hasMessageContaining("Replay conflict detected")
+                    .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode()).isEqualTo("RECEIPT_REPLAY_REJECTED"));
+        }
+
+        @Test
+        @DisplayName("9. Genuine receipt record requires all verifications and persistence")
+        void testGenuineReceiptRecordRequiresAllVerifications() {
+            var cmd = validCommandBuilder().build();
+            var record = captureService.captureGenuineReceipt(cmd);
+
+            assertThat(record.genuine()).isTrue();
+            assertThat(record.employerConfirmationId()).isEqualTo("WD-CONF-987654");
+            assertThat(record.atsPlatform()).isEqualTo("WORKDAY");
+            assertThat(record.verifiedAt()).isNotNull();
+            assertThat(record.submissionReceipt()).isNotNull();
+            assertThat(record.submissionReceipt().confirmation().confirmed()).isTrue();
+            assertThat(record.submissionReceipt().authorization().approved()).isTrue();
         }
     }
 }
