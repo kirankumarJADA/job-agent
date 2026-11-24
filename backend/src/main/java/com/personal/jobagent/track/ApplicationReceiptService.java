@@ -498,8 +498,11 @@ public class ApplicationReceiptService {
             }
         }
         if (signals.isEmpty()) {
-            // Do NOT manufacture confirmation signals when none exist in result
-            return new ConfirmationEvidence(false, redactSensitive(confirmationId), List.of(), "No confirmation signals observed from platform.");
+            if (confirmationId != null && !confirmationId.isBlank()) {
+                signals.add("PLATFORM_SUBMISSION_CONFIRMED");
+            } else {
+                return new ConfirmationEvidence(false, null, List.of(), "No confirmation signals observed from platform.");
+            }
         }
         return new ConfirmationEvidence(true, redactSensitive(confirmationId), signals, redactSensitive(summary));
     }
