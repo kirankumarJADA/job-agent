@@ -133,17 +133,34 @@ public class ApplicationPipelineEventHandler implements EventHandler {
         switch (envelope.type()) {
             case NotificationEvents.JOB_DISCOVERED -> pipeline.onJobIngested(
                     uuid(payload.get("job_id")), String.valueOf(payload.getOrDefault("action", "INSERTED")));
-            case NotificationEvents.JOB_MATCHED -> handleMatched(payload);
-            case NotificationEvents.APPLICATION_CREATED -> handleCreated(payload);
+            case NotificationEvents.JOB_MATCHED -> handleMatched(envelope, payload);
+            case NotificationEvents.APPLICATION_CREATED -> handleCreated(envelope, payload, true);
             case NotificationEvents.APPLICATION_REPREPARATION_REQUESTED -> {
                 metrics.rePreparationRequested();
-                handleCreated(payload);
+                handleCreated(envelope, payload, false);
             }
             default -> log.debug("Ignoring unsupported event {}", envelope.type());
         }
     }
 
-    private void handleMatched(Map<String, Object> payload) {
+    private boolean claimBusinessKey(String businessKey, UUID eventId) {
+        if (businessKey == null || businessKey.isBlank() || db == null) return true;
+        try {
+            int inserted = db.update("""
+                    insert into consumed_events (event_id, consumer, business_key, processed_at)
+                    values (?, ?, ?, now())
+                    on conflict do nothing
+                    """,
+                    eventId != null ? eventId : UuidV7.generate(),
+                    CONSUMER_NAME, businessKey);
+            return inserted > 0;
+        } catch (Exception e) {
+            log.debug("Business key claim non-fatal error for {}: {}", businessKey, e.getMessage());
+            return true;
+        }
+    }
+
+    private void handleMatched(Envelope envelope, Map<String, Object> payload) {
         // REVIEW/SKIP are valid match decisions: the score and recommendation
         // are already stored in job_matches for the candidate to act on — no
         // application is created for them by design.
@@ -155,6 +172,12 @@ public class ApplicationPipelineEventHandler implements EventHandler {
         UUID jobId = uuid(payload.get("job_id"));
         if (profileId == null || jobId == null) {
             log.warn("job.matched event without usable ids (profile_id/job_id) — skipping creation");
+            return;
+        }
+
+        String businessKey = "job.matched:" + profileId + ":" + jobId + ":" + payload.get("recommendation");
+        if (!claimBusinessKey(businessKey, envelope != null ? envelope.id() : null)) {
+            log.info("job.matched event already claimed for business key {} — skipping duplicate", businessKey);
             return;
         }
         // Phase 5: the decision engine sits between the scorer and the
@@ -257,13 +280,21 @@ public class ApplicationPipelineEventHandler implements EventHandler {
         }
     }
 
-    private void handleCreated(Map<String, Object> payload) {
+    private void handleCreated(Envelope envelope, Map<String, Object> payload, boolean checkBusinessKey) {
         UUID applicationId = uuid(payload.get("application_id"));
         UUID profileId = uuid(payload.get("profile_id"));
         UUID jobId = uuid(payload.get("job_id"));
         if (applicationId == null || profileId == null || jobId == null) {
             log.warn("application.created event without usable ids — skipping preparation");
             return;
+        }
+
+        if (checkBusinessKey) {
+            String businessKey = "application.created:" + applicationId;
+            if (!claimBusinessKey(businessKey, envelope != null ? envelope.id() : null)) {
+                log.info("application.created event already claimed for business key {} — skipping duplicate", businessKey);
+                return;
+            }
         }
         if (!applicationExists(applicationId)) {
             log.warn("application.created for missing application {} — skipping preparation", applicationId);

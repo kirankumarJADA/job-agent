@@ -1,0 +1,420 @@
+package com.personal.jobagent.automation.handoff;
+
+import com.personal.jobagent.application.ApplicationStatusService;
+import com.personal.jobagent.audit.AuditEntry;
+import com.personal.jobagent.audit.AuditLogWriter;
+import com.personal.jobagent.automation.AutomationPlanRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.Optional;
+import java.util.UUID;
+
+/**
+ * Phase 3: Service orchestrating candidate-controlled ATS browser handoff workflows.
+ * Guarantees zero CAPTCHA/MFA automated bypass, explicit candidate consent, and duplicate prevention.
+ */
+@Service
+public class AtsHandoffService {
+
+    private static final Logger log = LoggerFactory.getLogger(AtsHandoffService.class);
+
+    private final HandoffSessionRepository handoffRepository;
+    private final AutomationPlanRepository planRepository;
+    private final AuditLogWriter audit;
+    private final TransactionTemplate transactionTemplate;
+    private final ApplicationStatusService applicationStatus;
+
+    @Autowired
+    public AtsHandoffService(HandoffSessionRepository handoffRepository,
+                             AutomationPlanRepository planRepository,
+                             @Autowired(required = false) AuditLogWriter audit,
+                             @Autowired(required = false) TransactionTemplate transactionTemplate,
+                             @Autowired(required = false) ApplicationStatusService applicationStatus) {
+        this.handoffRepository = handoffRepository;
+        this.planRepository = planRepository;
+        this.audit = audit;
+        this.transactionTemplate = transactionTemplate;
+        this.applicationStatus = applicationStatus;
+    }
+
+    public AtsHandoffService(HandoffSessionRepository handoffRepository,
+                             AutomationPlanRepository planRepository,
+                             AuditLogWriter audit,
+                             TransactionTemplate transactionTemplate) {
+        this(handoffRepository, planRepository, audit, transactionTemplate, null);
+    }
+
+    /**
+     * Validates that the target URL is an absolute HTTPS URL with a valid host,
+     * no embedded user credentials, and no protocol-relative or dangerous schemes.
+     */
+    public static void validateTargetUrl(String targetUrl) {
+        if (targetUrl == null || targetUrl.isBlank()) {
+            throw new IllegalArgumentException("Target URL must not be null or blank");
+        }
+        String trimmed = targetUrl.trim();
+        if (trimmed.startsWith("//")) {
+            throw new IllegalArgumentException("Protocol-relative target URLs are not permitted");
+        }
+        URI uri;
+        try {
+            uri = new URI(trimmed);
+        } catch (URISyntaxException e) {
+            throw new IllegalArgumentException("Invalid target URL syntax: " + e.getMessage(), e);
+        }
+        if (!uri.isAbsolute()) {
+            throw new IllegalArgumentException("Target URL must be absolute");
+        }
+        if (!"https".equalsIgnoreCase(uri.getScheme())) {
+            throw new IllegalArgumentException("Target URL scheme must be HTTPS (got: " + uri.getScheme() + ")");
+        }
+        String host = uri.getHost();
+        if (host == null || host.isBlank()) {
+            throw new IllegalArgumentException("Target URL must contain a valid host");
+        }
+        if (uri.getUserInfo() != null || (uri.getRawAuthority() != null && uri.getRawAuthority().contains("@"))) {
+            throw new IllegalArgumentException("Target URL must not contain embedded credentials");
+        }
+    }
+
+    /**
+     * Initiates a candidate handoff when browser automation detects CAPTCHA, MFA, or security challenge.
+     * Transitions the plan to HANDOFF_REQUIRED and persists a short-lived session.
+     */
+    @Transactional
+    public HandoffSessionRecord initiateHandoff(UUID ownerProfileId, UUID planId, UUID applicationId,
+                                                String targetUrl, HandoffBlockReason reason, int ttlMinutes) {
+        if (ownerProfileId == null || planId == null || applicationId == null) {
+            throw new IllegalArgumentException("ownerProfileId, planId, and applicationId are required");
+        }
+        validateTargetUrl(targetUrl);
+
+        // Invariant: automation_plans.application_id == requested applicationId
+        AutomationPlanRepository.PlanRow plan = planRepository.findById(planId)
+                .orElseThrow(() -> new IllegalArgumentException("Automation plan not found: " + planId));
+        if (!applicationId.equals(plan.applicationId())) {
+            throw new IllegalArgumentException("Mismatched plan and application: plan " + planId
+                    + " belongs to application " + plan.applicationId() + ", but requested application was " + applicationId);
+        }
+
+        // Invariant: plan owner must match supplied ownerProfileId
+        UUID planOwner = planRepository.ownerOfPlan(planId)
+                .orElseThrow(() -> new SecurityException("Plan owner not found for plan: " + planId));
+        if (!ownerProfileId.equals(planOwner)) {
+            throw new SecurityException("Plan " + planId + " does not belong to profile " + ownerProfileId);
+        }
+
+        // Invariant: application owner must match supplied ownerProfileId
+        UUID appOwner = handoffRepository.findProfileIdForApplication(applicationId)
+                .orElseThrow(() -> new SecurityException("Application owner not found for application: " + applicationId));
+        if (!ownerProfileId.equals(appOwner)) {
+            throw new SecurityException("Application " + applicationId + " does not belong to profile " + ownerProfileId);
+        }
+
+        log.info("Initiating candidate handoff for plan {} (app {}) due to {}", planId, applicationId, reason);
+        HandoffSessionRecord session = handoffRepository.createSession(ownerProfileId, planId, applicationId, targetUrl, reason, ttlMinutes);
+
+        // Pause plan status safely: support transition from RUNNING or BLOCKED_ANTI_BOT to HANDOFF_REQUIRED
+        boolean transitioned = planRepository.transition(planId, "RUNNING", "HANDOFF_REQUIRED");
+        if (!transitioned) {
+            transitioned = planRepository.transition(planId, "BLOCKED_ANTI_BOT", "HANDOFF_REQUIRED");
+        }
+        if (!transitioned) {
+            Optional<String> currentStatus = planRepository.findById(planId).map(AutomationPlanRepository.PlanRow::status);
+            if (currentStatus.isEmpty() || !"HANDOFF_REQUIRED".equals(currentStatus.get())) {
+                throw new IllegalStateException("Failed to transition plan " + planId + " to HANDOFF_REQUIRED (current status: " + currentStatus.orElse("not found") + ")");
+            }
+        }
+
+        if (audit != null) {
+            audit.write(new AuditEntry(
+                    "WORKER",
+                    "ATS_HANDOFF_INITIATED",
+                    "AUTOMATION_PLAN",
+                    planId,
+                    null,
+                    HandoffSessionResponse.from(session),
+                    null,
+                    null
+            ));
+        }
+
+        return session;
+    }
+
+    public Optional<HandoffSessionRecord> getActiveHandoffForApplication(UUID ownerProfileId, UUID applicationId) {
+        return handoffRepository.findActiveByApplication(ownerProfileId, applicationId);
+    }
+
+    public Optional<HandoffSessionRecord> getActiveHandoffForPlan(UUID ownerProfileId, UUID planId) {
+        return handoffRepository.findActiveByPlan(ownerProfileId, planId);
+    }
+
+    public Optional<HandoffSessionRecord> findSessionAnyOwner(UUID sessionId) {
+        return handoffRepository.findByIdAnyOwner(sessionId);
+    }
+
+    public boolean isPlanAssociatedWithApplication(UUID planId, UUID applicationId) {
+        if (planId == null || applicationId == null) {
+            return false;
+        }
+        return planRepository.findById(planId)
+                .map(AutomationPlanRepository.PlanRow::applicationId)
+                .map(applicationId::equals)
+                .orElse(false);
+    }
+
+    public Optional<UUID> resolveProfileId(UUID planId, UUID applicationId) {
+        if (planId == null || applicationId == null) {
+            return Optional.empty();
+        }
+        // Invariant: plan must exist and be associated with applicationId
+        Optional<AutomationPlanRepository.PlanRow> planOpt = planRepository.findById(planId);
+        if (planOpt.isEmpty() || !applicationId.equals(planOpt.get().applicationId())) {
+            return Optional.empty();
+        }
+        Optional<UUID> planOwner = planRepository.ownerOfPlan(planId);
+        Optional<UUID> appOwner = handoffRepository.findProfileIdForApplication(applicationId);
+        if (planOwner.isEmpty() || appOwner.isEmpty() || !planOwner.get().equals(appOwner.get())) {
+            return Optional.empty();
+        }
+        return planOwner;
+    }
+
+    public boolean isApplicationOwnedBy(UUID applicationId, UUID profileId) {
+        if (applicationId == null || profileId == null) return false;
+        return handoffRepository.findProfileIdForApplication(applicationId)
+                .map(profileId::equals)
+                .orElse(false);
+    }
+
+    public boolean isPlanOwnedBy(UUID planId, UUID profileId) {
+        if (planId == null || profileId == null) return false;
+        return planRepository.ownerOfPlan(planId)
+                .map(profileId::equals)
+                .orElse(false);
+    }
+
+    /**
+     * Completes a handoff after candidate interaction and explicit attestation of external submission.
+     * Atomically transitions the session to COMPLETED, the application to APPLICATION_SUBMITTED via ApplicationStatusService,
+     * and sets plan status to COMPLETED (terminal state).
+     *
+     * @param ownerProfileId caller profile ID
+     * @param sessionId handoff session ID
+     * @return true if completion succeeded; false if expired, cancelled, or not owned
+     */
+    @Transactional
+    public boolean confirmHandoffCompletion(UUID ownerProfileId, UUID sessionId) {
+        Optional<HandoffSessionRecord> sessionOpt = handoffRepository.findById(ownerProfileId, sessionId);
+        if (sessionOpt.isEmpty()) {
+            log.warn("Handoff completion refused: session {} not found for owner {}", sessionId, ownerProfileId);
+            return false;
+        }
+
+        HandoffSessionRecord session = sessionOpt.get();
+        if (session.isExpired()) {
+            log.warn("Handoff completion refused: session {} is expired", sessionId);
+            expireStaleSessions();
+            return false;
+        }
+
+        boolean updated = handoffRepository.completeSession(ownerProfileId, sessionId);
+        if (!updated) {
+            log.warn("Handoff completion refused: atomic update failed for session {}", sessionId);
+            return false;
+        }
+
+        // 1. Transition the application status to APPLICATION_SUBMITTED following the state machine
+        recordExternalSubmission(ownerProfileId, session.applicationId(), sessionId, session.blockReason().name());
+
+        // 2. Transition automation plan to terminal state COMPLETED with external attestation result
+        List<Object> completionResult = List.of(Map.of(
+                "type", "EXTERNAL_SUBMISSION_ATTESTATION",
+                "outcome", "COMPLETED",
+                "submissionSource", "CANDIDATE_ATTESTATION",
+                "verificationLevel", "CANDIDATE_REPORTED",
+                "attestedAt", Instant.now().toString(),
+                "sessionId", sessionId.toString(),
+                "blockReason", session.blockReason().name()
+        ));
+
+        boolean transitioned = planRepository.transitionWithResult(
+                session.planId(), "HANDOFF_REQUIRED", "COMPLETED", completionResult
+        );
+        if (!transitioned) {
+            // Also attempt transition if plan was previously in BLOCKED_ANTI_BOT
+            transitioned = planRepository.transitionWithResult(
+                    session.planId(), "BLOCKED_ANTI_BOT", "COMPLETED", completionResult
+            );
+        }
+        if (!transitioned) {
+            throw new IllegalStateException("Failed to transition automation plan " + session.planId() + " to terminal COMPLETED");
+        }
+
+        log.info("Handoff session {} completed by candidate attestation. Plan {} set to COMPLETED (terminal)", sessionId, session.planId());
+
+        if (audit != null) {
+            audit.write(new AuditEntry(
+                    "CANDIDATE",
+                    "ATS_HANDOFF_COMPLETED",
+                    "AUTOMATION_PLAN",
+                    session.planId(),
+                    session.status().name(),
+                    Map.of(
+                            "mode", "EXTERNAL_COMPLETION",
+                            "submissionSource", "CANDIDATE_ATTESTATION",
+                            "verificationLevel", "CANDIDATE_REPORTED",
+                            "blockReason", session.blockReason().name(),
+                            "sessionId", sessionId.toString()
+                    ),
+                    null,
+                    null
+            ));
+        }
+
+        return true;
+    }
+
+    private void recordExternalSubmission(UUID ownerProfileId, UUID applicationId, UUID sessionId, String reason) {
+        if (applicationId == null || ownerProfileId == null) {
+            return;
+        }
+        if (applicationStatus == null) {
+            throw new IllegalStateException("ApplicationStatusService is required for external submission transitions");
+        }
+
+        String currentStatus = handoffRepository.getApplicationStatus(applicationId).orElse(null);
+        if (currentStatus == null) {
+            throw new NoSuchElementException("Application not found: " + applicationId);
+        }
+
+        // Handle already-submitted applications idempotently without regressing status
+        if ("APPLICATION_SUBMITTED".equals(currentStatus) ||
+                "CONFIRMATION_RECEIVED".equals(currentStatus) ||
+                "RECRUITER_CONTACT".equals(currentStatus) ||
+                "ASSESSMENT".equals(currentStatus) ||
+                "INTERVIEW".equals(currentStatus) ||
+                "OFFER".equals(currentStatus)) {
+            log.info("Application {} is already in terminal/submitted status {}; maintaining status", applicationId, currentStatus);
+            handoffRepository.recordSubmissionTimestamp(applicationId);
+            return;
+        }
+
+        // State machine progression: READY_TO_APPLY -> APPLICATION_STARTED -> APPLICATION_SUBMITTED
+        if ("READY_TO_APPLY".equals(currentStatus)) {
+            applicationStatus.apply(ownerProfileId, applicationId, "APPLICATION_STARTED",
+                    "handoff.start:" + sessionId, "candidate",
+                    Map.of("sessionId", sessionId.toString(), "reason", reason));
+        }
+
+        applicationStatus.apply(ownerProfileId, applicationId, "APPLICATION_SUBMITTED",
+                "handoff.external_submit:" + sessionId, "candidate",
+                Map.of(
+                        "sessionId", sessionId.toString(),
+                        "submissionSource", "CANDIDATE_ATTESTATION",
+                        "verificationLevel", "CANDIDATE_REPORTED",
+                        "reason", reason
+                ));
+
+        handoffRepository.recordSubmissionTimestamp(applicationId);
+    }
+
+    @Transactional
+    public int expireStaleSessions() {
+        List<UUID> expiredPlanIds = handoffRepository.expireStaleSessionsAndGetPlanIds();
+        for (UUID planId : expiredPlanIds) {
+            List<Object> errorResult = List.of(Map.of(
+                    "type", "PLAN_ERROR",
+                    "outcome", "FAILED",
+                    "reason", "HANDOFF_EXPIRED",
+                    "message", "Handoff session expired without candidate attestation"
+            ));
+            String previousState = "HANDOFF_REQUIRED";
+            boolean transitioned = planRepository.transitionWithResult(planId, previousState, "FAILED", errorResult);
+            if (!transitioned) {
+                previousState = "BLOCKED_ANTI_BOT";
+                transitioned = planRepository.transitionWithResult(planId, previousState, "FAILED", errorResult);
+            }
+            if (transitioned) {
+                if (audit != null) {
+                    audit.write(new AuditEntry(
+                            "SYSTEM",
+                            "ATS_HANDOFF_EXPIRED",
+                            "AUTOMATION_PLAN",
+                            planId,
+                            previousState,
+                            "FAILED",
+                            null,
+                            null
+                    ));
+                }
+                continue;
+            }
+
+            // Both expected transitions failed: inspect actual plan status
+            Optional<String> currentStatus = planRepository.findById(planId).map(AutomationPlanRepository.PlanRow::status);
+            if (currentStatus.isPresent() && "FAILED".equals(currentStatus.get())) {
+                log.info("Plan {} is already in terminal FAILED status; treating expiry as idempotent", planId);
+                // Do not record an expiry audit event claiming a transition occurred when it did not
+                continue;
+            }
+
+            throw new IllegalStateException("Failed to transition expired plan " + planId + " to FAILED (current status: " + currentStatus.orElse("not found") + ")");
+        }
+        return expiredPlanIds.size();
+    }
+
+    /**
+     * Cancels an active handoff session upon candidate request.
+     */
+    @Transactional
+    public boolean cancelHandoff(UUID ownerProfileId, UUID sessionId) {
+        Optional<HandoffSessionRecord> sessionOpt = handoffRepository.findById(ownerProfileId, sessionId);
+        if (sessionOpt.isEmpty()) {
+            return false;
+        }
+
+        HandoffSessionRecord session = sessionOpt.get();
+        boolean cancelled = handoffRepository.cancelSession(ownerProfileId, sessionId);
+        if (cancelled) {
+            List<Object> errorResult = List.of(Map.of(
+                    "type", "PLAN_ERROR",
+                    "outcome", "FAILED",
+                    "reason", "HANDOFF_CANCELLED",
+                    "message", "Handoff session cancelled by candidate"
+            ));
+            boolean transitioned = planRepository.transitionWithResult(session.planId(), "HANDOFF_REQUIRED", "FAILED", errorResult);
+            if (!transitioned) {
+                transitioned = planRepository.transitionWithResult(session.planId(), "BLOCKED_ANTI_BOT", "FAILED", errorResult);
+            }
+            if (!transitioned) {
+                throw new IllegalStateException("Failed to transition automation plan " + session.planId() + " to FAILED on handoff cancellation");
+            }
+            if (audit != null) {
+                audit.write(new AuditEntry(
+                        "CANDIDATE",
+                        "ATS_HANDOFF_CANCELLED",
+                        "AUTOMATION_PLAN",
+                        session.planId(),
+                        session.status().name(),
+                        "CANCELLED",
+                        null,
+                        null
+                ));
+            }
+        }
+        return cancelled;
+    }
+}

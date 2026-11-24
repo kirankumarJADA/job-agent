@@ -92,6 +92,40 @@ public class JobsController {
         }
     }
 
+    /**
+     * Bookmark a job for the authenticated candidate profile.
+     * Idempotent under repeated calls.
+     */
+    @PostMapping("/{id}/bookmark")
+    public ResponseEntity<?> bookmarkJob(@PathVariable UUID id) {
+        UUID profileId = ownerContext.profileIdOrNull();
+        if (profileId == null) {
+            return ResponseEntity.badRequest().body(Map.of("error", "a profile is required to bookmark"));
+        }
+        if (!jobRepository.existsById(id)) {
+            return ResponseEntity.notFound().build();
+        }
+        jobRepository.addBookmark(profileId, id);
+        return ResponseEntity.ok(Map.of("bookmarked", true, "job_id", id.toString()));
+    }
+
+    /**
+     * Remove a bookmark for the authenticated candidate profile.
+     * Idempotent under repeated calls.
+     */
+    @DeleteMapping("/{id}/bookmark")
+    public ResponseEntity<?> removeBookmark(@PathVariable UUID id) {
+        UUID profileId = ownerContext.profileIdOrNull();
+        if (profileId == null) {
+            return ResponseEntity.badRequest().body(Map.of("error", "a profile is required to bookmark"));
+        }
+        if (!jobRepository.existsById(id)) {
+            return ResponseEntity.notFound().build();
+        }
+        jobRepository.removeBookmark(profileId, id);
+        return ResponseEntity.ok(Map.of("bookmarked", false, "job_id", id.toString()));
+    }
+
     @GetMapping
     public ResponseEntity<?> listJobs(@RequestParam(required = false) String status,
                                        @RequestParam(required = false) String q,
@@ -215,6 +249,7 @@ public class JobsController {
         wire.put("match_score", item.matchScore());
         wire.put("match_recommendation", item.matchRecommendation());
         wire.put("match_breakdown", item.matchBreakdown());
+        wire.put("bookmarked", item.bookmarked());
         return wire;
     }
 

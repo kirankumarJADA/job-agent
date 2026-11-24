@@ -208,8 +208,8 @@ class ApplicationTrackingIT {
     @Test
     void aFixtureConnectorAcknowledgementWithPassingSenderAuthenticationConfirmsSubmission() throws Exception {
         String url = greenhouseUrl("conn", 7002);
-        UUID app = application(seedJob("conn", "Fixture Co", "Data Engineer", url, null));
-        String body = "Thank you. We have received your application for Data Engineer. " + url;
+        UUID app = application(seedJob("conn", "Fixture Co", "Backend Engineer", url, null));
+        String body = "Thank you. We have received your application for Backend Engineer. " + url;
 
         var verified = emails.ingestFromMailboxConnector(devProfile, new ConnectorMessage("fixture-provider",
                 "conn-" + UUID.randomUUID(), "Fixture Co Talent <talent@mail.fixture.example>", "dev@example.local",
@@ -225,7 +225,7 @@ class ApplicationTrackingIT {
 
         // Same connector, failing signature: recorded, but never verified.
         String otherUrl = greenhouseUrl("conn2", 7003);
-        UUID other = application(seedJob("conn2", "Fixture Co", "QA Engineer", otherUrl, null));
+        UUID other = application(seedJob("conn2", "Fixture Co", "Software Engineer", otherUrl, null));
         var failed = emails.ingestFromMailboxConnector(devProfile, new ConnectorMessage("fixture-provider",
                 "conn-" + UUID.randomUUID(), "Fixture Co Talent <talent@mail.fixture.example>", "dev@example.local",
                 "Application received", "We have received your application. " + otherUrl,
@@ -335,7 +335,7 @@ class ApplicationTrackingIT {
     @Test
     void anInferredInterviewWaitsForConfirmationAndReclassificationPreservesHistory() throws Exception {
         String url = greenhouseUrl("intv", 7201);
-        UUID app = application(seedJob("intv", "Interview Co", "Product Engineer", url, null));
+        UUID app = application(seedJob("intv", "Interview Co", "Platform Engineer", url, null));
         report(app, Map.of("kind", "SUBMITTED", "occurredOn", "2026-10-01"));
 
         JsonNode ingest = ingestHttp(Map.of("messageId", "intv-" + UUID.randomUUID(), "from", "talent@interviewco.example",
@@ -535,7 +535,7 @@ class ApplicationTrackingIT {
 
     @Test
     void aRecordedStatusWithNoHistoryIsReportedAsUnknown() throws Exception {
-        UUID app = application(seedJob("nohist", "Legacy Co", "Data Engineer", greenhouseUrl("nohist", 7602), null));
+        UUID app = application(seedJob("nohist", "Legacy Co", "Backend Engineer", greenhouseUrl("nohist", 7602), null));
         jdbc.update("update applications set status = 'OFFER' where id = ?", app);
         assertThat(track(app).get("status").asText()).isEqualTo("UNKNOWN");
     }
@@ -763,9 +763,11 @@ class ApplicationTrackingIT {
         UUID tsentaJob = UuidV7.generate();
         jdbc.update("""
                 insert into jobs (id, source_id, external_id, dedup_key, company_name_raw, title,
-                                  description_text, skills_extracted, status, content_hash, application_url, canonical_url)
-                values (?, ?, 'tsenta-hide', 'dedup-tsenta-hide', 'Hidden Source Co', 'Data Engineer', 'Build.', '{}',
-                        'SCORED', 'hash-tsenta-hide', 'https://careers.hiddensource.example/jobs/42', 'https://tsenta.com/jobs/abc')
+                                  description_text, skills_extracted, status, content_hash, application_url, canonical_url,
+                                  location_raw, country, remote_type)
+                values (?, ?, 'tsenta-hide', 'dedup-tsenta-hide', 'Hidden Source Co', 'Backend Engineer', 'Build.', '{}',
+                        'SCORED', 'hash-tsenta-hide', 'https://careers.hiddensource.example/jobs/42', 'https://tsenta.com/jobs/abc',
+                        'London, UK', 'GB', 'HYBRID')
                 """, tsentaJob, TSENTA_SOURCE);
         UUID viaAggregator = application(tsentaJob);
         report(viaBoard, Map.of("kind", "SUBMITTED"));
@@ -810,7 +812,7 @@ class ApplicationTrackingIT {
 
         // A purge of another candidate's profile cascades through every TRACK table.
         UUID otherProfile = otherProfile();
-        UUID theirJob = seedJob("del-other", "Delete Co", "Data Engineer", greenhouseUrl("del", 8202), null);
+        UUID theirJob = seedJob("del-other", "Delete Co", "Platform Engineer", greenhouseUrl("del", 8202), null);
         UUID theirApp = pipeline.createApplicationFromMatch(otherProfile, theirJob).applicationId();
         emails.ingest(otherProfile, "del-other-" + UUID.randomUUID(), "no-reply@deleteco.example", null,
                 "Application received", "We have received your application. " + greenhouseUrl("del", 8202),
@@ -833,8 +835,9 @@ class ApplicationTrackingIT {
         String externalId = "track-" + tag + "-" + jobId;
         jdbc.update("""
                 insert into jobs (id, source_id, external_id, dedup_key, company_name_raw, title,
-                                  description_text, skills_extracted, status, content_hash, application_url, canonical_url)
-                values (?, ?, ?, ?, ?, ?, 'Build services.', '{}', 'SCORED', ?, ?, ?)
+                                  description_text, skills_extracted, status, content_hash, application_url, canonical_url,
+                                  location_raw, country, remote_type)
+                values (?, ?, ?, ?, ?, ?, 'Build services.', '{}', 'SCORED', ?, ?, ?, 'London, UK', 'GB', 'HYBRID')
                 """, jobId, SOURCE, externalId, "dedup-" + externalId, company, title, "hash-" + externalId, url, url);
         for (JobIdentity.Key key : JobIdentity.keys(SOURCE, externalId, url, url, company, requisition)) {
             jdbc.update("insert into job_identity_keys(key, job_id, key_type, source_id) values (?, ?, ?, ?) on conflict (key) do nothing",

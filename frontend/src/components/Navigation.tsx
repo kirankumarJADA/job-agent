@@ -95,6 +95,17 @@ const MAIN_NAV: NavItem[] = [
     ),
   },
   {
+    name: 'Search Plans',
+    path: '/search-plans',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" className={iconClass} aria-hidden="true">
+        <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="1.6" />
+        <path d="M16 16l4.5 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+        <path d="M8.5 11h5M11 8.5v5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+  {
     name: 'Approval Rules',
     path: '/approval-rules',
     icon: (

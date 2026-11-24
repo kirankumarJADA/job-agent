@@ -78,7 +78,9 @@ class FlywayBootstrapRecoveryStrategyIT {
     private JdbcTemplate jdbc;
 
     private Flyway newFlyway() {
-        return Flyway.configure()
+        // FlywayTestSupport applies the application's session-level lock: V064's
+        // CREATE INDEX CONCURRENTLY deadlocks on Flyway's default transactional one.
+        return FlywayTestSupport.load(Flyway.configure()
                 .dataSource(jdbc.getDataSource())
                 .locations("classpath:db/migration")
                 .baselineOnMigrate(false)
@@ -88,8 +90,7 @@ class FlywayBootstrapRecoveryStrategyIT {
                 // itself. It uses the production value on purpose: these
                 // scenarios reproduce hosted deployments, and the correction
                 // must therefore be part of what is being verified here.
-                .placeholders(java.util.Map.of("remove_seed_dev_account", "true"))
-                .load();
+                .placeholders(java.util.Map.of("remove_seed_dev_account", "true")));
     }
 
     private void resetSchema() {
@@ -409,19 +410,17 @@ class FlywayBootstrapRecoveryStrategyIT {
 
         // Emulate the earlier deploy: baseline at zero, then migrate only as
         // far as that jar's chain went.
-        Flyway.configure()
+        FlywayTestSupport.load(Flyway.configure()
                 .dataSource(jdbc.getDataSource())
                 .locations("classpath:db/migration")
                 .baselineOnMigrate(false)
-                .baselineVersion("0")
-                .load()
+                .baselineVersion("0"))
                 .baseline();
-        Flyway.configure()
+        FlywayTestSupport.load(Flyway.configure()
                 .dataSource(jdbc.getDataSource())
                 .locations("classpath:db/migration")
                 .baselineOnMigrate(false)
-                .target("19")
-                .load()
+                .target("19"))
                 .migrate();
 
         // Production-like data written before the upgrade, on the V019

@@ -53,6 +53,29 @@ class GmailMessageMapperTest {
         assertThat(mapped.authentication().dmarc()).isEqualTo("pass");
         assertThat(mapped.connectedAddress()).isEqualTo("candidate@example.com");
         assertThat(mapped.receivedAt()).isEqualTo(Instant.ofEpochMilli(1791194400000L));
+        assertThat(mapped.threadReferences()).contains("th-1");
+    }
+
+    @Test
+    void extractsThreadIdAndRfcHeadersIntoThreadReferences() throws Exception {
+        java.util.List<String> headerObjects = new java.util.ArrayList<>();
+        headerObjects.add(header("From", "recruiter@acme.com"));
+        headerObjects.add(header("To", "candidate@example.com"));
+        headerObjects.add(header("Subject", "Re: Application update"));
+        headerObjects.add(header("In-Reply-To", "<initial-app@acme.com>"));
+        headerObjects.add(header("References", "<initial-app@acme.com> <prev-reply@acme.com>"));
+        String json = "{\"id\":\"msg-42\",\"threadId\":\"gmail-thread-999\",\"labelIds\":[\"INBOX\"],"
+                + "\"payload\":{\"headers\":[" + String.join(",", headerObjects) + "],"
+                + "\"mimeType\":\"text/plain\",\"body\":{\"data\":\""
+                + java.util.Base64.getUrlEncoder().encodeToString("Thanks for following up".getBytes()) + "\"}}}";
+
+        GmailMessageMapper.GmailMessage mapped = GmailMessageMapper.fromApi(
+                parse(json), "candidate@example.com");
+
+        assertThat(mapped.threadId()).isEqualTo("gmail-thread-999");
+        assertThat(mapped.threadReferences()).containsExactly(
+                "gmail-thread-999", "initial-app@acme.com", "prev-reply@acme.com"
+        );
     }
 
     @Test

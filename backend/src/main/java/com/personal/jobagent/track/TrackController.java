@@ -102,7 +102,9 @@ public class TrackController {
     @GetMapping("/applications/{id}/receipts")
     public ResponseEntity<?> receiptsList(@PathVariable UUID id, HttpServletRequest request) {
         UUID profileId = ownerContext.profileIdOrNull();
-        return run(request, () -> ResponseEntity.ok(Map.of("items", receipts.getAttempts(profileId, id))));
+        return run(request, () -> receipts.getAttempts(profileId, id)
+                .<ResponseEntity<?>>map(items -> ResponseEntity.ok(Map.of("items", items)))
+                .orElseGet(() -> notFound(request, "No application with that id")));
     }
 
     @PostMapping("/applications/{id}/track/reports")

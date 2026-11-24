@@ -246,7 +246,7 @@ public class DiscoveryOrchestrator {
     private static JobDiscoveryService.IngestJobCommand toCommand(UUID sourceId, ScraperProvider.ExtractedJob job) {
         String source = job.sourceUrl() == null ? job.applicationUrl() : job.sourceUrl();
         String externalId = job.externalJobId() == null
-                ? JobDeduplicationService.normalizeUrl(source) : job.externalJobId();
+                ? com.personal.jobagent.discovery.platform.JobIdentity.normalizeUrl(source) : job.externalJobId();
         return new JobDiscoveryService.IngestJobCommand(sourceId, externalId, null, job.company(), job.title(),
                 job.location(), null, null, job.remoteType(), job.employmentType(), null, null, null, null,
                 job.description(), job.skills(), job.applicationUrl(), source, job.postedAt());

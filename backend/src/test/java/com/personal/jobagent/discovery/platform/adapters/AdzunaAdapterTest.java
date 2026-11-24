@@ -198,6 +198,42 @@ class AdzunaAdapterTest {
     }
 
     @Test
+    void buildUriIncludesQueryParametersWhenPresent() {
+        AdzunaAdapter adapter = configured();
+        URI uriWithParams = adapter.buildUri("gb", 1, "Java Spring", "London");
+        assertThat(uriWithParams.toString())
+                .contains("/v1/api/jobs/gb/search/1")
+                .contains("app_id=test-app-id")
+                .contains("app_key=test-app-key")
+                .contains("what=Java+Spring")
+                .contains("where=London");
+
+        URI defaultUri = adapter.buildUri("gb", 1);
+        assertThat(defaultUri.toString())
+                .doesNotContain("&what=")
+                .doesNotContain("&where=");
+    }
+
+    @Test
+    void listPassesQueryParamsFromBoardRef() {
+        FixtureHttp http = new FixtureHttp()
+                .sequence("GET", "v1/api/jobs/gb/search",
+                        FixtureHttp.json(FixtureHttp.fixture("adzuna-search-empty.json")));
+
+        AdzunaAdapter adapter = configured();
+        BoardRef boardWithParams = new BoardRef(PlatformKind.ADZUNA, "gb", java.util.Map.of(
+                "what", "Rust Systems",
+                "where", "London"
+        ));
+        CrawlContext context = new CrawlContext(http.client(), 50, Instant.parse("2026-10-20T00:00:00Z"), null);
+        ListingResult result = adapter.list(boardWithParams, context);
+
+        assertThat(result.failure()).isNull();
+        assertThat(http.requests.stream().map(FixtureHttp.Request::uri))
+                .anyMatch(u -> u.toString().contains("what=Rust+Systems") && u.toString().contains("where=London"));
+    }
+
+    @Test
     void detailIsNeverActuallyCallableBecauseEveryListingEntryIsAlreadyComplete() {
         AdzunaAdapter adapter = configured();
         var entry = com.personal.jobagent.discovery.platform.BoardAdapter.ListingEntry.complete(

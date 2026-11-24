@@ -303,4 +303,26 @@ class ApplicationReceiptServiceTest {
         assertThat(redacted).hasSize(256);
         assertThat(redacted).endsWith("...");
     }
+
+    @Test
+    void getAttemptsReturnsEmptyWhenApplicationBelongsToAnotherProfileOrNotFound() {
+        UUID foreignAppId = UUID.randomUUID();
+        when(db.queryForObject(contains("select count(*) from applications"), eq(Integer.class), eq(foreignAppId), eq(PROFILE_ID)))
+                .thenReturn(0);
+
+        var attempts = service.getAttempts(PROFILE_ID, foreignAppId);
+        assertThat(attempts).isEmpty();
+    }
+
+    @Test
+    void getAttemptsReturnsListWhenApplicationOwned() {
+        when(db.queryForObject(contains("select count(*) from applications"), eq(Integer.class), eq(APP_ID), eq(PROFILE_ID)))
+                .thenReturn(1);
+        when(db.query(contains("from automation_plans p"), any(RowMapper.class), eq(APP_ID), eq(PROFILE_ID)))
+                .thenReturn(List.of());
+
+        var attempts = service.getAttempts(PROFILE_ID, APP_ID);
+        assertThat(attempts).isPresent();
+        assertThat(attempts.get()).isEmpty();
+    }
 }

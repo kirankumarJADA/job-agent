@@ -224,6 +224,25 @@ export const ApplicationTrackPanel: React.FC<{
   );
 };
 
+function stageOrder(stage: string): number {
+  switch (stage) {
+    case 'APPLIED': return 1;
+    case 'ACKNOWLEDGED': return 2;
+    case 'IN_CONTACT':
+    case 'ASSESSMENT':
+    case 'INTERVIEW': return 3;
+    case 'OFFER': return 4;
+    default: return 0;
+  }
+}
+
+const STAGES: Array<{ key: string; label: string }> = [
+  { key: 'APPLIED', label: 'Applied' },
+  { key: 'ACKNOWLEDGED', label: 'Acknowledged' },
+  { key: 'INTERVIEW', label: 'Interview' },
+  { key: 'OFFER', label: 'Offer' },
+];
+
 const StatusSection: React.FC<{ track: ApplicationTrack; onOpenReceipt: () => void }> = ({ track, onOpenReceipt }) => (
   <section aria-label="Current status">
     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -242,6 +261,65 @@ const StatusSection: React.FC<{ track: ApplicationTrack; onOpenReceipt: () => vo
         Submission Receipt
       </SecondaryButton>
     </div>
+
+    {/* Visual Timeline Stepper */}
+    <div className="mt-4 border-t border-line pt-3" aria-label="Application progress stepper">
+      <div className="flex items-center justify-between">
+        {STAGES.map((s, idx) => {
+          const isCurrent = track.status === s.key;
+          const isCompleted = stageOrder(track.status) >= stageOrder(s.key);
+          return (
+            <div key={s.key} className="flex items-center flex-1 last:flex-none">
+              <div className="flex flex-col items-center">
+                <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-semibold ${
+                  isCurrent ? 'bg-forest-700 text-white ring-2 ring-forest-400' :
+                  isCompleted ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-ink-muted'
+                }`}>
+                  {idx + 1}
+                </div>
+                <span className={`text-[11px] mt-1 font-medium ${isCurrent ? 'text-forest-800 font-bold' : isCompleted ? 'text-emerald-800' : 'text-ink-muted'}`}>
+                  {s.label}
+                </span>
+              </div>
+              {idx < STAGES.length - 1 && (
+                <div className={`flex-1 h-0.5 mx-2 ${stageOrder(track.status) > stageOrder(s.key) ? 'bg-emerald-500' : 'bg-slate-200'}`} />
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+
+    {track.followUp?.due && (
+      <div className="mt-3">
+        <Alert tone="info">
+          <strong>Follow-up reminder:</strong> This application has had no employer response for over 14 days. Consider sending a professional follow-up email.
+        </Alert>
+      </div>
+    )}
+
+    {track.threads && track.threads.length > 0 && (
+      <div className="mt-4 border-t border-line pt-3">
+        <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-muted mb-2">Recruiter Conversation Threads</h4>
+        <div className="space-y-1.5">
+          {track.threads.map((t) => (
+            <div key={t.threadId} className="flex items-center justify-between p-2 rounded border border-line bg-cream-50/50 text-xs">
+              <div>
+                <span className="font-semibold text-ink">{t.subject}</span>
+                <span className="ml-1.5 text-ink-faint">({t.messageCount} {t.messageCount === 1 ? 'msg' : 'msgs'})</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <StatusPill tone="sky">{t.latestClassification}</StatusPill>
+                {t.lastMessageAt && (
+                  <span className="text-ink-faint text-[11px]">{new Date(t.lastMessageAt).toLocaleDateString()}</span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    )}
+
     <p className="mt-2 text-sm text-ink-body">{track.reason}</p>
     <dl className="mt-3 grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
       <div>

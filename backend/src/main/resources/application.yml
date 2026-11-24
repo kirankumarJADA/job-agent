@@ -38,6 +38,18 @@ spring:
     # populated schemas fail closed.
     baseline-version: 0
 
+    # V064 builds applications_follow_up_idx with CREATE INDEX CONCURRENTLY, which waits for
+    # every transaction older than itself to finish. Flyway's PostgreSQL schema-history lock is
+    # transactional by default, so Flyway's own second connection sits "idle in transaction" for
+    # the whole run and the concurrent build waits on its virtualxid indefinitely - the migration
+    # HANGS rather than failing. A session-level advisory lock carries no such transaction, so the
+    # build proceeds. Measured on PostgreSQL 17.11: without this, migrate hung for 25 minutes at
+    # V064; with it the whole V001-V064 chain applies in 0.653s and Flyway logs V064 as
+    # "[non-transactional]". Required together with V064's executeInTransaction=false script config
+    # (V064__application_follow_up_index_concurrent.sql.conf).
+    postgresql:
+      transactional-lock: false
+
     placeholders:
       # V024 neutralizes the seeded development credential (dev@example.local,
       # whose password is published in V003's comment) unless a deployment says

@@ -47,8 +47,9 @@ export class HumanInputRequiredError extends Error {
 
 export class BrowserWorker {
   constructor({ statePath, artifactDir, eventSink = () => {}, verificationResolver = null, identityResolver = null,
-                credentialResolver = null, onPageCreated = null }) {
+                credentialResolver = null, onPageCreated = null, chromium: customChromium = null } = {}) {
     this.store = new StateStore(statePath);
+    this.chromium = customChromium ?? chromium;
     this.artifactDir = artifactDir;
     this.eventSink = eventSink;
     this.verificationResolver = verificationResolver;
@@ -138,7 +139,7 @@ export class BrowserWorker {
     // renderer, and the hardened images run without the user-namespace
     // sandbox. Both flags are required for reliable headless execution in
     // the production container (worker/Dockerfile).
-    const browser = await chromium.launch({
+    const browser = await (this.chromium || chromium).launch({
       headless,
       args: ['--disable-dev-shm-usage', '--no-sandbox', '--disable-gpu'],
     });
@@ -206,6 +207,9 @@ export class BrowserWorker {
           }
           if (step.type === StepType.ASHBY_SUBMIT_CLICK && prior.submitResult) {
             this.lastAshbySubmitResult = prior.submitResult;
+          }
+          if (step.type === StepType.WORKDAY_SUBMIT_CLICK && prior.submitResult) {
+            this.lastWorkdaySubmitResult = prior.submitResult;
           }
           continue;
         }
@@ -337,8 +341,29 @@ export class BrowserWorker {
       }
       throw error;
     } finally {
-      await context.close();
-      await browser.close();
+      try {
+        if (context) {
+          await context.close();
+        }
+      } catch (closeErr) {
+        console.error(JSON.stringify({
+          type: 'BROWSER_CLEANUP_ERROR',
+          target: 'context',
+          error: closeErr?.message || String(closeErr),
+        }));
+      } finally {
+        try {
+          if (browser) {
+            await browser.close();
+          }
+        } catch (closeErr) {
+          console.error(JSON.stringify({
+            type: 'BROWSER_CLEANUP_ERROR',
+            target: 'browser',
+            error: closeErr?.message || String(closeErr),
+          }));
+        }
+      }
     }
   }
 

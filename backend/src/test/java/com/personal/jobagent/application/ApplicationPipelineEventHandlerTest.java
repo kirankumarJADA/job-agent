@@ -31,6 +31,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
@@ -87,6 +88,8 @@ class ApplicationPipelineEventHandlerTest {
         when(db.queryForObject(contains("count(*) from applications"), eq(Integer.class), eq(APPLICATION)))
                 .thenReturn(1);
         when(db.update(contains("application_events"), any(UUID.class), eq(APPLICATION), any(String.class)))
+                .thenReturn(1);
+        when(db.update(contains("consumed_events"), any(), any(), any()))
                 .thenReturn(1);
         when(db.queryForList(anyString(), any(Object.class))).thenReturn(List.of());
         // Default: APPLY matches auto-apply (the decision-engine tests cover
@@ -395,5 +398,30 @@ class ApplicationPipelineEventHandlerTest {
 
         verify(pipeline).onJobIngested(JOB, "UPDATED");
         verify(pipeline, never()).createApplicationFromMatch(any(), any());
+    }
+
+    @Test
+    void jobMatchedDuplicateBusinessKeyIsIgnored() {
+        when(db.update(contains("consumed_events"), any(), any(), any())).thenReturn(0);
+
+        handler.handle(envelope(NotificationEvents.JOB_MATCHED, Map.of(
+                "job_id", JOB.toString(), "profile_id", PROFILE.toString(),
+                "recommendation", "APPLY", "score", 91)));
+
+        verify(decisionService, never()).decide(any(), any(), anyInt(), any());
+        verify(pipeline, never()).createApplicationFromMatch(any(), any());
+    }
+
+    @Test
+    void applicationCreatedDuplicateBusinessKeyIsIgnored() {
+        when(db.update(contains("consumed_events"), any(), any(), any())).thenReturn(0);
+
+        handler.handle(envelope(NotificationEvents.APPLICATION_CREATED, Map.of(
+                "application_id", APPLICATION.toString(),
+                "profile_id", PROFILE.toString(),
+                "job_id", JOB.toString())));
+
+        verify(resumeService, never()).tailor(any(), any(), any());
+        verify(coverLetterService, never()).generateCoverLetter(any(), any(), any());
     }
 }

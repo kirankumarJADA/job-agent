@@ -110,23 +110,19 @@ public class HardFilterService {
         if (jobTitle == null || jobTitle.isBlank() || allowedTitles == null || allowedTitles.isEmpty()) {
             return false;
         }
+        List<String> expandedAllowed = TitleSynonymRegistry.expandTitles(allowedTitles);
         String jobTitleClean = normalizeTitle(jobTitle);
-        for (String allowed : allowedTitles) {
+        for (String allowed : expandedAllowed) {
             if (allowed == null || allowed.isBlank()) continue;
             String allowedClean = normalizeTitle(allowed);
-            if (jobTitleClean.contains(allowedClean)) {
+            String wordRegex = "\\b" + java.util.regex.Pattern.quote(allowedClean) + "\\b";
+            if (java.util.regex.Pattern.compile(wordRegex).matcher(jobTitleClean).find()) {
                 return true;
             }
             String[] tokens = allowedClean.split("\\s+");
-            if (tokens.length > 1) {
-                boolean allTokensMatch = true;
-                for (String t : tokens) {
-                    if (!jobTitleClean.contains(t)) {
-                        allTokensMatch = false;
-                        break;
-                    }
-                }
-                if (allTokensMatch) {
+            if (tokens.length == 2) {
+                String regex = "\\b" + java.util.regex.Pattern.quote(tokens[0]) + "(?:\\s+\\w+)?\\s+" + java.util.regex.Pattern.quote(tokens[1]) + "\\b";
+                if (java.util.regex.Pattern.compile(regex).matcher(jobTitleClean).find()) {
                     return true;
                 }
             }

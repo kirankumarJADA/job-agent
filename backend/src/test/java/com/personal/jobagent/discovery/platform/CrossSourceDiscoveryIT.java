@@ -101,6 +101,72 @@ class CrossSourceDiscoveryIT {
     }
 
     @Test
+    void aggregatorExpiryOnlySoftDeletesJobsWhoseObservationsExpiredInThatSweep() {
+        String n = unique();
+
+        var staleAggregatorJob = ingest(aggregator, "ts-expired-" + n, "Expired aggregator role", "Aggregator body",
+                null, "https://tsenta.com/jobs/expired-" + n);
+        var legacyJob = ingest(ats, "legacy-" + n, "Legacy role", "Legacy body",
+                "https://boards.greenhouse.io/acme/jobs/legacy-" + n,
+                "https://boards.greenhouse.io/acme/jobs/legacy-" + n);
+        var activeAtsJob = ingest(ats, "active-" + n, "Active ATS role", "Active body",
+                "https://boards.greenhouse.io/acme/jobs/active-" + n,
+                "https://boards.greenhouse.io/acme/jobs/active-" + n);
+        var closedHistoryJob = ingest(ats2, "closed-" + n, "Closed historical role", "Historical body",
+                "https://jobs.lever.co/acme/closed-" + n,
+                "https://jobs.lever.co/acme/closed-" + n);
+        String sharedAtsUrl = "https://boards.greenhouse.io/acme/jobs/shared-" + n;
+        var crossSourceJob = ingest(ats, "shared-ats-" + n, "Cross-source live role", "ATS body",
+                sharedAtsUrl, sharedAtsUrl);
+        ingest(aggregator, "shared-ts-" + n, "Cross-source live role", "Aggregator body",
+                sharedAtsUrl, "https://tsenta.com/jobs/shared-" + n);
+
+        // Reproduce the four-row F9 pool: a legacy job with no observations,
+        // one stale aggregator observation, one currently active ATS posting,
+        // and one unrelated historical posting already marked CLOSED. The
+        // additional cross-source row proves a live ATS sighting still keeps
+        // a job visible after its stale aggregator observation expires.
+        jdbc.update("delete from job_source_observations where job_id = ?", legacyJob.jobId());
+        jdbc.update("""
+                update job_source_observations
+                set last_seen_at = now() - interval '8 days'
+                where job_id = ?
+                """, staleAggregatorJob.jobId());
+        jdbc.update("""
+                update job_source_observations
+                set last_seen_at = now() - interval '8 days'
+                where job_id = ? and source_id = ?
+                """, crossSourceJob.jobId(), aggregator);
+        jdbc.update("""
+                update job_source_observations
+                set source_status = 'CLOSED', removed_at = now()
+                where job_id = ?
+                """, closedHistoryJob.jobId());
+
+        ingestion.scheduledDiscoveryMaintenance();
+
+        assertThat(jdbc.queryForObject("select deleted_at from jobs where id = ?",
+                Object.class, staleAggregatorJob.jobId())).isNotNull();
+        assertThat(jdbc.queryForObject("select deleted_at from jobs where id = ?",
+                Object.class, legacyJob.jobId())).isNull();
+        assertThat(jdbc.queryForObject("select deleted_at from jobs where id = ?",
+                Object.class, activeAtsJob.jobId())).isNull();
+        assertThat(jdbc.queryForObject("select deleted_at from jobs where id = ?",
+                Object.class, closedHistoryJob.jobId())).isNull();
+        assertThat(jdbc.queryForObject("select deleted_at from jobs where id = ?",
+                Object.class, crossSourceJob.jobId())).isNull();
+        assertThat(jdbc.queryForObject("""
+                select source_status from job_source_observations where job_id = ? and source_id = ?
+                """, String.class, crossSourceJob.jobId(), aggregator)).isEqualTo("MISSING");
+        assertThat(jdbc.queryForObject("""
+                select source_status from job_source_observations where job_id = ? and source_id = ?
+                """, String.class, crossSourceJob.jobId(), ats)).isEqualTo("SEEN");
+        assertThat(jdbc.queryForObject("""
+                select source_status from job_source_observations where job_id = ?
+                """, String.class, staleAggregatorJob.jobId())).isEqualTo("MISSING");
+    }
+
+    @Test
     void anAggregatorListingAndTheAtsPostingBecomeOneJobWithBothProvenances() {
         String n = unique();
         String gh = "https://boards.greenhouse.io/acme" + n + "/jobs/4" + n.hashCode();
@@ -254,19 +320,96 @@ class CrossSourceDiscoveryIT {
     }
 
     @Test
-    void aJobStillListedByAnotherSourceIsNotRemoved() {
+    void aJobStillListedByAnotherAuthoritativeSourceIsNotRemoved() {
         String board = "xs" + unique();
         UUID gem = source("GEM", board);
         Scripted a = new Scripted();
         a.listing = BoardAdapter.ListingResult.complete(List.of(posting(board, "keep")), 1, null);
         boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.MANUAL);
-        // The same posting is also listed by the aggregator.
+        // The same posting is also listed by another authoritative ATS source (LEVER).
         String url = "https://jobs.gem.com/" + board + "/keep";
-        ingest(aggregator, "ts-keep-" + board, "Role keep", "Body", url, "https://tsenta.com/jobs/keep-" + board);
+        ingest(ats2, "lev-keep-" + board, "Role keep", "Body", url, url);
 
-        a.listing = BoardAdapter.ListingResult.complete(List.of(), 1, null);
+        // GEM completes a NON-EMPTY run without "keep" (an empty listing is never authoritative under
+        // C1 and would stop at the safe-deletion guard), so markUnlisted really runs here and "keep"
+        // must survive only because LEVER, another authoritative source, still lists it.
+        a.listing = BoardAdapter.ListingResult.complete(List.of(posting(board, "other")), 1, null);
         boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.MANUAL);
         assertThat(deletedAt(gem, "keep")).isNull();
+    }
+
+    @Test
+    void anAggregatorDoesNotKeepAJobAliveOnceAuthoritativeSourceClosesIt() {
+        String board = "xs" + unique();
+        UUID gem = source("GEM", board);
+        Scripted a = new Scripted();
+        a.listing = BoardAdapter.ListingResult.complete(List.of(posting(board, "agg-drop")), 1, null);
+        boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.MANUAL);
+        // The same posting is listed by the aggregator (TSENTA).
+        String url = "https://jobs.gem.com/" + board + "/agg-drop";
+        ingest(aggregator, "ts-drop-" + board, "Role drop", "Body", url, "https://tsenta.com/jobs/drop-" + board);
+
+        // GEM completes a non-empty run without the job -> authoritative source marks it missing.
+        // (An empty listing is never authoritative in any mode: C1, safe-deletion guard.)
+        a.listing = BoardAdapter.ListingResult.complete(List.of(posting(board, "agg-keep")), 1, null);
+        boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.MANUAL);
+        // P1-1: Aggregator SEEN observation does NOT keep it alive
+        assertThat(deletedAt(gem, "agg-drop")).isNotNull();
+
+        // Aggregator re-ingests the job -> Aggregator does NOT resurrect the closed job
+        ingest(aggregator, "ts-drop-" + board, "Role drop", "Body", url, "https://tsenta.com/jobs/drop-" + board);
+        assertThat(deletedAt(gem, "agg-drop")).isNotNull();
+
+        // Authoritative GEM lists the job again -> Authoritative source RESTORES it
+        a.listing = BoardAdapter.ListingResult.complete(List.of(posting(board, "agg-drop")), 1, null);
+        boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.MANUAL);
+        assertThat(deletedAt(gem, "agg-drop")).isNull();
+    }
+
+    @Test
+    void discoveryRunHistoryIsRecordedInDiscoveryRunsTable() {
+        String board = "xs" + unique();
+        UUID gem = source("GEM", board);
+        Scripted a = new Scripted();
+        a.listing = BoardAdapter.ListingResult.complete(List.of(posting(board, "r1")), 1, null);
+        boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.SCHEDULED);
+
+        List<Map<String, Object>> runs = jdbc.queryForList("""
+                select kind, mode, status, complete, duration_ms, counters
+                from discovery_runs where source_id = ?
+                """, gem);
+        assertThat(runs).hasSize(1);
+        Map<String, Object> run = runs.get(0);
+        assertThat(run.get("kind")).isEqualTo("GEM");
+        assertThat(run.get("mode")).isEqualTo("SCHEDULED");
+        assertThat(run.get("status")).isEqualTo("ok");
+        assertThat(run.get("complete")).isEqualTo(true);
+        assertThat(((Number) run.get("duration_ms")).longValue()).isGreaterThanOrEqualTo(0);
+    }
+
+    @Test
+    void touchedEventsAreRateLimitedWithinInterval() {
+        org.springframework.test.util.ReflectionTestUtils.setField(ingestion, "touchedEventIntervalHours", 24);
+        try {
+            String board = "xs" + unique();
+            UUID gem = source("GEM", board);
+            Scripted a = new Scripted();
+            a.listing = BoardAdapter.ListingResult.complete(List.of(posting(board, "rate-limit")), 1, null);
+            boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.MANUAL);
+
+            int initialDiscoveredEvents = jdbc.queryForObject(
+                    "select count(*)::int from outbox_events where event_type = 'job.discovered'", Integer.class);
+            assertThat(initialDiscoveredEvents).isGreaterThanOrEqualTo(1);
+
+            // Immediate second run with unchanged content -> TOUCHED path
+            boards.run(gem, a, board, "Acme", BoardDiscoveryService.Mode.MANUAL);
+            int afterSecondRun = jdbc.queryForObject(
+                    "select count(*)::int from outbox_events where event_type = 'job.discovered'", Integer.class);
+            // TOUCHED event within 24 hours should be suppressed
+            assertThat(afterSecondRun).isEqualTo(initialDiscoveredEvents);
+        } finally {
+            org.springframework.test.util.ReflectionTestUtils.setField(ingestion, "touchedEventIntervalHours", 0);
+        }
     }
 
     @Test

@@ -31,10 +31,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
+import java.util.concurrent.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
@@ -448,6 +446,51 @@ class CloudflareManagedMailIT {
         // Candidate B and App B remain completely untouched
         assertThat(jdbc.queryForObject("select count(*) from emails where profile_id = ?", Integer.class, candidateB.profileId())).isZero();
         assertThat(jdbc.queryForObject("select count(*) from email_application_links where profile_id = ?", Integer.class, candidateB.profileId())).isZero();
+    }
+
+    @Test
+    @DisplayName("Concurrent duplicate webhook deliveries store exactly one message")
+    void concurrentDuplicateWebhookDeliveryStoresSingleMessage() throws Exception {
+        String address = reserve(session);
+        String messageId = "<concurrent-test-" + UUID.randomUUID() + "@employer.example>";
+        String body = buildCloudflarePayload(address, "hr@employer.example", "Interview Invitation", "Please choose a time slot", messageId);
+        String token = "tok-concurrent-" + UUID.randomUUID();
+        Instant now = Instant.now();
+
+        int threads = 4;
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        CountDownLatch latch = new CountDownLatch(1);
+        List<Future<MvcResult>> futures = new ArrayList<>();
+
+        for (int i = 0; i < threads; i++) {
+            futures.add(executor.submit(() -> {
+                latch.await();
+                return deliverSigned(body, token, now);
+            }));
+        }
+
+        latch.countDown();
+        executor.shutdown();
+        assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+
+        int storedCount = 0;
+        int duplicateCount = 0;
+        for (Future<MvcResult> f : futures) {
+            MvcResult res = f.get();
+            assertThat(res.getResponse().getStatus()).isEqualTo(200);
+            String status = json(res).get("status").asText();
+            if ("stored".equals(status)) storedCount++;
+            else if ("duplicate".equals(status)) duplicateCount++;
+        }
+
+        assertThat(storedCount).isEqualTo(1);
+        assertThat(duplicateCount).isEqualTo(threads - 1);
+
+        // Exactly one message in managed_inbound_messages
+        Integer dbCount = jdbc.queryForObject(
+                "select count(*) from managed_inbound_messages where envelope_recipient = ?",
+                Integer.class, address);
+        assertThat(dbCount).isEqualTo(1);
     }
 
     private JsonNode json(MvcResult result) throws Exception {

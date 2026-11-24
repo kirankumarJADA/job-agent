@@ -87,6 +87,9 @@ class InspectionPlanBridgeTest {
         // Application exists
         when(db.queryForObject(contains("count(*) from applications"), eq(Integer.class), eq(APP_ID)))
                 .thenReturn(1);
+        // Event idempotency claim succeeds
+        when(db.update(contains("consumed_events"), any(), any(), any()))
+                .thenReturn(1);
         // Timeline writes succeed
         when(db.update(contains("application_events"), any(UUID.class), eq(APP_ID), any(), any()))
                 .thenReturn(1);

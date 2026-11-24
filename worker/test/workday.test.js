@@ -663,3 +663,45 @@ test('WORKDAY_SUBMIT_CLICK clicks submit button and captures platform confirmati
 
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test('a previously confirmed Workday submission outcome is restored after a restart, without clicking again', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workday-restore-confirmed-'));
+  const plan = workdayPlan(root, {
+    extraSteps: [
+      { id: 'workday-apply', type: StepType.WORKDAY_APPLY, policy: 'AUTO', params: {} },
+      { id: 'workday-submit-click', type: StepType.WORKDAY_SUBMIT_CLICK, policy: 'AUTO', params: {} },
+    ],
+  });
+
+  let loadCount = 0;
+  const instance = routedWorker(root, (route) => {
+    loadCount += 1;
+    if (loadCount === 1) {
+      route.fulfill({ contentType: 'text/html', body: REVIEW_SUBMIT_HTML });
+    } else {
+      route.fulfill({ contentType: 'text/html', body: CONFIRMATION_HTML });
+    }
+  });
+
+  await assert.rejects(
+    () => instance.execute(plan, { approve: true, failAfterStep: 'workday-submit-click' }),
+    /SIMULATED_WORKER_CRASH_AFTER:workday-submit-click/,
+  );
+
+  const persisted = JSON.parse(fs.readFileSync(path.join(root, 'state.json'), 'utf8')).plans[plan.planId];
+  assert.equal(persisted.steps['workday-submit-click'].status, 'COMPLETED');
+  assert.equal(persisted.steps['workday-submit-click'].submitResult?.confirmed, true);
+  assert.equal(loadCount, 2, 'first process executed navigation and submit click');
+
+  const restarted = routedWorker(root, (route) => {
+    route.fulfill({ contentType: 'text/html', body: '<html></html>' });
+  });
+
+  const result = await restarted.execute(plan, { approve: true });
+  assert.equal(result.status, 'COMPLETED');
+  assert.equal(result.workdaySubmitResult?.confirmed, true);
+  assert.equal(result.workdaySubmitResult?.category, WorkdaySubmissionCategory.CONFIRMED);
+  assert.equal(loadCount, 2, 'restarted process must never click or re-submit a second time');
+
+  fs.rmSync(root, { recursive: true, force: true });
+});

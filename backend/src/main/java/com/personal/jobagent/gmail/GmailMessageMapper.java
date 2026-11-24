@@ -4,8 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.personal.jobagent.track.ReceiptVerificationPolicy;
 
 import java.time.Instant;
-import java.util.Base64;
-import java.util.Locale;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -34,7 +33,14 @@ public final class GmailMessageMapper {
     public record GmailMessage(String messageId, String threadId, Long historyId, String from, String to,
                                String subject, Instant receivedAt, String bodyText,
                                ReceiptVerificationPolicy.SenderAuthentication authentication,
-                               String connectedAddress) {}
+                               String connectedAddress, List<String> threadReferences) {
+        public GmailMessage(String messageId, String threadId, Long historyId, String from, String to,
+                            String subject, Instant receivedAt, String bodyText,
+                            ReceiptVerificationPolicy.SenderAuthentication authentication,
+                            String connectedAddress) {
+            this(messageId, threadId, historyId, from, to, subject, receivedAt, bodyText, authentication, connectedAddress, List.of());
+        }
+    }
 
     /**
      * A mailbox item is eligible as delivered-email evidence only when Gmail's
@@ -62,6 +68,10 @@ public final class GmailMessageMapper {
                 ? message.path("historyId").asLong() : null;
 
         String from = null, to = null, subject = null;
+        List<String> threadRefs = new ArrayList<>();
+        if (threadId != null && !threadId.isBlank()) {
+            threadRefs.add(threadId.trim());
+        }
         JsonNode headers = message.path("payload").path("headers");
         if (headers.isArray()) {
             for (JsonNode header : headers) {
@@ -70,6 +80,16 @@ public final class GmailMessageMapper {
                 if ("From".equalsIgnoreCase(name)) from = value;
                 else if ("To".equalsIgnoreCase(name)) to = value;
                 else if ("Subject".equalsIgnoreCase(name)) subject = value;
+                else if ("In-Reply-To".equalsIgnoreCase(name) || "References".equalsIgnoreCase(name) || "Message-ID".equalsIgnoreCase(name)) {
+                    if (!value.isBlank()) {
+                        for (String part : value.split("\\s+")) {
+                            String trimmed = part.trim().replaceAll("^[<]+|[>]+$", "");
+                            if (!trimmed.isBlank() && !threadRefs.contains(trimmed)) {
+                                threadRefs.add(trimmed);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -88,7 +108,7 @@ public final class GmailMessageMapper {
         // from a potentially forged To or Delivered-To header.
         String toForMessage = deliveredToConnectedMailbox ? connectedAddress : to;
         return new GmailMessage(messageId, threadId, historyId, from, toForMessage, subject,
-                receivedAt, body, auth, connected);
+                receivedAt, body, auth, connected, Collections.unmodifiableList(threadRefs));
     }
 
     /**

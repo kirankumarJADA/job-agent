@@ -391,4 +391,35 @@ describe('JobsFeedPage Phase 4 filters, sort and URL sync', () => {
     expect(await screen.findByText('No matching jobs')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Reset all filters' })).toBeTruthy();
   });
+
+  it('toggling the bookmark star triggers POST and DELETE /jobs/{id}/bookmark endpoints', async () => {
+    mockedApiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      const shared = routeSharedPaths(path);
+      if (shared !== undefined) return shared;
+      if (path.startsWith('/jobs?')) return { items: [{ ...job, bookmarked: false }], next_cursor: '' };
+      if (path === '/jobs/job-1/bookmark') {
+        return { bookmarked: init?.method === 'POST', job_id: 'job-1' };
+      }
+      throw new Error('Unexpected API path: ' + path);
+    });
+
+    render(React.createElement(MemoryRouter, null, React.createElement(JobsFeedPage)));
+    await screen.findByText('Backend Engineer');
+
+    // Initially unbookmarked
+    const bookmarkBtn = screen.getByRole('button', { name: 'Bookmark job' });
+    expect(bookmarkBtn).toBeTruthy();
+
+    // Click to bookmark
+    await userEvent.click(bookmarkBtn);
+    expect(mockedApiFetch).toHaveBeenCalledWith('/jobs/job-1/bookmark', { method: 'POST' });
+
+    // State updates to bookmarked
+    const removeBtn = await screen.findByRole('button', { name: 'Remove bookmark' });
+    expect(removeBtn).toBeTruthy();
+
+    // Click to remove bookmark
+    await userEvent.click(removeBtn);
+    expect(mockedApiFetch).toHaveBeenCalledWith('/jobs/job-1/bookmark', { method: 'DELETE' });
+  });
 });

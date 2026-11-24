@@ -213,9 +213,9 @@ public class GmailSyncService {
                         GmailMessageMapper.fromApi(message, connection.googleEmail());
                 EmailIntelligenceService.IngestResult result = emailIntelligence.ingestFromMailboxConnector(
                         profileId, new EmailIntelligenceService.ConnectorMessage(
-                                "gmail", mapped.messageId(), mapped.from(), mapped.to(),
+                                "gmail", mapped.messageId(), mapped.threadId(), mapped.from(), mapped.to(),
                                 mapped.subject(), mapped.bodyText(), mapped.receivedAt(),
-                                mapped.connectedAddress(), mapped.authentication()));
+                                mapped.connectedAddress(), mapped.authentication(), mapped.threadReferences()));
                 if (result.emailId() != null && !result.replayed()) ingested++;
             }
 
