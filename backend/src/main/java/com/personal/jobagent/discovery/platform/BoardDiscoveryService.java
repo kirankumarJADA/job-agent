@@ -433,7 +433,14 @@ public class BoardDiscoveryService {
         counts.put("requests", http.requestsMade());
         counts.put("result_count", resultCount);
 
-        int nextOffset = (totalEntries > 0) ? (offset + entriesProcessed) % totalEntries : 0;
+        int nextOffset;
+        if (listing.failure() != null && totalEntries == 0) {
+            // Upstream listing failure with zero entries (e.g. HTTP 500, 429, or network error):
+            // preserve the previously persisted scan offset rather than resetting pagination cursor to 0.
+            nextOffset = startOffset;
+        } else {
+            nextOffset = (totalEntries > 0) ? (offset + entriesProcessed) % totalEntries : 0;
+        }
         counts.put("scan_offset", nextOffset);
         if (searchPlanId != null) {
             counts.put("scan_offset_" + searchPlanId, nextOffset);

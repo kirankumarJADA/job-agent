@@ -43,7 +43,8 @@ public class JobRepository {
                 (Integer) rs.getObject("match_score"),
                 rs.getString("match_recommendation"),
                 rs.getTimestamp("match_scored_at") == null ? null : rs.getTimestamp("match_scored_at").toInstant(),
-                JdbcConversions.readJsonMap(rs, "match_breakdown", objectMapper));
+                JdbcConversions.readJsonMap(rs, "match_breakdown", objectMapper),
+                rs.getBoolean("bookmarked"));
     }
 
     /**
@@ -154,11 +155,18 @@ public class JobRepository {
     public record FeedItem(JobRecord job, java.time.Instant firstSeenAt, java.time.Instant lastSeenAt,
                            boolean stale, boolean removed, String sourceName, String sourceKind,
                            Integer matchScore, String matchRecommendation, java.time.Instant matchScoredAt,
-                           Map<String, Object> matchBreakdown) {
+                           Map<String, Object> matchBreakdown, boolean bookmarked) {
+        public FeedItem(JobRecord job, java.time.Instant firstSeenAt, java.time.Instant lastSeenAt,
+                        boolean stale, boolean removed, String sourceName, String sourceKind,
+                        Integer matchScore, String matchRecommendation, java.time.Instant matchScoredAt,
+                        Map<String, Object> matchBreakdown) {
+            this(job, firstSeenAt, lastSeenAt, stale, removed, sourceName, sourceKind, matchScore, matchRecommendation, matchScoredAt, matchBreakdown, false);
+        }
+
         public FeedItem(JobRecord job, java.time.Instant firstSeenAt, java.time.Instant lastSeenAt,
                         boolean stale, boolean removed, String sourceName, String sourceKind,
                         Integer matchScore, String matchRecommendation, java.time.Instant matchScoredAt) {
-            this(job, firstSeenAt, lastSeenAt, stale, removed, sourceName, sourceKind, matchScore, matchRecommendation, matchScoredAt, null);
+            this(job, firstSeenAt, lastSeenAt, stale, removed, sourceName, sourceKind, matchScore, matchRecommendation, matchScoredAt, null, false);
         }
     }
 
@@ -172,9 +180,11 @@ public class JobRepository {
             + ", s.display_name as source_name, s.kind as source_kind"
             + ", m.score as match_score, m.recommendation as match_recommendation, m.scored_at as match_scored_at"
             + ", m.breakdown as match_breakdown"
+            + ", (b.id is not null) as bookmarked"
             + " from jobs j"
             + " left join job_sources s on s.id = j.source_id"
-            + " left join job_matches m on m.job_id = j.id and m.profile_id = ?::uuid";
+            + " left join job_matches m on m.job_id = j.id and m.profile_id = ?::uuid"
+            + " left join job_bookmarks b on b.job_id = j.id and b.profile_id = ?::uuid";
 
 
 
@@ -287,6 +297,7 @@ public class JobRepository {
         List<String> conditions = new ArrayList<>();
         List<Object> params = new ArrayList<>();
         params.add(profileId);
+        params.add(profileId);
         conditions.add("j.deleted_at is null");
         if (status != null) {
             conditions.add("j.status = ?");
@@ -377,8 +388,60 @@ public class JobRepository {
 
     /** One posting with its freshness, source and the caller's own match — soft-deleted rows included and flagged. */
     public Optional<FeedItem> findFeedItem(UUID profileId, UUID jobId) {
-        return jdbcTemplate.query(FEED_SELECT + " where j.id = ?", feedMapper, profileId, jobId)
+        return jdbcTemplate.query(FEED_SELECT + " where j.id = ?", feedMapper, profileId, profileId, jobId)
                 .stream().findFirst();
+    }
+
+    /** Check if a job exists in the catalogue. */
+    public boolean existsById(UUID jobId) {
+        if (jobId == null) {
+            return false;
+        }
+        Integer count = jdbcTemplate.queryForObject(
+                "select count(1) from jobs where id = ?", Integer.class, jobId);
+        return count != null && count > 0;
+    }
+
+    /**
+     * Bookmark a job for the given candidate profile. Idempotent under multiple calls.
+     * Returns true if a new bookmark was created, false if already bookmarked.
+     */
+    public boolean addBookmark(UUID profileId, UUID jobId) {
+        if (profileId == null || jobId == null) {
+            return false;
+        }
+        int rows = jdbcTemplate.update("""
+                insert into job_bookmarks (id, profile_id, job_id, created_at)
+                values (?, ?, ?, now())
+                on conflict (profile_id, job_id) do nothing
+                """, UUID.randomUUID(), profileId, jobId);
+        return rows > 0;
+    }
+
+    /**
+     * Remove a bookmark for the given candidate profile. Idempotent under multiple calls.
+     * Returns true if a bookmark was removed, false if none existed.
+     */
+    public boolean removeBookmark(UUID profileId, UUID jobId) {
+        if (profileId == null || jobId == null) {
+            return false;
+        }
+        int rows = jdbcTemplate.update("""
+                delete from job_bookmarks
+                where profile_id = ? and job_id = ?
+                """, profileId, jobId);
+        return rows > 0;
+    }
+
+    /** Check whether a candidate has bookmarked a specific job. */
+    public boolean isBookmarked(UUID profileId, UUID jobId) {
+        if (profileId == null || jobId == null) {
+            return false;
+        }
+        Integer count = jdbcTemplate.queryForObject(
+                "select count(1) from job_bookmarks where profile_id = ? and job_id = ?",
+                Integer.class, profileId, jobId);
+        return count != null && count > 0;
     }
 
     /** One candidate's own match decision for a posting, or empty if they have not scored it. */
