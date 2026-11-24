@@ -275,6 +275,13 @@ public class HardFilterService {
         }
     }
 
+    public static boolean matchesSalary(JobRecord job, Long salaryMinGbp) {
+        if (salaryMinGbp == null || salaryMinGbp <= 0) return true;
+        BigDecimal jobMax = job.salaryMax();
+        if (jobMax == null) return true;
+        return jobMax.compareTo(BigDecimal.valueOf(salaryMinGbp)) >= 0;
+    }
+
     private void checkSalaryMin(JobRecord job, PreferenceSetRecord prefs,
                                 List<HardFilterResult.FilterReason> reasons) {
         Long minSalary = prefs.salaryMinGbp();
@@ -285,7 +292,7 @@ public class HardFilterService {
         if (jobMax == null) return;
 
         // If the job's declared maximum is below the user's minimum, reject
-        if (jobMax.compareTo(BigDecimal.valueOf(minSalary)) < 0) {
+        if (!matchesSalary(job, minSalary)) {
             reasons.add(new HardFilterResult.FilterReason(
                     "SALARY_MIN",
                     "≥ " + minSalary + " GBP",
