@@ -215,7 +215,7 @@ class ApplicationReceiptIT {
         jdbc.update("""
                 insert into candidate_sandbox_registrations (id, profile_id, ats_platform, posting_url, permitted_domain, approved_by)
                 values (?, ?, 'WORKDAY', ?, ?, 'dev@example.local')
-                on conflict (profile_id, ats_platform, posting_url) do nothing
+                on conflict (profile_id, ats_platform, posting_url) where revoked_at is null do nothing
                 """, UUID.randomUUID(), profileId, postingUrl, SANDBOX_DOMAIN);
     }
 

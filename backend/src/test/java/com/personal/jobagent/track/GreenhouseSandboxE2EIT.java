@@ -717,6 +717,82 @@ class GreenhouseSandboxE2EIT {
                 .andExpect(jsonPath("$.submission.state").value("CONFIRMED"));
     }
 
+    @Test
+    void revokedSandboxReceiptStaysUntrustedAfterReregistrationWhileNewSubmissionUsesNewRegistrationId() throws Exception {
+        String postingUrl = "https://boards.greenhouse.io/robin-sandbox/jobs/8200888";
+
+        // 1. Register reg1 and confirm receipt1 against reg1
+        MvcResult reg1Res = mvc.perform(post("/api/v1/sandbox-registrations")
+                        .session(devSession)
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"atsPlatform":"GREENHOUSE","postingUrl":"%s"}
+                                """.formatted(postingUrl)))
+                .andExpect(status().isCreated())
+                .andReturn();
+        UUID reg1Id = UUID.fromString(json.readTree(reg1Res.getResponse().getContentAsString()).get("id").asText());
+
+        SeededPlan app1 = prepareRealGreenhousePlan("rereg-1-" + UUID.randomUUID(), postingUrl);
+        List<String> signals = List.of("GREENHOUSE_SUBMISSION_RESPONSE_2XX", "EMPLOYER_CONFIRMATION_ID_OBSERVED");
+        String raw1 = canonicalGreenhouseEvidence(app1.planId(), app1.applicationId(), "GH-REREG-1", null);
+        mvc.perform(post("/api/v1/automation/plans/" + app1.planId() + "/complete")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(completionBody("GH-REREG-1", signals, raw1))))
+                .andExpect(status().isNoContent());
+
+        mvc.perform(get("/api/v1/applications/" + app1.applicationId() + "/receipt").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.confirmation.confirmed").value(true));
+
+        // 2. Revoke reg1, then re-register the same URL under reg2
+        mvc.perform(post("/api/v1/sandbox-registrations/" + reg1Id + "/revoke")
+                        .session(devSession)
+                        .with(csrf()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.active").value(false));
+
+        MvcResult reg2Res = mvc.perform(post("/api/v1/sandbox-registrations")
+                        .session(devSession)
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"atsPlatform":"GREENHOUSE","postingUrl":"%s"}
+                                """.formatted(postingUrl)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.active").value(true))
+                .andReturn();
+        UUID reg2Id = UUID.fromString(json.readTree(reg2Res.getResponse().getContentAsString()).get("id").asText());
+        assertThat(reg2Id).isNotEqualTo(reg1Id);
+
+        // Receipt1 remains linked to reg1 (preserved FK) and must NOT inherit trust from reg2
+        assertThat(jdbc.queryForObject(
+                "select sandbox_registration_id from submission_receipts where plan_id = ?",
+                UUID.class, app1.planId())).isEqualTo(reg1Id);
+        mvc.perform(get("/api/v1/applications/" + app1.applicationId() + "/receipt").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.confirmation.confirmed").value(false))
+                .andExpect(jsonPath("$.reconciliation.required").value(true));
+
+        // 3. New submission on the re-registered URL binds cleanly to reg2 and verifies confirmed
+        SeededPlan app2 = prepareRealGreenhousePlan("rereg-2-" + UUID.randomUUID(), postingUrl);
+        String raw2 = canonicalGreenhouseEvidence(app2.planId(), app2.applicationId(), "GH-REREG-2", null);
+        mvc.perform(post("/api/v1/automation/plans/" + app2.planId() + "/complete")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(completionBody("GH-REREG-2", signals, raw2))))
+                .andExpect(status().isNoContent());
+
+        assertThat(jdbc.queryForObject(
+                "select sandbox_registration_id from submission_receipts where plan_id = ?",
+                UUID.class, app2.planId())).isEqualTo(reg2Id);
+        mvc.perform(get("/api/v1/applications/" + app2.applicationId() + "/receipt").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.confirmation.confirmed").value(true))
+                .andExpect(jsonPath("$.confirmation.confirmationId").value("GH-REREG-2"));
+    }
+
     private static String sha256Hex(byte[] content) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(content);
