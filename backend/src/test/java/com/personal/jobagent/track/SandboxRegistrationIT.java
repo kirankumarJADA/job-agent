@@ -291,4 +291,73 @@ class SandboxRegistrationIT {
                     .andExpect(status().isBadRequest());
         }
     }
+
+    @Test
+    void v069UnconditionalUniqueConstraintLocksOutReRegistrationAfterRevocation() throws Exception {
+        String postingUrl = "https://boards.greenhouse.io/robin-sandbox/jobs/8200999";
+
+        MvcResult created = mvc.perform(post("/api/v1/sandbox-registrations")
+                        .session(devSession)
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"atsPlatform":"GREENHOUSE","postingUrl":"%s"}
+                                """.formatted(postingUrl)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.active").value(true))
+                .andReturn();
+        String regId = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(created.getResponse().getContentAsString()).get("id").asText();
+
+        mvc.perform(post("/api/v1/sandbox-registrations/" + regId + "/revoke")
+                        .session(devSession)
+                        .with(csrf()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.active").value(false))
+                .andExpect(jsonPath("$.revokedAt").isNotEmpty());
+
+        Integer revokedRows = jdbc.queryForObject(
+                "select count(*) from candidate_sandbox_registrations where id = ? and revoked_at is not null",
+                Integer.class, UUID.fromString(regId));
+        assertThat(revokedRows).isEqualTo(1);
+
+        // Under V069 unique (profile_id, ats_platform, posting_url), re-registering the revoked URL fails with 409 Conflict.
+        MvcResult conflict = mvc.perform(post("/api/v1/sandbox-registrations")
+                        .session(devSession)
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"atsPlatform":"GREENHOUSE","postingUrl":"%s"}
+                                """.formatted(postingUrl)))
+                .andExpect(status().isConflict())
+                .andReturn();
+        assertThat(conflict.getResponse().getContentAsString()).contains("already exists");
+
+        // Confirm V069 metadata matches the documented V070 additive migration assumptions:
+        // (1) unconditional 3-column unique constraint exists; (2) submission_receipts(sandbox_registration_id) index is absent in V069.
+        Integer unconditionalUniqueCount = jdbc.queryForObject("""
+                select count(*) from pg_constraint
+                where conrelid = 'candidate_sandbox_registrations'::regclass
+                  and contype = 'u' and array_length(conkey, 1) = 3
+                """, Integer.class);
+        assertThat(unconditionalUniqueCount).isEqualTo(1);
+
+        Integer receiptSandboxIdxCount = jdbc.queryForObject("""
+                select count(*) from pg_indexes
+                where tablename = 'submission_receipts'
+                  and indexname = 'submission_receipts_sandbox_registration_idx'
+                """, Integer.class);
+        assertThat(receiptSandboxIdxCount).isZero();
+
+        // A different candidate profile can still register the same URL independently.
+        mvc.perform(post("/api/v1/sandbox-registrations")
+                        .session(otherSession)
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"atsPlatform":"GREENHOUSE","postingUrl":"%s"}
+                                """.formatted(postingUrl)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.active").value(true));
+    }
 }
