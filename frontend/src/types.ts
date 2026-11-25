@@ -352,11 +352,20 @@ export interface AshbyOutcome {
 }
 
 export interface WorkdayField {
+  id?: string;
   label: string;
-  category: 'STANDARD' | 'OPTIONAL_STANDARD' | 'EXPERIENCE' | 'DECLARATION' | 'CUSTOM' | 'REQUIRES_HUMAN' | 'SENSITIVE' | 'UNKNOWN';
+  category: string;
   value?: string | null;
   required?: boolean;
+  reason?: string | null;
 }
+
+export type WorkdayDocumentUploadState =
+  | 'NO_FIELD'
+  | 'NO_ARTIFACT'
+  | 'REJECTED'
+  | 'ATTACHED'
+  | 'CONFIRMED';
 
 /**
  * Phase 19: the structured outcome a WORKDAY plan's WORKDAY_APPLY step reports
@@ -366,16 +375,20 @@ export interface WorkdayField {
 export interface WorkdayApplicationOutcome {
   type: 'WORKDAY_APPLICATION_OUTCOME';
   planType: 'WORKDAY';
-  currentStep?: 'MY_INFORMATION' | 'MY_EXPERIENCE' | 'APPLICATION_QUESTIONS' | 'VOLUNTARY_DISCLOSURES' | 'REVIEW' | 'UNKNOWN';
-  filled: WorkdayField[];
-  requiredGaps: WorkdayField[];
+  step?: string | null;
+  filledCategories?: string[];
+  requiredGaps?: WorkdayField[];
+  cvUploadState?: WorkdayDocumentUploadState | string | null;
+  coverLetterUploadState?: WorkdayDocumentUploadState | string | null;
+  applicationUrl?: string | null;
+  // Legacy fallback fields in case an older stored plan row used them
+  currentStep?: string | null;
+  filled?: WorkdayField[];
   fields?: WorkdayField[];
-  resumeUploadState: 'ATTACHED' | 'FAILED' | 'MISSING' | 'NOT_REQUESTED';
+  resumeUploadState?: string | null;
   resumeUploadReason?: string | null;
-  coverLetterUploadState?: 'ATTACHED' | 'FAILED' | 'MISSING' | 'NOT_REQUESTED';
   coverLetterUploadReason?: string | null;
   formFound?: boolean;
-  applicationUrl?: string | null;
   credentialSaved?: boolean;
 }
 
@@ -1248,95 +1261,96 @@ export interface EmailIngestResult {
   receiptVerification: string | null;
 }
 
-/** Application Submission Receipt (Phase 20) */
+/** Application Submission Receipt — matches ApplicationReceiptService.SubmissionReceipt */
 export interface IdentityReceipt {
-  fullName: string | null;
+  name: string | null;
+  firstName: string | null;
+  lastName: string | null;
   email: string | null;
   phone: string | null;
-  city: string | null;
-  country: string | null;
-  rightToWorkUk: boolean | null;
-  requiresVisaSponsorship: boolean | null;
+  addressLine1: string | null;
+  linkedIn: string | null;
 }
 
 export interface DocumentReceipt {
-  cvId: string | null;
-  cvVersion: number | null;
-  cvFilename: string | null;
-  cvSha256: string | null;
-  coverLetterId: string | null;
-  coverLetterTitle: string | null;
-  coverLetterSha256: string | null;
-  coverLetterProvided: boolean;
+  versionId: string | null;
+  title: string | null;
+  kind: string | null;
+  sha256: string | null;
+  byteSize: number | null;
+  purpose: string | null;
+  fileName: string | null;
+  validationPassed: boolean | null;
 }
 
 export interface AnswerReceipt {
-  key: string;
-  questionText: string;
-  answerText: string;
+  question: string;
+  answer: string;
 }
 
 export interface ConfirmationEvidence {
   confirmed: boolean;
-  confirmationNumber: string | null;
-  receiptToken: string | null;
-  detectedAt: string | null;
-  pageTitle: string | null;
+  confirmationId: string | null;
   observedSignals: string[];
+  summary: string | null;
 }
 
 export interface ReconciliationDetails {
-  needed: boolean;
+  required: boolean;
   reason: string | null;
-  lastReconciledAt: string | null;
-  attemptCount: number;
+  suggestedAction: string | null;
 }
 
 export interface FailureDetails {
   failed: boolean;
-  failureStage: string | null;
-  errorMessage: string | null;
-  occurredAt: string | null;
+  reason: string | null;
+  code: string | null;
 }
 
 export interface AuthorizationRecord {
-  authorized: boolean;
-  authorizedBy: string | null;
-  authorizedAt: string | null;
-  consentSummary: string | null;
+  approved: boolean;
+  policy: string | null;
+  approvedAt: string | null;
+  actor: string | null;
 }
 
 export interface AttemptSummary {
   attemptId: string;
-  idempotencyKey: string;
+  attemptNumber: number;
+  atsKind: string;
+  idempotencyKey: string | null;
   status: string;
-  stage: string | null;
+  submitted: boolean;
   createdAt: string | null;
-  completedAt: string | null;
-  isCurrent: boolean;
+  updatedAt: string | null;
+  isLatest: boolean;
 }
 
 export interface SubmissionReceipt {
-  receiptId: string;
+  receiptId: string | null;
   applicationId: string;
-  attemptId: string;
-  idempotencyKey: string;
-  companyName: string | null;
+  jobId: string;
   jobTitle: string | null;
+  company: string | null;
   applicationUrl: string | null;
+  atsKind: string;
+  attemptNumber: number;
+  isLatest: boolean;
+  idempotencyKey: string | null;
   status: string;
-  failureStage: string | null;
-  failureReason: string | null;
-  generatedAt: string;
+  submitted: boolean;
   submittedAt: string | null;
-  identity: IdentityReceipt;
-  documents: DocumentReceipt;
-  answers: AnswerReceipt[];
+  createdAt: string | null;
+  updatedAt: string | null;
+  authorization: AuthorizationRecord;
+  submittedIdentity: IdentityReceipt;
+  submittedAnswers: AnswerReceipt[];
+  cv: DocumentReceipt | null;
+  coverLetter: DocumentReceipt | null;
   confirmation: ConfirmationEvidence;
   reconciliation: ReconciliationDetails;
   failure: FailureDetails;
-  authorization: AuthorizationRecord;
-  attempts: AttemptSummary[];
+  attemptHistory: AttemptSummary[];
 }
 
 export type HandoffBlockReason = 'CAPTCHA' | 'MFA' | 'CLOUDFLARE_TURNSTILE' | 'EMPLOYER_SECURITY_CHECK';

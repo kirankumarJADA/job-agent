@@ -643,6 +643,51 @@ class AutomationControllerReviewTest {
         verify(plans, never()).approveForSubmission(any());
     }
 
+    @Test
+    void approvalSucceedsForAWorkdayPlanWithVerifiedCvAndCoverLetterPackages() {
+        Map<String, Object> payload = workdayPlanPayload();
+        payload.put("package", Map.of(
+                "cv", Map.of("versionId", cvVersionId.toString(), "sha256", cvSha,
+                        "jobId", jobId.toString(), "applicationId", applicationId.toString()),
+                "coverLetter", Map.of("versionId", coverVersionId.toString(), "sha256", coverSha,
+                        "jobId", jobId.toString(), "applicationId", applicationId.toString())));
+        when(plans.find(profileId, planId)).thenReturn(Optional.of(
+                rowWithResult("AWAITING_APPROVAL", payload, workdayOutcome(List.of()))));
+        when(executionPackages.artifactBytes(eq(planId), eq(profileId), eq(applicationId), eq(jobId), eq("cv"), eq(cvVersionId)))
+                .thenReturn(new ExecutionPackageService.ArtifactBytes(new byte[]{1}, cvSha, "application/pdf", "cv.pdf"));
+        when(executionPackages.artifactBytes(eq(planId), eq(profileId), eq(applicationId), eq(jobId), eq("cover-letter"), eq(coverVersionId)))
+                .thenReturn(new ExecutionPackageService.ArtifactBytes(new byte[]{2}, coverSha, "text/plain", "cover.txt"));
+        when(plans.approveForSubmission(planId)).thenReturn(true);
+
+        ResponseEntity<?> response = controller.approve(planId);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        verify(executionPackages).artifactBytes(planId, profileId, applicationId, jobId, "cover-letter", coverVersionId);
+        verify(plans).approveForSubmission(planId);
+    }
+
+    @Test
+    void approvalRejectsAWorkdayPlanWithTamperedCoverLetterChecksum() {
+        Map<String, Object> payload = workdayPlanPayload();
+        payload.put("package", Map.of(
+                "cv", Map.of("versionId", cvVersionId.toString(), "sha256", cvSha,
+                        "jobId", jobId.toString(), "applicationId", applicationId.toString()),
+                "coverLetter", Map.of("versionId", coverVersionId.toString(), "sha256", coverSha,
+                        "jobId", jobId.toString(), "applicationId", applicationId.toString())));
+        when(plans.find(profileId, planId)).thenReturn(Optional.of(
+                rowWithResult("AWAITING_APPROVAL", payload, workdayOutcome(List.of()))));
+        when(executionPackages.artifactBytes(eq(planId), eq(profileId), eq(applicationId), eq(jobId), eq("cv"), eq(cvVersionId)))
+                .thenReturn(new ExecutionPackageService.ArtifactBytes(new byte[]{1}, cvSha, "application/pdf", "cv.pdf"));
+        when(executionPackages.artifactBytes(eq(planId), eq(profileId), eq(applicationId), eq(jobId), eq("cover-letter"), eq(coverVersionId)))
+                .thenReturn(new ExecutionPackageService.ArtifactBytes(new byte[]{2}, "f".repeat(64), "text/plain", "cover.txt"));
+
+        ResponseEntity<?> response = controller.approve(planId);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(409);
+        assertThat(String.valueOf(response.getBody())).contains("cover-letter artifact checksum does not match");
+        verify(plans, never()).approveForSubmission(any());
+    }
+
     // ── Phase 15: the Greenhouse precondition defect fix ────────────────
 
     /**

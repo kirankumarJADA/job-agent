@@ -62,6 +62,17 @@ export const WorkdayReviewPanel: React.FC<{
   const reconciliation: SubmissionReconciliationResult | null =
     (plan?.result ?? []).find((entry): entry is SubmissionReconciliationResult => entry?.type === 'SUBMISSION_RECONCILIATION') ?? null;
 
+  const requiredGaps = applicationOutcome?.requiredGaps ?? [];
+  const filledItems: WorkdayField[] = (applicationOutcome?.filledCategories && applicationOutcome.filledCategories.length > 0)
+    ? applicationOutcome.filledCategories.map((category) => ({
+        label: formatWorkdayFilledLabel(category),
+        category,
+      }))
+    : (applicationOutcome?.filled ?? []);
+  const stepReached = applicationOutcome?.step ?? applicationOutcome?.currentStep ?? null;
+  const cvUploadState = applicationOutcome?.cvUploadState ?? applicationOutcome?.resumeUploadState ?? 'NO_FIELD';
+  const coverLetterUploadState = applicationOutcome?.coverLetterUploadState ?? 'NO_FIELD';
+
   const checkVerification = useCallback(() => {
     if (!plan) return;
     setCheckingVerification(true);
@@ -170,7 +181,7 @@ export const WorkdayReviewPanel: React.FC<{
         : isReadyToSubmit
           ? <StatusPill tone="emerald">Ready to submit</StatusPill>
           : applicationOutcome
-            ? (applicationOutcome.requiredGaps.length > 0
+            ? (requiredGaps.length > 0
                 ? <StatusPill tone="amber">Human input required</StatusPill>
                 : <StatusPill tone="amber">Review needed before authorizing submission</StatusPill>)
             : loginOutcome?.loginStatus === 'ACCOUNT_CREATED'
@@ -248,37 +259,37 @@ export const WorkdayReviewPanel: React.FC<{
       {/* Phase 19: Workday Multi-step Application Workflow */}
       {!stopped && applicationOutcome && (
         <div className="space-y-4 text-sm">
-          {applicationOutcome.currentStep && (
+          {stepReached && (
             <div className="flex items-center gap-2 text-xs text-ink-muted">
               <span>Step reached on Workday:</span>
-              <span className="font-semibold text-ink-soft">{formatStepName(applicationOutcome.currentStep)}</span>
+              <span className="font-semibold text-ink-soft">{formatStepName(stepReached)}</span>
             </div>
           )}
 
           <WorkdayFieldList
             title="Filled automatically"
             tone="emerald"
-            items={applicationOutcome.filled}
+            items={filledItems}
             emptyText="Nothing was auto-filled."
           />
 
           <WorkdayFieldList
             title="Needs your input before you can authorize submission"
             tone="amber"
-            items={applicationOutcome.requiredGaps}
+            items={requiredGaps}
             emptyText="Nothing is outstanding."
           />
 
           <div className="space-y-2 border-t border-line pt-3">
             <WorkdayDocumentStatus
               title="Résumé / CV"
-              state={applicationOutcome.resumeUploadState}
+              state={cvUploadState}
               reason={applicationOutcome.resumeUploadReason}
             />
-            {applicationOutcome.coverLetterUploadState && applicationOutcome.coverLetterUploadState !== 'NOT_REQUESTED' && (
+            {coverLetterUploadState !== 'NO_FIELD' && coverLetterUploadState !== 'NOT_REQUESTED' && (
               <WorkdayDocumentStatus
                 title="Cover Letter"
-                state={applicationOutcome.coverLetterUploadState}
+                state={coverLetterUploadState}
                 reason={applicationOutcome.coverLetterUploadReason}
               />
             )}
@@ -306,7 +317,7 @@ export const WorkdayReviewPanel: React.FC<{
             {isAwaitingApproval && (
               <div className="space-y-2">
                 <p className="text-ink-soft font-semibold">Candidate review</p>
-                {applicationOutcome.requiredGaps.length > 0 ? (
+                {requiredGaps.length > 0 ? (
                   <p className="text-amber-700 text-xs">
                     Resolve the outstanding fields above before approving submission. Robin will not submit incomplete declarations or unanswered required questions.
                   </p>
@@ -470,8 +481,28 @@ function formatStepName(step: string): string {
     case 'APPLICATION_QUESTIONS': return 'Application Questions';
     case 'VOLUNTARY_DISCLOSURES': return 'Voluntary Disclosures';
     case 'REVIEW': return 'Review';
+    case 'APPLICATION_STEP': return 'Application Form';
     default: return step;
   }
+}
+
+const WORKDAY_FILLED_LABELS: Record<string, string> = {
+  FIRST_NAME: 'First Name',
+  LAST_NAME: 'Last Name',
+  EMAIL: 'Email Address',
+  PHONE: 'Phone Number',
+  ADDRESS_LINE1: 'Street Address',
+  CITY: 'City',
+  POSTAL_CODE: 'Postal Code',
+  COUNTRY: 'Country',
+  LINKEDIN: 'LinkedIn Profile',
+  RESUME_UPLOAD: 'Résumé / CV Upload',
+  COVER_LETTER_UPLOAD: 'Cover Letter Upload',
+};
+
+function formatWorkdayFilledLabel(category: string): string {
+  return WORKDAY_FILLED_LABELS[category]
+    ?? category.toLowerCase().replace(/_/g, ' ').replace(/\b\w/g, (ch) => ch.toUpperCase());
 }
 
 const WORKDAY_CATEGORY_LABELS: Record<string, string> = {
@@ -481,57 +512,83 @@ const WORKDAY_CATEGORY_LABELS: Record<string, string> = {
   DECLARATION: 'Declaration',
   CUSTOM: 'Custom question',
   REQUIRES_HUMAN: 'Needs your input',
+  CAPTCHA: 'Security check',
+  UNRECOGNIZED: 'Unrecognized question',
   SENSITIVE: 'Sensitive question',
   UNKNOWN: 'Unrecognized question',
 };
 
 const WorkdayDocumentStatus: React.FC<{
   title: string;
-  state: 'ATTACHED' | 'FAILED' | 'MISSING' | 'NOT_REQUESTED';
+  state?: string | null;
   reason?: string | null;
-}> = ({ title, state, reason }) => (
-  <div>
-    <p className="font-semibold text-ink-soft">{title}</p>
-    {state === 'NOT_REQUESTED' && <p className="mt-1 text-ink-faint">Not requested on this form.</p>}
-    {(state === 'MISSING' || state === 'FAILED') && (
-      <p className="mt-1 text-ink-muted">
-        Not attached automatically{reason ? `: ${reason}` : ''}.
-      </p>
-    )}
-    {state === 'ATTACHED' && (
-      <p className="mt-1 text-emerald-700">
-        Attached to the form — not yet submitted to the employer.
-      </p>
-    )}
-  </div>
-);
+}> = ({ title, state, reason }) => {
+  const normalized = state ?? 'NO_FIELD';
+  return (
+    <div>
+      <p className="font-semibold text-ink-soft">{title}</p>
+      {(normalized === 'NO_FIELD' || normalized === 'NOT_REQUESTED') && (
+        <p className="mt-1 text-ink-faint">Not requested on this form.</p>
+      )}
+      {(normalized === 'NO_ARTIFACT' || normalized === 'MISSING') && (
+        <p className="mt-1 text-amber-700">
+          Not attached automatically{reason ? `: ${reason}` : ': no reviewed document was available'}.
+        </p>
+      )}
+      {(normalized === 'REJECTED' || normalized === 'FAILED') && (
+        <p className="mt-1 text-amber-700">
+          Not attached automatically{reason ? `: ${reason}` : ': rejected by the form'}.
+        </p>
+      )}
+      {normalized === 'ATTACHED' && (
+        <p className="mt-1 text-emerald-700">
+          Attached to the form — not yet submitted to the employer.
+        </p>
+      )}
+      {normalized === 'CONFIRMED' && (
+        <p className="mt-1 text-emerald-700">
+          Confirmed attached on the form — not yet submitted to the employer.
+        </p>
+      )}
+      {!['NO_FIELD', 'NOT_REQUESTED', 'NO_ARTIFACT', 'MISSING', 'REJECTED', 'FAILED', 'ATTACHED', 'CONFIRMED'].includes(normalized) && (
+        <p className="mt-1 text-ink-faint">Upload state: {normalized}</p>
+      )}
+    </div>
+  );
+};
 
 const WorkdayFieldList: React.FC<{
   title: string;
   tone: 'emerald' | 'amber';
-  items: WorkdayField[];
+  items?: WorkdayField[] | null;
   emptyText: string;
-}> = ({ title, tone, items, emptyText }) => (
-  <div>
-    <p className="font-semibold text-ink-soft">
-      {title} ({items.length})
-    </p>
-    {items.length === 0 ? (
-      <p className="mt-1 text-ink-faint">{emptyText}</p>
-    ) : (
-      <ul className={`mt-1 space-y-0.5 ${tone === 'emerald' ? 'text-emerald-700' : 'text-amber-700'}`}>
-        {items.map((item, index) => (
-          <li key={`${item.label}-${item.category}-${index}`}>
-            {item.label}
-            {item.value && (
-              <span className="text-ink-soft font-mono text-xs"> = &quot;{item.value}&quot;</span>
-            )}
-            {WORKDAY_CATEGORY_LABELS[item.category] && (
-              <span className="text-ink-faint"> — {WORKDAY_CATEGORY_LABELS[item.category]}</span>
-            )}
-          </li>
-        ))}
-      </ul>
-    )}
-  </div>
-);
+}> = ({ title, tone, items, emptyText }) => {
+  const safeItems = items ?? [];
+  return (
+    <div>
+      <p className="font-semibold text-ink-soft">
+        {title} ({safeItems.length})
+      </p>
+      {safeItems.length === 0 ? (
+        <p className="mt-1 text-ink-faint">{emptyText}</p>
+      ) : (
+        <ul className={`mt-1 space-y-0.5 ${tone === 'emerald' ? 'text-emerald-700' : 'text-amber-700'}`}>
+          {safeItems.map((item, index) => (
+            <li key={`${item.id ?? item.label}-${item.category}-${index}`}>
+              {item.label}
+              {item.value && (
+                <span className="text-ink-soft font-mono text-xs"> = &quot;{item.value}&quot;</span>
+              )}
+              {WORKDAY_CATEGORY_LABELS[item.category] && (
+                <span className="text-ink-faint"> — {WORKDAY_CATEGORY_LABELS[item.category]}</span>
+              )}
+              {item.reason && (
+                <span className="text-ink-muted"> ({item.reason})</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+};

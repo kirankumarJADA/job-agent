@@ -16,6 +16,7 @@
     { "source": "/review-queue", "destination": "/index.html" },
     { "source": "/approval-rules", "destination": "/index.html" },
     { "source": "/auto-apply", "destination": "/index.html" },
-    { "source": "/auto-apply-activity", "destination": "/index.html" }
+    { "source": "/auto-apply-activity", "destination": "/index.html" },
+    { "source": "/sandbox-registrations", "destination": "/index.html" }
   ]
 }

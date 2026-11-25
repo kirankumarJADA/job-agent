@@ -37,7 +37,9 @@ class ApplicationReceiptServiceTest {
     @BeforeEach
     void setUp() {
         db = mock(JdbcTemplate.class);
-        json = new ObjectMapper();
+        json = new ObjectMapper()
+                .findAndRegisterModules()
+                .disable(com.fasterxml.jackson.databind.SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         service = new ApplicationReceiptService(db, json);
     }
 
@@ -328,5 +330,33 @@ class ApplicationReceiptServiceTest {
         var attempts = service.getAttempts(PROFILE_ID, APP_ID);
         assertThat(attempts).isPresent();
         assertThat(attempts.get()).isEmpty();
+    }
+
+    @Test
+    void serializesReceiptDtoWithExactFrontendContractFieldNames() throws Exception {
+        stubApplication();
+        when(db.query(contains("from automation_plans p"), any(RowMapper.class), eq(APP_ID), eq(PROFILE_ID)))
+                .thenReturn(List.of());
+
+        var receipt = service.getReceipt(PROFILE_ID, APP_ID, null).orElseThrow();
+        var serialized = json.readTree(json.writeValueAsString(receipt));
+
+        assertThat(serialized.has("company")).isTrue();
+        assertThat(serialized.has("updatedAt")).isTrue();
+        assertThat(serialized.has("submittedIdentity")).isTrue();
+        assertThat(serialized.has("submittedAnswers")).isTrue();
+        assertThat(serialized.has("cv")).isTrue();
+        assertThat(serialized.has("coverLetter")).isTrue();
+        assertThat(serialized.has("attemptHistory")).isTrue();
+        assertThat(serialized.path("authorization").has("approved")).isTrue();
+        assertThat(serialized.path("confirmation").has("confirmationId")).isTrue();
+        assertThat(serialized.path("reconciliation").has("required")).isTrue();
+        // Legacy mismatched frontend names must never appear
+        assertThat(serialized.has("companyName")).isFalse();
+        assertThat(serialized.has("generatedAt")).isFalse();
+        assertThat(serialized.has("identity")).isFalse();
+        assertThat(serialized.has("documents")).isFalse();
+        assertThat(serialized.has("answers")).isFalse();
+        assertThat(serialized.has("attempts")).isFalse();
     }
 }

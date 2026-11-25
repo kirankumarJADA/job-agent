@@ -28,11 +28,22 @@ describe('Vercel SPA routing', () => {
       '/approval-rules',
       '/auto-apply',
       '/auto-apply-activity',
+      '/sandbox-registrations',
     ];
     const sources = config.rewrites.map(({ source }) => source);
 
     expect(sources).toEqual(routes);
     expect(config.rewrites.every(({ destination }) => destination === '/index.html')).toBe(true);
+  });
+
+  it('wires /sandbox-registrations across App routes, Navigation, and Vercel rewrites', () => {
+    const sources = config.rewrites.map(({ source }) => source);
+    const appSource = readFileSync(resolve(frontendRoot, 'src/App.tsx'), 'utf8');
+    const navSource = readFileSync(resolve(frontendRoot, 'src/components/Navigation.tsx'), 'utf8');
+
+    expect(sources).toContain('/sandbox-registrations');
+    expect(appSource).toContain('path="/sandbox-registrations"');
+    expect(navSource).toContain("path: '/sandbox-registrations'");
   });
 
   it('does not add API, asset, or generic catch-all rewrites', () => {

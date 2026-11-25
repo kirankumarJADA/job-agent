@@ -800,7 +800,7 @@ public class AutomationController {
         if (!pkg.isEmpty()) {
             String cvReason = verifyArtifact(plan.id(), profileId, applicationId, jobId, "cv", pkg.get("cv"), false);
             if (cvReason != null) return cvReason;
-            String clReason = verifyArtifact(plan.id(), profileId, applicationId, jobId, "coverLetter", pkg.get("coverLetter"), false);
+            String clReason = verifyArtifact(plan.id(), profileId, applicationId, jobId, "cover-letter", pkg.get("coverLetter"), false);
             if (clReason != null) return clReason;
         }
         return null;
