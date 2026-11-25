@@ -119,9 +119,9 @@ test('omits confirmationNumber and EMPLOYER_CONFIRMATION_ID_OBSERVED when no gen
 test('sanitization removes tokens, cookies, headers, JSON secrets, dangerous tags, and oversized payloads cleanly', () => {
   assert.equal(sanitizeEvidenceText('ok Bearer eyJhbGciOi.payload.sig token=abc cookie=xyz'), 'ok Bearer [REDACTED] token=[REDACTED] cookie=[REDACTED]');
   const headerAndJson = sanitizeEvidenceText(
-    'Cookie: sid=topsecret_cookie Authorization: Basic dXNlcjpwYXNz x-api-key: key_123 {"secret":"hidden_val","api_key":"ak_99"}'
+    'Cookie: sid=topsecret_cookie Authorization: Basic dXNlcjpwYXNz x-api-key: key_123 access_token=tok_a csrf_token=tok_b csrftoken=tok_c session_id=sid_d {"secret":"hidden_val","api_key":"ak_99","access_token":"at_88","session_id":"sid_77"}'
   );
-  assert.doesNotMatch(headerAndJson, /topsecret_cookie|dXNlcjpwYXNz|key_123|hidden_val|ak_99/);
+  assert.doesNotMatch(headerAndJson, /topsecret_cookie|dXNlcjpwYXNz|key_123|tok_a|tok_b|tok_c|sid_d|hidden_val|ak_99|at_88|sid_77/);
 
   const html = '<div class="confirmation"><a href="https://boards.greenhouse.io?token=s3cr3t">Receipt</a><a href="javascript:alert(1)">bad</a><iframe src="evil"></iframe><span data-auth-token="secret123">Confirmed</span></div>';
   const cleanedHtml = sanitizeContainerHtml(html);

@@ -76,15 +76,15 @@ export function redactSecrets(text) {
     .replace(/\bauthorization\s*:\s*(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+/gi, 'Authorization: [REDACTED]')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{6,}/gi, 'Bearer [REDACTED]')
     .replace(
-      /"(password|otp|token|cookie|secret|api[_-]?key|credential|auth(?:orization)?)"\s*:\s*"[^"]*"/gi,
+      /"([A-Za-z0-9_-]*(?:password|otp|token|cookie|secret|api[_-]?key|credential|session_id|auth(?:orization)?)[A-Za-z0-9_-]*)"\s*:\s*"[^"]*"/gi,
       '"$1": "[REDACTED]"'
     )
     .replace(
-      /\b(password|otp|token|cookie|secret|credential|api[_-]?key|session|auth(?:orization)?)=([^\s,;&"'<>]+)/gi,
+      /\b([A-Za-z0-9_-]*(?:password|otp|token|cookie|secret|credential|api[_-]?key|session(?:_id)?|auth(?:orization)?))=([^\s,;&"'<>]+)/gi,
       '$1=[REDACTED]'
     )
     .replace(
-      /\b(x-api-key|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|secret|credential|password)\s*:\s*([^\s,;"'<>]+)/gi,
+      /\b([A-Za-z0-9_-]*(?:api[_-]?key|secret|token|credential|password|session_id))\s*:\s*([^\s,;"'<>]+)/gi,
       '$1: [REDACTED]'
     );
 }
