@@ -128,6 +128,7 @@ class AutomationLifecycleIT {
     @Autowired private PasswordEncoder passwordEncoder;
     @Autowired private ObjectMapper json;
     @Autowired private AutomationPlanRepository planRepository;
+    @Autowired private GreenhouseExecutionPlanService greenhousePlanService;
 
     private static MockHttpSession cachedSession;
     private MockHttpSession session;
@@ -1304,6 +1305,64 @@ class AutomationLifecycleIT {
                             .content("{\"outcome\":\"COMPLETED\",\"detail\":\"drained in scenarioQ\"}"))
                     .andExpect(status().isNoContent());
         }
+    }
+
+    @Test
+    @Order(21)
+    void scenarioR_greenhouseExecutionPlanRequeuesFailedAndBlockedAntiBotOnRePrepare() throws Exception {
+        UUID planId = seedRunningPlan("life-gh-requeue-1", "Greenhouse Requeue Engineer");
+        UUID applicationId = jdbc.queryForObject(
+                "select application_id from automation_plans where id = ?", UUID.class, planId);
+        UUID jobId = jdbc.queryForObject(
+                "select job_id from applications where id = ?", UUID.class, applicationId);
+        mockMvc.perform(post("/api/v1/automation/plans/{id}/complete", planId).with(csrf()).session(session)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"outcome\":\"FAILED\",\"detail\":\"initial worker timeout\"}"))
+                .andExpect(status().isNoContent());
+        jdbc.update("delete from automation_plans where id = ?", planId);
+
+        UUID servicePlanId = greenhousePlanService.createExecutionPlan(PROFILE, applicationId, jobId).orElseThrow();
+        assertThat(planStatus(servicePlanId)).isEqualTo("PREPARED");
+
+        // 1. Worker claims and marks it FAILED -> createExecutionPlan must requeue it cleanly to PREPARED
+        MvcResult firstClaim = mockMvc.perform(post("/api/v1/automation/plans/claim-next").with(csrf()).session(session))
+                .andExpect(status().isOk()).andReturn();
+        assertThat(firstClaim.getResponse().getContentAsString()).contains(servicePlanId.toString());
+        mockMvc.perform(post("/api/v1/automation/plans/{id}/complete", servicePlanId).with(csrf()).session(session)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"outcome\":\"FAILED\",\"detail\":\"form selector timeout\"}"))
+                .andExpect(status().isNoContent());
+        assertThat(planStatus(servicePlanId)).isEqualTo("FAILED");
+
+        UUID requeuedId = greenhousePlanService.createExecutionPlan(PROFILE, applicationId, jobId).orElseThrow();
+        assertThat(requeuedId).isEqualTo(servicePlanId);
+        assertThat(planStatus(servicePlanId)).isEqualTo("PREPARED");
+        assertThat(planRepository.manualRequeueCount(servicePlanId)).isEqualTo(1);
+        assertThat(resultOf(servicePlanId)).isEqualTo("[]");
+
+        // 2. Worker claims and hits BLOCKED_ANTI_BOT -> createExecutionPlan also requeues cleanly
+        MvcResult secondClaim = mockMvc.perform(post("/api/v1/automation/plans/claim-next").with(csrf()).session(session))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.requeueCount").value(1))
+                .andReturn();
+        assertThat(secondClaim.getResponse().getContentAsString()).contains(servicePlanId.toString());
+        mockMvc.perform(post("/api/v1/automation/plans/{id}/complete", servicePlanId).with(csrf()).session(session)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"outcome\":\"BLOCKED_ANTI_BOT\",\"detail\":\"captcha challenge\"}"))
+                .andExpect(status().isNoContent());
+        assertThat(planStatus(servicePlanId)).isEqualTo("BLOCKED_ANTI_BOT");
+
+        greenhousePlanService.createExecutionPlan(PROFILE, applicationId, jobId);
+        assertThat(planStatus(servicePlanId)).isEqualTo("PREPARED");
+        assertThat(planRepository.manualRequeueCount(servicePlanId)).isEqualTo(2);
+
+        // Drain back to COMPLETED so scenarioJ (@Order(25)) sees an empty queue
+        mockMvc.perform(post("/api/v1/automation/plans/claim-next").with(csrf()).session(session))
+                .andExpect(status().isOk());
+        mockMvc.perform(post("/api/v1/automation/plans/{id}/complete", servicePlanId).with(csrf()).session(session)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"outcome\":\"COMPLETED\",\"detail\":\"greenhouse retry verified\"}"))
+                .andExpect(status().isNoContent());
     }
 
     private String resultOf(UUID planId) {

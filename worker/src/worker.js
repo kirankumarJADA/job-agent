@@ -311,26 +311,39 @@ const DEFAULT_PROCESS_PASS_ID = crypto.randomUUID();
 
 export function buildWorkerEventBody(event) {
   const passSegment = event?.passId ?? DEFAULT_PROCESS_PASS_ID;
+  const sequenceOrStep = event?.stepId
+    ? String(event.stepId)
+    : (event?.eventSeq !== undefined && event?.eventSeq !== null ? `seq-${event.eventSeq}` : '');
   return {
-    eventId: `${event?.planId ?? 'plan'}:${passSegment}:${event?.type ?? 'EVENT'}:${event?.stepId ?? ''}`,
+    eventId: `${event?.planId ?? 'plan'}:${passSegment}:${event?.type ?? 'EVENT'}:${sequenceOrStep}`,
     ...event,
   };
 }
 
-const eventSink = (event) => {
-  process.stdout.write(`${JSON.stringify(event)}\n`);
-  if (!eventUrl) return;
-  const body = JSON.stringify(buildWorkerEventBody(event));
-  (async () => {
+export function createEventSink({
+  eventUrlVal = eventUrl,
+  authHeadersFn = authHeaders,
+  fetchWithRetryFn = fetchWithRetry,
+  stdoutWrite = (line) => process.stdout.write(line),
+} = {}) {
+  return async (event) => {
+    stdoutWrite(`${JSON.stringify(event)}\n`);
+    if (!eventUrlVal) return { delivered: false, skipped: true };
+    const body = JSON.stringify(buildWorkerEventBody(event));
     try {
-      await fetchWithRetry(eventUrl, {
+      const response = await fetchWithRetryFn(eventUrlVal, {
         method: 'POST',
-        headers: { ...authHeaders(), 'content-type': 'application/json' },
+        headers: { ...authHeadersFn(), 'content-type': 'application/json' },
         body,
       });
-    } catch {}
-  })();
-};
+      return { delivered: response?.ok !== false, status: response?.status ?? null };
+    } catch {
+      return { delivered: false, failed: true };
+    }
+  };
+}
+
+const eventSink = createEventSink();
 
 export async function apiCall(url, body = null, {
   retryConfig = {},
@@ -518,12 +531,32 @@ export async function executePollCycle({
   let plan = null;
   let heartbeat;
   let passEventSink = eventSinkFn;
+  const inFlightEvents = new Set();
   try {
     const claimed = await apiCallFn(pollUrl);
     if (!claimed?.id) return { status: 'NO_PLAN' };
     planId = String(claimed.id);
     const passId = crypto.randomUUID();
-    passEventSink = (event) => eventSinkFn({ ...event, passId: event?.passId ?? passId });
+    let nextEventSeq = 0;
+    passEventSink = (event) => {
+      const hasStep = event?.stepId !== undefined && event?.stepId !== null && event?.stepId !== '';
+      const hasSeq = event?.eventSeq !== undefined && event?.eventSeq !== null;
+      const enriched = {
+        ...event,
+        passId: event?.passId ?? passId,
+        ...(hasStep || hasSeq ? {} : { eventSeq: ++nextEventSeq }),
+      };
+      let pending;
+      try {
+        pending = Promise.resolve(eventSinkFn(enriched));
+      } catch {
+        pending = Promise.resolve({ delivered: false, failed: true });
+      }
+      const tracked = pending.catch(() => ({ delivered: false, failed: true }));
+      inFlightEvents.add(tracked);
+      tracked.finally(() => inFlightEvents.delete(tracked));
+      return tracked;
+    };
 
     const requeueCount = Number.isInteger(claimed.requeueCount) ? claimed.requeueCount : 0;
     if (typeof deadLetterRegistry.reconcileRequeue === 'function') {
@@ -847,6 +880,9 @@ export async function executePollCycle({
   } finally {
     if (heartbeat) clearInterval(heartbeat);
     runtimeObj.runner = null;
+    if (inFlightEvents.size > 0) {
+      await Promise.allSettled([...inFlightEvents]);
+    }
   }
 }
 

@@ -53,7 +53,7 @@ public class GreenhouseExecutionPlanService {
         }
         String applicationUrl = applicationUrlOf(profileId, applicationId, jobId);
         if (applicationUrl == null) return Optional.empty();
-        return buildPlan(profileId, applicationId, jobId, applicationUrl, "greenhouse:" + applicationId);
+        return buildPlan(profileId, applicationId, jobId, applicationUrl, "greenhouse:" + applicationId, true);
     }
 
     /**
@@ -74,7 +74,7 @@ public class GreenhouseExecutionPlanService {
         }
         String applicationUrl = applicationUrlOf(profileId, applicationId, jobId);
         if (applicationUrl == null) return Optional.empty();
-        return buildPlan(profileId, applicationId, jobId, applicationUrl, "greenhouse-retry:" + supersededPlanId);
+        return buildPlan(profileId, applicationId, jobId, applicationUrl, "greenhouse-retry:" + supersededPlanId, false);
     }
 
     private String applicationUrlOf(UUID profileId, UUID applicationId, UUID jobId) {
@@ -88,7 +88,7 @@ public class GreenhouseExecutionPlanService {
     }
 
     private Optional<UUID> buildPlan(UUID profileId, UUID applicationId, UUID jobId, String applicationUrl,
-                                     String idempotencyKey) {
+                                     String idempotencyKey, boolean allowRequeue) {
         // ExecutionPackageService performs read-only inspection after the
         // application owner/job correlation has been established above.
         List<AutomationPlan.Step> baseSteps = List.of(
@@ -99,7 +99,11 @@ public class GreenhouseExecutionPlanService {
         // An idempotent event replay must not rewrite a plan already claimed or
         // completed by a worker. A PREPARED row is invisible until this transaction commits.
         AutomationPlanRepository.PlanRow current = plans.findById(planId).orElseThrow();
-        if (!"PREPARED".equals(current.status())) return Optional.of(planId);
+        if (allowRequeue && ("FAILED".equals(current.status()) || "BLOCKED_ANTI_BOT".equals(current.status()))) {
+            if (!plans.requeueFailedPlan(planId)) return Optional.of(planId);
+        } else if (!"PREPARED".equals(current.status())) {
+            return Optional.of(planId);
+        }
 
         ExecutionPackageService.ExecutionPackage executionPackage =
                 executionPackages.build(planId, profileId, applicationId, jobId);

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import * as workerMod from '../src/worker.js';
 import {
   isRetryableStatus,
   isRetryableNetworkError,
@@ -848,4 +849,67 @@ test('DeadLetterRegistry + executePollCycle redact secrets in crash records, loa
     console.error = originalErr;
     fs.rmSync(path.dirname(tmpFile), { recursive: true, force: true });
   }
+});
+
+test('createEventSink + executePollCycle await event HTTP delivery safely and assign unique sequential eventIds for step-less events', async () => {
+  assert.equal(typeof workerMod.createEventSink, 'function', 'createEventSink must be exported');
+
+  // 1. Returned Promise does not settle until underlying HTTP POST completes
+  let httpSettled = false;
+  let postedBody = null;
+  const sink = workerMod.createEventSink({
+    eventUrlVal: 'http://backend.invalid/api/v1/automation/events',
+    authHeadersFn: () => ({ Authorization: 'Bearer test-tok' }),
+    fetchWithRetryFn: async (_url, opts) => {
+      postedBody = JSON.parse(opts.body);
+      await new Promise((r) => setTimeout(r, 30));
+      httpSettled = true;
+      return { ok: true, status: 204 };
+    },
+    stdoutWrite: () => {},
+  });
+  const deliveryResult = await sink({ planId: 'plan-ev-1', passId: 'pass-ev-1', type: 'PLAN_DEAD_LETTER_ISOLATED' });
+  assert.equal(httpSettled, true, 'awaiting eventSink must wait for HTTP POST completion');
+  assert.equal(deliveryResult.delivered, true);
+  assert.ok(postedBody.eventId.startsWith('plan-ev-1:pass-ev-1:PLAN_DEAD_LETTER_ISOLATED:'));
+
+  // 2. Failing HTTP delivery rejects safely inside sink (no unhandled promise rejection)
+  const failingSink = workerMod.createEventSink({
+    eventUrlVal: 'http://backend.invalid/api/v1/automation/events',
+    authHeadersFn: () => ({}),
+    fetchWithRetryFn: async () => { throw new Error('network down'); },
+    stdoutWrite: () => {},
+  });
+  const failRes = await failingSink({ planId: 'plan-ev-2', type: 'STEP_FAILED' });
+  assert.equal(failRes.delivered, false);
+
+  // 3. Step-less events emitted within one executePollCycle receive monotonically unique eventIds
+  const emittedBodies = [];
+  const emittedPromisesResolved = [];
+  const delayedSink = async (evt) => {
+    await new Promise((r) => setTimeout(r, 20));
+    emittedPromisesResolved.push(evt.type);
+    emittedBodies.push(buildWorkerEventBody(evt));
+  };
+  await executePollCycle({
+    pollUrl: 'http://backend.invalid/api/v1/automation/plans/claim-next',
+    apiCallFn: async () => ({
+      id: 'plan-seq-1',
+      plan: { planType: 'WORKDAY', targetUrl: 'https://x.test', steps: [{ type: 'NAVIGATE', url: 'https://x.test' }] },
+    }),
+    runner: {
+      execute: async (_plan) => ({ status: 'COMPLETED', detail: 'ok', result: [] }),
+      requestAbort: () => {},
+    },
+    reportOutcomeFn: async () => { throw Object.assign(new Error('BACKEND_REQUEST_FAILED:422'), { status: 422, body: { reason: 'needs evidence' } }); },
+    eventSinkFn: delayedSink,
+  });
+
+  // Also check buildWorkerEventBody distinguishes two step-less events with different sequences
+  const seq1 = buildWorkerEventBody({ planId: 'p-seq', passId: 'pass-x', type: 'PROGRESS_NOTE', eventSeq: 1 });
+  const seq2 = buildWorkerEventBody({ planId: 'p-seq', passId: 'pass-x', type: 'PROGRESS_NOTE', eventSeq: 2 });
+  assert.notEqual(seq1.eventId, seq2.eventId, 'distinct step-less events in same pass must have distinct eventIds');
+  assert.equal(seq1.eventId, buildWorkerEventBody({ planId: 'p-seq', passId: 'pass-x', type: 'PROGRESS_NOTE', eventSeq: 1 }).eventId);
+  assert.ok(emittedPromisesResolved.includes('PLAN_ENDED'));
+  assert.equal(emittedBodies[0].eventSeq, 1);
 });
