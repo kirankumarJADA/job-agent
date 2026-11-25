@@ -53,25 +53,60 @@ export const WorkdayReviewPanel: React.FC<{
     load();
   }, [load]);
 
-  const applicationOutcome: WorkdayApplicationOutcome | null =
-    (plan?.result ?? []).find((entry) => entry?.type === 'WORKDAY_APPLICATION_OUTCOME') as WorkdayApplicationOutcome | undefined ?? null;
-  const loginOutcome: WorkdayOutcome | null =
-    (plan?.result ?? []).find((entry) => entry?.type === 'WORKDAY_OUTCOME') as WorkdayOutcome | undefined ?? null;
-  const planError: PlanErrorResult | null =
-    (plan?.result ?? []).find((entry) => entry?.type === 'PLAN_ERROR') as PlanErrorResult | undefined ?? null;
-  const reconciliation: SubmissionReconciliationResult | null =
-    (plan?.result ?? []).find((entry): entry is SubmissionReconciliationResult => entry?.type === 'SUBMISSION_RECONCILIATION') ?? null;
+  const resultEntries = Array.isArray(plan?.result) ? plan.result : [];
+  const hasMalformedResult = Boolean(
+    plan && plan.result !== undefined && plan.result !== null && !Array.isArray(plan.result),
+  );
 
-  const requiredGaps = applicationOutcome?.requiredGaps ?? [];
-  const filledItems: WorkdayField[] = (applicationOutcome?.filledCategories && applicationOutcome.filledCategories.length > 0)
-    ? applicationOutcome.filledCategories.map((category) => ({
-        label: formatWorkdayFilledLabel(category),
-        category,
-      }))
-    : (applicationOutcome?.filled ?? []);
-  const stepReached = applicationOutcome?.step ?? applicationOutcome?.currentStep ?? null;
-  const cvUploadState = applicationOutcome?.cvUploadState ?? applicationOutcome?.resumeUploadState ?? 'NO_FIELD';
-  const coverLetterUploadState = applicationOutcome?.coverLetterUploadState ?? 'NO_FIELD';
+  const applicationOutcome: WorkdayApplicationOutcome | null =
+    (resultEntries.find((entry) => entry != null && typeof entry === 'object' && entry.type === 'WORKDAY_APPLICATION_OUTCOME') as
+      | WorkdayApplicationOutcome
+      | undefined) ?? null;
+  const loginOutcome: WorkdayOutcome | null =
+    (resultEntries.find((entry) => entry != null && typeof entry === 'object' && entry.type === 'WORKDAY_OUTCOME') as
+      | WorkdayOutcome
+      | undefined) ?? null;
+  const planError: PlanErrorResult | null =
+    (resultEntries.find((entry) => entry != null && typeof entry === 'object' && entry.type === 'PLAN_ERROR') as
+      | PlanErrorResult
+      | undefined) ?? null;
+  const reconciliation: SubmissionReconciliationResult | null =
+    (resultEntries.find(
+      (entry): entry is SubmissionReconciliationResult =>
+        entry != null && typeof entry === 'object' && entry.type === 'SUBMISSION_RECONCILIATION',
+    )) ?? null;
+
+  const requiredGapsResult = normalizeWorkdayFields(applicationOutcome?.requiredGaps);
+  const filledCategoriesResult = normalizeFilledCategories(applicationOutcome?.filledCategories);
+  const filledFallbackResult = normalizeWorkdayFields(applicationOutcome?.filled);
+  const requiredGaps = requiredGapsResult.items;
+  const filledItems: WorkdayField[] =
+    filledCategoriesResult.items.length > 0 ? filledCategoriesResult.items : filledFallbackResult.items;
+
+  const rawStep = applicationOutcome?.step ?? applicationOutcome?.currentStep;
+  const stepReached = typeof rawStep === 'string' && rawStep.trim().length > 0 ? rawStep : null;
+  const hasMalformedStep = rawStep !== undefined && rawStep !== null && stepReached === null;
+  const hasMalformedOutcome =
+    hasMalformedResult ||
+    requiredGapsResult.malformed ||
+    filledCategoriesResult.malformed ||
+    filledFallbackResult.malformed ||
+    hasMalformedStep;
+
+  const rawCvUploadState = applicationOutcome?.cvUploadState ?? applicationOutcome?.resumeUploadState;
+  const cvUploadState =
+    typeof rawCvUploadState === 'string' && rawCvUploadState.trim().length > 0 ? rawCvUploadState : 'NO_FIELD';
+  const coverLetterUploadState =
+    typeof applicationOutcome?.coverLetterUploadState === 'string' &&
+    applicationOutcome.coverLetterUploadState.trim().length > 0
+      ? applicationOutcome.coverLetterUploadState
+      : 'NO_FIELD';
+  const resumeUploadReason =
+    typeof applicationOutcome?.resumeUploadReason === 'string' ? applicationOutcome.resumeUploadReason : undefined;
+  const coverLetterUploadReason =
+    typeof applicationOutcome?.coverLetterUploadReason === 'string'
+      ? applicationOutcome.coverLetterUploadReason
+      : undefined;
 
   const checkVerification = useCallback(() => {
     if (!plan) return;
@@ -253,12 +288,23 @@ export const WorkdayReviewPanel: React.FC<{
       )}
 
       {plan && !stopped && !applicationOutcome && !loginOutcome && (
-        <p className="text-sm text-ink-muted">The worker has not yet reported what it found on this page. Check back shortly, or refresh.</p>
+        hasMalformedResult ? (
+          <Alert tone="error">
+            Worker returned a malformed application outcome payload; candidate review and approval are blocked until valid data is reported.
+          </Alert>
+        ) : (
+          <p className="text-sm text-ink-muted">The worker has not yet reported what it found on this page. Check back shortly, or refresh.</p>
+        )
       )}
 
       {/* Phase 19: Workday Multi-step Application Workflow */}
       {!stopped && applicationOutcome && (
         <div className="space-y-4 text-sm">
+          {hasMalformedOutcome && (
+            <Alert tone="error">
+              Worker returned a malformed application outcome payload; approval is blocked until complete verification data is available.
+            </Alert>
+          )}
           {stepReached && (
             <div className="flex items-center gap-2 text-xs text-ink-muted">
               <span>Step reached on Workday:</span>
@@ -284,13 +330,13 @@ export const WorkdayReviewPanel: React.FC<{
             <WorkdayDocumentStatus
               title="Résumé / CV"
               state={cvUploadState}
-              reason={applicationOutcome.resumeUploadReason}
+              reason={resumeUploadReason}
             />
             {coverLetterUploadState !== 'NO_FIELD' && coverLetterUploadState !== 'NOT_REQUESTED' && (
               <WorkdayDocumentStatus
                 title="Cover Letter"
                 state={coverLetterUploadState}
-                reason={applicationOutcome.coverLetterUploadReason}
+                reason={coverLetterUploadReason}
               />
             )}
           </div>
@@ -317,7 +363,11 @@ export const WorkdayReviewPanel: React.FC<{
             {isAwaitingApproval && (
               <div className="space-y-2">
                 <p className="text-ink-soft font-semibold">Candidate review</p>
-                {requiredGaps.length > 0 ? (
+                {hasMalformedOutcome ? (
+                  <p className="text-amber-700 text-xs">
+                    Submission approval is blocked because the worker reported a malformed outcome payload and required fields cannot be verified.
+                  </p>
+                ) : requiredGaps.length > 0 ? (
                   <p className="text-amber-700 text-xs">
                     Resolve the outstanding fields above before approving submission. Robin will not submit incomplete declarations or unanswered required questions.
                   </p>
@@ -500,9 +550,59 @@ const WORKDAY_FILLED_LABELS: Record<string, string> = {
   COVER_LETTER_UPLOAD: 'Cover Letter Upload',
 };
 
-function formatWorkdayFilledLabel(category: string): string {
+function formatWorkdayFilledLabel(category: unknown): string {
+  if (typeof category !== 'string' || category.trim().length === 0) return 'Unknown field';
   return WORKDAY_FILLED_LABELS[category]
     ?? category.toLowerCase().replace(/_/g, ' ').replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+function normalizeFilledCategories(raw: unknown): { items: WorkdayField[]; malformed: boolean } {
+  if (raw === undefined || raw === null) return { items: [], malformed: false };
+  if (!Array.isArray(raw)) return { items: [], malformed: true };
+  const items: WorkdayField[] = [];
+  let malformed = false;
+  for (const entry of raw) {
+    if (typeof entry === 'string' && entry.trim().length > 0) {
+      items.push({ label: formatWorkdayFilledLabel(entry), category: entry });
+    } else {
+      malformed = true;
+    }
+  }
+  return { items, malformed };
+}
+
+function normalizeWorkdayFields(raw: unknown): { items: WorkdayField[]; malformed: boolean } {
+  if (raw === undefined || raw === null) return { items: [], malformed: false };
+  if (!Array.isArray(raw)) return { items: [], malformed: true };
+  const items: WorkdayField[] = [];
+  let malformed = false;
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') {
+      malformed = true;
+      continue;
+    }
+    const candidate = entry as Record<string, unknown>;
+    const category = typeof candidate.category === 'string' && candidate.category.trim().length > 0
+      ? candidate.category
+      : null;
+    const label = typeof candidate.label === 'string' && candidate.label.trim().length > 0
+      ? candidate.label
+      : category
+        ? formatWorkdayFilledLabel(category)
+        : null;
+    if (!label) {
+      malformed = true;
+      continue;
+    }
+    items.push({
+      id: typeof candidate.id === 'string' ? candidate.id : undefined,
+      label,
+      value: typeof candidate.value === 'string' ? candidate.value : undefined,
+      category: category ?? 'UNKNOWN',
+      reason: typeof candidate.reason === 'string' ? candidate.reason : undefined,
+    });
+  }
+  return { items, malformed };
 }
 
 const WORKDAY_CATEGORY_LABELS: Record<string, string> = {
@@ -563,7 +663,9 @@ const WorkdayFieldList: React.FC<{
   items?: WorkdayField[] | null;
   emptyText: string;
 }> = ({ title, tone, items, emptyText }) => {
-  const safeItems = items ?? [];
+  const safeItems = Array.isArray(items)
+    ? items.filter((item): item is WorkdayField => Boolean(item && typeof item === 'object' && typeof item.label === 'string'))
+    : [];
   return (
     <div>
       <p className="font-semibold text-ink-soft">
@@ -579,7 +681,7 @@ const WorkdayFieldList: React.FC<{
               {item.value && (
                 <span className="text-ink-soft font-mono text-xs"> = &quot;{item.value}&quot;</span>
               )}
-              {WORKDAY_CATEGORY_LABELS[item.category] && (
+              {Object.prototype.hasOwnProperty.call(WORKDAY_CATEGORY_LABELS, item.category) && (
                 <span className="text-ink-faint"> — {WORKDAY_CATEGORY_LABELS[item.category]}</span>
               )}
               {item.reason && (

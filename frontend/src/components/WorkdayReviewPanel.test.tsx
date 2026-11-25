@@ -351,4 +351,103 @@ describe('WorkdayReviewPanel', () => {
 
     expect(mocked).toHaveBeenCalledWith('/automation/plans/plan-1/reconcile', { method: 'POST' });
   });
+
+  it('fails closed without crashing when filledCategories is a non-array string', async () => {
+    mocked.mockResolvedValue(PLAN([{
+      type: 'WORKDAY_APPLICATION_OUTCOME',
+      planType: 'WORKDAY',
+      step: 'REVIEW',
+      filledCategories: 'FIRST_NAME',
+      requiredGaps: [],
+      cvUploadState: 'ATTACHED',
+      coverLetterUploadState: 'NO_FIELD',
+    }], 'AWAITING_APPROVAL'));
+
+    renderPanel();
+
+    expect(await screen.findByText(/malformed application outcome/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Approve for Submission' })).toBeNull();
+  });
+
+  it('fails closed without crashing when filledCategories contains null or non-string entries', async () => {
+    mocked.mockResolvedValue(PLAN([{
+      type: 'WORKDAY_APPLICATION_OUTCOME',
+      planType: 'WORKDAY',
+      step: 'REVIEW',
+      filledCategories: [null, 42, 'EMAIL'],
+      requiredGaps: [],
+      cvUploadState: 'ATTACHED',
+      coverLetterUploadState: 'NO_FIELD',
+    }], 'AWAITING_APPROVAL'));
+
+    renderPanel();
+
+    expect(await screen.findByText(/malformed application outcome/i)).toBeTruthy();
+    expect(screen.getByText('Email Address')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Approve for Submission' })).toBeNull();
+  });
+
+  it('never interprets non-array requiredGaps as ready to approve', async () => {
+    mocked.mockResolvedValue(PLAN([{
+      type: 'WORKDAY_APPLICATION_OUTCOME',
+      planType: 'WORKDAY',
+      step: 'REVIEW',
+      filledCategories: ['FIRST_NAME'],
+      requiredGaps: { workAuthorization: 'required' },
+      cvUploadState: 'ATTACHED',
+      coverLetterUploadState: 'NO_FIELD',
+    }], 'AWAITING_APPROVAL'));
+
+    renderPanel();
+
+    expect(await screen.findByText(/malformed application outcome/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Approve for Submission' })).toBeNull();
+  });
+
+  it('guards malformed or null items inside requiredGaps and blocks approval', async () => {
+    mocked.mockResolvedValue(PLAN([{
+      type: 'WORKDAY_APPLICATION_OUTCOME',
+      planType: 'WORKDAY',
+      step: 'APPLICATION_QUESTIONS',
+      filledCategories: ['FIRST_NAME'],
+      requiredGaps: [null, { id: 'q1' }, { id: 'uk_rtw', label: 'Right to work', category: 'REQUIRES_HUMAN' }],
+      cvUploadState: 'ATTACHED',
+      coverLetterUploadState: 'NO_FIELD',
+    }], 'AWAITING_APPROVAL'));
+
+    renderPanel();
+
+    expect(await screen.findByText(/malformed application outcome/i)).toBeTruthy();
+    expect(screen.getByText(/Right to work/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Approve for Submission' })).toBeNull();
+  });
+
+  it('guards non-array filled fallback and non-string step without crashing or approving', async () => {
+    mocked.mockResolvedValue(PLAN([{
+      type: 'WORKDAY_APPLICATION_OUTCOME',
+      planType: 'WORKDAY',
+      step: { invalid: true },
+      filled: 'email',
+      requiredGaps: [],
+      cvUploadState: 'ATTACHED',
+      coverLetterUploadState: 'NO_FIELD',
+    }], 'AWAITING_APPROVAL'));
+
+    renderPanel();
+
+    expect(await screen.findByText(/malformed application outcome/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Approve for Submission' })).toBeNull();
+  });
+
+  it('guards non-array plan.result and non-string step without crashing', async () => {
+    mocked.mockResolvedValue({
+      ...PLAN([], 'AWAITING_APPROVAL'),
+      result: { unexpected: true },
+    });
+
+    renderPanel();
+
+    expect(await screen.findByText(/malformed|has not yet reported/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Approve for Submission' })).toBeNull();
+  });
 });
