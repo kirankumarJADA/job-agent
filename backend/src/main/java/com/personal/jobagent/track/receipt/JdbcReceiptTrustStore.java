@@ -96,13 +96,16 @@ public class JdbcReceiptTrustStore implements ReceiptTrustStore {
 
     @Override
     public Optional<SandboxRegistration> activeSandboxRegistration(UUID profileId, String atsPlatform, String postingUrl) {
-        if (profileId == null || atsPlatform == null || postingUrl == null) {
+        if (profileId == null || atsPlatform == null || postingUrl == null || postingUrl.isBlank()) {
             return Optional.empty();
         }
+        String trimmed = postingUrl.trim();
+        String canonical = SandboxRegistrationPolicy.canonicalizePostingUrl(trimmed);
+        String canonicalLookup = canonical != null ? canonical : trimmed;
         return db.query("""
                 select id, profile_id, ats_platform, posting_url, permitted_domain, approved_at, revoked_at
                 from candidate_sandbox_registrations
-                where profile_id = ? and ats_platform = ? and posting_url = ? and revoked_at is null
+                where profile_id = ? and ats_platform = ? and posting_url in (?, ?) and revoked_at is null
                 order by approved_at desc
                 limit 1
                 """, (rs, n) -> {
@@ -115,6 +118,6 @@ public class JdbcReceiptTrustStore implements ReceiptTrustStore {
                     rs.getString("permitted_domain"),
                     rs.getTimestamp("approved_at").toInstant(),
                     revoked == null ? null : revoked.toInstant());
-        }, profileId, atsPlatform, postingUrl).stream().findFirst();
+        }, profileId, atsPlatform, trimmed, canonicalLookup).stream().findFirst();
     }
 }

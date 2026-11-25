@@ -475,6 +475,7 @@ public class ReceiptCaptureService {
         Optional<SandboxRegistration> registration = worker.targetUrl() == null ? Optional.empty()
                 : trusted(() -> trust.activeSandboxRegistration(cmd.profileId(), platform, worker.targetUrl()));
         boolean sandboxPosting = registration.isPresent()
+                && canonicalUrlsMatch(worker.targetUrl(), registration.get().postingUrl())
                 && hostWithinDomain(worker.targetUrl(), registration.get().permittedDomain());
         boolean candidateAuthorizedSandbox = registration.isPresent()
                 && cmd.profileId().equals(registration.get().profileId())
@@ -583,6 +584,15 @@ public class ReceiptCaptureService {
         return receiptSha256 == null
                 || !existing.evidenceSha256().equalsIgnoreCase(receiptSha256.trim())
                 || !Objects.equals(existing.employerConfirmationId(), trim(confirmationId));
+    }
+
+    static boolean canonicalUrlsMatch(String actualUrl, String registeredUrl) {
+        if (actualUrl == null || registeredUrl == null) {
+            return false;
+        }
+        String a = SandboxRegistrationPolicy.canonicalizePostingUrl(actualUrl);
+        String b = SandboxRegistrationPolicy.canonicalizePostingUrl(registeredUrl);
+        return a != null && a.equals(b);
     }
 
     /** True when the URL is https and its host equals the permitted domain or is a subdomain of it. */

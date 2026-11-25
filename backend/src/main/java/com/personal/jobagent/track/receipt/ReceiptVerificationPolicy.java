@@ -48,8 +48,10 @@ public class ReceiptVerificationPolicy {
     public static final String POLICY_VERSION = "genuine-ats-receipt-policy-v1";
     public static final Duration FUTURE_TOLERANCE = Duration.ofMinutes(5);
 
-    public static final Set<String> MOCK_PREFIXES = Set.of("MOCK-", "TEST-", "SAMPLE-", "SIM-");
+    public static final Set<String> MOCK_PREFIXES = Set.of(
+            "MOCK-", "TEST-", "SAMPLE-", "SIM-", "FIXTURE-", "SYNTHETIC-", "DEMO-", "FAKE-");
     public static final Set<String> REQUISITION_PREFIXES = Set.of("REQ-", "REQUISITION-", "JOB-REQ-", "RECEIPT-");
+    private static final com.fasterxml.jackson.databind.ObjectMapper JSON = new com.fasterxml.jackson.databind.ObjectMapper();
 
     public static final Set<String> ALLOWED_ATS_PLATFORMS = Set.of(
             "GREENHOUSE",
@@ -179,6 +181,33 @@ public class ReceiptVerificationPolicy {
     }
 
     /**
+     * Rejects payloads marked explicitly as synthetic/fixture test artifacts.
+     */
+    public static boolean isSyntheticFixtureEvidence(String rawEvidencePayload) {
+        if (rawEvidencePayload == null || rawEvidencePayload.isBlank()) {
+            return false;
+        }
+        String trimmed = rawEvidencePayload.trim();
+        if (!trimmed.startsWith("{")) {
+            return false;
+        }
+        try {
+            Map<?, ?> map = JSON.readValue(trimmed, Map.class);
+            if (Boolean.TRUE.equals(map.get("fixture"))
+                    || Boolean.TRUE.equals(map.get("isFixture"))
+                    || Boolean.TRUE.equals(map.get("synthetic"))
+                    || Boolean.TRUE.equals(map.get("fixtureMode"))) {
+                return true;
+            }
+            Object source = map.get("source");
+            return source != null && ("FIXTURE".equalsIgnoreCase(String.valueOf(source).trim())
+                    || "SYNTHETIC".equalsIgnoreCase(String.valueOf(source).trim()));
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    /**
      * Deterministically builds canonical JSON string for evidence hashing.
      */
     public static String buildCanonicalEvidencePayload(String employerConfirmationId, String atsPlatform,
@@ -274,6 +303,12 @@ public class ReceiptVerificationPolicy {
             throw new InvalidReceiptException(
                     "Raw evidence payload cannot be substituted with a summary text: actual DOM/screenshot evidence required",
                     "SUMMARY_SUBSTITUTION_REJECTED"
+            );
+        }
+        if (isSyntheticFixtureEvidence(evidence.rawEvidencePayload())) {
+            throw new InvalidReceiptException(
+                    "Synthetic fixture evidence markers cannot be accepted as a genuine production receipt",
+                    "FIXTURE_EVIDENCE_REJECTED"
             );
         }
 

@@ -188,6 +188,15 @@ app:
     # manage discovery sources. Production sets ROBIN_OPERATOR_EMAILS.
     operator-emails: ${ROBIN_OPERATOR_EMAILS:}
 
+  sandbox:
+    # Server-controlled allowlist of permitted ATS sandbox domains and optional posting path prefixes.
+    # Fail-closed by default (empty = no sandbox registrations accepted until configured by operator).
+    allowed-domains: ${APP_SANDBOX_ALLOWED_DOMAINS:}
+    allowed-path-prefixes: ${APP_SANDBOX_ALLOWED_PATH_PREFIXES:}
+    require-https: ${APP_SANDBOX_REQUIRE_HTTPS:true}
+    # Isolated test fixture toggle only; never enabled in production.
+    allow-local-test-hosts: ${APP_SANDBOX_ALLOW_LOCAL_TEST_HOSTS:false}
+
 management:
   endpoints:
     web:

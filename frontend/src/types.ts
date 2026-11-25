@@ -972,6 +972,25 @@ export interface ApplicationAnswer {
   updatedAt: string;
 }
 
+export interface SandboxRegistration {
+  id: string;
+  atsPlatform: string;
+  postingUrl: string;
+  permittedDomain: string;
+  approvedBy: string;
+  approvedAt: string;
+  revokedAt: string | null;
+  active: boolean;
+}
+
+export interface SandboxRegistrationsResponse {
+  configured: boolean;
+  allowedDomains: string[];
+  allowedPathPrefixes: string[];
+  requireHttps: boolean;
+  items: SandboxRegistration[];
+}
+
 /** One actionable blocker/warning from the server-side APPLY readiness gate. */
 export interface ApplyReadinessItem {
   area: string;
@@ -1355,5 +1374,24 @@ export interface HandoffSession {
   cancelledAt?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface SandboxRegistration {
+  id: string;
+  atsPlatform: string;
+  postingUrl: string;
+  permittedDomain: string;
+  approvedBy: string;
+  approvedAt: string;
+  revokedAt: string | null;
+  active: boolean;
+}
+
+export interface SandboxRegistrationsResponse {
+  configured: boolean;
+  allowedDomains: string[];
+  allowedPathPrefixes: string[];
+  requireHttps: boolean;
+  items: SandboxRegistration[];
 }
 

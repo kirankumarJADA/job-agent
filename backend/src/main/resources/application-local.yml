@@ -27,3 +27,9 @@ logging:
 app:
   security:
     operator-emails: "dev@example.local,operator@example.local"
+  sandbox:
+    # Local inspection allows only explicit sandbox board paths on Greenhouse hosts (never real employer boards).
+    allowed-domains: ${APP_SANDBOX_ALLOWED_DOMAINS:boards.greenhouse.io,job-boards.greenhouse.io}
+    allowed-path-prefixes: ${APP_SANDBOX_ALLOWED_PATH_PREFIXES:/robin-sandbox/,/sandbox/}
+    require-https: true
+    allow-local-test-hosts: false
