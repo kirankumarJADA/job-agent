@@ -432,26 +432,28 @@ export class BrowserWorker {
           await page.locator(p.selector).check({ force: false });
         }
         break;
-      case StepType.UPLOAD_FILE:
+      case StepType.UPLOAD_FILE: {
         assertSafeSelector(p.selector);
         if (plan.planType === 'GREENHOUSE' && (p.expectedJobId !== plan.correlation.jobId
             || p.expectedApplicationId !== plan.correlation.applicationId)) {
           throw new HardStopError('CROSS_JOB_FILE_CONTAMINATION', { stepId: step.id });
         }
-        if (!fs.existsSync(p.path)) throw new Error(`FILE_NOT_FOUND:${p.path}`);
         const artifact = plan.planType === 'GREENHOUSE'
           ? (p.artifact === 'coverLetter' ? plan.package.coverLetter : p.artifact === 'cv' ? plan.package.cv : null)
           : (p.selector.includes('cover_letter') ? plan.package.coverLetter : plan.package.cv);
+        const filePath = p.path ?? artifact?.path;
+        if (!filePath || !fs.existsSync(filePath)) throw new Error(`FILE_NOT_FOUND:${filePath}`);
         if (!artifact?.versionId || p.expectedVersionId !== artifact.versionId) throw new HardStopError('CV_VERSION_LINK_MISMATCH', { stepId: step.id });
         if (plan.planType === 'GREENHOUSE' && artifact.sha256 !== p.sha256) {
           throw new HardStopError('PACKAGE_CHECKSUM_MISMATCH', { stepId: step.id });
         }
         if (artifact.sha256) {
-          const actual = crypto.createHash('sha256').update(fs.readFileSync(p.path)).digest('hex');
+          const actual = crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
           if (actual !== artifact.sha256) throw new HardStopError('PACKAGE_CHECKSUM_MISMATCH', { stepId: step.id });
         }
-        await page.locator(p.selector).setInputFiles(p.path);
+        await page.locator(p.selector).setInputFiles(filePath);
         break;
+      }
       case StepType.CLICK:
         if (p.onlyWhenVerificationOtp && !values.verification?.otp) break;
         assertSafeSelector(p.selector);
