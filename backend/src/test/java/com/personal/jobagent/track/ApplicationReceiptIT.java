@@ -1029,6 +1029,128 @@ class ApplicationReceiptIT {
                 .andExpect(jsonPath("$.acknowledgement.state").value(org.hamcrest.Matchers.not("VERIFIED")));
     }
 
+    @Test
+    void receiptMatchesTrackingReconciliationExtractsPlanErrorResolvesCoverLetterFormatsAndHandlesEmptyMetadata() throws Exception {
+        Prepared p = preparedWorkdayApplication("Contract Alignment Engineer");
+        UUID jobId = jdbc.queryForObject("select job_id from applications where id = ?", UUID.class, p.applicationId());
+        String clBody = "Dear Hiring Team, aligned contract receipt metadata.";
+        String clSha = sha256Hex(clBody.getBytes(StandardCharsets.UTF_8));
+        UUID clId = UUID.randomUUID();
+        jdbc.update("""
+                insert into cover_letters (id, profile_id, job_id, application_id, version, title, body_markdown,
+                                           content_sha256, claims_validation, is_approved, origin, created_at, updated_at)
+                values (?, ?, ?, ?, 1, 'Contract Alignment Cover Letter', ?, ?, '{"passed":true}'::jsonb, true, 'GENERATED', now(), now())
+                """, clId, devProfileId, jobId, p.applicationId(), clBody, clSha);
+
+        String txtPlanJson = """
+                {
+                  "planType": "GREENHOUSE",
+                  "package": {
+                    "coverLetter": {
+                      "versionId": "%s",
+                      "sha256": "%s",
+                      "fileName": "cover-letter-%s.txt"
+                    }
+                  },
+                  "steps": [
+                    {"id": "fill-first_name", "type": "FILL_FIELD", "params": {"selector": "#first_name", "value": "Ada"}},
+                    {"id": "fill-last_name", "type": "FILL_FIELD", "params": {"selector": "#last_name", "value": "Lovelace"}},
+                    {"id": "fill-email", "type": "FILL_FIELD", "params": {"selector": "#email", "value": "ada@example.com"}}
+                  ]
+                }
+                """.formatted(clId, clSha, clId);
+        String reconciliationResult = json.writeValueAsString(List.of(Map.of(
+                "type", "SUBMISSION_RECONCILIATION",
+                "planType", "GREENHOUSE",
+                "category", "UNKNOWN",
+                "evidence", "Submit click ran but employer confirmation timed out."
+        )));
+        jdbc.update("""
+                update automation_plans
+                set status = 'RECONCILIATION_REQUIRED',
+                    plan = ?::jsonb,
+                    result = ?::jsonb
+                where id = ?""", txtPlanJson, reconciliationResult, p.planId());
+
+        String expectedRecNote = "[UNKNOWN] Submit click ran but employer confirmation timed out.";
+        mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/receipt").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reconciliation.required").value(true))
+                .andExpect(jsonPath("$.reconciliation.reason").value(expectedRecNote))
+                .andExpect(jsonPath("$.submittedIdentity.firstName").value("Ada"))
+                .andExpect(jsonPath("$.submittedIdentity.lastName").value("Lovelace"))
+                .andExpect(jsonPath("$.submittedIdentity.email").value("ada@example.com"))
+                .andExpect(jsonPath("$.coverLetter.title").value("Contract Alignment Cover Letter"))
+                .andExpect(jsonPath("$.coverLetter.kind").value("TXT"))
+                .andExpect(jsonPath("$.coverLetter.byteSize").value(clBody.getBytes(StandardCharsets.UTF_8).length))
+                .andExpect(jsonPath("$.coverLetter.validationPassed").value(true));
+
+        mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/track").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.attention[?(@.code=='RECONCILIATION_REQUIRED')].message")
+                        .value(org.hamcrest.Matchers.hasItem(org.hamcrest.Matchers.containsString(expectedRecNote))));
+
+        // Failed plan with PLAN_ERROR message/reason and PDF cover letter attached via files table
+        byte[] pdfBytes = "%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n".getBytes(StandardCharsets.UTF_8);
+        String pdfSha = sha256Hex(pdfBytes);
+        UUID pdfFileId = UUID.randomUUID();
+        jdbc.update(
+                "insert into files(id, object_key, sha256, content_type, byte_size, purpose, content) values(?,?,?,?,?,?,?)",
+                pdfFileId, "test/cover-" + clId + ".pdf", pdfSha, "application/pdf", pdfBytes.length, "COVER_LETTER", pdfBytes);
+        jdbc.update("update cover_letters set pdf_file_id = ? where id = ?", pdfFileId, clId);
+        String pdfPlanJson = """
+                {
+                  "planType": "GREENHOUSE",
+                  "package": {
+                    "coverLetter": {
+                      "versionId": "%s",
+                      "sha256": "%s",
+                      "fileName": "cover-letter-%s.pdf",
+                      "byteSize": %d
+                    }
+                  },
+                  "steps": []
+                }
+                """.formatted(clId, pdfSha, clId, pdfBytes.length);
+        String planErrorResult = json.writeValueAsString(List.of(Map.of(
+                "type", "PLAN_ERROR",
+                "outcome", "FAILED",
+                "reason", "WAIT_TIMEOUT",
+                "message", "Confirmation panel did not appear within 15000ms"
+        )));
+        jdbc.update("""
+                update automation_plans
+                set status = 'FAILED',
+                    plan = ?::jsonb,
+                    result = ?::jsonb
+                where id = ?""", pdfPlanJson, planErrorResult, p.planId());
+
+        mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/receipt").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FAILED"))
+                .andExpect(jsonPath("$.failure.failed").value(true))
+                .andExpect(jsonPath("$.failure.code").value("WAIT_TIMEOUT"))
+                .andExpect(jsonPath("$.failure.reason").value("Confirmation panel did not appear within 15000ms"))
+                .andExpect(jsonPath("$.coverLetter.kind").value("PDF"))
+                .andExpect(jsonPath("$.coverLetter.sha256").value(pdfSha))
+                .andExpect(jsonPath("$.coverLetter.byteSize").value(pdfBytes.length))
+                .andExpect(jsonPath("$.coverLetter.validationPassed").value(true));
+
+        // Unattempted application with missing optional documents & metadata
+        Prepared empty = preparedWorkdayApplication("Unattempted Metadata Engineer");
+        jdbc.update("delete from automation_plans where application_id = ?", empty.applicationId());
+        jdbc.update("delete from cover_letters where application_id = ?", empty.applicationId());
+        jdbc.update("update applications set cv_version_id = null where id = ?", empty.applicationId());
+
+        mvc.perform(get("/api/v1/applications/" + empty.applicationId() + "/receipt").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.receiptId").doesNotExist())
+                .andExpect(jsonPath("$.atsKind").value("NOT_ATTEMPTED"))
+                .andExpect(jsonPath("$.cv").doesNotExist())
+                .andExpect(jsonPath("$.coverLetter").doesNotExist())
+                .andExpect(jsonPath("$.attemptHistory").isEmpty());
+    }
+
     private static String sha256Hex(byte[] content) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(content);

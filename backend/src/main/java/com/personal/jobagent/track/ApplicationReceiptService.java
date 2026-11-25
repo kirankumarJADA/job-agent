@@ -16,6 +16,7 @@ import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -24,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -404,25 +406,66 @@ public class ApplicationReceiptService {
         if (!(planMap.get("steps") instanceof List<?> steps)) {
             return new IdentityReceipt(null, null, null, null, null, null, null);
         }
+        String firstName = null;
+        String lastName = null;
+        String name = null;
+        String email = null;
+        String phone = null;
+        String addressLine1 = null;
+        String linkedIn = null;
         for (Object s : steps) {
             if (s instanceof Map<?, ?> step) {
                 String type = String.valueOf(step.get("type"));
                 if (type.endsWith("_APPLY") && step.get("params") instanceof Map<?, ?> params) {
                     if (params.get("identity") instanceof Map<?, ?> idMap) {
                         return new IdentityReceipt(
-                                (String) idMap.get("name"),
-                                (String) idMap.get("firstName"),
-                                (String) idMap.get("lastName"),
-                                (String) idMap.get("email"),
-                                (String) idMap.get("phone"),
-                                (String) idMap.get("addressLine1"),
-                                (String) idMap.get("linkedIn")
+                                nonBlankString(idMap.get("name")),
+                                nonBlankString(idMap.get("firstName")),
+                                nonBlankString(idMap.get("lastName")),
+                                nonBlankString(idMap.get("email")),
+                                nonBlankString(idMap.get("phone")),
+                                nonBlankString(idMap.get("addressLine1")),
+                                nonBlankString(idMap.get("linkedIn"))
                         );
+                    }
+                    if ("LEVER_APPLY".equals(type) && params.get("fields") instanceof List<?> fields) {
+                        for (Object fObj : fields) {
+                            if (fObj instanceof Map<?, ?> f) {
+                                String key = nonBlankString(f.get("key"));
+                                String val = nonBlankString(f.get("value"));
+                                if (key == null || val == null) continue;
+                                switch (key) {
+                                    case "name" -> name = val;
+                                    case "email" -> email = val;
+                                    case "phone" -> phone = val;
+                                    case "location" -> addressLine1 = val;
+                                    case "urls[LinkedIn]" -> linkedIn = val;
+                                    default -> {}
+                                }
+                            }
+                        }
+                    }
+                } else if ("FILL_FIELD".equals(type) && step.get("params") instanceof Map<?, ?> params) {
+                    String stepId = nonBlankString(step.get("id"));
+                    String val = nonBlankString(params.get("value"));
+                    if (stepId != null && val != null) {
+                        switch (stepId) {
+                            case "fill-first_name" -> firstName = val;
+                            case "fill-last_name" -> lastName = val;
+                            case "fill-email" -> email = val;
+                            case "fill-phone" -> phone = val;
+                            case "fill-candidate-location", "fill-location" -> addressLine1 = val;
+                            default -> {}
+                        }
                     }
                 }
             }
         }
-        return new IdentityReceipt(null, null, null, null, null, null, null);
+        if (name == null && (firstName != null || lastName != null)) {
+            name = String.join(" ", firstName == null ? List.of(lastName)
+                    : lastName == null ? List.of(firstName) : List.of(firstName, lastName));
+        }
+        return new IdentityReceipt(name, firstName, lastName, email, phone, addressLine1, linkedIn);
     }
 
     @SuppressWarnings("unchecked")
@@ -459,27 +502,61 @@ public class ApplicationReceiptService {
             return null;
         }
         UUID versionId = m.get("versionId") != null ? parseUuid(String.valueOf(m.get("versionId"))) : null;
-        String sha256 = (String) m.get("sha256");
+        String sha256 = nonBlankString(m.get("sha256"));
         Long byteSize = m.get("byteSize") instanceof Number n ? n.longValue() : null;
-        String fileName = (String) m.get("fileName");
-        String purpose = m.get("purpose") != null ? String.valueOf(m.get("purpose")) : defaultPurpose;
+        String fileName = nonBlankString(m.get("fileName"));
+        String purpose = nonBlankString(m.get("purpose"));
+        if (purpose == null) {
+            purpose = defaultPurpose;
+        }
+        boolean isCoverLetter = "COVER_LETTER".equalsIgnoreCase(purpose);
 
         String title = null;
         Boolean validationPassed = null;
+        boolean hasPdfFile = !isCoverLetter || Boolean.TRUE.equals(m.get("pdfStored"))
+                || (fileName != null && fileName.toLowerCase(Locale.ROOT).endsWith(".pdf"));
+
         if (versionId != null) {
             try {
-                Map<String, Object> vRow = db.queryForMap(
-                        "select title, claims_validation::text as val from cv_versions where id = ? and profile_id = ?",
-                        versionId, profileId);
-                title = (String) vRow.get("title");
-                String valJson = (String) vRow.get("val");
-                if (valJson != null && valJson.contains("\"passed\":true")) {
-                    validationPassed = true;
+                if (isCoverLetter) {
+                    Map<String, Object> clRow = db.queryForMap("""
+                            select cl.title, cl.claims_validation::text as val, cl.body_markdown, cl.content_sha256,
+                                   f.byte_size as pdf_byte_size, f.sha256 as pdf_sha256
+                            from cover_letters cl
+                            left join files f on f.id = cl.pdf_file_id
+                            where cl.id = ? and cl.profile_id = ?
+                            """, versionId, profileId);
+                    title = (String) clRow.get("title");
+                    validationPassed = parseValidationPassed((String) clRow.get("val"));
+                    String pdfSha = nonBlankString(clRow.get("pdf_sha256"));
+                    Long pdfBytes = clRow.get("pdf_byte_size") instanceof Number p ? p.longValue() : null;
+                    if (pdfSha != null || pdfBytes != null) {
+                        hasPdfFile = true;
+                    }
+                    String kind = documentFormat(fileName, hasPdfFile ? "PDF" : "TXT");
+                    if (byteSize == null) {
+                        if ("PDF".equals(kind) && pdfBytes != null) {
+                            byteSize = pdfBytes;
+                        } else if (clRow.get("body_markdown") instanceof String body) {
+                            byteSize = (long) body.getBytes(StandardCharsets.UTF_8).length;
+                        }
+                    }
+                    if (sha256 == null) {
+                        sha256 = "PDF".equals(kind) && pdfSha != null ? pdfSha : nonBlankString(clRow.get("content_sha256"));
+                    }
+                    return new DocumentReceipt(versionId, title, kind, sha256, byteSize, purpose, fileName, validationPassed);
+                } else {
+                    Map<String, Object> vRow = db.queryForMap(
+                            "select title, claims_validation::text as val from cv_versions where id = ? and profile_id = ?",
+                            versionId, profileId);
+                    title = (String) vRow.get("title");
+                    validationPassed = parseValidationPassed((String) vRow.get("val"));
                 }
             } catch (EmptyResultDataAccessException ignored) {
             }
         }
-        return new DocumentReceipt(versionId, title, "PDF", sha256, byteSize, purpose, fileName, validationPassed);
+        String kind = documentFormat(fileName, hasPdfFile ? "PDF" : "TXT");
+        return new DocumentReceipt(versionId, title, kind, sha256, byteSize, purpose, fileName, validationPassed);
     }
 
     private AuthorizationRecord extractAuthorization(UUID planId, UUID applicationId, UUID profileId, boolean approved, Instant updatedAt) {
@@ -693,10 +770,22 @@ public class ApplicationReceiptService {
         String reason = "Submission attempt was made but employer acknowledgment response was unobserved or timed out.";
         for (Object r : results) {
             if (r instanceof Map<?, ?> m) {
-                if ("SUBMISSION_RECONCILIATION".equals(m.get("type")) && m.get("reason") != null) {
-                    reason = String.valueOf(m.get("reason"));
-                } else if (m.get("reconciliationReason") != null) {
-                    reason = String.valueOf(m.get("reconciliationReason"));
+                if ("SUBMISSION_RECONCILIATION".equals(m.get("type"))) {
+                    String category = nonBlankString(m.get("category"));
+                    String evidence = nonBlankString(m.get("evidence"));
+                    String legacyReason = nonBlankString(m.get("reason"));
+                    if (category != null || evidence != null) {
+                        String catLabel = category != null ? category : "UNKNOWN";
+                        String detail = evidence != null ? evidence : legacyReason;
+                        reason = detail != null ? ("[" + catLabel + "] " + detail) : ("[" + catLabel + "]");
+                    } else if (legacyReason != null) {
+                        reason = legacyReason;
+                    }
+                } else {
+                    String compat = nonBlankString(m.get("reconciliationReason"));
+                    if (compat != null) {
+                        reason = compat;
+                    }
                 }
             }
         }
@@ -714,8 +803,20 @@ public class ApplicationReceiptService {
         String code = status;
         for (Object r : results) {
             if (r instanceof Map<?, ?> m) {
-                if (m.get("error") != null) reason = String.valueOf(m.get("error"));
-                if (m.get("errorCode") != null) code = String.valueOf(m.get("errorCode"));
+                if ("PLAN_ERROR".equals(m.get("type"))) {
+                    String msg = nonBlankString(m.get("message"));
+                    if (msg == null) msg = nonBlankString(m.get("error"));
+                    if (msg != null) reason = msg;
+                    String errCode = nonBlankString(m.get("reason"));
+                    if (errCode == null) errCode = nonBlankString(m.get("errorCode"));
+                    if (errCode != null) code = errCode;
+                } else {
+                    String err = nonBlankString(m.get("error"));
+                    if (err == null) err = nonBlankString(m.get("message"));
+                    if (err != null) reason = err;
+                    String errCode = nonBlankString(m.get("errorCode"));
+                    if (errCode != null) code = errCode;
+                }
             }
         }
         return new FailureDetails(true, redactSensitive(reason), redactSensitive(code));
@@ -748,7 +849,8 @@ public class ApplicationReceiptService {
         }
         try {
             return db.queryForObject("""
-                    select cv.id, cv.title, cv.content_sha256, f.byte_size
+                    select cv.id, cv.title, cv.claims_validation::text as val,
+                           coalesce(f.sha256, cv.content_sha256) as sha256, f.byte_size
                     from cv_versions cv
                     left join files f on f.id = cv.pdf_file_id
                     where cv.id = ? and cv.profile_id = ?
@@ -756,11 +858,11 @@ public class ApplicationReceiptService {
                     (UUID) rs.getObject("id"),
                     rs.getString("title"),
                     "PDF",
-                    rs.getString("content_sha256"),
+                    rs.getString("sha256"),
                     rs.getObject("byte_size") != null ? rs.getLong("byte_size") : null,
                     "TAILORED_CV",
                     "tailored-cv.pdf",
-                    true
+                    parseValidationPassed(rs.getString("val"))
             ), cvVersionId, profileId);
         } catch (EmptyResultDataAccessException e) {
             return null;
@@ -770,24 +872,62 @@ public class ApplicationReceiptService {
     private DocumentReceipt fetchCurrentCoverLetterReceipt(UUID profileId, UUID applicationId, UUID jobId) {
         try {
             return db.queryForObject("""
-                    select cl.id, cl.title, f.sha256, f.byte_size
+                    select cl.id, cl.title, cl.claims_validation::text as val, cl.body_markdown, cl.content_sha256,
+                           cl.pdf_file_id, f.sha256 as pdf_sha256, f.byte_size as pdf_byte_size
                     from cover_letters cl
-                    left join files f on f.object_key = 'cover-letters/' || cl.id || '.pdf'
+                    left join files f on f.id = cl.pdf_file_id
                     where cl.profile_id = ? and (cl.application_id = ? or (cl.application_id is null and cl.job_id = ?))
-                    order by cl.created_at desc limit 1
-                    """, (rs, n) -> new DocumentReceipt(
-                    (UUID) rs.getObject("id"),
-                    rs.getString("title"),
-                    "PDF",
-                    rs.getString("sha256"),
-                    rs.getObject("byte_size") != null ? rs.getLong("byte_size") : null,
-                    "COVER_LETTER",
-                    "cover-letter.pdf",
-                    null
-            ), profileId, applicationId, jobId);
+                    order by cl.application_id is null asc, cl.is_approved desc, cl.created_at desc, cl.id desc limit 1
+                    """, (rs, n) -> {
+                String pdfSha = nonBlankString(rs.getString("pdf_sha256"));
+                Long pdfBytes = rs.getObject("pdf_byte_size") != null ? rs.getLong("pdf_byte_size") : null;
+                boolean hasPdf = rs.getObject("pdf_file_id") != null && pdfSha != null;
+                String body = rs.getString("body_markdown");
+                String sha = hasPdf ? pdfSha : nonBlankString(rs.getString("content_sha256"));
+                Long bytes = hasPdf ? pdfBytes : (body != null ? (long) body.getBytes(StandardCharsets.UTF_8).length : null);
+                return new DocumentReceipt(
+                        (UUID) rs.getObject("id"),
+                        rs.getString("title"),
+                        hasPdf ? "PDF" : "TXT",
+                        sha,
+                        bytes,
+                        "COVER_LETTER",
+                        hasPdf ? "cover-letter.pdf" : "cover-letter.txt",
+                        parseValidationPassed(rs.getString("val"))
+                );
+            }, profileId, applicationId, jobId);
         } catch (EmptyResultDataAccessException e) {
             return null;
         }
+    }
+
+    private Boolean parseValidationPassed(String valJson) {
+        if (valJson == null || valJson.isBlank()) {
+            return null;
+        }
+        Map<String, Object> valMap = readJsonMap(valJson);
+        Object passed = valMap.get("passed");
+        return passed instanceof Boolean b ? b : null;
+    }
+
+    private static String documentFormat(String fileName, String defaultFormat) {
+        if (fileName == null || fileName.isBlank()) {
+            return defaultFormat;
+        }
+        String lower = fileName.trim().toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".pdf")) return "PDF";
+        if (lower.endsWith(".txt")) return "TXT";
+        if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "MARKDOWN";
+        if (lower.endsWith(".docx")) return "DOCX";
+        return defaultFormat;
+    }
+
+    private static String nonBlankString(Object value) {
+        if (!(value instanceof String s)) {
+            return null;
+        }
+        String trimmed = s.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     private IdentityReceipt fetchProfileIdentity(UUID profileId) {

@@ -1,0 +1,439 @@
+{
+  "confirmed": {
+    "receiptId": "66666666-6666-7666-8666-666666666662",
+    "applicationId": "22222222-2222-7222-8222-222222222222",
+    "jobId": "33333333-3333-7333-8333-333333333333",
+    "jobTitle": "Senior Platform Engineer",
+    "company": "Acme Corp",
+    "applicationUrl": "https://boards.greenhouse.io/robin-sandbox/jobs/42",
+    "atsKind": "GREENHOUSE",
+    "attemptNumber": 2,
+    "isLatest": true,
+    "idempotencyKey": "greenhouse-retry:66666666-6666-7666-8666-666666666661",
+    "status": "SUBMITTED",
+    "submitted": true,
+    "submittedAt": "2026-10-22T11:59:00Z",
+    "createdAt": "2026-10-22T11:58:00Z",
+    "updatedAt": "2026-10-22T11:59:00Z",
+    "authorization": {
+      "approved": true,
+      "policy": "EXPLICIT_CANDIDATE_APPROVAL",
+      "approvedAt": "2026-10-22T11:55:00Z",
+      "actor": "Jane Doe"
+    },
+    "submittedIdentity": {
+      "name": "Jane Doe",
+      "firstName": "Jane",
+      "lastName": "Doe",
+      "email": "jane@example.com",
+      "phone": "+44 7700 900123",
+      "addressLine1": "London, UK",
+      "linkedIn": null
+    },
+    "submittedAnswers": [
+      {
+        "question": "How many years of experience do you have with Kubernetes?",
+        "answer": "7 years managing enterprise production clusters"
+      }
+    ],
+    "cv": {
+      "versionId": "44444444-4444-7444-8444-444444444444",
+      "title": "Tailored Platform CV",
+      "kind": "PDF",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "byteSize": 54321,
+      "purpose": "TAILORED_CV",
+      "fileName": "cv-44444444-4444-7444-8444-444444444444.pdf",
+      "validationPassed": true
+    },
+    "coverLetter": {
+      "versionId": "55555555-5555-7555-8555-555555555555",
+      "title": "Acme Senior Platform Engineer Cover Letter",
+      "kind": "TXT",
+      "sha256": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+      "byteSize": 51,
+      "purpose": "COVER_LETTER",
+      "fileName": "cover-letter-55555555-5555-7555-8555-555555555555.txt",
+      "validationPassed": true
+    },
+    "confirmation": {
+      "confirmed": true,
+      "confirmationId": "GH-CONF-98765",
+      "observedSignals": [
+        "GREENHOUSE_SUBMISSION_RESPONSE_2XX",
+        "GREENHOUSE_CONFIRMATION_URL_MATCHED"
+      ],
+      "summary": "Application confirmation verified against stored worker evidence."
+    },
+    "reconciliation": {
+      "required": false,
+      "reason": null,
+      "suggestedAction": null
+    },
+    "failure": {
+      "failed": false,
+      "reason": null,
+      "code": null
+    },
+    "attemptHistory": [
+      {
+        "attemptId": "66666666-6666-7666-8666-666666666661",
+        "attemptNumber": 1,
+        "atsKind": "GREENHOUSE",
+        "idempotencyKey": "greenhouse:22222222-2222-7222-8222-222222222222",
+        "status": "RECONCILIATION_REQUIRED",
+        "submitted": false,
+        "createdAt": "2026-10-22T10:00:00Z",
+        "updatedAt": "2026-10-22T10:02:00Z",
+        "isLatest": false
+      },
+      {
+        "attemptId": "66666666-6666-7666-8666-666666666662",
+        "attemptNumber": 2,
+        "atsKind": "GREENHOUSE",
+        "idempotencyKey": "greenhouse-retry:66666666-6666-7666-8666-666666666661",
+        "status": "SUBMITTED",
+        "submitted": true,
+        "createdAt": "2026-10-22T11:58:00Z",
+        "updatedAt": "2026-10-22T11:59:00Z",
+        "isLatest": true
+      }
+    ]
+  },
+  "reconciliation": {
+    "receiptId": "66666666-6666-7666-8666-666666666661",
+    "applicationId": "22222222-2222-7222-8222-222222222222",
+    "jobId": "33333333-3333-7333-8333-333333333333",
+    "jobTitle": "Senior Platform Engineer",
+    "company": "Acme Corp",
+    "applicationUrl": "https://boards.greenhouse.io/robin-sandbox/jobs/42",
+    "atsKind": "GREENHOUSE",
+    "attemptNumber": 1,
+    "isLatest": false,
+    "idempotencyKey": "greenhouse:22222222-2222-7222-8222-222222222222",
+    "status": "RECONCILIATION_REQUIRED",
+    "submitted": false,
+    "submittedAt": null,
+    "createdAt": "2026-10-22T10:00:00Z",
+    "updatedAt": "2026-10-22T10:02:00Z",
+    "authorization": {
+      "approved": true,
+      "policy": "EXPLICIT_CANDIDATE_APPROVAL",
+      "approvedAt": "2026-10-22T09:55:00Z",
+      "actor": "Jane Doe"
+    },
+    "submittedIdentity": {
+      "name": "Jane Doe",
+      "firstName": "Jane",
+      "lastName": "Doe",
+      "email": "jane@example.com",
+      "phone": "+44 7700 900123",
+      "addressLine1": "London, UK",
+      "linkedIn": null
+    },
+    "submittedAnswers": [
+      {
+        "question": "How many years of experience do you have with Kubernetes?",
+        "answer": "7 years managing enterprise production clusters"
+      }
+    ],
+    "cv": {
+      "versionId": "44444444-4444-7444-8444-444444444444",
+      "title": "Tailored Platform CV",
+      "kind": "PDF",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "byteSize": 54321,
+      "purpose": "TAILORED_CV",
+      "fileName": "cv-44444444-4444-7444-8444-444444444444.pdf",
+      "validationPassed": true
+    },
+    "coverLetter": {
+      "versionId": "55555555-5555-7555-8555-555555555555",
+      "title": "Acme Senior Platform Engineer Cover Letter",
+      "kind": "TXT",
+      "sha256": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+      "byteSize": 51,
+      "purpose": "COVER_LETTER",
+      "fileName": "cover-letter-55555555-5555-7555-8555-555555555555.txt",
+      "validationPassed": true
+    },
+    "confirmation": {
+      "confirmed": false,
+      "confirmationId": null,
+      "observedSignals": [],
+      "summary": "Application has not been confirmed as submitted."
+    },
+    "reconciliation": {
+      "required": true,
+      "reason": "[UNKNOWN] Submit click ran but employer confirmation response timed out.",
+      "suggestedAction": "Verify directly with the employer whether your application was received, or click Reconcile to trigger a fresh independent submission attempt."
+    },
+    "failure": {
+      "failed": false,
+      "reason": null,
+      "code": null
+    },
+    "attemptHistory": [
+      {
+        "attemptId": "66666666-6666-7666-8666-666666666661",
+        "attemptNumber": 1,
+        "atsKind": "GREENHOUSE",
+        "idempotencyKey": "greenhouse:22222222-2222-7222-8222-222222222222",
+        "status": "RECONCILIATION_REQUIRED",
+        "submitted": false,
+        "createdAt": "2026-10-22T10:00:00Z",
+        "updatedAt": "2026-10-22T10:02:00Z",
+        "isLatest": false
+      },
+      {
+        "attemptId": "66666666-6666-7666-8666-666666666662",
+        "attemptNumber": 2,
+        "atsKind": "GREENHOUSE",
+        "idempotencyKey": "greenhouse-retry:66666666-6666-7666-8666-666666666661",
+        "status": "SUBMITTED",
+        "submitted": true,
+        "createdAt": "2026-10-22T11:58:00Z",
+        "updatedAt": "2026-10-22T11:59:00Z",
+        "isLatest": true
+      }
+    ]
+  },
+  "submittedUnverified": {
+    "receiptId": "66666666-6666-7666-8666-666666666662",
+    "applicationId": "22222222-2222-7222-8222-222222222222",
+    "jobId": "33333333-3333-7333-8333-333333333333",
+    "jobTitle": "Senior Platform Engineer",
+    "company": "Acme Corp",
+    "applicationUrl": "https://boards.greenhouse.io/robin-sandbox/jobs/42",
+    "atsKind": "GREENHOUSE",
+    "attemptNumber": 1,
+    "isLatest": false,
+    "idempotencyKey": "greenhouse:22222222-2222-7222-8222-222222222222",
+    "status": "SUBMITTED",
+    "submitted": true,
+    "submittedAt": "2026-10-22T11:59:00Z",
+    "createdAt": "2026-10-22T11:58:00Z",
+    "updatedAt": "2026-10-22T11:59:00Z",
+    "authorization": {
+      "approved": true,
+      "policy": "EXPLICIT_CANDIDATE_APPROVAL",
+      "approvedAt": "2026-10-22T11:55:00Z",
+      "actor": "Jane Doe"
+    },
+    "submittedIdentity": {
+      "name": "Jane Doe",
+      "firstName": "Jane",
+      "lastName": "Doe",
+      "email": "jane@example.com",
+      "phone": "+44 7700 900123",
+      "addressLine1": "London, UK",
+      "linkedIn": null
+    },
+    "submittedAnswers": [],
+    "cv": {
+      "versionId": "44444444-4444-7444-8444-444444444444",
+      "title": "Tailored Platform CV",
+      "kind": "PDF",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "byteSize": 54321,
+      "purpose": "TAILORED_CV",
+      "fileName": "cv-44444444-4444-7444-8444-444444444444.pdf",
+      "validationPassed": true
+    },
+    "coverLetter": {
+      "versionId": "55555555-5555-7555-8555-555555555555",
+      "title": "Acme Senior Platform Engineer Cover Letter",
+      "kind": "TXT",
+      "sha256": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+      "byteSize": 51,
+      "purpose": "COVER_LETTER",
+      "fileName": "cover-letter-55555555-5555-7555-8555-555555555555.txt",
+      "validationPassed": true
+    },
+    "confirmation": {
+      "confirmed": false,
+      "confirmationId": "CLAIMED-ONLY-999",
+      "observedSignals": [],
+      "summary": "Unverified submission: receipt verification is unavailable, so this submission cannot be shown as confirmed."
+    },
+    "reconciliation": {
+      "required": true,
+      "reason": "UNVERIFIED_RECEIPT_EVIDENCE",
+      "suggestedAction": "Genuine employer confirmation evidence is unavailable or unverified. Verify directly with the employer."
+    },
+    "failure": {
+      "failed": false,
+      "reason": null,
+      "code": null
+    },
+    "attemptHistory": [
+      {
+        "attemptId": "66666666-6666-7666-8666-666666666662",
+        "attemptNumber": 1,
+        "atsKind": "GREENHOUSE",
+        "idempotencyKey": "greenhouse:22222222-2222-7222-8222-222222222222",
+        "status": "SUBMITTED",
+        "submitted": true,
+        "createdAt": "2026-10-22T11:58:00Z",
+        "updatedAt": "2026-10-22T11:59:00Z",
+        "isLatest": false
+      },
+      {
+        "attemptId": "66666666-6666-7666-8666-666666666663",
+        "attemptNumber": 2,
+        "atsKind": "GREENHOUSE",
+        "idempotencyKey": "greenhouse:22222222-2222-7222-8222-222222222222",
+        "status": "FAILED",
+        "submitted": false,
+        "createdAt": "2026-10-22T12:00:00Z",
+        "updatedAt": "2026-10-22T12:01:00Z",
+        "isLatest": true
+      }
+    ]
+  },
+  "failed": {
+    "receiptId": "66666666-6666-7666-8666-666666666663",
+    "applicationId": "22222222-2222-7222-8222-222222222222",
+    "jobId": "33333333-3333-7333-8333-333333333333",
+    "jobTitle": "Senior Platform Engineer",
+    "company": "Acme Corp",
+    "applicationUrl": "https://boards.greenhouse.io/robin-sandbox/jobs/42",
+    "atsKind": "GREENHOUSE",
+    "attemptNumber": 2,
+    "isLatest": true,
+    "idempotencyKey": "greenhouse:22222222-2222-7222-8222-222222222222",
+    "status": "FAILED",
+    "submitted": false,
+    "submittedAt": null,
+    "createdAt": "2026-10-22T12:00:00Z",
+    "updatedAt": "2026-10-22T12:01:00Z",
+    "authorization": {
+      "approved": false,
+      "policy": "EXPLICIT_CANDIDATE_APPROVAL",
+      "approvedAt": null,
+      "actor": null
+    },
+    "submittedIdentity": {
+      "name": "Jane Doe",
+      "firstName": "Jane",
+      "lastName": "Doe",
+      "email": "jane@example.com",
+      "phone": "+44 7700 900123",
+      "addressLine1": "London, UK",
+      "linkedIn": null
+    },
+    "submittedAnswers": [],
+    "cv": {
+      "versionId": "44444444-4444-7444-8444-444444444444",
+      "title": "Tailored Platform CV",
+      "kind": "PDF",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "byteSize": 54321,
+      "purpose": "TAILORED_CV",
+      "fileName": "cv-44444444-4444-7444-8444-444444444444.pdf",
+      "validationPassed": true
+    },
+    "coverLetter": {
+      "versionId": "55555555-5555-7555-8555-555555555555",
+      "title": "Acme Senior Platform Engineer Cover Letter",
+      "kind": "TXT",
+      "sha256": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+      "byteSize": 51,
+      "purpose": "COVER_LETTER",
+      "fileName": "cover-letter-55555555-5555-7555-8555-555555555555.txt",
+      "validationPassed": true
+    },
+    "confirmation": {
+      "confirmed": false,
+      "confirmationId": null,
+      "observedSignals": [],
+      "summary": "Application has not been confirmed as submitted."
+    },
+    "reconciliation": {
+      "required": false,
+      "reason": null,
+      "suggestedAction": null
+    },
+    "failure": {
+      "failed": true,
+      "reason": "Repeated crashes (3/3): Wait timeout Authorization: [REDACTED]",
+      "code": "DEAD_LETTER_POISON_PILL"
+    },
+    "attemptHistory": [
+      {
+        "attemptId": "66666666-6666-7666-8666-666666666662",
+        "attemptNumber": 1,
+        "atsKind": "GREENHOUSE",
+        "idempotencyKey": "greenhouse:22222222-2222-7222-8222-222222222222",
+        "status": "SUBMITTED",
+        "submitted": true,
+        "createdAt": "2026-10-22T11:58:00Z",
+        "updatedAt": "2026-10-22T11:59:00Z",
+        "isLatest": false
+      },
+      {
+        "attemptId": "66666666-6666-7666-8666-666666666663",
+        "attemptNumber": 2,
+        "atsKind": "GREENHOUSE",
+        "idempotencyKey": "greenhouse:22222222-2222-7222-8222-222222222222",
+        "status": "FAILED",
+        "submitted": false,
+        "createdAt": "2026-10-22T12:00:00Z",
+        "updatedAt": "2026-10-22T12:01:00Z",
+        "isLatest": true
+      }
+    ]
+  },
+  "empty": {
+    "receiptId": null,
+    "applicationId": "22222222-2222-7222-8222-222222222222",
+    "jobId": "33333333-3333-7333-8333-333333333333",
+    "jobTitle": "Senior Platform Engineer",
+    "company": "Acme Corp",
+    "applicationUrl": "https://boards.greenhouse.io/robin-sandbox/jobs/42",
+    "atsKind": "NOT_ATTEMPTED",
+    "attemptNumber": 0,
+    "isLatest": true,
+    "idempotencyKey": null,
+    "status": "PREPARED",
+    "submitted": false,
+    "submittedAt": null,
+    "createdAt": "2026-10-22T10:00:00Z",
+    "updatedAt": "2026-10-22T10:00:00Z",
+    "authorization": {
+      "approved": false,
+      "policy": "EXPLICIT_CANDIDATE_APPROVAL",
+      "approvedAt": null,
+      "actor": null
+    },
+    "submittedIdentity": {
+      "name": null,
+      "firstName": null,
+      "lastName": null,
+      "email": null,
+      "phone": null,
+      "addressLine1": null,
+      "linkedIn": null
+    },
+    "submittedAnswers": [],
+    "cv": null,
+    "coverLetter": null,
+    "confirmation": {
+      "confirmed": false,
+      "confirmationId": null,
+      "observedSignals": [],
+      "summary": "No submission attempt has been executed yet."
+    },
+    "reconciliation": {
+      "required": false,
+      "reason": null,
+      "suggestedAction": null
+    },
+    "failure": {
+      "failed": false,
+      "reason": null,
+      "code": null
+    },
+    "attemptHistory": []
+  }
+}
