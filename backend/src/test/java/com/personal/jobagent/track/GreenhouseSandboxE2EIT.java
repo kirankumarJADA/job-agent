@@ -684,6 +684,39 @@ class GreenhouseSandboxE2EIT {
         }
     }
 
+    @Test
+    void confirmedSubmissionAdvancesApplicationStartingFromReadyToApplyWithoutFailure() throws Exception {
+        String postingUrl = "https://boards.greenhouse.io/robin-sandbox/jobs/8200799";
+        mvc.perform(post("/api/v1/sandbox-registrations")
+                        .session(devSession)
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"atsPlatform":"GREENHOUSE","postingUrl":"%s"}
+                                """.formatted(postingUrl)))
+                .andExpect(status().isCreated());
+
+        SeededPlan seeded = prepareRealGreenhousePlan("ready-to-apply-" + UUID.randomUUID(), postingUrl);
+        jdbc.update("update applications set status = 'READY_TO_APPLY' where id = ?", seeded.applicationId());
+
+        String raw = canonicalGreenhouseEvidence(seeded.planId(), seeded.applicationId(), "GH-READY-99", null);
+        List<String> signals = List.of("GREENHOUSE_SUBMISSION_RESPONSE_2XX", "EMPLOYER_CONFIRMATION_ID_OBSERVED");
+
+        mvc.perform(post("/api/v1/automation/plans/" + seeded.planId() + "/complete")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(completionBody("GH-READY-99", signals, raw))))
+                .andExpect(status().isNoContent());
+
+        String appStatus = jdbc.queryForObject(
+                "select status from applications where id = ?", String.class, seeded.applicationId());
+        assertThat(appStatus).isEqualTo("APPLICATION_SUBMITTED");
+        mvc.perform(get("/api/v1/applications/" + seeded.applicationId() + "/track").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.basis").value("VERIFIED"))
+                .andExpect(jsonPath("$.submission.state").value("CONFIRMED"));
+    }
+
     private static String sha256Hex(byte[] content) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(content);

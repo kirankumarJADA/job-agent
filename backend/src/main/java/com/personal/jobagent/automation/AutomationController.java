@@ -542,10 +542,19 @@ public class AutomationController {
             return;
         }
         try {
+            String currentStatus = applicationStatus.find(profileId, plan.applicationId())
+                    .map(row -> row.get("status"))
+                    .map(String::valueOf)
+                    .orElse(null);
+            if ("READY_TO_APPLY".equals(currentStatus)) {
+                applicationStatus.apply(profileId, plan.applicationId(), "APPLICATION_STARTED",
+                        "automation.real_submit.start:" + planId, "worker",
+                        Map.of("planId", planId.toString()));
+            }
             applicationStatus.apply(profileId, plan.applicationId(), "APPLICATION_SUBMITTED",
                     "automation.real_submit:" + planId, "worker",
                     Map.of("planId", planId.toString(), "detail", detail == null ? "" : detail));
-        } catch (IllegalStateException | java.util.NoSuchElementException e) {
+        } catch (IllegalStateException | java.util.NoSuchElementException | org.springframework.dao.DataAccessException e) {
             log.warn("Could not mirror real submission onto application status for plan {}: {}", planId, e.getMessage());
         }
     }
@@ -626,7 +635,24 @@ public class AutomationController {
             return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
         }
         return plans.claimNext()
-                .<ResponseEntity<?>>map(ResponseEntity::ok)
+                .<ResponseEntity<?>>map(plan -> {
+                    int requeueCount = plans.manualRequeueCount(plan.id());
+                    if (requeueCount <= 0) {
+                        return ResponseEntity.ok(plan);
+                    }
+                    Map<String, Object> body = new java.util.LinkedHashMap<>();
+                    body.put("id", plan.id());
+                    body.put("applicationId", plan.applicationId());
+                    body.put("targetUrl", plan.targetUrl());
+                    body.put("status", plan.status());
+                    body.put("plan", plan.plan());
+                    body.put("result", plan.result());
+                    body.put("submitApproved", plan.submitApproved());
+                    body.put("heartbeatAt", plan.heartbeatAt());
+                    body.put("updatedAt", plan.updatedAt());
+                    body.put("requeueCount", requeueCount);
+                    return ResponseEntity.ok(body);
+                })
                 .orElseGet(() -> ResponseEntity.noContent().build());
     }
 

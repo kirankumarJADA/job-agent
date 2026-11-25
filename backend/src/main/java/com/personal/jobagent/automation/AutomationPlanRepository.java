@@ -2,6 +2,8 @@ package com.personal.jobagent.automation;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.common.UuidV7;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -44,6 +46,8 @@ import java.util.UUID;
  */
 @Repository
 public class AutomationPlanRepository {
+
+    private static final Logger log = LoggerFactory.getLogger(AutomationPlanRepository.class);
 
     public record PlanRow(UUID id, UUID applicationId, String targetUrl, String status,
                           Map<String, Object> plan, List<Object> result, boolean submitApproved,
@@ -194,11 +198,30 @@ public class AutomationPlanRepository {
      *
      * @return false if the plan was not in one of those two exact states
      */
+    @Transactional
     public boolean requeueFailedPlan(UUID id) {
-        return db.update("""
+        int updated = db.update("""
                 update automation_plans set status='PREPARED', heartbeat_at=null, result='[]'::jsonb, updated_at=now()
                 where id=? and status in ('FAILED','BLOCKED_ANTI_BOT')
-                """, id) == 1;
+                """, id);
+        if (updated == 1) {
+            db.update("""
+                    insert into worker_events(id, event_id, plan_id, application_id, job_id, event_type, payload, profile_id, processed_at)
+                    select ?, ?, id, application_id, null, 'PLAN_MANUAL_REQUEUE', '{}'::jsonb, profile_id, now()
+                    from automation_plans where id=?
+                    """, UuidV7.generate(), "manual-requeue:" + id + ":" + UuidV7.generate(), id);
+        }
+        return updated == 1;
+    }
+
+    public int manualRequeueCount(UUID planId) {
+        if (planId == null) {
+            return 0;
+        }
+        Integer count = db.queryForObject(
+                "select count(*) from worker_events where plan_id = ? and event_type = 'PLAN_MANUAL_REQUEUE'",
+                Integer.class, planId);
+        return count != null ? count : 0;
     }
 
     public boolean approveSubmit(UUID id) {
@@ -413,9 +436,41 @@ public class AutomationPlanRepository {
                 """, applicationId);
     }
 
+    private static final String SUBMIT_STEP_EXISTS_SQL = """
+            exists (
+                select 1
+                from jsonb_array_elements(
+                    case when jsonb_typeof(plan->'steps') = 'array' then plan->'steps' else '[]'::jsonb end
+                ) s
+                where s->>'type' in ('REAL_SUBMIT_CLICK', 'ASHBY_SUBMIT_CLICK', 'WORKDAY_SUBMIT_CLICK', 'MOCK_SUBMIT', 'CLICK')
+            )""";
+
+    private static final String STALE_SUBMIT_RECONCILIATION_JSON =
+            "[{\"type\":\"SUBMISSION_RECONCILIATION\",\"category\":\"STALE_SUBMIT_EXECUTION\","
+            + "\"evidence\":\"Worker heartbeat expired during a submit-capable run; moved to RECONCILIATION_REQUIRED instead of auto-requeueing.\"}]";
+
+    @Transactional
     public int recoverStale(Instant cutoff) {
-        return db.update("update automation_plans set status='PREPARED',updated_at=now() where status='RUNNING' and heartbeat_at < ?",
-                java.sql.Timestamp.from(cutoff));
+        java.sql.Timestamp ts = java.sql.Timestamp.from(cutoff);
+        int reclaimed = db.update("""
+                update automation_plans
+                set status='PREPARED', heartbeat_at=null, updated_at=now()
+                where status='RUNNING' and heartbeat_at < ?
+                  and submit_approved = false
+                  and not """ + "\n" + SUBMIT_STEP_EXISTS_SQL,
+                ts);
+        int quarantined = db.update("""
+                update automation_plans
+                set status='RECONCILIATION_REQUIRED', submit_approved=false, heartbeat_at=null,
+                    result=?::jsonb, updated_at=now()
+                where status='RUNNING' and heartbeat_at < ?
+                  and (submit_approved = true or """ + "\n" + SUBMIT_STEP_EXISTS_SQL + ")",
+                STALE_SUBMIT_RECONCILIATION_JSON, ts);
+        if (quarantined > 0) {
+            log.warn("Quarantined {} stale submit-capable automation plan(s) to RECONCILIATION_REQUIRED instead of PREPARED",
+                    quarantined);
+        }
+        return reclaimed;
     }
 
     /**

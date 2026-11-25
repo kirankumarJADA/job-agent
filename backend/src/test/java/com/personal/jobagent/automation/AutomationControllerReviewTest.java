@@ -355,6 +355,64 @@ class AutomationControllerReviewTest {
                 anyString(), eq("worker"), any());
     }
 
+    @Test
+    void completeSubmittedAdvancesApplicationFromReadyToApplyThroughStarted() {
+        when(owner.isWorkerRequest()).thenReturn(true);
+        when(owner.actorOr(anyString())).thenReturn("worker");
+        List<Map<String, Object>> evidence = List.of(Map.of(
+                "type", "SUBMISSION_EVIDENCE",
+                "planType", "GREENHOUSE",
+                "category", "CONFIRMED",
+                "confirmed", true,
+                "confirmationNumber", "GH-READY-1",
+                "evidence", "Application submitted"));
+        when(submissions.completeWorkerSubmission(planId, "worker", "confirmed", evidence))
+                .thenReturn(new SubmissionCompletionService.Result(
+                        SubmissionCompletionService.Outcome.SUBMITTED,
+                        null, UUID.randomUUID(), "STORED_ENCRYPTED"));
+        when(plans.findById(planId)).thenReturn(Optional.of(row("SUBMITTED", planPayload(), true)));
+        when(plans.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
+        when(applicationStatus.find(profileId, applicationId))
+                .thenReturn(Optional.of(Map.of("id", applicationId, "status", "READY_TO_APPLY")));
+
+        ResponseEntity<?> response = controller.complete(planId,
+                new AutomationController.OutcomeRequest("SUBMITTED", "confirmed", evidence));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(204);
+        var ordered = inOrder(applicationStatus);
+        ordered.verify(applicationStatus).apply(eq(profileId), eq(applicationId), eq("APPLICATION_STARTED"),
+                eq("automation.real_submit.start:" + planId), eq("worker"), any());
+        ordered.verify(applicationStatus).apply(eq(profileId), eq(applicationId), eq("APPLICATION_SUBMITTED"),
+                eq("automation.real_submit:" + planId), eq("worker"), any());
+    }
+
+    @Test
+    void completeSubmittedSwallowsDataAccessExceptionWhenMirroringApplicationStatus() {
+        when(owner.isWorkerRequest()).thenReturn(true);
+        when(owner.actorOr(anyString())).thenReturn("worker");
+        List<Map<String, Object>> evidence = List.of(Map.of(
+                "type", "SUBMISSION_EVIDENCE",
+                "planType", "GREENHOUSE",
+                "category", "CONFIRMED",
+                "confirmed", true,
+                "confirmationNumber", "GH-DBERR-1",
+                "evidence", "Application submitted"));
+        when(submissions.completeWorkerSubmission(planId, "worker", "confirmed", evidence))
+                .thenReturn(new SubmissionCompletionService.Result(
+                        SubmissionCompletionService.Outcome.SUBMITTED,
+                        null, UUID.randomUUID(), "STORED_ENCRYPTED"));
+        when(plans.findById(planId)).thenReturn(Optional.of(row("SUBMITTED", planPayload(), true)));
+        when(plans.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
+        when(applicationStatus.apply(eq(profileId), eq(applicationId), eq("APPLICATION_SUBMITTED"),
+                anyString(), eq("worker"), any()))
+                .thenThrow(new org.springframework.dao.DataAccessResourceFailureException("transient db blip"));
+
+        ResponseEntity<?> response = controller.complete(planId,
+                new AutomationController.OutcomeRequest("SUBMITTED", "confirmed", evidence));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(204);
+    }
+
     /** The completion service's atomic guard failing must not be papered over. */
     @Test
     void completeRejectsASubmittedOutcomeWhenTheRepositoryGuardFails() {

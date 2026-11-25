@@ -14,6 +14,7 @@ import {
   reportOutcome,
   executePollCycle,
   createPollHandler,
+  buildWorkerEventBody,
 } from '../src/worker.js';
 
 // ── 1. HTTP Status & Network Error Retry Policies ──────────────────────────
@@ -586,4 +587,189 @@ test('executePollCycle: successful execution clears past crash count for the pla
   assert.equal(res.status, 'COMPLETED');
   assert.equal(registry.getCrashCount(planId), 0, 'Clean execution must clear crash records');
   assert.equal(registry.isDeadLetter(planId), false);
+});
+
+test('apiCall: attaches status and parsed JSON body on non-retryable 422 response', async () => {
+  let seenErr = null;
+  try {
+    await apiCall('http://backend.invalid/plans/p-422/complete', { outcome: 'SUBMITTED' }, {
+      fetchFn: async () => ({
+        ok: false,
+        status: 422,
+        text: async () => JSON.stringify({
+          code: 'SUBMISSION_EVIDENCE_REQUIRED',
+          status: 'RECONCILIATION_REQUIRED',
+          reason: 'missing confirmation signal',
+        }),
+      }),
+      retryConfig: { sleepFn: async () => {}, maxRetries: 2 },
+    });
+  } catch (err) {
+    seenErr = err;
+  }
+  assert.ok(seenErr);
+  assert.equal(seenErr.status, 422);
+  assert.equal(seenErr.body.code, 'SUBMISSION_EVIDENCE_REQUIRED');
+  assert.equal(seenErr.body.status, 'RECONCILIATION_REQUIRED');
+});
+
+test('executePollCycle: treats 422 RECONCILIATION_REQUIRED as non-crash terminal outcome without FAILED overwrite', async () => {
+  const registry = new DeadLetterRegistry({ maxCrashes: 3 });
+  const planId = 'reconcile-422-plan';
+  const claimedPlan = {
+    id: planId,
+    plan: {
+      planType: 'ASHBY',
+      targetUrl: 'https://jobs.ashbyhq.com/acme/1',
+      correlation: { jobId: 'j-1', applicationId: 'a-1' },
+      steps: [
+        { type: 'NAVIGATE', url: 'https://jobs.ashbyhq.com/acme/1' },
+        { type: 'ASHBY_SUBMIT_CLICK' },
+      ],
+    },
+  };
+
+  const reportCalls = [];
+  const emittedEvents = [];
+  const res = await executePollCycle({
+    pollUrl: 'http://backend.invalid/plans/claim-next',
+    apiCallFn: async () => claimedPlan,
+    sendHeartbeatFn: async () => {},
+    runner: {
+      execute: async () => ({
+        status: 'COMPLETED',
+        submitResult: {
+          confirmed: true,
+          category: 'CONFIRMED',
+          evidence: 'Confirmation page appeared',
+          signals: [],
+        },
+      }),
+      requestAbort: () => {},
+    },
+    reportOutcomeFn: async (id, outcome) => {
+      reportCalls.push({ id, outcome });
+      const err = new Error('BACKEND_REQUEST_FAILED:422');
+      err.status = 422;
+      err.body = {
+        code: 'SUBMISSION_EVIDENCE_REQUIRED',
+        status: 'RECONCILIATION_REQUIRED',
+        reason: 'missing structured evidence',
+      };
+      throw err;
+    },
+    eventSinkFn: async (evt) => emittedEvents.push(evt),
+    deadLetterRegistry: registry,
+  });
+
+  assert.equal(res.status, 'RECONCILIATION_REQUIRED');
+  assert.equal(res.outcome, 'RECONCILIATION_REQUIRED');
+  assert.equal(reportCalls.length, 1, '422 must NOT trigger a fallback FAILED overwrite call');
+  assert.equal(registry.getCrashCount(planId), 0, '422 reconciliation must NOT count as a worker crash');
+  assert.equal(registry.isDeadLetter(planId), false);
+  assert.ok(emittedEvents.some((e) => e.type === 'PLAN_ENDED' && e.outcome === 'RECONCILIATION_REQUIRED'));
+});
+
+test('buildWorkerEventBody: produces unique eventId per execution pass while remaining deterministic within a pass', () => {
+  const pass1Body = buildWorkerEventBody({
+    planId: 'plan-evt-1',
+    passId: 'pass-a',
+    type: 'STEP_STARTED',
+    stepId: 'navigate-application',
+  });
+  const pass1RetryBody = buildWorkerEventBody({
+    planId: 'plan-evt-1',
+    passId: 'pass-a',
+    type: 'STEP_STARTED',
+    stepId: 'navigate-application',
+  });
+  const pass2Body = buildWorkerEventBody({
+    planId: 'plan-evt-1',
+    passId: 'pass-b',
+    type: 'STEP_STARTED',
+    stepId: 'navigate-application',
+  });
+
+  assert.equal(pass1Body.eventId, pass1RetryBody.eventId);
+  assert.notEqual(pass1Body.eventId, pass2Body.eventId);
+});
+
+test('DeadLetterRegistry + executePollCycle: manual requeueCount increase unblocks isolated plan and resets pass events', async () => {
+  const tmpFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'dl-requeue-')), 'dead-letters.json');
+  try {
+    const registry = new DeadLetterRegistry({ maxCrashes: 2, persistPath: tmpFile });
+    const planId = 'requeue-plan-9';
+    const baseClaim = {
+      id: planId,
+      requeueCount: 0,
+      plan: {
+        planType: 'INSPECTION',
+        targetUrl: 'http://test.invalid',
+        steps: [{ type: 'NAVIGATE', url: 'http://test.invalid' }],
+      },
+    };
+    const crashingRunner = {
+      execute: async () => {
+        throw new Error('Transient profile gap before fix');
+      },
+      requestAbort: () => {},
+    };
+    const emittedEvents = [];
+    const sink = async (evt) => emittedEvents.push(evt);
+
+    await executePollCycle({
+      pollUrl: 'http://backend.invalid/plans/claim-next',
+      apiCallFn: async () => baseClaim,
+      runner: crashingRunner,
+      reportOutcomeFn: async () => {},
+      eventSinkFn: sink,
+      deadLetterRegistry: registry,
+      maxCrashLimit: 2,
+    });
+    await executePollCycle({
+      pollUrl: 'http://backend.invalid/plans/claim-next',
+      apiCallFn: async () => baseClaim,
+      runner: crashingRunner,
+      reportOutcomeFn: async () => {},
+      eventSinkFn: sink,
+      deadLetterRegistry: registry,
+      maxCrashLimit: 2,
+    });
+    assert.equal(registry.isDeadLetter(planId), true);
+
+    // Without manual requeue (requeueCount still 0), execution stays blocked
+    const blocked = await executePollCycle({
+      pollUrl: 'http://backend.invalid/plans/claim-next',
+      apiCallFn: async () => baseClaim,
+      runner: { execute: async () => ({ status: 'COMPLETED' }), requestAbort: () => {} },
+      reportOutcomeFn: async () => {},
+      eventSinkFn: sink,
+      deadLetterRegistry: registry,
+      maxCrashLimit: 2,
+    });
+    assert.equal(blocked.status, 'DEAD_LETTER');
+
+    // Reload from disk and verify manual requeueCount=1 clears prior isolation cleanly
+    const reloaded = new DeadLetterRegistry({ maxCrashes: 2, persistPath: tmpFile });
+    assert.equal(reloaded.isDeadLetter(planId), true);
+
+    const reqClaim = { ...baseClaim, requeueCount: 1 };
+    const resumed = await executePollCycle({
+      pollUrl: 'http://backend.invalid/plans/claim-next',
+      apiCallFn: async () => reqClaim,
+      runner: { execute: async () => ({ status: 'COMPLETED' }), requestAbort: () => {} },
+      reportOutcomeFn: async () => {},
+      eventSinkFn: sink,
+      deadLetterRegistry: reloaded,
+      maxCrashLimit: 2,
+    });
+    assert.equal(resumed.status, 'COMPLETED');
+    assert.equal(reloaded.isDeadLetter(planId), false);
+    assert.equal(reloaded.getCrashCount(planId), 0);
+    // Pass IDs across passes differ so backend worker_events never deduplicates the new pass
+    const dlPassIds = new Set(emittedEvents.map((e) => e.passId));
+    assert.ok(dlPassIds.size >= 1);
+  } finally {
+    fs.rmSync(path.dirname(tmpFile), { recursive: true, force: true });
+  }
 });

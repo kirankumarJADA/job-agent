@@ -196,6 +196,7 @@ export class DeadLetterRegistry {
     this.persistPath = persistPath;
     this.crashes = new Map();
     this.deadLetters = new Map();
+    this.requeueCounts = new Map();
     if (this.persistPath) this.#load();
   }
 
@@ -233,6 +234,19 @@ export class DeadLetterRegistry {
     this.#save();
   }
 
+  reconcileRequeue(planId, requeueCount = 0) {
+    if (!planId || !Number.isInteger(requeueCount) || requeueCount <= 0) return false;
+    const prev = this.requeueCounts.get(planId) ?? 0;
+    if (requeueCount > prev) {
+      this.crashes.delete(planId);
+      this.deadLetters.delete(planId);
+      this.requeueCounts.set(planId, requeueCount);
+      this.#save();
+      return true;
+    }
+    return false;
+  }
+
   clear(planId) {
     if (planId) {
       this.crashes.delete(planId);
@@ -240,6 +254,7 @@ export class DeadLetterRegistry {
     } else {
       this.crashes.clear();
       this.deadLetters.clear();
+      this.requeueCounts.clear();
     }
     this.#save();
   }
@@ -254,6 +269,9 @@ export class DeadLetterRegistry {
         if (data.crashes) {
           for (const [k, v] of Object.entries(data.crashes)) this.crashes.set(k, v);
         }
+        if (data.requeueCounts) {
+          for (const [k, v] of Object.entries(data.requeueCounts)) this.requeueCounts.set(k, v);
+        }
       }
     } catch {}
   }
@@ -264,6 +282,7 @@ export class DeadLetterRegistry {
         const obj = {
           deadLetters: Object.fromEntries(this.deadLetters),
           crashes: Object.fromEntries(this.crashes),
+          requeueCounts: Object.fromEntries(this.requeueCounts),
         };
         fs.mkdirSync(path.dirname(this.persistPath), { recursive: true });
         const tmp = `${this.persistPath}.tmp-${process.pid}`;
@@ -276,10 +295,20 @@ export class DeadLetterRegistry {
 
 export const defaultDeadLetterRegistry = new DeadLetterRegistry();
 
+const DEFAULT_PROCESS_PASS_ID = crypto.randomUUID();
+
+export function buildWorkerEventBody(event) {
+  const passSegment = event?.passId ?? DEFAULT_PROCESS_PASS_ID;
+  return {
+    eventId: `${event?.planId ?? 'plan'}:${passSegment}:${event?.type ?? 'EVENT'}:${event?.stepId ?? ''}`,
+    ...event,
+  };
+}
+
 const eventSink = (event) => {
   process.stdout.write(`${JSON.stringify(event)}\n`);
   if (!eventUrl) return;
-  const body = JSON.stringify({ eventId: `${event.planId ?? 'plan'}:${event.type}:${event.stepId ?? ''}`, ...event });
+  const body = JSON.stringify(buildWorkerEventBody(event));
   (async () => {
     try {
       await fetchWithRetry(eventUrl, {
@@ -301,7 +330,27 @@ export async function apiCall(url, body = null, {
   if (body) options.body = JSON.stringify(body);
   const response = await fetchWithRetry(url, options, { fetchFn, ...retryConfig });
   if (response.status === 204) return null;
-  if (!response.ok) throw new Error(`BACKEND_REQUEST_FAILED:${response.status}`);
+  if (!response.ok) {
+    let errorBody = null;
+    try {
+      if (typeof response.text === 'function') {
+        const rawText = await response.text();
+        if (rawText) {
+          try {
+            errorBody = JSON.parse(rawText);
+          } catch {
+            errorBody = { message: rawText };
+          }
+        }
+      } else if (typeof response.json === 'function') {
+        errorBody = await response.json();
+      }
+    } catch {}
+    const err = new Error(`BACKEND_REQUEST_FAILED:${response.status}`);
+    err.status = response.status;
+    if (errorBody !== null) err.body = errorBody;
+    throw err;
+  }
   return response.json();
 }
 
@@ -456,10 +505,20 @@ export async function executePollCycle({
   let planId = null;
   let plan = null;
   let heartbeat;
+  let passEventSink = eventSinkFn;
   try {
     const claimed = await apiCallFn(pollUrl);
     if (!claimed?.id) return { status: 'NO_PLAN' };
     planId = String(claimed.id);
+    const passId = crypto.randomUUID();
+    passEventSink = (event) => eventSinkFn({ ...event, passId: event?.passId ?? passId });
+
+    const requeueCount = Number.isInteger(claimed.requeueCount) ? claimed.requeueCount : 0;
+    if (typeof deadLetterRegistry.reconcileRequeue === 'function') {
+      if (deadLetterRegistry.reconcileRequeue(planId, requeueCount)) {
+        console.log(JSON.stringify({ type: 'PLAN_REQUEUE_RESET', planId, requeueCount }));
+      }
+    }
 
     // Terminal isolation: check if this plan is already isolated as a poison-pill dead letter
     if (deadLetterRegistry.isDeadLetter(planId)) {
@@ -472,7 +531,7 @@ export async function executePollCycle({
         message: `Plan was previously isolated as dead-letter poison-pill: ${dl.reason}`,
         deadLetter: true,
       }]).catch(() => {});
-      await eventSinkFn({
+      await passEventSink({
         type: 'PLAN_DEAD_LETTER_ISOLATED',
         planId,
         reason: dl.reason,
@@ -533,7 +592,7 @@ export async function executePollCycle({
     const runnerInstance = runner ?? new BrowserWorker({
       statePath: statePathVal,
       artifactDir: artifactDirVal,
-      eventSink: eventSinkFn,
+      eventSink: passEventSink,
       verificationResolver: verificationResolverFn,
       identityResolver: identityResolverFn,
       credentialResolver: credentialResolverFn,
@@ -567,13 +626,13 @@ export async function executePollCycle({
     const { outcome, detail, result } = computePlanOutcome(plan, runResult);
     if (plan.planType === 'GREENHOUSE' && !isSubmitAttempt) {
       await Promise.allSettled([
-        eventSinkFn({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
+        passEventSink({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
           applicationId: plan.correlation.applicationId, requiredGaps: plan.requiredGaps }),
       ]);
     } else if (plan.planType === 'ZOHO_RECRUIT') {
       const zoho = runResult.zohoRecruitResult ?? {};
       await Promise.allSettled([
-        eventSinkFn({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
+        passEventSink({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
           applicationId: plan.correlation.applicationId, requiredGaps: zoho.requiredGaps ?? [],
           filled: zoho.filled ?? [], fields: zoho.fields ?? [],
           resumeUploadState: zoho.resumeUploadState ?? 'NO_FIELD',
@@ -582,7 +641,7 @@ export async function executePollCycle({
     } else if (plan.planType === 'LEVER') {
       const lever = runResult.leverResult ?? {};
       await Promise.allSettled([
-        eventSinkFn({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
+        passEventSink({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
           applicationId: plan.correlation.applicationId, requiredGaps: lever.requiredGaps ?? [],
           filled: lever.filled ?? [], fields: lever.fields ?? [],
           resumeUploadState: lever.resumeUploadState ?? 'NO_FIELD' }),
@@ -593,7 +652,7 @@ export async function executePollCycle({
         const workday = runResult.workdayResult ?? {};
         if (plan.steps.some((s) => s.type === StepType.WORKDAY_APPLY)) {
           await Promise.allSettled([
-            eventSinkFn({
+            passEventSink({
               type: 'HUMAN_REVIEW_REQUIRED',
               planId,
               jobId: plan.correlation.jobId,
@@ -607,7 +666,7 @@ export async function executePollCycle({
           ]);
         } else {
           await Promise.allSettled([
-            eventSinkFn({
+            passEventSink({
               type: 'HUMAN_REVIEW_REQUIRED',
               planId,
               jobId: plan.correlation.jobId,
@@ -625,13 +684,44 @@ export async function executePollCycle({
       // "submission unconfirmed" state, never a form-preparation review.
       const ashby = runResult.ashbyResult ?? {};
       await Promise.allSettled([
-        eventSinkFn({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
+        passEventSink({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
           applicationId: plan.correlation.applicationId, requiredGaps: ashby.requiredGaps ?? [],
           filled: ashby.filled ?? [], fields: ashby.fields ?? [],
           resumeUploadState: ashby.resumeUploadState ?? 'NO_FIELD' }),
       ]);
     }
-    await reportOutcomeFn(planId, outcome, detail, result);
+    try {
+      await reportOutcomeFn(planId, outcome, detail, result);
+    } catch (reportErr) {
+      if (reportErr?.status === 422 || /BACKEND_REQUEST_FAILED:422\b/.test(String(reportErr?.message))) {
+        deadLetterRegistry.clear(planId);
+        const reconciliationReason =
+          reportErr?.body?.reason || reportErr?.body?.error || detail || 'RECONCILIATION_REQUIRED';
+        await Promise.allSettled([
+          passEventSink({
+            type: 'PLAN_ENDED',
+            planId,
+            outcome: 'RECONCILIATION_REQUIRED',
+            code: reportErr?.body?.code ?? 'SUBMISSION_EVIDENCE_REQUIRED',
+            reason: reconciliationReason,
+          }),
+        ]);
+        console.warn(JSON.stringify({
+          type: 'PLAN_RECONCILIATION_REQUIRED',
+          planId,
+          outcome: 'RECONCILIATION_REQUIRED',
+          code: reportErr?.body?.code ?? 'SUBMISSION_EVIDENCE_REQUIRED',
+        }));
+        return {
+          status: 'RECONCILIATION_REQUIRED',
+          planId,
+          outcome: 'RECONCILIATION_REQUIRED',
+          detail: reconciliationReason,
+          result,
+        };
+      }
+      throw reportErr;
+    }
     // Successful execution clears past crash tracking for this plan
     deadLetterRegistry.clear(planId);
     console.log(JSON.stringify({ type: 'PLAN_ENDED', planId, outcome }));
@@ -723,7 +813,7 @@ export async function executePollCycle({
       if (planId) {
         await reportOutcomeFn(planId, outcome, detail, errorResult).catch(() => {});
         if (isDead) {
-          await eventSinkFn({
+          await passEventSink({
             type: 'PLAN_DEAD_LETTER_ISOLATED',
             planId,
             crashes: deadLetterRegistry.getCrashCount(planId),

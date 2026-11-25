@@ -88,6 +88,8 @@ class AutomationPlanClaimTest {
         int recovered = repo.recoverStale(cutoff);
 
         assertThat(recovered).isEqualTo(2);
+        verify(db).update(contains("submit_approved = false"), any(java.sql.Timestamp.class));
+        verify(db).update(contains("status='RECONCILIATION_REQUIRED'"), anyString(), any(java.sql.Timestamp.class));
     }
 
     @Test
