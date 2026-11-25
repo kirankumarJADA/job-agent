@@ -6,6 +6,7 @@ import { BrowserWorker } from './browser_worker.js';
 import { StepType } from './plan.js';
 import { computePlanOutcome } from './outcome.js';
 import { initiateHandoff, isHandoffEligibleError } from './handoff.js';
+import { redactSecrets, sanitizeUrl } from './secret_redaction.js';
 import { StateStore } from './store.js';
 
 const args = new Map();
@@ -658,30 +659,33 @@ export async function executePollCycle({
           type: 'HANDOFF_TRANSFERRED_TO_HUMAN',
           planId,
           sessionId: handoffResult?.sessionId,
-          reason: error.reason || error.message,
+          reason: redactSecrets(error.reason || error.message),
         }));
         // Under Option B (External Human Completion), the worker terminates cleanly
         // and releases its execution lease immediately. The candidate will complete
         // and submit the application directly on the employer site.
         return { status: 'HANDOFF', planId, sessionId: handoffResult?.sessionId };
       } catch (handoffErr) {
-        console.error(JSON.stringify({ type: 'HANDOFF_ERROR', planId, error: handoffErr.message }));
+        const safeHandoffErr = redactSecrets(handoffErr?.message ?? handoffErr);
+        const safeOriginalErr = redactSecrets(error?.message ?? error);
+        console.error(JSON.stringify({ type: 'HANDOFF_ERROR', planId, error: safeHandoffErr }));
         const errorResult = [{
           type: 'PLAN_ERROR',
           outcome: 'BLOCKED_ANTI_BOT',
           reason: error.reason || null,
-          message: String(error.message),
+          message: safeOriginalErr,
         }];
-        await reportOutcomeFn(planId, 'BLOCKED_ANTI_BOT', String(error.message), errorResult).catch(() => {});
-        return { status: 'HANDOFF_FAILED', planId, error: handoffErr.message };
+        await reportOutcomeFn(planId, 'BLOCKED_ANTI_BOT', safeOriginalErr, errorResult).catch(() => {});
+        return { status: 'HANDOFF_FAILED', planId, error: safeHandoffErr };
       }
     } else {
       let isDead = false;
+      const safeErrorMsg = redactSecrets(error?.message ?? error);
       if (planId) {
         const crashCount = deadLetterRegistry.recordCrash(planId, error);
         if (deadLetterRegistry.isDeadLetter(planId) || crashCount >= maxCrashLimit) {
           isDead = true;
-          deadLetterRegistry.markDeadLetter(planId, `Repeated crashes (${crashCount}/${maxCrashLimit}): ${error.message}`);
+          deadLetterRegistry.markDeadLetter(planId, `Repeated crashes (${crashCount}/${maxCrashLimit}): ${safeErrorMsg}`);
         }
       }
 
@@ -693,13 +697,13 @@ export async function executePollCycle({
         : 'FAILED';
 
       const reason = isDead ? 'DEAD_LETTER_POISON_PILL' : (error.name === 'HardStopError' ? error.reason : null);
-      const detail = isDead ? `DEAD_LETTER_POISON_PILL: ${error.message}` : String(error.message);
+      const detail = isDead ? `DEAD_LETTER_POISON_PILL: ${safeErrorMsg}` : safeErrorMsg;
 
       console.error(JSON.stringify({
         type: isDead ? 'PLAN_DEAD_LETTER' : 'POLL_ERROR',
         planId,
         outcome,
-        error: error.message,
+        error: safeErrorMsg,
         crashes: planId ? deadLetterRegistry.getCrashCount(planId) : 1,
       }));
 
@@ -712,7 +716,7 @@ export async function executePollCycle({
         type: 'PLAN_ERROR',
         outcome,
         reason,
-        message: String(error.message),
+        message: safeErrorMsg,
         deadLetter: isDead,
       }];
 
@@ -723,7 +727,7 @@ export async function executePollCycle({
             type: 'PLAN_DEAD_LETTER_ISOLATED',
             planId,
             crashes: deadLetterRegistry.getCrashCount(planId),
-            error: error.message,
+            error: safeErrorMsg,
           });
         }
       }
@@ -732,7 +736,7 @@ export async function executePollCycle({
         status: isDead ? 'DEAD_LETTER' : 'ERROR',
         planId,
         outcome,
-        error: error.message,
+        error: safeErrorMsg,
         detail,
       };
     }
@@ -785,8 +789,9 @@ export function createPollHandler({
         maxCrashLimit,
       });
     } catch (error) {
-      console.error(JSON.stringify({ type: 'POLL_LOOP_ERROR', error: error?.message }));
-      return { status: 'POLL_ERROR', error: error?.message };
+      const safePollErr = redactSecrets(error?.message ?? error);
+      console.error(JSON.stringify({ type: 'POLL_LOOP_ERROR', error: safePollErr }));
+      return { status: 'POLL_ERROR', error: safePollErr };
     } finally {
       executing = false;
     }
@@ -807,9 +812,9 @@ if (planFile) {
   runtime.runner = worker;
   worker.execute(plan, { approve, headless: true })
     .then((result) => process.stdout.write(`${JSON.stringify({ type: 'WORKER_RESULT', status: result.status })}\n`))
-    .catch((error) => { process.stderr.write(`${JSON.stringify({ type: 'WORKER_ERROR', error: error.message })}\n`); process.exitCode = 1; });
+    .catch((error) => { process.stderr.write(`${JSON.stringify({ type: 'WORKER_ERROR', error: redactSecrets(error?.message ?? error) })}\n`); process.exitCode = 1; });
 } else if (pollUrl) {
-  console.log(JSON.stringify({ type: 'WORKER_READY', mode: 'POLLING', pollUrl, pollIntervalMs }));
+  console.log(JSON.stringify({ type: 'WORKER_READY', mode: 'POLLING', pollUrl: sanitizeUrl(pollUrl), pollIntervalMs }));
   const poll = createPollHandler({
     pollUrl,
     apiCallFn: apiCall,

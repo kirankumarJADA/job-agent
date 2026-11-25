@@ -102,22 +102,39 @@ public class JdbcReceiptTrustStore implements ReceiptTrustStore {
         String trimmed = postingUrl.trim();
         String canonical = SandboxRegistrationPolicy.canonicalizePostingUrl(trimmed);
         String canonicalLookup = canonical != null ? canonical : trimmed;
+        String matchCanonical = SandboxRegistrationPolicy.canonicalizePostingUrlForMatch(trimmed);
+        String matchLookup = matchCanonical != null ? matchCanonical : canonicalLookup;
         return db.query("""
                 select id, profile_id, ats_platform, posting_url, permitted_domain, approved_at, revoked_at
                 from candidate_sandbox_registrations
-                where profile_id = ? and ats_platform = ? and posting_url in (?, ?) and revoked_at is null
+                where profile_id = ? and ats_platform = ? and posting_url in (?, ?, ?) and revoked_at is null
                 order by approved_at desc
                 limit 1
-                """, (rs, n) -> {
-            Timestamp revoked = rs.getTimestamp("revoked_at");
-            return new SandboxRegistration(
-                    (UUID) rs.getObject("id"),
-                    (UUID) rs.getObject("profile_id"),
-                    rs.getString("ats_platform"),
-                    rs.getString("posting_url"),
-                    rs.getString("permitted_domain"),
-                    rs.getTimestamp("approved_at").toInstant(),
-                    revoked == null ? null : revoked.toInstant());
-        }, profileId, atsPlatform, trimmed, canonicalLookup).stream().findFirst();
+                """, (rs, n) -> mapSandbox(rs),
+                profileId, atsPlatform, trimmed, canonicalLookup, matchLookup).stream().findFirst();
+    }
+
+    @Override
+    public Optional<SandboxRegistration> sandboxRegistrationById(UUID registrationId) {
+        if (registrationId == null) {
+            return Optional.empty();
+        }
+        return db.query("""
+                select id, profile_id, ats_platform, posting_url, permitted_domain, approved_at, revoked_at
+                from candidate_sandbox_registrations
+                where id = ?
+                """, (rs, n) -> mapSandbox(rs), registrationId).stream().findFirst();
+    }
+
+    private static SandboxRegistration mapSandbox(java.sql.ResultSet rs) throws java.sql.SQLException {
+        Timestamp revoked = rs.getTimestamp("revoked_at");
+        return new SandboxRegistration(
+                (UUID) rs.getObject("id"),
+                (UUID) rs.getObject("profile_id"),
+                rs.getString("ats_platform"),
+                rs.getString("posting_url"),
+                rs.getString("permitted_domain"),
+                rs.getTimestamp("approved_at").toInstant(),
+                revoked == null ? null : revoked.toInstant());
     }
 }

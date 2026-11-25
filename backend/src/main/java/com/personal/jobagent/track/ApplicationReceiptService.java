@@ -663,6 +663,10 @@ public class ApplicationReceiptService {
      * when the attempt does not belong to this profile and application, or no
      * raw evidence was stored for it.
      *
+     * <p>Digest integrity is verified against the stored SHA-256 over the exact
+     * encrypted plaintext first; any credentials/tokens/cookies/userinfo that
+     * appeared in the payload are then redacted before returning the view.
+     *
      * @throws com.personal.jobagent.track.receipt.EvidenceIntegrityException when the stored ciphertext fails decryption or its integrity check
      */
     public Optional<RawEvidence> getRawEvidence(UUID profileId, UUID applicationId, UUID attemptId) {
@@ -676,7 +680,8 @@ public class ApplicationReceiptService {
         StoredEvidence e = evidence.get();
         return evidenceRepository.decryptRawEvidence(e).map(payload -> new RawEvidence(
                 e.id(), e.planId(), e.rawEvidenceSha256(),
-                e.rawEvidenceByteLength() == null ? 0 : e.rawEvidenceByteLength(), e.recordedAt(), payload));
+                e.rawEvidenceByteLength() == null ? 0 : e.rawEvidenceByteLength(),
+                e.recordedAt(), redactRawEvidenceSecrets(payload)));
     }
 
     @SuppressWarnings("unchecked")
@@ -718,12 +723,23 @@ public class ApplicationReceiptService {
 
     static String redactSensitive(String val) {
         if (val == null) return null;
-        String s = val;
-        if (s.length() > 256) {
-            s = s.substring(0, 253) + "...";
+        String redacted = redactRawEvidenceSecrets(val);
+        if (redacted.length() > 256) {
+            return redacted.substring(0, 253) + "...";
         }
-        return s.replaceAll("(?i)(bearer\\s+[a-zA-Z0-9_\\-\\.]+)", "Bearer [REDACTED]")
-                .replaceAll("(?i)(password|secret|token)=[^&\\s]+", "$1=[REDACTED]");
+        return redacted;
+    }
+
+    static String redactRawEvidenceSecrets(String val) {
+        if (val == null) return null;
+        return val
+                .replaceAll("(?i)(https?://)([^/\\s:@\"'<>]+):([^/\\s@\"'<>]+)@", "$1[REDACTED]@")
+                .replaceAll("(?i)\\b(cookie|set-cookie)\\s*:\\s*[^\\r\\n<>\"']+", "$1: [REDACTED]")
+                .replaceAll("(?i)\\bauthorization\\s*:\\s*(?:bearer|basic|token|apikey)\\s+[A-Za-z0-9._~+/=-]+", "Authorization: [REDACTED]")
+                .replaceAll("(?i)\\bbearer\\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]")
+                .replaceAll("(?i)\"([A-Za-z0-9_-]*(?:password|passwd|pwd|otp|token|cookie|secret|api[_-]?key|apikey|credential|session_id|auth(?:orization)?)[A-Za-z0-9_-]*)\"\\s*:\\s*\"(?:[^\"\\\\]|\\\\.)*\"", "\"$1\": \"[REDACTED]\"")
+                .replaceAll("(?i)\\b([A-Za-z0-9_-]*(?:password|passwd|pwd|otp|token|cookie|secret|api[_-]?key|apikey|credential|session(?:_id)?|auth(?:orization)?))=([^\\s,;&\"'<>]+)", "$1=[REDACTED]")
+                .replaceAll("(?i)\\b([A-Za-z0-9_-]*(?:password|passwd|pwd|secret|token|cookie|api[_-]?key|apikey|credential|session_id|otp))\\s*:\\s*([^\\s,;\"'<>]+)", "$1: [REDACTED]");
     }
 
     private DocumentReceipt fetchCurrentCvReceipt(UUID profileId, UUID applicationId, UUID cvVersionId) {

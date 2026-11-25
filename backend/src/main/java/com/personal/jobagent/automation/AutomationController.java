@@ -229,6 +229,9 @@ public class AutomationController {
 
     @PostMapping("/plans")
     public ResponseEntity<?> create(@RequestBody CreateRequest r) {
+        if (ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(403).body(Map.of("error", "creating a plan requires a candidate session"));
+        }
         if (r.applicationId() == null || r.jobId() == null || r.targetUrl() == null || r.idempotencyKey() == null) {
             return ResponseEntity.badRequest().body(Map.of("error", "missing correlation or target"));
         }
@@ -264,6 +267,9 @@ public class AutomationController {
         if (!mayActOnPlan(id)) {
             return notFound();
         }
+        if (!machineOrLocalDev()) {
+            return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
+        }
         return plans.claim(id) ? ResponseEntity.ok(Map.of("status", "RUNNING"))
                 : ResponseEntity.status(409).body(Map.of("error", "plan is not PREPARED"));
     }
@@ -273,6 +279,9 @@ public class AutomationController {
         if (!mayActOnPlan(id)) {
             return notFound();
         }
+        if (!machineOrLocalDev()) {
+            return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
+        }
         return plans.heartbeat(id) ? ResponseEntity.noContent().build() : ResponseEntity.status(409).build();
     }
 
@@ -280,6 +289,9 @@ public class AutomationController {
     public ResponseEntity<?> step(@PathVariable UUID id, @RequestBody StepRequest r) {
         if (!mayActOnPlan(id)) {
             return notFound();
+        }
+        if (!machineOrLocalDev()) {
+            return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
         }
         return plans.appendStep(id, r.index(), r.stepId(), r.status(),
                 r.result() == null ? Map.of() : r.result(), r.screenshotRef())
@@ -417,6 +429,9 @@ public class AutomationController {
         }
         if ("RECONCILIATION_REQUIRED".equals(outcome) && (r.detail() == null || r.detail().isBlank())) {
             return ResponseEntity.status(400).body(Map.of("error", "an unconfirmed real submission outcome requires evidence"));
+        }
+        if (!machineOrLocalDev()) {
+            return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
         }
         // Phase 15 defence in depth: a plan whose last step is a real
         // submission click can never resolve to HUMAN_REQUIRED/AWAITING_APPROVAL

@@ -28,6 +28,7 @@ public final class InMemoryReceiptTrustFixture implements ReceiptTrustStore, Rec
     private final Map<PlanKey, VerifiedApproval> approvals = new ConcurrentHashMap<>();
     private final Map<PlanKey, WorkerEvidence> evidence = new ConcurrentHashMap<>();
     private final Map<SandboxKey, SandboxRegistration> sandboxes = new ConcurrentHashMap<>();
+    private final Map<UUID, SandboxRegistration> sandboxesById = new ConcurrentHashMap<>();
     private final Map<UUID, StoredReceipt> receiptsByPlan = new ConcurrentHashMap<>();
 
     public final AtomicBoolean failTrustReads = new AtomicBoolean(false);
@@ -63,9 +64,24 @@ public final class InMemoryReceiptTrustFixture implements ReceiptTrustStore, Rec
 
     public InMemoryReceiptTrustFixture sandbox(UUID profileId, String atsPlatform, String postingUrl,
                                               String permittedDomain, Instant approvedAt, Instant revokedAt) {
-        sandboxes.put(new SandboxKey(profileId, atsPlatform, postingUrl), new SandboxRegistration(
+        SandboxRegistration reg = new SandboxRegistration(
                 UUID.randomUUID(), profileId, atsPlatform, postingUrl, permittedDomain,
-                approvedAt, revokedAt));
+                approvedAt, revokedAt);
+        sandboxes.put(new SandboxKey(profileId, atsPlatform, postingUrl), reg);
+        sandboxesById.put(reg.id(), reg);
+        return this;
+    }
+
+    public InMemoryReceiptTrustFixture revokeSandbox(UUID profileId, String atsPlatform, String postingUrl) {
+        SandboxKey key = new SandboxKey(profileId, atsPlatform, postingUrl);
+        SandboxRegistration existing = sandboxes.get(key);
+        if (existing != null) {
+            SandboxRegistration revoked = new SandboxRegistration(
+                    existing.id(), existing.profileId(), existing.atsPlatform(),
+                    existing.postingUrl(), existing.permittedDomain(), existing.approvedAt(), Instant.now());
+            sandboxes.put(key, revoked);
+            sandboxesById.put(revoked.id(), revoked);
+        }
         return this;
     }
 
@@ -101,7 +117,19 @@ public final class InMemoryReceiptTrustFixture implements ReceiptTrustStore, Rec
     public Optional<SandboxRegistration> activeSandboxRegistration(UUID profileId, String atsPlatform, String postingUrl) {
         checkTrust();
         SandboxRegistration r = sandboxes.get(new SandboxKey(profileId, atsPlatform, postingUrl));
+        if (r == null) {
+            String canonical = SandboxRegistrationPolicy.canonicalizePostingUrlForMatch(postingUrl);
+            if (canonical != null) {
+                r = sandboxes.get(new SandboxKey(profileId, atsPlatform, canonical));
+            }
+        }
         return r == null || r.revokedAt() != null ? Optional.empty() : Optional.of(r);
+    }
+
+    @Override
+    public Optional<SandboxRegistration> sandboxRegistrationById(UUID registrationId) {
+        checkTrust();
+        return registrationId == null ? Optional.empty() : Optional.ofNullable(sandboxesById.get(registrationId));
     }
 
     private void checkTrust() {
@@ -116,6 +144,12 @@ public final class InMemoryReceiptTrustFixture implements ReceiptTrustStore, Rec
     public synchronized InsertResult insertIfAbsent(NewReceipt r) {
         if (failPersistence.get()) {
             throw new IllegalStateException("simulated database outage during receipt insert");
+        }
+        SandboxRegistration reg = sandboxesById.get(r.sandboxRegistrationId());
+        if (reg == null || reg.revokedAt() != null) {
+            throw new InvalidReceiptException(
+                    "Sandbox registration is missing or was revoked before receipt persistence completed",
+                    "SANDBOX_POSTING_UNREGISTERED");
         }
         StoredReceipt existing = receiptsByPlan.get(r.planId());
         if (existing != null) {

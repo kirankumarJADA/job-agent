@@ -664,7 +664,7 @@ class ReceiptVerificationTest {
                     ReceiptCaptureService.WORKER_PRINCIPAL,
                     SubmissionEvidenceRepository.RECORDED_VIA_WORKER_COMPLETE,
                     "WORKDAY", TARGET_URL, "CONFIRMED", "WD-CONF-987654",
-                    List.of("PLATFORM_SUBMISSION_CONFIRMED"), "Confirmation captured",
+                    cmd.observedSignals(), "Confirmation captured",
                     sha, CANONICAL_RAW_EVIDENCE.getBytes(java.nio.charset.StandardCharsets.UTF_8).length,
                     SubmissionEvidenceRepository.RAW_STORED, SUBMITTED_AT,
                     validCipher.encrypt(CANONICAL_RAW_EVIDENCE));
@@ -768,6 +768,19 @@ class ReceiptVerificationTest {
             throwDbOutage = true;
             assertThatThrownBy(() -> revalidatingService.isStoredReceiptIntegrityVerified(PROFILE_ID, APPLICATION_ID, PLAN_ID))
                     .isInstanceOf(org.springframework.dao.DataAccessException.class);
+        }
+
+        @Test
+        void postCaptureSandboxRevocationInvalidatesStoredReceiptTrust() {
+            assertThat(revalidatingService.isStoredReceiptIntegrityVerified(PROFILE_ID, APPLICATION_ID, PLAN_ID)).isTrue();
+
+            fixture.revokeSandbox(PROFILE_ID, "WORKDAY", TARGET_URL);
+
+            var res = revalidatingService.revalidateStoredReceipt(PROFILE_ID, APPLICATION_ID, PLAN_ID);
+            assertThat(res.isInvalid()).isTrue();
+            assertThat(res.failureReason()).contains("revoked");
+            assertThat(revalidatingService.isStoredReceiptIntegrityVerified(PROFILE_ID, APPLICATION_ID, PLAN_ID)).isFalse();
+            assertThat(revalidatingService.findVerifiedReceipt(PROFILE_ID, PLAN_ID)).isEmpty();
         }
     }
 }

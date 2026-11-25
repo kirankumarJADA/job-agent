@@ -19,7 +19,7 @@
  * resumed run needs is re-filled by the plan's own steps.
  */
 
-const SENSITIVE_PARAM_PATTERN = /password|passwd|pwd|token|secret|otp|credential|api[_-]?key|session|auth(?:orization)?/i;
+const SENSITIVE_PARAM_PATTERN = /password|passwd|pwd|token|secret|otp|credential|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|private[_-]?key|client[_-]?secret|session|xsrf|csrf|auth(?:orization)?/i;
 
 /**
  * Returns a version of `rawUrl` safe to persist or log: query-parameter and
@@ -72,19 +72,20 @@ export function sanitizeUrl(rawUrl) {
 export function redactSecrets(text) {
   const str = String(text ?? '');
   return str
+    .replace(/\b(https?:\/\/)([^/\s:@"']+:[^/\s@"']+)@/gi, '$1[REDACTED]@')
     .replace(/\b(cookie|set-cookie)\s*:\s*[^\r\n<>"']+/gi, '$1: [REDACTED]')
-    .replace(/\bauthorization\s*:\s*(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+/gi, 'Authorization: [REDACTED]')
+    .replace(/\bauthorization\s*:\s*(?:bearer|basic|token|apikey)\s+[A-Za-z0-9._~+/=-]+/gi, 'Authorization: [REDACTED]')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{6,}/gi, 'Bearer [REDACTED]')
     .replace(
-      /"([A-Za-z0-9_-]*(?:password|otp|token|cookie|secret|api[_-]?key|credential|session_id|auth(?:orization)?)[A-Za-z0-9_-]*)"\s*:\s*"[^"]*"/gi,
+      /"([A-Za-z0-9_-]*(?:password|passwd|pwd|otp|token|cookie|secret|api[_-]?key|apikey|credential|session_id|xsrf|csrf|auth(?:orization)?)[A-Za-z0-9_-]*)"\s*:\s*"(?:[^"\\]|\\.)*"/gi,
       '"$1": "[REDACTED]"'
     )
     .replace(
-      /\b([A-Za-z0-9_-]*(?:password|otp|token|cookie|secret|credential|api[_-]?key|session(?:_id)?|auth(?:orization)?))=([^\s,;&"'<>]+)/gi,
+      /\b([A-Za-z0-9_-]*(?:password|passwd|pwd|otp|token|cookie|secret|api[_-]?key|apikey|credential|session(?:_id)?|xsrf|csrf|auth(?:orization)?))=([^\s,;&"'<>]+)/gi,
       '$1=[REDACTED]'
     )
     .replace(
-      /\b([A-Za-z0-9_-]*(?:api[_-]?key|secret|token|credential|password|session_id))\s*:\s*([^\s,;"'<>]+)/gi,
+      /\b([A-Za-z0-9_-]*(?:api[_-]?key|apikey|secret|token|credential|password|passwd|pwd|session_id|otp))\s*:\s*([^\s,;"'<>]+)/gi,
       '$1: [REDACTED]'
     );
 }

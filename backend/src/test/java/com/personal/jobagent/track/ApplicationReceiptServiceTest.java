@@ -303,11 +303,22 @@ class ApplicationReceiptServiceTest {
                 .isEqualTo("Bearer [REDACTED]");
         assertThat(ApplicationReceiptService.redactSensitive("Error during auth: password=SecretPass123! and login failed"))
                 .isEqualTo("Error during auth: password=[REDACTED] and login failed");
+        assertThat(ApplicationReceiptService.redactSensitive("Cookie: session_id=abc123\nAuthorization: Basic dXNlcjpwYXNz\nhttps://alice:s3cret@host.test/cb?api_key=k123"))
+                .doesNotContain("abc123", "dXNlcjpwYXNz", "alice:s3cret", "k123")
+                .contains("Cookie: [REDACTED]", "Authorization: [REDACTED]", "https://[REDACTED]@host.test/cb?api_key=[REDACTED]");
+
+        String longPrefixPlusSecret = "A".repeat(250) + "Bearer super-secret-tail-token";
+        assertThat(ApplicationReceiptService.redactSensitive(longPrefixPlusSecret))
+                .doesNotContain("super-secret-tail-token");
 
         String longStr = "A".repeat(300);
         String redacted = ApplicationReceiptService.redactSensitive(longStr);
         assertThat(redacted).hasSize(256);
         assertThat(redacted).endsWith("...");
+
+        String rawEvidence = "{\"cookie\":\"Cookie: sid=topsecret\",\"url\":\"https://u:p@example.com/ok\",\"token\":\"eyJ.tok\",\"html\":\"" + "B".repeat(500) + "\"}";
+        String redactedRaw = ApplicationReceiptService.redactRawEvidenceSecrets(rawEvidence);
+        assertThat(redactedRaw).doesNotContain("topsecret", "u:p@", "eyJ.tok").contains("B".repeat(500));
     }
 
     @Test

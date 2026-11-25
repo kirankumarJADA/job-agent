@@ -697,6 +697,28 @@ class ApplicationReceiptIT {
         mvc.perform(post("/api/v1/automation/plans/" + p.planId() + "/complete").session(otherSession).with(csrf())
                         .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(submittedBody())))
                 .andExpect(status().isNotFound());
+
+        // With worker token configured, candidate session cannot call claim/heartbeat/steps/complete even for non-SUBMITTED outcomes (403)
+        mvc.perform(post("/api/v1/automation/plans/" + p.planId() + "/claim").session(devSession).with(csrf()))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/api/v1/automation/plans/" + p.planId() + "/heartbeat").session(devSession).with(csrf()))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/api/v1/automation/plans/" + p.planId() + "/steps").session(devSession).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"index\":0,\"stepId\":\"s1\",\"status\":\"COMPLETED\"}"))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/api/v1/automation/plans/" + p.planId() + "/complete").session(devSession).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"outcome\":\"COMPLETED\",\"detail\":\"candidate attempt\"}"))
+                .andExpect(status().isForbidden());
+
+        // Candidate session + forged Bearer token on worker execution endpoints fails 401 at filter
+        mvc.perform(post("/api/v1/automation/plans/" + p.planId() + "/complete")
+                        .session(devSession)
+                        .header("Authorization", "Bearer bogus-token")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"outcome\":\"COMPLETED\",\"detail\":\"forged\"}"))
+                .andExpect(status().isUnauthorized());
     }
 
     // ── approval binding, against the real audit schema ─────────────────
@@ -906,6 +928,25 @@ class ApplicationReceiptIT {
         assertThat(evidenceRes.getResponse().getContentAsString())
                 .contains("integrity check")
                 .doesNotContain("WD-POST-1", "(tampered)", "payload");
+    }
+
+    @Test
+    void rawEvidenceEndpointRedactsSecretsBeforeReturningPayloadWhilePreservingDigestIntegrity() throws Exception {
+        Prepared p = preparedWorkdayApplication("Redacted Evidence Engineer");
+        registerSandbox(devProfileId, p.targetUrl());
+        approveQueueAndClaim(p.planId());
+
+        String rawWithSecret = "<div>Confirmation: WD-REDACT-1\nCookie: sid=secretCookie123\nurl=https://alice:hunter2@x.test/ok\nBearer tok-secret-99</div>";
+        assertThat(workerComplete(p.planId(), submittedBody(submissionEvidence("WD-REDACT-1", rawWithSecret))).getResponse().getStatus())
+                .isEqualTo(204);
+
+        MvcResult evidenceRes = mvc.perform(get("/api/v1/applications/" + p.applicationId() + "/receipts/" + p.planId() + "/evidence").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sha256").value(sha256Hex(rawWithSecret.getBytes(StandardCharsets.UTF_8))))
+                .andReturn();
+        assertThat(evidenceRes.getResponse().getContentAsString())
+                .contains("WD-REDACT-1", "Cookie: [REDACTED]", "https://[REDACTED]@x.test/ok", "Bearer [REDACTED]")
+                .doesNotContain("secretCookie123", "hunter2", "tok-secret-99");
     }
 
     @Test

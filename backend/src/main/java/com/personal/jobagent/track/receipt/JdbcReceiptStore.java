@@ -55,6 +55,21 @@ public class JdbcReceiptStore implements ReceiptStore {
     @Override
     public InsertResult insertIfAbsent(NewReceipt r) {
         return tx.execute(status -> {
+            // Lock the candidate sandbox registration row in shared mode inside the
+            // same transaction as the insert so a concurrent /revoke either commits
+            // first (making revoked_at non-null here and failing capture closed) or
+            // waits until this verified receipt commits.
+            List<Timestamp> revokedAtRows = db.query("""
+                    select revoked_at from candidate_sandbox_registrations
+                    where id = ? and profile_id = ? and upper(ats_platform) = upper(?)
+                    for share
+                    """, (rs, n) -> rs.getTimestamp("revoked_at"),
+                    r.sandboxRegistrationId(), r.profileId(), r.atsPlatform());
+            if (revokedAtRows.isEmpty() || revokedAtRows.get(0) != null) {
+                throw new InvalidReceiptException(
+                        "Sandbox registration is missing or was revoked before receipt persistence completed",
+                        "SANDBOX_POSTING_UNREGISTERED");
+            }
             UUID id = UuidV7.generate();
             String signals;
             try {

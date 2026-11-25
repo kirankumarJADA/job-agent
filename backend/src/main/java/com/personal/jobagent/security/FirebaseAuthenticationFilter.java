@@ -92,9 +92,11 @@ public class FirebaseAuthenticationFilter extends OncePerRequestFilter {
             FirebaseTokenVerifier.VerifiedIdentity identity = verifier.verifyIdToken(idToken);
             Optional<UserRecord> user = userRepository.findByFirebaseUid(identity.uid());
             if (user.isEmpty()) {
-                // Verified, but not yet provisioned. Only the exchange endpoint
-                // (which checks the invite code) may create the account.
-                log.debug("Verified Firebase identity has no linked local account yet; leaving request unauthenticated");
+                // Verified, but not yet provisioned. Never fall back to an
+                // ambient cookie session when an explicit Bearer header fails
+                // to map to a local account.
+                log.debug("Verified Firebase identity has no linked local account yet; clearing context");
+                SecurityContextHolder.clearContext();
                 filterChain.doFilter(request, response);
                 return;
             }
@@ -130,23 +132,36 @@ public class FirebaseAuthenticationFilter extends OncePerRequestFilter {
                 if (session != null) {
                     session.invalidate();
                 }
-            } else if (!isAlreadyAuthenticated()) {
+            } else if (e.reason() != FirebaseTokenVerifier.InvalidationReason.EXPIRED
+                    || !isSafeMethod(request)
+                    || !isAlreadyAuthenticated()) {
+                // An invalid signature, malformed token, or expired token on a
+                // CSRF-exempted state-changing request must never fall back to an
+                // ambient cookie session.
                 SecurityContextHolder.clearContext();
             }
         } catch (FirebaseTokenVerifier.Unavailable e) {
             // Configuration or network fault. Not authenticated via bearer.
             log.warn("Firebase token verification unavailable: {}", e.getMessage());
-            if (!isAlreadyAuthenticated()) {
+            if (!isSafeMethod(request) || !isAlreadyAuthenticated()) {
                 SecurityContextHolder.clearContext();
             }
         } catch (RuntimeException e) {
             log.warn("Unexpected failure verifying Firebase ID token", e);
-            if (!isAlreadyAuthenticated()) {
+            if (!isSafeMethod(request) || !isAlreadyAuthenticated()) {
                 SecurityContextHolder.clearContext();
             }
         }
 
         filterChain.doFilter(request, response);
+    }
+
+    private static boolean isSafeMethod(HttpServletRequest request) {
+        String method = request.getMethod();
+        return method == null || method.isBlank()
+                || "GET".equalsIgnoreCase(method)
+                || "HEAD".equalsIgnoreCase(method)
+                || "OPTIONS".equalsIgnoreCase(method);
     }
 
     /**

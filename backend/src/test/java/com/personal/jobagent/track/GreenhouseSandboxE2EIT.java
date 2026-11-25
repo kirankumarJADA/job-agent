@@ -548,6 +548,142 @@ class GreenhouseSandboxE2EIT {
                 .andExpect(status().isNotFound());
     }
 
+    @Test
+    void revokingSandboxAfterCaptureInvalidatesTrustWhileTrackingUrlQueriesReconcileSafely() throws Exception {
+        String baseSandboxUrl = "https://boards.greenhouse.io/robin-sandbox/jobs/8200690";
+        String executedWithTrackingUrl = baseSandboxUrl + "?gh_src=linkedin&utm_medium=social";
+
+        MvcResult regRes = mvc.perform(post("/api/v1/sandbox-registrations")
+                        .session(devSession)
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"atsPlatform":"GREENHOUSE","postingUrl":"%s"}
+                                """.formatted(baseSandboxUrl)))
+                .andExpect(status().isCreated())
+                .andReturn();
+        String regId = new ObjectMapper().readTree(regRes.getResponse().getContentAsString()).get("id").asText();
+
+        SeededPlan seeded = prepareRealGreenhousePlan("tracking-revoke-" + UUID.randomUUID(), executedWithTrackingUrl);
+        String raw = canonicalGreenhouseEvidence(seeded.planId(), seeded.applicationId(), "GH-SBX-TRK1", null);
+        List<String> signals = List.of("GREENHOUSE_SUBMISSION_RESPONSE_2XX", "EMPLOYER_CONFIRMATION_ID_OBSERVED");
+
+        mvc.perform(post("/api/v1/automation/plans/" + seeded.planId() + "/complete")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(completionBody("GH-SBX-TRK1", signals, raw))))
+                .andExpect(status().isNoContent());
+
+        // Tracking query params reconcile cleanly to the registered sandbox URL
+        mvc.perform(get("/api/v1/applications/" + seeded.applicationId() + "/receipt").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.confirmation.confirmed").value(true));
+        mvc.perform(get("/api/v1/applications/" + seeded.applicationId() + "/track").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.basis").value("VERIFIED"))
+                .andExpect(jsonPath("$.submission.state").value("CONFIRMED"));
+
+        // Post-capture revocation preserves immutable DB rows but revokes active trust on receipt + track
+        mvc.perform(post("/api/v1/sandbox-registrations/" + regId + "/revoke")
+                        .session(devSession)
+                        .with(csrf()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.active").value(false));
+
+        Integer receiptRows = jdbc.queryForObject(
+                "select count(*) from submission_receipts where plan_id = ?", Integer.class, seeded.planId());
+        assertThat(receiptRows).isEqualTo(1);
+
+        mvc.perform(get("/api/v1/applications/" + seeded.applicationId() + "/receipt").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.confirmation.confirmed").value(false))
+                .andExpect(jsonPath("$.reconciliation.required").value(true));
+        mvc.perform(get("/api/v1/applications/" + seeded.applicationId() + "/track").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.basis").value("UNVERIFIED"))
+                .andExpect(jsonPath("$.submission.state").value("UNVERIFIED"));
+    }
+
+    @Test
+    void concurrentCaptureAndRevokeNeverProduceActiveTrustForRevokedRegistration() throws Exception {
+        var executor = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            for (int attempt = 0; attempt < 4; attempt++) {
+                final int trial = attempt;
+                String baseSandboxUrl = "https://boards.greenhouse.io/robin-sandbox/jobs/" + (8200710 + trial);
+                String postingUrl = baseSandboxUrl + "?utm_source=race_" + trial;
+                MvcResult regRes = mvc.perform(post("/api/v1/sandbox-registrations")
+                                .session(devSession)
+                                .with(csrf())
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("""
+                                        {"atsPlatform":"GREENHOUSE","postingUrl":"%s"}
+                                        """.formatted(baseSandboxUrl)))
+                        .andExpect(status().isCreated())
+                        .andReturn();
+                String regId = new ObjectMapper().readTree(regRes.getResponse().getContentAsString()).get("id").asText();
+
+                SeededPlan seeded = prepareRealGreenhousePlan("race-" + trial + "-" + UUID.randomUUID(), postingUrl);
+                String raw = canonicalGreenhouseEvidence(seeded.planId(), seeded.applicationId(), "GH-RACE-" + trial, null);
+                List<String> signals = List.of("GREENHOUSE_SUBMISSION_RESPONSE_2XX", "EMPLOYER_CONFIRMATION_ID_OBSERVED");
+
+                var startGate = new java.util.concurrent.CountDownLatch(1);
+                var doneGate = new java.util.concurrent.CountDownLatch(2);
+                var errors = new java.util.concurrent.ConcurrentLinkedQueue<Throwable>();
+
+                executor.submit(() -> {
+                    try {
+                        startGate.await();
+                        mvc.perform(post("/api/v1/automation/plans/" + seeded.planId() + "/complete")
+                                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                                        .contentType(MediaType.APPLICATION_JSON)
+                                        .content(json.writeValueAsString(completionBody("GH-RACE-" + trial, signals, raw))))
+                                .andExpect(status().isNoContent());
+                    } catch (Throwable t) {
+                        errors.add(t);
+                    } finally {
+                        doneGate.countDown();
+                    }
+                });
+
+                executor.submit(() -> {
+                    try {
+                        startGate.await();
+                        mvc.perform(post("/api/v1/sandbox-registrations/" + regId + "/revoke")
+                                        .session(devSession)
+                                        .with(csrf()))
+                                .andExpect(status().isOk())
+                                .andExpect(jsonPath("$.active").value(false));
+                    } catch (Throwable t) {
+                        errors.add(t);
+                    } finally {
+                        doneGate.countDown();
+                    }
+                });
+
+                startGate.countDown();
+                assertThat(doneGate.await(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                assertThat(errors).isEmpty();
+
+                Integer receiptRows = jdbc.queryForObject(
+                        "select count(*) from submission_receipts where plan_id = ?", Integer.class, seeded.planId());
+                assertThat(receiptRows).isBetween(0, 1);
+
+                // In every interleaving, revoked sandbox trust must never yield confirmed=true or VERIFIED tracking.
+                mvc.perform(get("/api/v1/applications/" + seeded.applicationId() + "/receipt").session(devSession))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$.confirmation.confirmed").value(false))
+                        .andExpect(jsonPath("$.reconciliation.required").value(true));
+                mvc.perform(get("/api/v1/applications/" + seeded.applicationId() + "/track").session(devSession))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$.basis").value("UNVERIFIED"))
+                        .andExpect(jsonPath("$.submission.state").value("UNVERIFIED"));
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
     private static String sha256Hex(byte[] content) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(content);

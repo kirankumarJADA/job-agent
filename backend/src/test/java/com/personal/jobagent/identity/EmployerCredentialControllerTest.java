@@ -138,6 +138,19 @@ class EmployerCredentialControllerTest {
         verify(credentials).disable(profileId, "greenhouse.io");
     }
 
+    @Test
+    void candidateEndpointsRejectWorkerRequestsWith403() {
+        when(ownerContext.isWorkerRequest()).thenReturn(true);
+
+        assertThat(controller.list(request).getStatusCode().value()).isEqualTo(403);
+        assertThat(controller.save(new EmployerCredentialController.SaveRequest("greenhouse.io", "u", "p"), request)
+                .getStatusCode().value()).isEqualTo(403);
+        assertThat(controller.disable("greenhouse.io", request).getStatusCode().value()).isEqualTo(403);
+        verify(credentials, never()).list(any());
+        verify(credentials, never()).save(any(), any(), any(), any());
+        verify(credentials, never()).disable(any(), any());
+    }
+
     // ── worker-facing: resolve ───────────────────────────────────────
 
     @Test

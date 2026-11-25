@@ -53,4 +53,7 @@ public interface ReceiptTrustStore {
 
     /** An unrevoked registration of exactly this posting URL for this profile and platform. */
     Optional<SandboxRegistration> activeSandboxRegistration(UUID profileId, String atsPlatform, String postingUrl);
+
+    /** Lookup a candidate sandbox registration by id (including revoked ones for post-capture revalidation). */
+    Optional<SandboxRegistration> sandboxRegistrationById(UUID registrationId);
 }

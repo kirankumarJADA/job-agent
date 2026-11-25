@@ -42,10 +42,16 @@ public class WorkerEventTokenFilter extends OncePerRequestFilter {
     private static final String RECOVER_STALE_PATH = "/api/v1/automation/plans/recover-stale";
     private static final String MAILBOX_VERIFICATION_RESOLVE_PATH = "/api/v1/mailbox-verification/resolve";
     private static final String REGISTRATION_IDENTITY_PATH = "/api/v1/mailbox-verification/registration-identity";
+    private static final String EMPLOYER_CREDENTIALS_RESOLVE_PATH = "/api/v1/employer-credentials/resolve";
 
-    private static final Pattern WORKER_PLAN_PATH = Pattern.compile(
+    private static final Pattern WORKER_PLAN_EXECUTION_PATH = Pattern.compile(
             "^/api/v1/automation/plans/[0-9a-fA-F-]{36}/"
-                    + "(claim|heartbeat|steps|complete|package|artifacts/[^/]+)$"
+                    + "(claim|heartbeat|steps|complete)$"
+    );
+
+    private static final Pattern WORKER_PLAN_READ_PATH = Pattern.compile(
+            "^/api/v1/automation/plans/[0-9a-fA-F-]{36}/"
+                    + "(package|artifacts/[^/]+)$"
     );
 
     private final String expectedToken;
@@ -59,9 +65,11 @@ public class WorkerEventTokenFilter extends OncePerRequestFilter {
                                     FilterChain filterChain) throws ServletException, IOException {
         String path = request.getRequestURI();
         boolean workerOnly = isWorkerOnlyPath(path);
+        boolean workerExecution = WORKER_PLAN_EXECUTION_PATH.matcher(path).matches();
         boolean isHandoffInitiate = "POST".equalsIgnoreCase(request.getMethod())
                 && "/api/v1/handoff/initiate".equals(path);
-        boolean workerCapable = workerOnly || WORKER_PLAN_PATH.matcher(path).matches() || isHandoffInitiate;
+        boolean workerCapable = workerOnly || workerExecution
+                || WORKER_PLAN_READ_PATH.matcher(path).matches() || isHandoffInitiate;
 
         if (!workerCapable) {
             filterChain.doFilter(request, response);
@@ -69,10 +77,12 @@ public class WorkerEventTokenFilter extends OncePerRequestFilter {
         }
 
         String header = request.getHeader("Authorization");
-        boolean bearer = header != null && header.startsWith("Bearer ");
-        boolean validWorker = bearer
+        boolean bearer = header != null && header.length() >= 7
+                && header.regionMatches(true, 0, "Bearer ", 0, 7);
+        String suppliedToken = bearer ? header.substring(7).trim() : null;
+        boolean validWorker = suppliedToken != null
                 && !expectedToken.isBlank()
-                && constantTimeEquals(expectedToken, header.substring(7).trim());
+                && constantTimeEquals(expectedToken, suppliedToken);
 
         if (validWorker) {
             UsernamePasswordAuthenticationToken authentication =
@@ -90,15 +100,17 @@ public class WorkerEventTokenFilter extends OncePerRequestFilter {
             return;
         }
 
-        if (workerOnly) {
+        if (workerOnly || (bearer && (workerExecution || isHandoffInitiate))) {
+            SecurityContextHolder.clearContext();
             response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
             response.setContentType("application/json");
             response.getWriter().write("{\"error\":\"invalid or missing worker token\"}");
             return;
         }
 
-        // Dual-use plan endpoints may still be accessed by a normal
-        // authenticated user session when a worker token is not valid/present.
+        // Dual-use plan read endpoints (GET package/artifacts) and candidate cookie
+        // rejection semantics (403/404 in AutomationController for no-Bearer
+        // sessions) continue through standard Spring Security authentication.
         filterChain.doFilter(request, response);
     }
 
@@ -107,7 +119,8 @@ public class WorkerEventTokenFilter extends OncePerRequestFilter {
                 || CLAIM_NEXT_PATH.equals(path)
                 || RECOVER_STALE_PATH.equals(path)
                 || MAILBOX_VERIFICATION_RESOLVE_PATH.equals(path)
-                || REGISTRATION_IDENTITY_PATH.equals(path);
+                || REGISTRATION_IDENTITY_PATH.equals(path)
+                || EMPLOYER_CREDENTIALS_RESOLVE_PATH.equals(path);
     }
 
     private boolean constantTimeEquals(String expected, String actual) {

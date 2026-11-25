@@ -133,6 +133,7 @@ class AutomationControllerReviewTest {
     /** A failed run must not silently disappear: the owner is notified. */
     @Test
     void failedOutcomeNotifiesThePlanOwner() {
+        when(owner.isWorkerRequest()).thenReturn(true);
         when(plans.transition(planId, "RUNNING", "FAILED")).thenReturn(true);
         when(plans.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
         when(plans.findById(planId)).thenReturn(Optional.of(row("FAILED", planPayload())));
@@ -145,7 +146,19 @@ class AutomationControllerReviewTest {
     }
 
     @Test
+    void candidateSessionCannotCallCompleteWhenWorkerTokenIsConfigured() {
+        when(owner.isWorkerRequest()).thenReturn(false);
+
+        ResponseEntity<?> response = controller.complete(planId,
+                new AutomationController.OutcomeRequest("COMPLETED", "done"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(403);
+        verify(plans, never()).transition(any(), anyString(), anyString());
+    }
+
+    @Test
     void completedOutcomeStaysSilent() {
+        when(owner.isWorkerRequest()).thenReturn(true);
         when(plans.transition(planId, "RUNNING", "COMPLETED")).thenReturn(true);
         when(plans.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
         when(plans.findById(planId)).thenReturn(Optional.of(row("COMPLETED", planPayload())));
@@ -163,6 +176,7 @@ class AutomationControllerReviewTest {
      */
     @Test
     void humanRequiredWithAStructuredResultPersistsItViaTheResultAwareTransition() {
+        when(owner.isWorkerRequest()).thenReturn(true);
         List<Map<String, Object>> result = List.of(Map.of(
                 "type", "ZOHO_RECRUIT_OUTCOME",
                 "filled", List.of(Map.of("label", "First Name *", "category", "IDENTITY_FIRST_NAME")),
@@ -182,6 +196,7 @@ class AutomationControllerReviewTest {
     /** No result payload at all still uses the plain transition — no behavior change for Greenhouse. */
     @Test
     void humanRequiredWithoutAResultPayloadUsesThePlainTransition() {
+        when(owner.isWorkerRequest()).thenReturn(true);
         when(plans.transition(planId, "RUNNING", "AWAITING_APPROVAL")).thenReturn(true);
         when(plans.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
         when(plans.findById(planId)).thenReturn(Optional.of(row("AWAITING_APPROVAL", planPayload())));
@@ -391,6 +406,7 @@ class AutomationControllerReviewTest {
      */
     @Test
     void uncertainSubmitOutcomeFallsBackToHumanReviewThroughTheSharedTransition() {
+        when(owner.isWorkerRequest()).thenReturn(true);
         when(plans.transition(planId, "RUNNING", "AWAITING_APPROVAL")).thenReturn(true);
         when(plans.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
         when(plans.findById(planId)).thenReturn(Optional.of(row("AWAITING_APPROVAL", planPayload())));

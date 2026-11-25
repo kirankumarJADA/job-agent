@@ -20,6 +20,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.net.URI;
 import java.time.Instant;
@@ -65,27 +67,42 @@ public class ReceiptCaptureService {
     private final ReceiptTrustStore trust;
     private final ReceiptStore store;
     private final SubmissionEvidenceRepository evidenceRepository;
+    private final SandboxRegistrationPolicy sandboxPolicy;
+    private final TransactionTemplate transactionTemplate;
 
     @Autowired
     public ReceiptCaptureService(ReceiptVerificationPolicy verificationPolicy,
                                  @Autowired(required = false) ReceiptTrustStore trust,
                                  @Autowired(required = false) ReceiptStore store,
-                                 @Autowired(required = false) SubmissionEvidenceRepository evidenceRepository) {
+                                 @Autowired(required = false) SubmissionEvidenceRepository evidenceRepository,
+                                 @Autowired(required = false) SandboxRegistrationPolicy sandboxPolicy,
+                                 @Autowired(required = false) PlatformTransactionManager transactionManager) {
         this.verificationPolicy = verificationPolicy != null ? verificationPolicy : new ReceiptVerificationPolicy();
         this.trust = trust;
         this.store = store;
         this.evidenceRepository = evidenceRepository;
+        this.sandboxPolicy = sandboxPolicy != null
+                ? sandboxPolicy
+                : new SandboxRegistrationPolicy("", "", true, false, null);
+        this.transactionTemplate = transactionManager != null ? new TransactionTemplate(transactionManager) : null;
+    }
+
+    public ReceiptCaptureService(ReceiptVerificationPolicy verificationPolicy,
+                                 ReceiptTrustStore trust,
+                                 ReceiptStore store,
+                                 SubmissionEvidenceRepository evidenceRepository) {
+        this(verificationPolicy, trust, store, evidenceRepository, null, null);
     }
 
     public ReceiptCaptureService(ReceiptVerificationPolicy verificationPolicy,
                                  ReceiptTrustStore trust,
                                  ReceiptStore store) {
-        this(verificationPolicy, trust, store, null);
+        this(verificationPolicy, trust, store, null, null, null);
     }
 
     /** No trusted state and no durable store: every capture fails closed. */
     public ReceiptCaptureService(ReceiptVerificationPolicy verificationPolicy) {
-        this(verificationPolicy, null, null, null);
+        this(verificationPolicy, null, null, null, null, null);
     }
 
     public record CaptureReceiptCommand(
@@ -306,6 +323,47 @@ public class ReceiptCaptureService {
                 || !recomputedSha256.equalsIgnoreCase(stored.evidenceSha256().trim())) {
             return StoredReceiptVerification.invalid("recomputed raw evidence SHA-256 does not match stored receipt.");
         }
+
+        // Business rule: revoking a sandbox registration after receipt capture preserves
+        // the immutable DB history rows, but invalidates active trust on subsequent
+        // reads so unrevoked sandbox authorization, URL/domain, and approval alignment
+        // are always re-verified end-to-end.
+        Optional<SandboxRegistration> registrationOpt = trust.sandboxRegistrationById(stored.sandboxRegistrationId());
+        if (registrationOpt.isEmpty()) {
+            return StoredReceiptVerification.invalid("linked sandbox registration could not be found.");
+        }
+        SandboxRegistration registration = registrationOpt.get();
+        if (!profileId.equals(registration.profileId())) {
+            return StoredReceiptVerification.invalid("sandbox registration ownership does not match this receipt.");
+        }
+        if (registration.revokedAt() != null) {
+            return StoredReceiptVerification.invalid("sandbox registration for this receipt has been revoked.");
+        }
+        if (!Objects.equals(trim(stored.atsPlatform()).toUpperCase(Locale.ROOT),
+                trim(registration.atsPlatform()).toUpperCase(Locale.ROOT))) {
+            return StoredReceiptVerification.invalid("sandbox registration platform does not match stored receipt.");
+        }
+        if (ev.targetUrl() == null
+                || !canonicalUrlsMatch(ev.targetUrl(), registration.postingUrl())
+                || !hostWithinRegisteredDomain(ev.targetUrl(), registration.permittedDomain())) {
+            return StoredReceiptVerification.invalid("submission target URL does not match active sandbox registration.");
+        }
+        Optional<VerifiedApproval> approvalOpt = trust.verifiedApproval(profileId, applicationId, planId);
+        if (approvalOpt.isEmpty() || !Objects.equals(approvalOpt.get().auditId(), stored.approvalAuditId())) {
+            return StoredReceiptVerification.invalid("candidate submit approval record for this receipt could not be verified.");
+        }
+        if (ev.recordedAt() != null && approvalOpt.get().approvedAt() != null
+                && approvalOpt.get().approvedAt().isAfter(ev.recordedAt())) {
+            return StoredReceiptVerification.invalid("candidate approval post-dates recorded worker submission.");
+        }
+        if (!ReceiptStore.idempotencyKeyFor(planId).equals(stored.idempotencyKey())) {
+            return StoredReceiptVerification.invalid("stored receipt idempotency key does not match plan binding.");
+        }
+        if (ev.observedSignals() == null || ev.observedSignals().isEmpty()
+                || stored.observedSignals() == null
+                || !new HashSet<>(stored.observedSignals()).equals(new HashSet<>(ev.observedSignals()))) {
+            return StoredReceiptVerification.invalid("stored receipt signals do not match recorded worker signals.");
+        }
         return StoredReceiptVerification.verified(stored);
     }
 
@@ -351,6 +409,13 @@ public class ReceiptCaptureService {
     }
 
     private GenuineReceiptRecord capture(CaptureReceiptCommand cmd) {
+        if (transactionTemplate != null) {
+            return transactionTemplate.execute(status -> captureTransactional(cmd));
+        }
+        return captureTransactional(cmd);
+    }
+
+    private GenuineReceiptRecord captureTransactional(CaptureReceiptCommand cmd) {
         if (cmd == null) {
             throw new InvalidReceiptException("CaptureReceiptCommand cannot be null", "MISSING_COMMAND");
         }
@@ -482,7 +547,7 @@ public class ReceiptCaptureService {
                 : trusted(() -> trust.activeSandboxRegistration(cmd.profileId(), platform, worker.targetUrl()));
         boolean sandboxPosting = registration.isPresent()
                 && canonicalUrlsMatch(worker.targetUrl(), registration.get().postingUrl())
-                && hostWithinDomain(worker.targetUrl(), registration.get().permittedDomain());
+                && hostWithinRegisteredDomain(worker.targetUrl(), registration.get().permittedDomain());
         boolean candidateAuthorizedSandbox = registration.isPresent()
                 && cmd.profileId().equals(registration.get().profileId())
                 && registration.get().revokedAt() == null;
@@ -526,6 +591,8 @@ public class ReceiptCaptureService {
         InsertResult result;
         try {
             result = store.insertIfAbsent(newReceipt);
+        } catch (InvalidReceiptException e) {
+            throw e;
         } catch (RuntimeException e) {
             log.error("Durable receipt persistence failed for plan {}: {}", cmd.planId(), e.getMessage());
             throw new InvalidReceiptException(
@@ -600,28 +667,51 @@ public class ReceiptCaptureService {
         if (actualUrl == null || registeredUrl == null) {
             return false;
         }
-        String a = SandboxRegistrationPolicy.canonicalizePostingUrl(actualUrl);
-        String b = SandboxRegistrationPolicy.canonicalizePostingUrl(registeredUrl);
+        String a = SandboxRegistrationPolicy.canonicalizePostingUrlForMatch(actualUrl);
+        String b = SandboxRegistrationPolicy.canonicalizePostingUrlForMatch(registeredUrl);
         return a != null && a.equals(b);
     }
 
     /** True when the URL is https and its host equals the permitted domain or is a subdomain of it. */
     static boolean hostWithinDomain(String url, String permittedDomain) {
+        return hostWithinDomain(url, permittedDomain, true, false);
+    }
+
+    boolean hostWithinRegisteredDomain(String url, String permittedDomain) {
+        return hostWithinDomain(url, permittedDomain,
+                sandboxPolicy.requireHttps(), sandboxPolicy.allowLocalTestHosts());
+    }
+
+    static boolean hostWithinDomain(String url, String permittedDomain,
+                                    boolean requireHttps, boolean allowLocalTestHosts) {
         if (url == null || permittedDomain == null || permittedDomain.isBlank()) {
             return false;
         }
         try {
             URI uri = URI.create(url.trim());
+            String scheme = uri.getScheme();
             String host = uri.getHost();
-            if (host == null || !"https".equalsIgnoreCase(uri.getScheme())) {
+            if (host == null || scheme == null) {
                 return false;
             }
             String h = host.toLowerCase(Locale.ROOT);
             String d = permittedDomain.trim().toLowerCase(Locale.ROOT);
-            return h.equals(d) || h.endsWith("." + d);
+            boolean https = "https".equalsIgnoreCase(scheme);
+            boolean isolatedLocalHttp = "http".equalsIgnoreCase(scheme)
+                    && !requireHttps
+                    && allowLocalTestHosts
+                    && SandboxRegistrationPolicy.isLoopbackHostname(h);
+            if (!https && !isolatedLocalHttp) {
+                return false;
+            }
+            return h.equals(d) || (!isIpLiteral(h) && h.endsWith("." + d));
         } catch (IllegalArgumentException e) {
             return false;
         }
+    }
+
+    private static boolean isIpLiteral(String host) {
+        return host.startsWith("[") || host.matches("[0-9.]+") || host.contains(":");
     }
 
     private static String trim(String s) {

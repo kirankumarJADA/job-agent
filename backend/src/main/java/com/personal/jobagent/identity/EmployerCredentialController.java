@@ -48,6 +48,7 @@ public class EmployerCredentialController {
     /** The candidate's own saved credentials. Usernames are shown; passwords never are. */
     @GetMapping
     public ResponseEntity<?> list(HttpServletRequest request) {
+        if (ownerContext.isWorkerRequest()) return forbiddenCandidateEndpoint(request);
         UUID profileId = ownerContext.profileIdOrNull();
         if (profileId == null) return notFound(request, "No profile exists for this account.");
         List<Map<String, Object>> body = credentials.list(profileId).stream()
@@ -65,6 +66,7 @@ public class EmployerCredentialController {
     /** Saves or replaces the credential for one employer domain. Write-only: never returned. */
     @PostMapping
     public ResponseEntity<?> save(@RequestBody SaveRequest r, HttpServletRequest request) {
+        if (ownerContext.isWorkerRequest()) return forbiddenCandidateEndpoint(request);
         UUID profileId = ownerContext.profileIdOrNull();
         if (profileId == null) return notFound(request, "No profile exists for this account.");
         String domain = r == null ? null : MailAddresses.employerDomain(r.employerDomain()).orElse(null);
@@ -78,6 +80,7 @@ public class EmployerCredentialController {
     /** Disables (does not delete) the credential for one employer domain. */
     @DeleteMapping("/{employerDomain}")
     public ResponseEntity<?> disable(@PathVariable String employerDomain, HttpServletRequest request) {
+        if (ownerContext.isWorkerRequest()) return forbiddenCandidateEndpoint(request);
         UUID profileId = ownerContext.profileIdOrNull();
         if (profileId == null) return notFound(request, "No profile exists for this account.");
         String domain = MailAddresses.employerDomain(employerDomain).orElse(null);
@@ -114,6 +117,10 @@ public class EmployerCredentialController {
 
     private ResponseEntity<?> forbidden(HttpServletRequest request) {
         return error(403, "Forbidden", "Only the automation worker may resolve employer credentials.", request);
+    }
+
+    private ResponseEntity<?> forbiddenCandidateEndpoint(HttpServletRequest request) {
+        return error(403, "Forbidden", "Worker tokens cannot manage candidate employer credentials.", request);
     }
 
     private ResponseEntity<?> notFound(HttpServletRequest request, String detail) {

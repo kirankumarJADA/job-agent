@@ -109,6 +109,10 @@ public class SandboxRegistrationPolicy {
         return requireHttps;
     }
 
+    public boolean allowLocalTestHosts() {
+        return allowLocalTestHosts;
+    }
+
     /**
      * Validates a candidate sandbox registration request and returns canonical URL + server-derived permittedDomain.
      *
@@ -178,11 +182,31 @@ public class SandboxRegistrationPolicy {
         return new ValidatedSandboxTarget(platform, canonicalUrl, matchedDomain);
     }
 
+    private static final java.util.Set<String> TRACKING_QUERY_PARAMS = java.util.Set.of(
+            "gh_src", "fbclid", "gclid", "mc_cid", "mc_eid",
+            "ref", "referer", "referrer", "source", "src"
+    );
+
     /**
      * Canonicalizes an existing posting URL (lowercase scheme/host, default port removed, trailing slash trimmed).
      * Returns empty when input is null, blank or unparseable.
      */
     public static String canonicalizePostingUrl(String rawUrl) {
+        return canonicalizeInternal(rawUrl, false);
+    }
+
+    /**
+     * Canonicalizes a posting URL for reconciling registered vs executed URLs:
+     * normalizes scheme/host/default port/trailing slash AND strips known benign
+     * tracking parameters ({@code gh_src}, {@code utm_*}, {@code fbclid},
+     * {@code gclid}, {@code ref}, {@code source}, etc.) while preserving every
+     * identity-bearing query parameter (such as {@code gh_jid}) in sorted order.
+     */
+    public static String canonicalizePostingUrlForMatch(String rawUrl) {
+        return canonicalizeInternal(rawUrl, true);
+    }
+
+    private static String canonicalizeInternal(String rawUrl, boolean stripTrackingParams) {
         if (rawUrl == null || rawUrl.isBlank()) {
             return null;
         }
@@ -199,13 +223,31 @@ public class SandboxRegistrationPolicy {
                     ? -1 : port;
             String path = normalizePostingPath(uri.getRawPath());
             String base = buildCanonicalUrl(scheme, host, effectivePort, path);
-            if (uri.getRawQuery() != null && !uri.getRawQuery().isEmpty()) {
-                return base + "?" + uri.getRawQuery();
+            String rawQuery = uri.getRawQuery();
+            if (rawQuery == null || rawQuery.isEmpty()) {
+                return base;
             }
-            return base;
+            if (!stripTrackingParams) {
+                return base + "?" + rawQuery;
+            }
+            List<String> kept = Arrays.stream(rawQuery.split("&"))
+                    .filter(pair -> pair != null && !pair.isEmpty())
+                    .filter(pair -> !isTrackingQueryParam(pair))
+                    .sorted()
+                    .toList();
+            return kept.isEmpty() ? base : base + "?" + String.join("&", kept);
         } catch (IllegalArgumentException e) {
             return null;
         }
+    }
+
+    private static boolean isTrackingQueryParam(String rawPair) {
+        int eq = rawPair.indexOf('=');
+        String key = (eq >= 0 ? rawPair.substring(0, eq) : rawPair).trim().toLowerCase(Locale.ROOT);
+        if (key.isEmpty()) {
+            return true;
+        }
+        return key.startsWith("utm_") || TRACKING_QUERY_PARAMS.contains(key);
     }
 
     private String normalizePlatform(String atsPlatform) {
@@ -297,7 +339,7 @@ public class SandboxRegistrationPolicy {
         return scheme + "://" + authority + canonicalPath;
     }
 
-    private static boolean isLoopbackHostname(String host) {
+    public static boolean isLoopbackHostname(String host) {
         return "localhost".equals(host) || "127.0.0.1".equals(host) || "[::1]".equals(host) || "::1".equals(host);
     }
 

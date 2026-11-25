@@ -180,4 +180,33 @@ class SandboxRegistrationPolicyTest {
                 "GREENHOUSE", "https://localhost:443/robin-sandbox/jobs/42");
         assertThat(defaultHttpsPort.canonicalPostingUrl()).isEqualTo("https://localhost/robin-sandbox/jobs/42");
     }
+
+    @Test
+    void trackingQueryParametersReconcileWithoutWeakeningPostingIdentityMatching() {
+        String registered = "https://boards.greenhouse.io/robin-sandbox/jobs/42";
+        String executedWithTracking = "https://BOARDS.GREENHOUSE.IO:443/robin-sandbox/jobs/42/?gh_src=linkedin&utm_medium=social&utm_campaign=q4";
+        String executedWithDifferentPostingParam = "https://boards.greenhouse.io/robin-sandbox/jobs/42?gh_jid=9999";
+
+        assertThat(SandboxRegistrationPolicy.canonicalizePostingUrlForMatch(executedWithTracking))
+                .isEqualTo(registered);
+        assertThat(ReceiptCaptureService.canonicalUrlsMatch(executedWithTracking, registered)).isTrue();
+        assertThat(ReceiptCaptureService.canonicalUrlsMatch(executedWithDifferentPostingParam, registered)).isFalse();
+    }
+
+    @Test
+    void localHttpDomainCheckRequiresExplicitLocalTestModeAndLoopbackHost() {
+        // Production default rejects http even for localhost
+        assertThat(ReceiptCaptureService.hostWithinDomain("http://localhost:8080/robin-sandbox/jobs/42", "localhost", true, false))
+                .isFalse();
+        assertThat(ReceiptCaptureService.hostWithinDomain("http://localhost:8080/robin-sandbox/jobs/42", "localhost", false, false))
+                .isFalse();
+        // Remote host never permitted over http even if local test mode is enabled
+        assertThat(ReceiptCaptureService.hostWithinDomain("http://boards.greenhouse.io/robin-sandbox/jobs/42", "boards.greenhouse.io", false, true))
+                .isFalse();
+        // Loopback permitted over http ONLY when !requireHttps && allowLocalTestHosts
+        assertThat(ReceiptCaptureService.hostWithinDomain("http://localhost:8080/robin-sandbox/jobs/42", "localhost", false, true))
+                .isTrue();
+        assertThat(ReceiptCaptureService.hostWithinDomain("http://127.0.0.1:8080/robin-sandbox/jobs/42", "127.0.0.1", false, true))
+                .isTrue();
+    }
 }

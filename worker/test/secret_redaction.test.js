@@ -83,3 +83,15 @@ test('handles null/undefined input without throwing, as an empty string', () => 
   assert.equal(redactSecrets(null), '');
   assert.equal(redactSecrets(undefined), '');
 });
+
+test('redacts URL userinfo, Cookie headers, apikey, Authorization schemes and escaped JSON values', () => {
+  const input = 'Cookie: sid=s123\nAuthorization: Basic dXNlcjpwYXNz\nhttps://alice:pwd123@example.com/cb {"apikey":"k-escaped\\"1"} Bearer tok+abc/def==';
+  const redacted = redactSecrets(input);
+  for (const leak of ['s123', 'dXNlcjpwYXNz', 'alice:pwd123', 'k-escaped', 'tok+abc/def==']) {
+    assert.ok(!redacted.includes(leak), `secret ${leak} must be redacted`);
+  }
+  assert.match(redacted, /Cookie: \[REDACTED\]/);
+  assert.match(redacted, /Authorization: \[REDACTED\]/);
+  assert.match(redacted, /https:\/\/\[REDACTED\]@example\.com\/cb/);
+  assert.match(redacted, /Bearer \[REDACTED\]/);
+});

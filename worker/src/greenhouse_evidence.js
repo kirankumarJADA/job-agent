@@ -44,7 +44,7 @@ export function sanitizeContainerHtml(rawHtml, maxChars = MAX_CONTAINER_HTML_CHA
     .replace(/<textarea\b[^>]*>[\s\S]*?<\/textarea>/gi, '')
     .replace(/<select\b[^>]*>[\s\S]*?<\/select>/gi, '')
     .replace(/<input\b[^>]*>/gi, '')
-    .replace(/\s(?:on[a-z]+|data-[a-z0-9-]*(?:token|secret|cookie|password|auth)[a-z0-9-]*)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\s(?:on[a-z]+|data-[a-z0-9-]*(?:token|secret|cookie|password|auth|session|csrf|xsrf|key)[a-z0-9-]*)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
     .replace(/\s(href|src|action)\s*=\s*(['"])\s*javascript:[^'"]*\2/gi, '');
   html = sanitizeEvidenceText(html, maxChars);
   return html;

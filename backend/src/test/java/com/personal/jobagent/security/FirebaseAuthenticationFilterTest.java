@@ -243,4 +243,65 @@ class FirebaseAuthenticationFilterTest {
         AppUserDetails principal = (AppUserDetails) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
         assertThat(principal.getUserId()).isEqualTo(USER_B_ID);
     }
+
+    @Test
+    void invalidSignatureBearerTokenClearsExistingCookieSessionAuthentication() throws Exception {
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/applications");
+        request.addHeader("Authorization", "Bearer forged-token");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        FilterChain chain = mock(FilterChain.class);
+
+        SecurityContext existingContext = SecurityContextHolder.createEmptyContext();
+        existingContext.setAuthentication(new UsernamePasswordAuthenticationToken(new AppUserDetails(userA, false), null, java.util.List.of()));
+        SecurityContextHolder.setContext(existingContext);
+
+        when(verifier.verifyIdToken("forged-token"))
+                .thenThrow(new FirebaseTokenVerifier.InvalidToken("Bad sig", FirebaseTokenVerifier.InvalidationReason.INVALID_SIGNATURE, null));
+
+        filter.doFilter(request, response, chain);
+
+        verify(chain).doFilter(request, response);
+        assertThat(SecurityContextHolder.getContext().getAuthentication()).isNull();
+    }
+
+    @Test
+    void expiredBearerTokenOnMutatingPostNeverFallsBackToExistingCookieSession() throws Exception {
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/v1/automation/plans/123/approve-submit");
+        request.addHeader("Authorization", "Bearer expired-token");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        FilterChain chain = mock(FilterChain.class);
+
+        SecurityContext existingContext = SecurityContextHolder.createEmptyContext();
+        existingContext.setAuthentication(new UsernamePasswordAuthenticationToken(new AppUserDetails(userA, false), null, java.util.List.of()));
+        SecurityContextHolder.setContext(existingContext);
+
+        when(verifier.verifyIdToken("expired-token"))
+                .thenThrow(new FirebaseTokenVerifier.InvalidToken("Expired", FirebaseTokenVerifier.InvalidationReason.EXPIRED, null));
+
+        filter.doFilter(request, response, chain);
+
+        verify(chain).doFilter(request, response);
+        assertThat(SecurityContextHolder.getContext().getAuthentication()).isNull();
+    }
+
+    @Test
+    void verifiedUnprovisionedBearerTokenClearsExistingCookieSession() throws Exception {
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/profile");
+        request.addHeader("Authorization", "Bearer valid-unlinked");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        FilterChain chain = mock(FilterChain.class);
+
+        SecurityContext existingContext = SecurityContextHolder.createEmptyContext();
+        existingContext.setAuthentication(new UsernamePasswordAuthenticationToken(new AppUserDetails(userA, false), null, java.util.List.of()));
+        SecurityContextHolder.setContext(existingContext);
+
+        when(verifier.verifyIdToken("valid-unlinked"))
+                .thenReturn(new FirebaseTokenVerifier.VerifiedIdentity("new-uid", "new@example.com", "New User", true));
+        when(userRepository.findByFirebaseUid("new-uid")).thenReturn(Optional.empty());
+
+        filter.doFilter(request, response, chain);
+
+        verify(chain).doFilter(request, response);
+        assertThat(SecurityContextHolder.getContext().getAuthentication()).isNull();
+    }
 }
