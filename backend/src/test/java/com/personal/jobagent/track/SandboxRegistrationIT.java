@@ -204,14 +204,14 @@ class SandboxRegistrationIT {
         // Unauthenticated
         mvc.perform(get("/api/v1/sandbox-registrations")).andExpect(status().isUnauthorized());
 
-        // Worker bearer token cannot manage candidate sandboxes (403)
+        // Worker bearer token cannot authenticate against candidate sandbox management (401)
         mvc.perform(post("/api/v1/sandbox-registrations")
                         .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"atsPlatform":"GREENHOUSE","postingUrl":"https://boards.greenhouse.io/robin-sandbox/jobs/7002"}
                                 """))
-                .andExpect(status().isForbidden());
+                .andExpect(status().isUnauthorized());
 
         // Caller-supplied profileId, permittedDomain or approvedBy are rejected (400)
         mvc.perform(post("/api/v1/sandbox-registrations")

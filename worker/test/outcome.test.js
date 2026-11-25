@@ -17,6 +17,34 @@ test('a GREENHOUSE plan that never attempted REAL_SUBMIT_CLICK always ends HUMAN
   assert.match(detail, /1 outstanding field/);
 });
 
+test('a confirmed GREENHOUSE submission preserves observed confirmationNumber, signals, and rawEvidence while stripping trust flags', () => {
+  const plan = { planType: 'GREENHOUSE', steps: [{ type: 'VALIDATE' }, { type: 'REAL_SUBMIT_CLICK' }], requiredGaps: [] };
+  const runResult = {
+    submitResult: {
+      confirmed: true,
+      evidence: 'Submission confirmed cleanly',
+      confirmationNumber: 'GH-SBX-5501',
+      signals: ['GREENHOUSE_SUBMISSION_RESPONSE_2XX', 'GREENHOUSE_CONFIRMATION_URL_MATCHED'],
+      rawEvidence: '{"schemaVersion":"robin-submission-evidence-v1"}',
+      sandboxPosting: true,
+      candidateAuthorizedSandbox: true,
+      evidenceProvenance: 'AUTHENTICATED_BROWSER_WORKER',
+    },
+  };
+  const { outcome, result } = computePlanOutcome(plan, runResult);
+  assert.equal(outcome, 'SUBMITTED');
+  assert.deepEqual(result, [{
+    type: 'SUBMISSION_EVIDENCE',
+    planType: 'GREENHOUSE',
+    category: 'CONFIRMED',
+    confirmed: true,
+    evidence: 'Submission confirmed cleanly',
+    confirmationNumber: 'GH-SBX-5501',
+    signals: ['GREENHOUSE_SUBMISSION_RESPONSE_2XX', 'GREENHOUSE_CONFIRMATION_URL_MATCHED'],
+    rawEvidence: '{"schemaVersion":"robin-submission-evidence-v1"}',
+  }]);
+});
+
 test('a confirmed real submission reports SUBMITTED with the actual evidence, never a guess', () => {
   const plan = { planType: 'GREENHOUSE', steps: [{ type: 'VALIDATE' }, { type: 'REAL_SUBMIT_CLICK' }], requiredGaps: [] };
   const runResult = { submitResult: { confirmed: true, evidence: 'page text matched "Thanks for applying"' } };

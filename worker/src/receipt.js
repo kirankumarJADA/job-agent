@@ -16,7 +16,16 @@ import crypto from 'node:crypto';
  * </ol>
  */
 
-export const MOCK_PREFIXES = Object.freeze(['MOCK-', 'TEST-', 'SAMPLE-', 'SIM-']);
+export const MOCK_PREFIXES = Object.freeze([
+  'MOCK-',
+  'TEST-',
+  'SAMPLE-',
+  'SIM-',
+  'FIXTURE-',
+  'SYNTHETIC-',
+  'DEMO-',
+  'FAKE-',
+]);
 export const REQUISITION_PREFIXES = Object.freeze(['REQ-', 'REQUISITION-', 'JOB-REQ-', 'RECEIPT-']);
 
 export const GENUINE_ATS_PLATFORMS = Object.freeze([
@@ -236,6 +245,21 @@ export function verifyGenuineReceiptInvariants(receipt = {}) {
       'Confirmation evidence is required: canonical DOM evidence or screenshot bytes cannot be empty',
       'MISSING_RAW_EVIDENCE'
     );
+  }
+  if (receipt.rawEvidence.trim().startsWith('{')) {
+    try {
+      const parsedRaw = JSON.parse(receipt.rawEvidence);
+      if (parsedRaw?.fixture === true || parsedRaw?.isFixture === true
+          || parsedRaw?.synthetic === true || parsedRaw?.fixtureMode === true
+          || /^(FIXTURE|SYNTHETIC)$/i.test(String(parsedRaw?.source ?? '').trim())) {
+        throw new InvalidReceiptError(
+          'Synthetic fixture evidence markers cannot be accepted as a genuine receipt',
+          'FIXTURE_EVIDENCE_REJECTED'
+        );
+      }
+    } catch (err) {
+      if (err instanceof InvalidReceiptError) throw err;
+    }
   }
 
   // 2. receiptSha256 - compute from raw evidence and compare with caller-supplied digest

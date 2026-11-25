@@ -13,6 +13,7 @@ const MAX_WORKDAY_UPLOAD_BYTES = 10 * 1024 * 1024;
 import { StateStore } from './store.js';
 import { MockMailboxClient, VerificationError } from './mailbox.js';
 import { sanitizeUrl, redactSecrets } from './secret_redaction.js';
+import { buildGreenhouseSubmissionEvidence, MAX_RESPONSE_SNIPPET_CHARS } from './greenhouse_evidence.js';
 
 // Robin x Tsenta continuation: shared between résumé and cover-letter
 // uploads on a Zoho Recruit form — a deliberately cautious default, not an
@@ -713,21 +714,14 @@ export class BrowserWorker {
       const bodyText = await page.locator('body').innerText().catch(() => '');
       const invalidFieldCount = await page.locator(':invalid').count().catch(() => 0);
       const formFieldsPresent = (await page.locator('#first_name, #email').count().catch(() => 0)) > 0;
-      // The platform-structural signal (see confirmation.js's module comment
-      // and plan.js's greenhouseConfirmationPageMatches for the live evidence
-      // this is built from): the client only reaches this URL+container pair
-      // after its own submission POST resolves 2xx, so this is computed from
-      // the real DOM/URL, never guessed, and needs no per-employer config —
-      // but URL+DOM alone can also be reached by a direct navigation, so
-      // `submissionRequestConfirmed` (the actual network evidence for this
-      // click, gathered below) is required alongside them.
       const confirmationUrlMatched = greenhouseConfirmationPageMatches(plan.targetUrl, page.url());
       const confirmationContainerPresent = (await page.locator('.confirmation').count().catch(() => 0)) > 0;
-      return classifySubmissionAttempt({
+      const classification = classifySubmissionAttempt({
         bodyText, invalidFieldCount, formFieldsPresent,
         expectedConfirmationText: p.expectedConfirmationText,
         confirmationUrlMatched, confirmationContainerPresent, submissionRequestConfirmed,
       });
+      return { classification, confirmationUrlMatched, confirmationContainerPresent };
     };
     const guardAgainstHardStops = (result) => {
       if (result.category === ConfirmationCategory.ANTI_BOT) {
@@ -742,8 +736,9 @@ export class BrowserWorker {
     // No click has happened yet in this process, so there is no "this
     // attempt" network evidence to pass in at all — `false` is the honest
     // absence of evidence, not a guess.
-    const before = guardAgainstHardStops(await inspect(false));
-    if (before.confirmed) return before;
+    const before = await inspect(false);
+    guardAgainstHardStops(before.classification);
+    if (before.classification.confirmed) return before.classification;
     assertSafeSelector(p.selector);
 
     // Durable marker BEFORE the one real external side effect this codebase
@@ -758,52 +753,67 @@ export class BrowserWorker {
     }
 
     const urlBeforeClick = page.url();
-    const submissionRequestConfirmed = await this.#captureGreenhouseSubmissionDuringClick(
+    const networkCapture = await this.#captureGreenhouseSubmissionDuringClick(
       page, plan, () => this.#retry(() => page.locator(p.selector).click()),
     );
-    if (submissionRequestConfirmed) {
-      // Greenhouse's own real handler is async — it awaits the submission
-      // response, then conditionally navigates — so the navigation can
-      // genuinely start after the click gesture itself has already
-      // finished. Only wait for it when a genuinely successful submission
-      // response was actually observed; a bounded wait here, not a guess.
+    if (networkCapture.confirmed) {
       await page.waitForURL((url) => url.href !== urlBeforeClick, { timeout: 2000 }).catch(() => {});
     }
     await page.waitForLoadState('domcontentloaded').catch(() => {});
-    return guardAgainstHardStops(await inspect(submissionRequestConfirmed));
+
+    const after = await inspect(networkCapture.confirmed);
+    const classification = guardAgainstHardStops(after.classification);
+    if (!classification.confirmed) {
+      return classification;
+    }
+
+    // Genuine confirmation observed for THIS click attempt: capture bounded, redacted confirmation
+    // container DOM evidence only (never applicant input controls, scripts, cookies, or full page).
+    const domCapture = await page.evaluate((useConfirmationContainer) => {
+      const root = useConfirmationContainer
+        ? document.querySelector('.confirmation')
+        : document.querySelector('main');
+      if (!root) {
+        return { containerHtml: '', containerText: '', confirmationIdAttr: null };
+      }
+      const attrOwner = root.hasAttribute('data-confirmation-id') || root.hasAttribute('data-confirmation-number')
+        ? root
+        : root.querySelector('[data-confirmation-id], [data-confirmation-number]');
+      const confirmationIdAttr = attrOwner
+        ? (attrOwner.getAttribute('data-confirmation-id') || attrOwner.getAttribute('data-confirmation-number'))
+        : null;
+      const clone = root.cloneNode(true);
+      clone.querySelectorAll('script, style, noscript, iframe, input, textarea, select').forEach((el) => el.remove());
+      for (const el of [clone, ...clone.querySelectorAll('*')]) {
+        for (const attr of [...el.attributes]) {
+          const name = attr.name.toLowerCase();
+          if (name.startsWith('on') || /token|secret|cookie|password|auth/i.test(name)) {
+            el.removeAttribute(attr.name);
+          }
+        }
+      }
+      return {
+        containerHtml: (clone.outerHTML || '').slice(0, 40000),
+        containerText: (root.innerText || root.textContent || '').slice(0, 6000),
+        confirmationIdAttr,
+      };
+    }, after.confirmationContainerPresent).catch(() => ({}));
+
+    return buildGreenhouseSubmissionEvidence({
+      plan,
+      classification,
+      networkCapture,
+      confirmationUrlMatched: after.confirmationUrlMatched,
+      confirmationContainerPresent: after.confirmationContainerPresent,
+      expectedConfirmationText: p.expectedConfirmationText ?? null,
+      pageUrl: page.url(),
+      domCapture,
+    });
   }
 
   /**
-   * Phase 1 blocker fix (false-positive confirmation): registers a response
-   * listener for the exact duration of a single REAL_SUBMIT_CLICK click
-   * attempt (including its own internal {@link #retry} attempts, if any),
-   * so that only a request/response pair genuinely caused by THIS click can
-   * ever satisfy the structural confirmation signal — never a prior
-   * attempt's leftover state, a crash-then-resume with no click in this
-   * process at all, or a request unrelated to the real submission. The
-   * listener is removed again immediately after, so nothing captured here
-   * ever leaks into a later step or a later plan.
-   *
-   * <p>Matches the exact contract read from Greenhouse's own shipped source
-   * (`app/utils/submit_application.ts`): a `POST` to the job posting's own
-   * pathname — re-verified with the same host/scheme safety shape as
-   * {@link greenhousePageIdentityMatches}, so an unrelated cross-origin POST
-   * can never count — `Content-Type: application/json`, a body carrying a
-   * `job_application` key, and the response itself must be `ok()` (2xx). A
-   * matching request with a non-2xx response is observed and simply never
-   * sets `confirmed`, so a rejected submission can never pass just because a
-   * confirmation-looking page appears afterwards. Anything that doesn't
-   * match this exact shape (a different path, method, content type, or no
-   * `job_application` key — e.g. an unrelated analytics POST) is ignored.
-   *
-   * <p>Deliberately uses {@link Page.waitForResponse} (predicate-based,
-   * registered <em>before</em> the click) rather than a passive listener
-   * checked immediately after the click returns: Greenhouse's own real
-   * handler is {@code async} — it awaits the submission `fetch` before
-   * conditionally navigating — so the matching response can genuinely
-   * arrive after the click gesture itself has already finished. A short,
-   * bounded wait for that specific response is the correct way to observe
-   * it without racing it.
+   * Captures the exact submission request/response pair triggered by THIS click attempt only.
+   * Returns structured network observation data (never reused across attempts or steps).
    */
   async #captureGreenhouseSubmissionDuringClick(page, plan, performClick) {
     const matchesSubmissionRequest = (request) => {
@@ -824,7 +834,29 @@ export class BrowserWorker {
       .catch(() => null);
     await performClick();
     const response = await responsePromise;
-    return Boolean(response && response.ok());
+    const observedAt = new Date().toISOString();
+    if (!response) {
+      return { confirmed: false, method: null, url: null, status: null, responseBodyText: null, observedAt };
+    }
+    const confirmed = Boolean(response.ok());
+    let responseBodyText = null;
+    if (confirmed) {
+      const rawBody = await Promise.race([
+        response.text().catch(() => null),
+        new Promise((resolve) => setTimeout(() => resolve(null), 500)),
+      ]);
+      if (typeof rawBody === 'string') {
+        responseBodyText = rawBody.slice(0, MAX_RESPONSE_SNIPPET_CHARS);
+      }
+    }
+    return {
+      confirmed,
+      method: response.request().method(),
+      url: sanitizeUrl(response.url()),
+      status: response.status(),
+      responseBodyText,
+      observedAt,
+    };
   }
 
   /**
