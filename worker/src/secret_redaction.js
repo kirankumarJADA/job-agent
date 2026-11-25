@@ -73,7 +73,10 @@ export function redactSecrets(text) {
   const str = String(text ?? '');
   return str
     .replace(/\b(https?:\/\/)([^/\s:@"']+:[^/\s@"']+)@/gi, '$1[REDACTED]@')
-    .replace(/\b(cookie|set-cookie)\s*:\s*[^\r\n<>"']+/gi, '$1: [REDACTED]')
+    .replace(
+      /\b(cookie|set-cookie)\s*:\s*(?:(?:[A-Za-z0-9_.-]+\s*=\s*(?:\\"(?:[^"\\\r\n]|\\.)*\\"|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s;\r\n<>"']+))(?:\s*;\s*[A-Za-z0-9_.-]+\s*=\s*(?:\\"(?:[^"\\\r\n]|\\.)*\\"|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s;\r\n<>"']+))*|[^\r\n<>"']+)/gi,
+      '$1: [REDACTED]'
+    )
     .replace(/\bauthorization\s*:\s*(?:bearer|basic|token|apikey)\s+[A-Za-z0-9._~+/=-]+/gi, 'Authorization: [REDACTED]')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{6,}/gi, 'Bearer [REDACTED]')
     .replace(
@@ -85,7 +88,7 @@ export function redactSecrets(text) {
       '$1=[REDACTED]'
     )
     .replace(
-      /\b([A-Za-z0-9_-]*(?:api[_-]?key|apikey|secret|token|credential|password|passwd|pwd|session_id|otp))\s*:\s*([^\s,;"'<>]+)/gi,
+      /\b([A-Za-z0-9_-]*(?:api[_-]?key|apikey|secret|token|credential|password|passwd|pwd|session_id|otp))\s*:\s*(?:\\"(?:[^"\\\r\n]|\\.)*\\"|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s,;"'<>]+)/gi,
       '$1: [REDACTED]'
     );
 }

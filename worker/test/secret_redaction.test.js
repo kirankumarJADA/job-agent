@@ -95,3 +95,16 @@ test('redacts URL userinfo, Cookie headers, apikey, Authorization schemes and es
   assert.match(redacted, /https:\/\/\[REDACTED\]@example\.com\/cb/);
   assert.match(redacted, /Bearer \[REDACTED\]/);
 });
+
+test('redacts quoted Cookie/Set-Cookie values and quoted apikey/token headers cleanly', () => {
+  const input = 'Cookie: sid="quoted-secret-99"; theme="dark" Set-Cookie: session="quoted-sess-77" api_key: "quoted-ak-55"';
+  const redacted = redactSecrets(input);
+  for (const leak of ['quoted-secret-99', 'quoted-sess-77', 'quoted-ak-55']) {
+    assert.ok(!redacted.includes(leak), `quoted secret ${leak} must be redacted`);
+  }
+  // Ensure JSON safety is preserved when quoted secret strings appear inside JSON messages
+  const jsonInput = JSON.stringify({ error: 'Cookie: sid="inner-cookie-42" failed' });
+  const redactedJson = redactSecrets(jsonInput);
+  assert.ok(!redactedJson.includes('inner-cookie-42'));
+  assert.equal(typeof JSON.parse(redactedJson).error, 'string');
+});

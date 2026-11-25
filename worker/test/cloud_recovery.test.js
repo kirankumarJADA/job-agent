@@ -773,3 +773,79 @@ test('DeadLetterRegistry + executePollCycle: manual requeueCount increase unbloc
     fs.rmSync(path.dirname(tmpFile), { recursive: true, force: true });
   }
 });
+
+test('DeadLetterRegistry + executePollCycle redact secrets in crash records, loaded disk entries, dead-letter events, and HANDOFF_INITIATING logs', async () => {
+  const tmpFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'dl-redact-')), 'dead-letters.json');
+  const originalLog = console.log;
+  const originalErr = console.error;
+  const logs = [];
+  const errs = [];
+  console.log = (...args) => logs.push(args.join(' '));
+  console.error = (...args) => errs.push(args.join(' '));
+
+  try {
+    // 1. Direct recordCrash / markDeadLetter must redact persisted crash/reason strings immediately
+    const reg = new DeadLetterRegistry({ maxCrashes: 1, persistPath: tmpFile });
+    reg.recordCrash('plan-sec-1', new Error('Request failed Authorization: Bearer jwt_secret_111 Cookie: sid="ck_secret_222"'));
+    const savedRaw = fs.readFileSync(tmpFile, 'utf8');
+    assert.doesNotMatch(savedRaw, /jwt_secret_111|ck_secret_222/);
+    assert.match(reg.getDeadLetter('plan-sec-1').reason, /\[REDACTED\]/);
+
+    // 2. Pre-existing legacy unredacted persisted file must also be redacted on load and emission
+    const legacyPlanId = 'plan-legacy-2';
+    fs.writeFileSync(tmpFile, JSON.stringify({
+      deadLetters: {
+        [legacyPlanId]: { at: Date.now(), reason: 'Legacy poison Authorization: Bearer legacy_tok_333 password=hunter2' },
+      },
+      crashes: {
+        [legacyPlanId]: [{ at: Date.now(), message: 'Crash api_key=ak_legacy_444' }],
+      },
+      requeueCounts: {},
+    }), 'utf8');
+    const reloaded = new DeadLetterRegistry({ maxCrashes: 1, persistPath: tmpFile });
+    assert.doesNotMatch(reloaded.getDeadLetter(legacyPlanId).reason, /legacy_tok_333|hunter2/);
+
+    const outcomes = [];
+    const emittedEvents = [];
+    await executePollCycle({
+      pollUrl: 'http://backend.invalid/api/v1/automation/plans/claim-next',
+      apiCallFn: async () => ({ id: legacyPlanId, requeueCount: 0, plan: { planType: 'INSPECTION', steps: [] } }),
+      runner: { execute: async () => ({ status: 'COMPLETED' }), requestAbort: () => {} },
+      reportOutcomeFn: async (...args) => outcomes.push(args),
+      eventSinkFn: async (evt) => emittedEvents.push(evt),
+      deadLetterRegistry: reloaded,
+    });
+
+    assert.doesNotMatch(errs.join('\n'), /legacy_tok_333|hunter2/);
+    assert.doesNotMatch(JSON.stringify(outcomes), /legacy_tok_333|hunter2/);
+    assert.doesNotMatch(JSON.stringify(emittedEvents), /legacy_tok_333|hunter2/);
+
+    // 3. HANDOFF_INITIATING must redact secrets in error.reason and error.message
+    const handoffErr = Object.assign(new Error('Challenge at https://u:pass_handoff@x.test/?token=handoff_tok_555'), {
+      name: 'HardStopError',
+      reason: 'CAPTCHA_DETECTED Authorization: Bearer handoff_bearer_666',
+      handoffEligible: true,
+    });
+    await executePollCycle({
+      pollUrl: 'http://backend.invalid/api/v1/automation/plans/claim-next',
+      apiCallFn: async () => ({
+        id: 'plan-handoff-3',
+        requeueCount: 0,
+        plan: { planType: 'WORKDAY', targetUrl: 'https://x.test', steps: [{ type: 'NAVIGATE', url: 'https://x.test' }] },
+      }),
+      runner: { execute: async () => { throw handoffErr; }, requestAbort: () => {} },
+      reportOutcomeFn: async () => {},
+      eventSinkFn: async () => {},
+      deadLetterRegistry: new DeadLetterRegistry({ maxCrashes: 2 }),
+      initiateHandoffFn: async () => ({ sessionId: 'sess-ok' }),
+    });
+
+    const joinedLogs = logs.join('\n');
+    assert.match(joinedLogs, /HANDOFF_INITIATING/);
+    assert.doesNotMatch(joinedLogs, /handoff_bearer_666|handoff_tok_555|pass_handoff/);
+  } finally {
+    console.log = originalLog;
+    console.error = originalErr;
+    fs.rmSync(path.dirname(tmpFile), { recursive: true, force: true });
+  }
+});

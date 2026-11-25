@@ -800,11 +800,11 @@ export class BrowserWorker {
         ? (attrOwner.getAttribute('data-confirmation-id') || attrOwner.getAttribute('data-confirmation-number'))
         : null;
       const clone = root.cloneNode(true);
-      clone.querySelectorAll('script, style, noscript, iframe, input, textarea, select').forEach((el) => el.remove());
+      clone.querySelectorAll('script, style, noscript, iframe, meta, input, textarea, select').forEach((el) => el.remove());
       for (const el of [clone, ...clone.querySelectorAll('*')]) {
         for (const attr of [...el.attributes]) {
           const name = attr.name.toLowerCase();
-          if (name.startsWith('on') || /token|secret|cookie|password|auth/i.test(name)) {
+          if (name.startsWith('on') || /token|secret|cookie|password|auth|csrf|xsrf|session|api[_-]?key|credential/i.test(name)) {
             el.removeAttribute(attr.name);
           }
         }

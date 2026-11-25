@@ -123,10 +123,10 @@ test('sanitization removes tokens, cookies, headers, JSON secrets, dangerous tag
   );
   assert.doesNotMatch(headerAndJson, /topsecret_cookie|dXNlcjpwYXNz|key_123|tok_a|tok_b|tok_c|sid_d|hidden_val|ak_99|at_88|sid_77/);
 
-  const html = '<div class="confirmation"><a href="https://boards.greenhouse.io?token=s3cr3t">Receipt</a><a href="javascript:alert(1)">bad</a><iframe src="evil"></iframe><span data-auth-token="secret123">Confirmed</span></div>';
+  const html = '<div class="confirmation"><meta name="csrf-token" content="meta-csrf-99"><a href="https://boards.greenhouse.io?token=s3cr3t">Receipt</a><a href="javascript:alert(1)">bad</a><iframe src="evil"></iframe><span data-auth-token="secret123" data-csrf-token="csrf123" data-session-id="sess123" data-api-key="ak123" x-auth-token="xauth123" csrf-token="attrcsrf123">Confirmed</span></div>';
   const cleanedHtml = sanitizeContainerHtml(html);
   assert.match(cleanedHtml, /href="https:\/\/boards\.greenhouse\.io\?token=\[REDACTED\]">Receipt<\/a>/);
-  assert.doesNotMatch(cleanedHtml, /s3cr3t|secret123|<iframe|javascript:|data-auth-token/);
+  assert.doesNotMatch(cleanedHtml, /s3cr3t|secret123|meta-csrf-99|<meta|csrf123|sess123|ak123|xauth123|attrcsrf123|<iframe|javascript:|data-auth-token|data-csrf-token|data-session-id|data-api-key|x-auth-token|csrf-token/);
 
   const oversized = '<div class="confirmation">' + 'a'.repeat(50000) + '</div>';
   assert.ok(sanitizeContainerHtml(oversized).length <= 32768);

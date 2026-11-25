@@ -202,11 +202,12 @@ export class DeadLetterRegistry {
 
   recordCrash(planId, error) {
     if (!planId) return 0;
+    const safeMessage = redactSecrets(error?.message || String(error ?? ''));
     const list = this.crashes.get(planId) || [];
-    list.push({ at: Date.now(), message: error?.message || String(error) });
+    list.push({ at: Date.now(), message: safeMessage });
     this.crashes.set(planId, list);
     if (list.length >= this.maxCrashes) {
-      this.markDeadLetter(planId, `Poison-pill plan exceeded max crash limit (${list.length}/${this.maxCrashes}): ${error?.message || ''}`);
+      this.markDeadLetter(planId, `Poison-pill plan exceeded max crash limit (${list.length}/${this.maxCrashes}): ${safeMessage}`);
     }
     this.#save();
     return list.length;
@@ -228,7 +229,7 @@ export class DeadLetterRegistry {
     if (!planId) return;
     this.deadLetters.set(planId, {
       at: Date.now(),
-      reason: String(reason || 'POISON_PILL_PLAN'),
+      reason: redactSecrets(String(reason || 'POISON_PILL_PLAN')),
       crashes: this.getCrashCount(planId),
     });
     this.#save();
@@ -264,10 +265,21 @@ export class DeadLetterRegistry {
       if (this.persistPath && fs.existsSync(this.persistPath)) {
         const data = JSON.parse(fs.readFileSync(this.persistPath, 'utf8'));
         if (data.deadLetters) {
-          for (const [k, v] of Object.entries(data.deadLetters)) this.deadLetters.set(k, v);
+          for (const [k, v] of Object.entries(data.deadLetters)) {
+            this.deadLetters.set(k, v && typeof v === 'object'
+              ? { ...v, reason: redactSecrets(String(v.reason || 'POISON_PILL_PLAN')) }
+              : v);
+          }
         }
         if (data.crashes) {
-          for (const [k, v] of Object.entries(data.crashes)) this.crashes.set(k, v);
+          for (const [k, v] of Object.entries(data.crashes)) {
+            const list = Array.isArray(v)
+              ? v.map((entry) => (entry && typeof entry === 'object'
+                ? { ...entry, message: redactSecrets(entry.message ?? '') }
+                : entry))
+              : v;
+            this.crashes.set(k, list);
+          }
         }
         if (data.requeueCounts) {
           for (const [k, v] of Object.entries(data.requeueCounts)) this.requeueCounts.set(k, v);
@@ -523,18 +535,19 @@ export async function executePollCycle({
     // Terminal isolation: check if this plan is already isolated as a poison-pill dead letter
     if (deadLetterRegistry.isDeadLetter(planId)) {
       const dl = deadLetterRegistry.getDeadLetter(planId);
-      console.error(JSON.stringify({ type: 'PLAN_DEAD_LETTER_BLOCKED', planId, reason: dl.reason }));
-      await reportOutcomeFn(planId, 'FAILED', `DEAD_LETTER_POISON_PILL: ${dl.reason}`, [{
+      const safeDeadReason = redactSecrets(dl?.reason || 'POISON_PILL_PLAN');
+      console.error(JSON.stringify({ type: 'PLAN_DEAD_LETTER_BLOCKED', planId, reason: safeDeadReason }));
+      await reportOutcomeFn(planId, 'FAILED', `DEAD_LETTER_POISON_PILL: ${safeDeadReason}`, [{
         type: 'PLAN_ERROR',
         outcome: 'FAILED',
         reason: 'DEAD_LETTER_POISON_PILL',
-        message: `Plan was previously isolated as dead-letter poison-pill: ${dl.reason}`,
+        message: `Plan was previously isolated as dead-letter poison-pill: ${safeDeadReason}`,
         deadLetter: true,
       }]).catch(() => {});
       await passEventSink({
         type: 'PLAN_DEAD_LETTER_ISOLATED',
         planId,
-        reason: dl.reason,
+        reason: safeDeadReason,
       });
       return { status: 'DEAD_LETTER', planId, outcome: 'FAILED', detail: dl.reason };
     }
@@ -735,7 +748,8 @@ export async function executePollCycle({
       return { status: 'DEFERRED_ON_SHUTDOWN', planId };
     } else if (isHandoffEligibleError(error) && pollUrl && planId && plan) {
       // Phase 3: Candidate handoff for security challenges (Option B: External Human Completion)
-      console.log(JSON.stringify({ type: 'HANDOFF_INITIATING', planId, reason: error.reason || error.message }));
+      const safeHandoffReason = redactSecrets(error.reason || error.message);
+      console.log(JSON.stringify({ type: 'HANDOFF_INITIATING', planId, reason: safeHandoffReason }));
       const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
       const backendBase = new URL(apiRoot).origin;
       try {
@@ -749,7 +763,7 @@ export async function executePollCycle({
           type: 'HANDOFF_TRANSFERRED_TO_HUMAN',
           planId,
           sessionId: handoffResult?.sessionId,
-          reason: redactSecrets(error.reason || error.message),
+          reason: safeHandoffReason,
         }));
         // Under Option B (External Human Completion), the worker terminates cleanly
         // and releases its execution lease immediately. The candidate will complete
@@ -762,7 +776,7 @@ export async function executePollCycle({
         const errorResult = [{
           type: 'PLAN_ERROR',
           outcome: 'BLOCKED_ANTI_BOT',
-          reason: error.reason || null,
+          reason: error.reason ? redactSecrets(error.reason) : null,
           message: safeOriginalErr,
         }];
         await reportOutcomeFn(planId, 'BLOCKED_ANTI_BOT', safeOriginalErr, errorResult).catch(() => {});
@@ -786,7 +800,7 @@ export async function executePollCycle({
         ? (/CAPTCHA|ANTI_BOT|ACCESS_DENIED|MFA_REQUIRED/i.test(String(error.reason)) ? 'BLOCKED_ANTI_BOT' : 'FAILED')
         : 'FAILED';
 
-      const reason = isDead ? 'DEAD_LETTER_POISON_PILL' : (error.name === 'HardStopError' ? error.reason : null);
+      const reason = isDead ? 'DEAD_LETTER_POISON_PILL' : (error.name === 'HardStopError' && error.reason ? redactSecrets(error.reason) : null);
       const detail = isDead ? `DEAD_LETTER_POISON_PILL: ${safeErrorMsg}` : safeErrorMsg;
 
       console.error(JSON.stringify({
