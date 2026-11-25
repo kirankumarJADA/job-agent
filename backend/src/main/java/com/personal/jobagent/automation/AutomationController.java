@@ -1008,9 +1008,15 @@ public class AutomationController {
             return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
         }
         if (maintenanceMode != null && maintenanceMode.isMaintenanceMode()) {
-            return ResponseEntity.status(503).body(Map.of("error", "maintenance mode active", "recovered", 0));
+            return ResponseEntity.status(503).body(Map.of(
+                    "error", "maintenance mode active",
+                    "recovered", 0,
+                    "quarantined", 0));
         }
-        return ResponseEntity.ok(Map.of("recovered", plans.recoverStale(Instant.now().minusSeconds(minutes * 60))));
+        var recovery = plans.recoverStaleDetailed(Instant.now().minusSeconds(minutes * 60));
+        return ResponseEntity.ok(Map.of(
+                "recovered", recovery.recovered(),
+                "quarantined", recovery.quarantined()));
     }
 
     // ── authorization helpers ─────────────────────────────────────────

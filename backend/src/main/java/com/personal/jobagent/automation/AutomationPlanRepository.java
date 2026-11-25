@@ -436,13 +436,15 @@ public class AutomationPlanRepository {
                 """, applicationId);
     }
 
+    public record RecoveryResult(int recovered, int quarantined) {}
+
     private static final String SUBMIT_STEP_EXISTS_SQL = """
             exists (
                 select 1
                 from jsonb_array_elements(
                     case when jsonb_typeof(plan->'steps') = 'array' then plan->'steps' else '[]'::jsonb end
                 ) s
-                where s->>'type' in ('REAL_SUBMIT_CLICK', 'ASHBY_SUBMIT_CLICK', 'WORKDAY_SUBMIT_CLICK', 'MOCK_SUBMIT', 'CLICK')
+                where s->>'type' in ('REAL_SUBMIT_CLICK', 'ASHBY_SUBMIT_CLICK', 'WORKDAY_SUBMIT_CLICK', 'MOCK_SUBMIT')
             )""";
 
     private static final String STALE_SUBMIT_RECONCILIATION_JSON =
@@ -451,6 +453,11 @@ public class AutomationPlanRepository {
 
     @Transactional
     public int recoverStale(Instant cutoff) {
+        return recoverStaleDetailed(cutoff).recovered();
+    }
+
+    @Transactional
+    public RecoveryResult recoverStaleDetailed(Instant cutoff) {
         java.sql.Timestamp ts = java.sql.Timestamp.from(cutoff);
         int reclaimed = db.update("""
                 update automation_plans
@@ -470,7 +477,7 @@ public class AutomationPlanRepository {
             log.warn("Quarantined {} stale submit-capable automation plan(s) to RECONCILIATION_REQUIRED instead of PREPARED",
                     quarantined);
         }
-        return reclaimed;
+        return new RecoveryResult(reclaimed, quarantined);
     }
 
     /**

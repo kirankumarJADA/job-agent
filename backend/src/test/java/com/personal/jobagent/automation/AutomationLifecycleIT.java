@@ -1224,6 +1224,88 @@ class AutomationLifecycleIT {
                 .andExpect(status().isNoContent());
     }
 
+    @Test
+    @Order(20)
+    void scenarioQ_genericClickStepsReclaimToPreparedWhileExplicitSubmitPlansQuarantine() throws Exception {
+        UUID anyAppId = jdbc.queryForObject(
+                "select application_id from automation_plans where profile_id = ? limit 1", UUID.class, PROFILE);
+
+        UUID navClickId = UUID.randomUUID();
+        UUID accountClickId = UUID.randomUUID();
+        UUID uploadAndClickId = UUID.randomUUID();
+        UUID greenhouseSubmitId = UUID.randomUUID();
+        UUID ashbySubmitId = UUID.randomUUID();
+        UUID workdaySubmitId = UUID.randomUUID();
+        UUID mockSubmitId = UUID.randomUUID();
+        UUID approvedNoSubmitStepId = UUID.randomUUID();
+
+        String[][] fixtures = new String[][] {
+                { navClickId.toString(), "https://jobs.example/nav",
+                  "{\"planType\":\"NAVIGATION\",\"policy\":\"NO_SUBMIT\",\"steps\":[{\"type\":\"NAVIGATE\"},{\"type\":\"CLICK\",\"params\":{\"selector\":\"a.next\"}}]}",
+                  "false" },
+                { accountClickId.toString(), "https://jobs.example/account",
+                  "{\"planType\":\"WORKDAY\",\"policy\":\"NO_SUBMIT\",\"steps\":[{\"id\":\"signup-submit\",\"type\":\"CLICK\"},{\"id\":\"account-verify-otp-submit\",\"type\":\"CLICK\"},{\"id\":\"login-submit\",\"type\":\"CLICK\"}]}",
+                  "false" },
+                { uploadAndClickId.toString(), "https://jobs.example/upload",
+                  "{\"planType\":\"GREENHOUSE\",\"policy\":\"NO_SUBMIT\",\"steps\":[{\"type\":\"FILL_FIELD\"},{\"type\":\"UPLOAD_FILE\"},{\"type\":\"CLICK\",\"params\":{\"selector\":\"button[data-next]\"}}]}",
+                  "false" },
+                { greenhouseSubmitId.toString(), "https://boards.greenhouse.io/acme/1",
+                  "{\"planType\":\"GREENHOUSE\",\"steps\":[{\"type\":\"FILL_FIELD\"},{\"type\":\"REAL_SUBMIT_CLICK\"}]}",
+                  "false" },
+                { ashbySubmitId.toString(), "https://jobs.ashbyhq.com/acme/2",
+                  "{\"planType\":\"ASHBY\",\"steps\":[{\"type\":\"ASHBY_APPLY\"},{\"type\":\"ASHBY_SUBMIT_CLICK\"}]}",
+                  "false" },
+                { workdaySubmitId.toString(), "https://acme.wd5.myworkdayjobs.com/en/job/3",
+                  "{\"planType\":\"WORKDAY\",\"steps\":[{\"type\":\"WORKDAY_APPLY\"},{\"type\":\"WORKDAY_SUBMIT_CLICK\"}]}",
+                  "false" },
+                { mockSubmitId.toString(), "https://mock.local/jobs/4",
+                  "{\"planType\":\"MOCK\",\"steps\":[{\"type\":\"MOCK_SUBMIT\"}]}",
+                  "false" },
+                { approvedNoSubmitStepId.toString(), "https://boards.greenhouse.io/acme/5",
+                  "{\"planType\":\"GREENHOUSE\",\"steps\":[{\"type\":\"NAVIGATE\"},{\"type\":\"CLICK\"}]}",
+                  "true" },
+        };
+
+        for (String[] row : fixtures) {
+            UUID id = UUID.fromString(row[0]);
+            jdbc.update("""
+                    insert into automation_plans (id, application_id, profile_id, target_url, status, plan, result,
+                                                  submit_approved, heartbeat_at, idempotency_key, created_at, updated_at)
+                    values (?, ?, ?, ?, 'RUNNING', ?::jsonb, '[]'::jsonb, ?, now() - interval '1 hour', ?, now(), now())
+                    """, id, anyAppId, PROFILE, row[1], row[2], Boolean.parseBoolean(row[3]), "scenarioQ:" + id);
+        }
+
+        mockMvc.perform(post("/api/v1/automation/plans/recover-stale")
+                        .param("minutes", "15").with(csrf()).session(session))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.recovered").value(3))
+                .andExpect(jsonPath("$.quarantined").value(5));
+
+        // Safe non-submit CLICK plans must be reclaimed to PREPARED (re-servable)
+        assertThat(planStatus(navClickId)).isEqualTo("PREPARED");
+        assertThat(planStatus(accountClickId)).isEqualTo("PREPARED");
+        assertThat(planStatus(uploadAndClickId)).isEqualTo("PREPARED");
+
+        // All submit-capable or approved plans must quarantine to RECONCILIATION_REQUIRED
+        for (UUID quarantinedId : List.of(greenhouseSubmitId, ashbySubmitId, workdaySubmitId, mockSubmitId, approvedNoSubmitStepId)) {
+            assertThat(planStatus(quarantinedId)).isEqualTo("RECONCILIATION_REQUIRED");
+            assertThat(jdbc.queryForObject("select submit_approved from automation_plans where id = ?",
+                    Boolean.class, quarantinedId)).isFalse();
+        }
+
+        // Drain the 3 reclaimed PREPARED plans cleanly so scenarioJ (@Order(25)) still sees an empty queue
+        for (int i = 0; i < 3; i++) {
+            MvcResult claimed = mockMvc.perform(post("/api/v1/automation/plans/claim-next").with(csrf()).session(session))
+                    .andExpect(status().isOk())
+                    .andReturn();
+            String claimedId = new ObjectMapper().readTree(claimed.getResponse().getContentAsString()).get("id").asText();
+            mockMvc.perform(post("/api/v1/automation/plans/{id}/complete", claimedId).with(csrf()).session(session)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"outcome\":\"COMPLETED\",\"detail\":\"drained in scenarioQ\"}"))
+                    .andExpect(status().isNoContent());
+        }
+    }
+
     private String resultOf(UUID planId) {
         return jdbc.queryForObject("select result::text from automation_plans where id = ?", String.class, planId);
     }

@@ -82,8 +82,10 @@ class AutomationRecoverySchedulerMaintenanceTest {
         Map<String, Object> body = (Map<String, Object>) response.getBody();
         assertThat(body).containsEntry("error", "maintenance mode active");
         assertThat(body).containsEntry("recovered", 0);
+        assertThat(body).containsEntry("quarantined", 0);
 
         verify(plans, never()).recoverStale(any(Instant.class));
+        verify(plans, never()).recoverStaleDetailed(any(Instant.class));
     }
 
     @Test
@@ -107,7 +109,8 @@ class AutomationRecoverySchedulerMaintenanceTest {
                 maintenanceMode
         );
 
-        when(plans.recoverStale(any(Instant.class))).thenReturn(2);
+        when(plans.recoverStaleDetailed(any(Instant.class)))
+                .thenReturn(new AutomationPlanRepository.RecoveryResult(2, 1));
 
         ResponseEntity<?> response = controller.recover(15);
 
@@ -115,7 +118,8 @@ class AutomationRecoverySchedulerMaintenanceTest {
         @SuppressWarnings("unchecked")
         Map<String, Object> body = (Map<String, Object>) response.getBody();
         assertThat(body).containsEntry("recovered", 2);
+        assertThat(body).containsEntry("quarantined", 1);
 
-        verify(plans, times(1)).recoverStale(any(Instant.class));
+        verify(plans, times(1)).recoverStaleDetailed(any(Instant.class));
     }
 }

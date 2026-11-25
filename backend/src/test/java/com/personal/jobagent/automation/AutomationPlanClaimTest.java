@@ -93,6 +93,30 @@ class AutomationPlanClaimTest {
     }
 
     @Test
+    void submitStepPredicateMatchesExplicitSubmitStepsOnlyAndExcludesGenericClick() {
+        Instant cutoff = Instant.now().minusSeconds(900);
+        org.mockito.ArgumentCaptor<String> preparedSql = org.mockito.ArgumentCaptor.forClass(String.class);
+        org.mockito.ArgumentCaptor<String> quarantineSql = org.mockito.ArgumentCaptor.forClass(String.class);
+        when(db.update(preparedSql.capture(), any(java.sql.Timestamp.class))).thenReturn(1);
+        when(db.update(quarantineSql.capture(), anyString(), any(java.sql.Timestamp.class))).thenReturn(2);
+
+        var detailed = repo.recoverStaleDetailed(cutoff);
+        assertThat(detailed.recovered()).isEqualTo(1);
+        assertThat(detailed.quarantined()).isEqualTo(2);
+
+        String reclaimQuery = preparedSql.getValue();
+        String quarantineQuery = quarantineSql.getValue();
+        for (String sql : List.of(reclaimQuery, quarantineQuery)) {
+            assertThat(sql)
+                    .contains("'REAL_SUBMIT_CLICK'")
+                    .contains("'ASHBY_SUBMIT_CLICK'")
+                    .contains("'WORKDAY_SUBMIT_CLICK'")
+                    .contains("'MOCK_SUBMIT'")
+                    .doesNotContain("'CLICK'");
+        }
+    }
+
+    @Test
     void approveSubmitOnlyFromAwaitingState() {
         when(db.update(contains("submit_approved=true"), eq(PLAN_A))).thenReturn(1);
 
