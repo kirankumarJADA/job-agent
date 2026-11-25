@@ -88,7 +88,7 @@ class SandboxRegistrationPolicyTest {
 
         SandboxRegistrationPolicy policy = new SandboxRegistrationPolicy(
                 List.of("boards.greenhouse.io", "greenhouse.io", "localhost", "127.0.0.1", "169.254.169.254", "10.0.0.5"),
-                List.of(),
+                List.of("/robin-sandbox/"),
                 true,
                 false,
                 mixedResolver);
@@ -122,5 +122,62 @@ class SandboxRegistrationPolicyTest {
         assertThat(ReceiptVerificationPolicy.isSyntheticFixtureEvidence(
                 "{\"atsPlatform\":\"GREENHOUSE\",\"confirmationNumber\":\"GH-9988\"}")).isFalse();
         assertThat(policy).isNotNull();
+    }
+
+    @Test
+    void sharedMultiTenantHostsWithoutPathPrefixesFailClosed() {
+        for (String host : List.of("boards.greenhouse.io", "job-boards.greenhouse.io", "jobs.ashbyhq.com")) {
+            SandboxRegistrationPolicy missingPrefixes = new SandboxRegistrationPolicy(
+                    List.of(host),
+                    List.of(),
+                    true,
+                    false,
+                    PUBLIC_RESOLVER_GUARD);
+            assertThat(missingPrefixes.isConfigured()).isFalse();
+            assertThatThrownBy(() -> missingPrefixes.validateAndCanonicalize(
+                    "GREENHOUSE", "https://" + host + "/stripe/jobs/999"))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("disabled");
+        }
+    }
+
+    @Test
+    void rejectsDotSegmentsEncodedTraversalUnicodeHostsTrailingDotIpv6AndNormalizesLocalPorts() {
+        SandboxRegistrationPolicy policy = new SandboxRegistrationPolicy(
+                List.of("boards.greenhouse.io", "greenhouse.io", "localhost", "[::1]", "[::ffff:127.0.0.1]"),
+                List.of("/robin-sandbox/"),
+                true,
+                false,
+                PUBLIC_RESOLVER_GUARD);
+
+        for (String dangerous : List.of(
+                "https://boards.greenhouse.io/robin-sandbox/jobs/..",
+                "https://boards.greenhouse.io/robin-sandbox/jobs/.",
+                "https://boards.greenhouse.io/../jobs/42",
+                "https://boards.greenhouse.io/robin-sandbox/jobs/%2e%2e",
+                "https://boards.greenhouse.io./robin-sandbox/jobs/42",
+                "https://b\u00f6ards.greenhouse.io/robin-sandbox/jobs/42",
+                "https://[::1]/robin-sandbox/jobs/42",
+                "https://[::ffff:127.0.0.1]/robin-sandbox/jobs/42")) {
+            assertThatThrownBy(() -> policy.validateAndCanonicalize("GREENHOUSE", dangerous))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+
+        // Isolated local test mode strips default ports (:443 / :80) matching canonicalizePostingUrl()
+        SandboxRegistrationPolicy localPolicy = new SandboxRegistrationPolicy(
+                List.of("localhost"),
+                List.of("/robin-sandbox/"),
+                false,
+                true,
+                PUBLIC_RESOLVER_GUARD);
+        var defaultHttpPort = localPolicy.validateAndCanonicalize(
+                "GREENHOUSE", "http://localhost:80/robin-sandbox/jobs/42/");
+        assertThat(defaultHttpPort.canonicalPostingUrl()).isEqualTo("http://localhost/robin-sandbox/jobs/42");
+        assertThat(defaultHttpPort.canonicalPostingUrl())
+                .isEqualTo(SandboxRegistrationPolicy.canonicalizePostingUrl("http://localhost:80/robin-sandbox/jobs/42/"));
+
+        var defaultHttpsPort = localPolicy.validateAndCanonicalize(
+                "GREENHOUSE", "https://localhost:443/robin-sandbox/jobs/42");
+        assertThat(defaultHttpsPort.canonicalPostingUrl()).isEqualTo("https://localhost/robin-sandbox/jobs/42");
     }
 }

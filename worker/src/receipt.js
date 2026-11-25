@@ -238,6 +238,30 @@ export function verifyGenuineReceiptInvariants(receipt = {}) {
       'REQUISITION_ID_AS_CONFIRMATION_REJECTED'
     );
   }
+  const trimmedConf = confId.trim().toLowerCase();
+  for (const internalId of [receipt.applicationId, receipt.jobId, receipt.planId]) {
+    if (internalId && trimmedConf === String(internalId).trim().toLowerCase()) {
+      throw new InvalidReceiptError(
+        `Internal identifier cannot be used as employer confirmation ID: ${confId}`,
+        'INTERNAL_ID_AS_CONFIRMATION_REJECTED'
+      );
+    }
+  }
+  if (receipt.targetUrl) {
+    try {
+      const pathMatch = new URL(receipt.targetUrl).pathname.match(/\/jobs\/([^/?#]+)(?:\/|$)/);
+      const postingJobId = pathMatch?.[1];
+      if (postingJobId && !['apply', 'confirmation'].includes(postingJobId.toLowerCase())
+          && trimmedConf === postingJobId.toLowerCase()) {
+        throw new InvalidReceiptError(
+          `Job posting URL identifier cannot be used as employer confirmation ID: ${confId}`,
+          'INTERNAL_ID_AS_CONFIRMATION_REJECTED'
+        );
+      }
+    } catch (err) {
+      if (err instanceof InvalidReceiptError) throw err;
+    }
+  }
 
   // Raw confirmation evidence payload is required
   if (!receipt.rawEvidence || typeof receipt.rawEvidence !== 'string' || receipt.rawEvidence.trim().length === 0) {

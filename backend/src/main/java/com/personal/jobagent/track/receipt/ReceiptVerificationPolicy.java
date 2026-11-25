@@ -3,6 +3,7 @@ package com.personal.jobagent.track.receipt;
 import com.personal.jobagent.track.ApplicationReceiptService.SubmissionReceipt;
 import org.springframework.stereotype.Component;
 
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -81,8 +82,30 @@ public class ReceiptVerificationPolicy {
             boolean candidateAuthorizedSandbox,
             List<String> observedSignals,
             String rawEvidencePayload,
-            String evidenceProvenance
+            String evidenceProvenance,
+            UUID jobId,
+            UUID planId,
+            String targetUrl
     ) {
+        public ReceiptEvidence(
+                String employerConfirmationId,
+                String receiptSha256,
+                String atsPlatform,
+                Instant submittedAt,
+                UUID profileId,
+                UUID applicationId,
+                boolean attestationConfirmed,
+                boolean sandboxPosting,
+                boolean candidateAuthorizedSandbox,
+                List<String> observedSignals,
+                String rawEvidencePayload,
+                String evidenceProvenance
+        ) {
+            this(employerConfirmationId, receiptSha256, atsPlatform, submittedAt, profileId, applicationId,
+                    attestationConfirmed, sandboxPosting, candidateAuthorizedSandbox, observedSignals,
+                    rawEvidencePayload, evidenceProvenance, null, null, null);
+        }
+
         public static Builder builder() {
             return new Builder();
         }
@@ -100,6 +123,9 @@ public class ReceiptVerificationPolicy {
             private List<String> observedSignals = List.of();
             private String rawEvidencePayload;
             private String evidenceProvenance; // NON-PERMISSIVE DEFAULT (null - must be verified)
+            private UUID jobId;
+            private UUID planId;
+            private String targetUrl;
 
             public Builder employerConfirmationId(String id) { this.employerConfirmationId = id; return this; }
             public Builder receiptSha256(String sha) { this.receiptSha256 = sha; return this; }
@@ -113,11 +139,14 @@ public class ReceiptVerificationPolicy {
             public Builder observedSignals(List<String> signals) { this.observedSignals = signals; return this; }
             public Builder rawEvidencePayload(String payload) { this.rawEvidencePayload = payload; return this; }
             public Builder evidenceProvenance(String provenance) { this.evidenceProvenance = provenance; return this; }
+            public Builder jobId(UUID jid) { this.jobId = jid; return this; }
+            public Builder planId(UUID plid) { this.planId = plid; return this; }
+            public Builder targetUrl(String url) { this.targetUrl = url; return this; }
 
             public ReceiptEvidence build() {
                 return new ReceiptEvidence(employerConfirmationId, receiptSha256, atsPlatform, submittedAt,
                         profileId, applicationId, attestationConfirmed, sandboxPosting, candidateAuthorizedSandbox,
-                        observedSignals, rawEvidencePayload, evidenceProvenance);
+                        observedSignals, rawEvidencePayload, evidenceProvenance, jobId, planId, targetUrl);
             }
         }
     }
@@ -133,6 +162,66 @@ public class ReceiptVerificationPolicy {
      * Checks if a string value starts with any mock or synthetic prefix.
      * Prefixes MOCK-*, TEST-*, SAMPLE-*, SIM-* are detected case-insensitively.
      */
+    private static final Pattern URL_POSTING_JOB_ID_PATTERN =
+            Pattern.compile(".*/jobs/([^/?#]+)(?:/.*)?$");
+
+    /**
+     * Rejects confirmation identifiers that merely echo internal correlation UUIDs
+     * (applicationId, jobId, planId) or the job posting ID segment from the target URL.
+     */
+    public static void assertConfirmationIdDistinctFromInternalIdentifiers(
+            String employerConfirmationId,
+            UUID applicationId,
+            UUID jobId,
+            UUID planId,
+            String targetUrl
+    ) {
+        if (employerConfirmationId == null || employerConfirmationId.isBlank()) {
+            return;
+        }
+        String candidate = employerConfirmationId.trim();
+        if (matchesId(candidate, applicationId) || matchesId(candidate, jobId) || matchesId(candidate, planId)) {
+            throw new InvalidReceiptException(
+                    "Internal application, job, or plan identifier cannot be used as employer confirmation ID: " + candidate,
+                    "INTERNAL_ID_AS_CONFIRMATION_REJECTED"
+            );
+        }
+        String postingJobId = extractPostingJobId(targetUrl);
+        if (postingJobId != null && candidate.equalsIgnoreCase(postingJobId)) {
+            throw new InvalidReceiptException(
+                    "Job posting URL identifier cannot be used as employer confirmation ID: " + candidate,
+                    "INTERNAL_ID_AS_CONFIRMATION_REJECTED"
+            );
+        }
+    }
+
+    private static boolean matchesId(String candidate, UUID id) {
+        return id != null && candidate.equalsIgnoreCase(id.toString());
+    }
+
+    private static String extractPostingJobId(String targetUrl) {
+        if (targetUrl == null || targetUrl.isBlank()) {
+            return null;
+        }
+        try {
+            String path = URI.create(targetUrl.trim()).getPath();
+            if (path == null) {
+                return null;
+            }
+            var matcher = URL_POSTING_JOB_ID_PATTERN.matcher(path);
+            if (!matcher.matches()) {
+                return null;
+            }
+            String segment = matcher.group(1).trim();
+            if (segment.isEmpty() || "apply".equalsIgnoreCase(segment) || "confirmation".equalsIgnoreCase(segment)) {
+                return null;
+            }
+            return segment;
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
     public static boolean isMockOrSynthetic(String value) {
         if (value == null || value.isBlank()) {
             return false;
@@ -291,6 +380,13 @@ public class ReceiptVerificationPolicy {
                     "REQUISITION_ID_AS_CONFIRMATION_REJECTED"
             );
         }
+        assertConfirmationIdDistinctFromInternalIdentifiers(
+                evidence.employerConfirmationId(),
+                evidence.applicationId(),
+                evidence.jobId(),
+                evidence.planId(),
+                evidence.targetUrl()
+        );
 
         // Invariant 2: Raw confirmation evidence is strictly required
         if (evidence.rawEvidencePayload() == null || evidence.rawEvidencePayload().isBlank()) {

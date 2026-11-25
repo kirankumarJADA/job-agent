@@ -72,6 +72,19 @@ export function sanitizeUrl(rawUrl) {
 export function redactSecrets(text) {
   const str = String(text ?? '');
   return str
-    .replace(/(password|otp|token|cookie|secret)=?[^\s,;]*/gi, '$1=[REDACTED]')
-    .replace(/\b(credential|api[_-]?key|session|auth(?:orization)?)=[^\s,;]*/gi, '$1=[REDACTED]');
+    .replace(/\b(cookie|set-cookie)\s*:\s*[^\r\n<>"']+/gi, '$1: [REDACTED]')
+    .replace(/\bauthorization\s*:\s*(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+/gi, 'Authorization: [REDACTED]')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{6,}/gi, 'Bearer [REDACTED]')
+    .replace(
+      /"(password|otp|token|cookie|secret|api[_-]?key|credential|auth(?:orization)?)"\s*:\s*"[^"]*"/gi,
+      '"$1": "[REDACTED]"'
+    )
+    .replace(
+      /\b(password|otp|token|cookie|secret|credential|api[_-]?key|session|auth(?:orization)?)=([^\s,;&"'<>]+)/gi,
+      '$1=[REDACTED]'
+    )
+    .replace(
+      /\b(x-api-key|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|secret|credential|password)\s*:\s*([^\s,;"'<>]+)/gi,
+      '$1: [REDACTED]'
+    );
 }

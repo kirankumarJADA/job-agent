@@ -279,6 +279,12 @@ public class ReceiptCaptureService {
                 || !Objects.equals(trim(stored.atsPlatform()), trim(ev.atsPlatform()))) {
             return StoredReceiptVerification.invalid("stored receipt confirmation details do not match linked evidence.");
         }
+        try {
+            ReceiptVerificationPolicy.assertConfirmationIdDistinctFromInternalIdentifiers(
+                    stored.employerConfirmationId(), applicationId, null, planId, ev.targetUrl());
+        } catch (InvalidReceiptException e) {
+            return StoredReceiptVerification.invalid(e.getMessage());
+        }
         if (ev.rawEvidenceSha256() == null
                 || !ev.rawEvidenceSha256().equalsIgnoreCase(stored.evidenceSha256().trim())) {
             return StoredReceiptVerification.invalid("stored receipt digest does not match linked evidence digest.");
@@ -482,19 +488,23 @@ public class ReceiptCaptureService {
                 && registration.get().revokedAt() == null;
 
         // Every invariant of the receipt policy, with trust inputs taken from server state only.
-        verificationPolicy.validateOrThrow(new ReceiptEvidence(
-                cmd.employerConfirmationId(),
-                cmd.receiptSha256(),
-                platform,
-                worker.recordedAt(),
-                cmd.profileId(),
-                cmd.applicationId(),
-                true,
-                sandboxPosting,
-                candidateAuthorizedSandbox,
-                worker.observedSignals(),
-                cmd.rawEvidencePayload(),
-                WORKER_PROVENANCE));
+        verificationPolicy.validateOrThrow(ReceiptEvidence.builder()
+                .employerConfirmationId(cmd.employerConfirmationId())
+                .receiptSha256(cmd.receiptSha256())
+                .atsPlatform(platform)
+                .submittedAt(worker.recordedAt())
+                .profileId(cmd.profileId())
+                .applicationId(cmd.applicationId())
+                .jobId(cmd.jobId())
+                .planId(cmd.planId())
+                .targetUrl(worker.targetUrl())
+                .attestationConfirmed(true)
+                .sandboxPosting(sandboxPosting)
+                .candidateAuthorizedSandbox(candidateAuthorizedSandbox)
+                .observedSignals(worker.observedSignals())
+                .rawEvidencePayload(cmd.rawEvidencePayload())
+                .evidenceProvenance(WORKER_PROVENANCE)
+                .build());
 
         // Durable persistence: receipt + audit in one transaction, idempotent per plan.
         NewReceipt newReceipt = new NewReceipt(

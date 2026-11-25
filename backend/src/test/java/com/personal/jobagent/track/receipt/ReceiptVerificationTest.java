@@ -601,6 +601,38 @@ class ReceiptVerificationTest {
                     .isInstanceOf(InvalidReceiptException.class)
                     .hasMessageContaining("Unauthenticated or untrusted evidence provenance rejected");
         }
+
+        @Test
+        void policyRejectsApplicationJobPlanAndUrlPostingIdsAsConfirmationId() {
+            String postingUrl = "https://boards.greenhouse.io/robin-sandbox/jobs/8200681";
+            for (String internalId : List.of(
+                    APPLICATION_ID.toString(),
+                    JOB_ID.toString(),
+                    PLAN_ID.toString(),
+                    "8200681")) {
+                ReceiptEvidence evidence = ReceiptEvidence.builder()
+                        .employerConfirmationId(internalId)
+                        .receiptSha256(validSha256())
+                        .atsPlatform("GREENHOUSE")
+                        .submittedAt(SUBMITTED_AT)
+                        .profileId(PROFILE_ID)
+                        .applicationId(APPLICATION_ID)
+                        .jobId(JOB_ID)
+                        .planId(PLAN_ID)
+                        .targetUrl(postingUrl)
+                        .attestationConfirmed(true)
+                        .sandboxPosting(true)
+                        .candidateAuthorizedSandbox(true)
+                        .observedSignals(List.of("GREENHOUSE_SUBMISSION_RESPONSE_2XX"))
+                        .rawEvidencePayload(CANONICAL_RAW_EVIDENCE)
+                        .evidenceProvenance("AUTHENTICATED_BROWSER_WORKER")
+                        .build();
+                assertThatThrownBy(() -> policy.validateOrThrow(evidence))
+                        .isInstanceOf(InvalidReceiptException.class)
+                        .satisfies(e -> assertThat(((InvalidReceiptException) e).getReasonCode())
+                                .isEqualTo("INTERNAL_ID_AS_CONFIRMATION_REJECTED"));
+            }
+        }
     }
 
     @Nested

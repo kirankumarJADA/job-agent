@@ -141,6 +141,8 @@ class GreenhouseSandboxE2EIT {
 
     private MockHttpSession devSession;
     private UUID devProfileId;
+    private MockHttpSession otherSession;
+    private UUID otherProfileId;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -149,7 +151,27 @@ class GreenhouseSandboxE2EIT {
                 "select p.id from profiles p join users u on u.id = p.user_id where u.email = 'dev@example.local'",
                 UUID.class);
         jdbc.update("update profiles set phone = '+447700900123' where id = ?", devProfileId);
-        jdbc.update("delete from candidate_sandbox_registrations where profile_id = ?", devProfileId);
+
+        String devHash = jdbc.queryForObject(
+                "select password_hash from users where email = 'dev@example.local'", String.class);
+        jdbc.update("""
+                insert into users (id, email, password_hash, display_name, auth_provider)
+                values ('00000000-0000-7000-8000-000000000078', 'other-gh-sbx@example.local', ?, 'Other Sandbox User', 'LOCAL')
+                on conflict (email) do update set password_hash = excluded.password_hash
+                """, devHash);
+        jdbc.update("""
+                insert into profiles (id, user_id, setup_status, phone, location, links)
+                values ('00000000-0000-7000-8000-000000000079', '00000000-0000-7000-8000-000000000078', 'READY', '+447700900124', null, '{}')
+                on conflict (id) do nothing
+                """);
+        otherProfileId = UUID.fromString("00000000-0000-7000-8000-000000000079");
+        otherSession = login("other-gh-sbx@example.local", "DevPassword123!");
+
+        jdbc.update("""
+                delete from candidate_sandbox_registrations r
+                where r.profile_id in (?, ?)
+                  and not exists (select 1 from submission_receipts sr where sr.sandbox_registration_id = r.id)
+                """, devProfileId, otherProfileId);
         jdbc.update("""
                 insert into job_sources (id, kind, org_identifier, display_name, capabilities, policy)
                 values (?, 'GREENHOUSE', 'robin-sandbox', 'Robin Greenhouse Sandbox', '{}', 'DISCOVERY_ONLY')
@@ -338,6 +360,7 @@ class GreenhouseSandboxE2EIT {
 
     @Test
     void revokedOrMismatchedSandboxRegistrationAndMissingOrSyntheticIdsKeepReceiptUnverified() throws Exception {
+        String testSandboxUrl = "https://boards.greenhouse.io/robin-sandbox/jobs/8200682";
         // A. Missing confirmation ID leaves receipt UNVERIFIED even with valid active sandbox
         mvc.perform(post("/api/v1/sandbox-registrations")
                         .session(devSession)
@@ -345,10 +368,10 @@ class GreenhouseSandboxE2EIT {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"atsPlatform":"GREENHOUSE","postingUrl":"%s"}
-                                """.formatted(GH_SANDBOX_URL)))
+                                """.formatted(testSandboxUrl)))
                 .andExpect(status().isCreated());
 
-        SeededPlan noCid = prepareRealGreenhousePlan("no-cid-" + UUID.randomUUID(), GH_SANDBOX_URL);
+        SeededPlan noCid = prepareRealGreenhousePlan("no-cid-" + UUID.randomUUID(), testSandboxUrl);
         String rawNoCid = canonicalGreenhouseEvidence(noCid.planId(), noCid.applicationId(), null, null);
         mvc.perform(post("/api/v1/automation/plans/" + noCid.planId() + "/complete")
                         .header("Authorization", "Bearer " + WORKER_TOKEN)
@@ -367,22 +390,31 @@ class GreenhouseSandboxE2EIT {
                 .andExpect(jsonPath("$.basis").value("UNVERIFIED"))
                 .andExpect(jsonPath("$.submission.state").value("UNVERIFIED"));
 
-        // B. Synthetic fixture marker or FIXTURE-/REQ- confirmation ID stays UNVERIFIED
-        SeededPlan fixtureMarker = prepareRealGreenhousePlan("fx-marker-" + UUID.randomUUID(), GH_SANDBOX_URL);
-        String rawFixture = canonicalGreenhouseEvidence(fixtureMarker.planId(), fixtureMarker.applicationId(), "FIXTURE-999", "fixture");
-        mvc.perform(post("/api/v1/automation/plans/" + fixtureMarker.planId() + "/complete")
-                        .header("Authorization", "Bearer " + WORKER_TOKEN)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(json.writeValueAsString(completionBody("FIXTURE-999",
-                                List.of("GREENHOUSE_SUBMISSION_RESPONSE_2XX"), rawFixture))))
-                .andExpect(status().isNoContent());
-        mvc.perform(get("/api/v1/applications/" + fixtureMarker.applicationId() + "/receipt").session(devSession))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.confirmation.confirmed").value(false))
-                .andExpect(jsonPath("$.reconciliation.required").value(true));
+        // B. Synthetic fixture marker or FIXTURE-/REQ-/internal/URL posting ID stays UNVERIFIED
+        for (String[] badCase : new String[][] {
+                { "FIXTURE-999", "fixture" },
+                { "REQ-999", "" },
+                { "8200682", "" },
+                { "__APP_ID__", "" }
+        }) {
+            SeededPlan rejectedPlan = prepareRealGreenhousePlan("bad-id-" + UUID.randomUUID(), testSandboxUrl);
+            String confId = "__APP_ID__".equals(badCase[0]) ? rejectedPlan.applicationId().toString() : badCase[0];
+            String extraMarker = badCase[1].isEmpty() ? null : badCase[1];
+            String badRaw = canonicalGreenhouseEvidence(rejectedPlan.planId(), rejectedPlan.applicationId(), confId, extraMarker);
+            mvc.perform(post("/api/v1/automation/plans/" + rejectedPlan.planId() + "/complete")
+                            .header("Authorization", "Bearer " + WORKER_TOKEN)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(json.writeValueAsString(completionBody(confId,
+                                    List.of("GREENHOUSE_SUBMISSION_RESPONSE_2XX"), badRaw))))
+                    .andExpect(status().isNoContent());
+            mvc.perform(get("/api/v1/applications/" + rejectedPlan.applicationId() + "/receipt").session(devSession))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.confirmation.confirmed").value(false))
+                    .andExpect(jsonPath("$.reconciliation.required").value(true));
+        }
 
         // C. Oversized payload (> 512KB) records REJECTED_TOO_LARGE and stays UNVERIFIED
-        SeededPlan oversized = prepareRealGreenhousePlan("oversized-" + UUID.randomUUID(), GH_SANDBOX_URL);
+        SeededPlan oversized = prepareRealGreenhousePlan("oversized-" + UUID.randomUUID(), testSandboxUrl);
         String hugePayload = "<div class=\"confirmation\">" + "x".repeat(SubmissionEvidenceRepository.MAX_RAW_EVIDENCE_BYTES + 256) + "</div>";
         mvc.perform(post("/api/v1/automation/plans/" + oversized.planId() + "/complete")
                         .header("Authorization", "Bearer " + WORKER_TOKEN)
@@ -402,11 +434,11 @@ class GreenhouseSandboxE2EIT {
         // D. Revoking registration refuses verification
         UUID regId = jdbc.queryForObject(
                 "select id from candidate_sandbox_registrations where profile_id = ? and posting_url = ?",
-                UUID.class, devProfileId, GH_SANDBOX_URL);
+                UUID.class, devProfileId, testSandboxUrl);
         mvc.perform(post("/api/v1/sandbox-registrations/" + regId + "/revoke").session(devSession).with(csrf()))
                 .andExpect(status().isOk());
 
-        SeededPlan afterRevoke = prepareRealGreenhousePlan("revoked-" + UUID.randomUUID(), GH_SANDBOX_URL);
+        SeededPlan afterRevoke = prepareRealGreenhousePlan("revoked-" + UUID.randomUUID(), testSandboxUrl);
         String rawAfterRevoke = canonicalGreenhouseEvidence(afterRevoke.planId(), afterRevoke.applicationId(), "GH-SBX-REV1", null);
         mvc.perform(post("/api/v1/automation/plans/" + afterRevoke.planId() + "/complete")
                         .header("Authorization", "Bearer " + WORKER_TOKEN)
@@ -436,8 +468,9 @@ class GreenhouseSandboxE2EIT {
 
     @Test
     void registeredDifferentPostingUrlCannotVerifySubmission() throws Exception {
+        String targetUrl = "https://boards.greenhouse.io/robin-sandbox/jobs/8200683";
         // 0. Completely unregistered sandbox also fails closed
-        SeededPlan unregistered = prepareRealGreenhousePlan("unreg-" + UUID.randomUUID(), GH_SANDBOX_URL);
+        SeededPlan unregistered = prepareRealGreenhousePlan("unreg-" + UUID.randomUUID(), targetUrl);
         String rawUnreg = canonicalGreenhouseEvidence(unregistered.planId(), unregistered.applicationId(), "GH-SBX-UNREG1", null);
         mvc.perform(post("/api/v1/automation/plans/" + unregistered.planId() + "/complete")
                         .header("Authorization", "Bearer " + WORKER_TOKEN)
@@ -460,7 +493,7 @@ class GreenhouseSandboxE2EIT {
                                 """.formatted(otherUrl)))
                 .andExpect(status().isCreated());
 
-        SeededPlan mismatch = prepareRealGreenhousePlan("mismatch-" + UUID.randomUUID(), GH_SANDBOX_URL);
+        SeededPlan mismatch = prepareRealGreenhousePlan("mismatch-" + UUID.randomUUID(), targetUrl);
         String raw = canonicalGreenhouseEvidence(mismatch.planId(), mismatch.applicationId(), "GH-SBX-DIFF1", null);
         mvc.perform(post("/api/v1/automation/plans/" + mismatch.planId() + "/complete")
                         .header("Authorization", "Bearer " + WORKER_TOKEN)
@@ -477,6 +510,42 @@ class GreenhouseSandboxE2EIT {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.basis").value("UNVERIFIED"))
                 .andExpect(jsonPath("$.submission.state").value("UNVERIFIED"));
+    }
+
+    @Test
+    void crossCandidateSandboxRegistrationCannotVerifySubmission() throws Exception {
+        String isolatedUrl = "https://boards.greenhouse.io/robin-sandbox/jobs/8200684";
+        // Cross-candidate isolation: otherSession registers isolatedUrl, devProfileId submits -> stays UNVERIFIED
+        mvc.perform(post("/api/v1/sandbox-registrations")
+                        .session(otherSession)
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"atsPlatform":"GREENHOUSE","postingUrl":"%s"}
+                                """.formatted(isolatedUrl)))
+                .andExpect(status().isCreated());
+
+        SeededPlan foreignSandboxPlan = prepareRealGreenhousePlan("cross-" + UUID.randomUUID(), isolatedUrl);
+        String foreignRaw = canonicalGreenhouseEvidence(foreignSandboxPlan.planId(), foreignSandboxPlan.applicationId(), "GH-SBX-CROSS1", null);
+        mvc.perform(post("/api/v1/automation/plans/" + foreignSandboxPlan.planId() + "/complete")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(completionBody("GH-SBX-CROSS1",
+                                List.of("GREENHOUSE_SUBMISSION_RESPONSE_2XX"), foreignRaw))))
+                .andExpect(status().isNoContent());
+
+        mvc.perform(get("/api/v1/applications/" + foreignSandboxPlan.applicationId() + "/receipt").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.confirmation.confirmed").value(false))
+                .andExpect(jsonPath("$.reconciliation.required").value(true));
+        mvc.perform(get("/api/v1/applications/" + foreignSandboxPlan.applicationId() + "/track").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.basis").value("UNVERIFIED"))
+                .andExpect(jsonPath("$.submission.state").value("UNVERIFIED"));
+
+        // Foreign candidate also cannot read devProfileId's receipt (404)
+        mvc.perform(get("/api/v1/applications/" + foreignSandboxPlan.applicationId() + "/receipt").session(otherSession))
+                .andExpect(status().isNotFound());
     }
 
     private static String sha256Hex(byte[] content) {

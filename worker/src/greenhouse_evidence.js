@@ -1,4 +1,4 @@
-import { canonicalJson, isRequisitionOrReceiptFallback } from './receipt.js';
+import { canonicalJson, isMockOrSynthetic, isRequisitionOrReceiptFallback } from './receipt.js';
 import { sanitizeUrl, redactSecrets } from './secret_redaction.js';
 import { greenhouseConfirmationPath } from './plan.js';
 
@@ -34,12 +34,18 @@ export function sanitizeEvidenceText(rawText, maxChars = MAX_CONFIRMATION_TEXT_C
 export function sanitizeContainerHtml(rawHtml, maxChars = MAX_CONTAINER_HTML_CHARS) {
   if (rawHtml === null || rawHtml === undefined) return '';
   let html = String(rawHtml).trim();
-  // Strip any leftover inline scripts/styles or form control tags cleanly in pure string fallback too.
+  // Strip any leftover inline scripts/styles, interactive/embedded controls, inline event handlers,
+  // javascript: URIs, and sensitive data-* attributes cleanly in pure string fallback too.
   html = html
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, '')
+    .replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, '')
+    .replace(/<textarea\b[^>]*>[\s\S]*?<\/textarea>/gi, '')
+    .replace(/<select\b[^>]*>[\s\S]*?<\/select>/gi, '')
     .replace(/<input\b[^>]*>/gi, '')
-    .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+    .replace(/\s(?:on[a-z]+|data-[a-z0-9-]*(?:token|secret|cookie|password|auth)[a-z0-9-]*)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\s(href|src|action)\s*=\s*(['"])\s*javascript:[^'"]*\2/gi, '');
   html = sanitizeEvidenceText(html, maxChars);
   return html;
 }
@@ -55,6 +61,7 @@ function isDisqualifiedIdentifier(candidate, { jobId, applicationId, targetUrl }
   if (!candidate || typeof candidate !== 'string') return true;
   const trimmed = candidate.trim();
   if (trimmed.length < 3 || trimmed.length > 128) return true;
+  if (isMockOrSynthetic(trimmed)) return true;
   if (isRequisitionOrReceiptFallback(trimmed)) return true;
   const lower = trimmed.toLowerCase();
   // Never confuse job ID, application ID, or URL job posting ID with an employer confirmation ID.
@@ -149,6 +156,9 @@ export function buildGreenhouseSubmissionEvidence({
   pageUrl = null,
   domCapture = {},
 } = {}) {
+  if (!classification?.confirmed || !networkCapture?.confirmed) {
+    throw new Error('UNCONFIRMED_SUBMISSION_EVIDENCE_FORBIDDEN');
+  }
   const confirmationPageUrl = sanitizeUrl(pageUrl || plan?.targetUrl || '');
   const containerHtml = sanitizeContainerHtml(domCapture.containerHtml ?? '');
   const confirmationText = sanitizeEvidenceText(domCapture.containerText ?? '');

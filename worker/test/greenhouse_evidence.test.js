@@ -8,7 +8,7 @@ import {
   sanitizeEvidenceText,
   buildGreenhouseSubmissionEvidence,
 } from '../src/greenhouse_evidence.js';
-import { verifyGenuineReceiptInvariants } from '../src/receipt.js';
+import { InvalidReceiptError, verifyGenuineReceiptInvariants } from '../src/receipt.js';
 
 const PLAN = {
   planId: 'plan-gh-42',
@@ -116,8 +116,59 @@ test('omits confirmationNumber and EMPLOYER_CONFIRMATION_ID_OBSERVED when no gen
   assert.equal(JSON.parse(result.rawEvidence).confirmationNumber, null);
 });
 
-test('sanitization removes tokens, cookies, and oversized payloads cleanly', () => {
+test('sanitization removes tokens, cookies, headers, JSON secrets, dangerous tags, and oversized payloads cleanly', () => {
   assert.equal(sanitizeEvidenceText('ok Bearer eyJhbGciOi.payload.sig token=abc cookie=xyz'), 'ok Bearer [REDACTED] token=[REDACTED] cookie=[REDACTED]');
+  const headerAndJson = sanitizeEvidenceText(
+    'Cookie: sid=topsecret_cookie Authorization: Basic dXNlcjpwYXNz x-api-key: key_123 {"secret":"hidden_val","api_key":"ak_99"}'
+  );
+  assert.doesNotMatch(headerAndJson, /topsecret_cookie|dXNlcjpwYXNz|key_123|hidden_val|ak_99/);
+
+  const html = '<div class="confirmation"><a href="https://boards.greenhouse.io?token=s3cr3t">Receipt</a><a href="javascript:alert(1)">bad</a><iframe src="evil"></iframe><span data-auth-token="secret123">Confirmed</span></div>';
+  const cleanedHtml = sanitizeContainerHtml(html);
+  assert.match(cleanedHtml, /href="https:\/\/boards\.greenhouse\.io\?token=\[REDACTED\]">Receipt<\/a>/);
+  assert.doesNotMatch(cleanedHtml, /s3cr3t|secret123|<iframe|javascript:|data-auth-token/);
+
   const oversized = '<div class="confirmation">' + 'a'.repeat(50000) + '</div>';
   assert.ok(sanitizeContainerHtml(oversized).length <= 32768);
+});
+
+test('disqualifies mock/synthetic prefixes in extraction and refuses unconfirmed builder input or internal IDs in receipt invariants', () => {
+  assert.equal(extractGenuineConfirmationId({ containerText: 'Confirmation ID: MOCK-4421', targetUrl: PLAN.targetUrl }), undefined);
+  assert.equal(extractGenuineConfirmationId({ containerText: 'Confirmation ID: FIXTURE-4421', targetUrl: PLAN.targetUrl }), undefined);
+
+  assert.throws(
+    () => buildGreenhouseSubmissionEvidence({
+      plan: PLAN,
+      classification: { category: 'CONFIRMED', confirmed: true, evidence: 'DOM only' },
+      networkCapture: { confirmed: false },
+      confirmationUrlMatched: true,
+      confirmationContainerPresent: true,
+    }),
+    /UNCONFIRMED_SUBMISSION_EVIDENCE_FORBIDDEN/,
+  );
+
+  const rawEvidence = JSON.stringify({ confirmationContainerHtml: '<div class="confirmation">GH</div>' });
+  const sha = crypto.createHash('sha256').update(rawEvidence, 'utf8').digest('hex');
+  for (const internalId of ['app-uuid-9100', 'job-uuid-8200', 'plan-gh-42', '8200681']) {
+    assert.throws(
+      () => verifyGenuineReceiptInvariants({
+        employerConfirmationId: internalId,
+        receiptSha256: sha,
+        rawEvidence,
+        atsPlatform: 'GREENHOUSE',
+        submittedAt: '2026-11-25T00:05:00.000Z',
+        profileId: 'prof-1',
+        applicationId: 'app-uuid-9100',
+        jobId: 'job-uuid-8200',
+        planId: 'plan-gh-42',
+        targetUrl: PLAN.targetUrl,
+        attestationConfirmed: true,
+        observedSignals: ['GREENHOUSE_SUBMISSION_RESPONSE_2XX'],
+        evidenceProvenance: 'AUTHENTICATED_BROWSER_WORKER',
+        sandboxPosting: true,
+        candidateAuthorizedSandbox: true,
+      }),
+      (err) => err instanceof InvalidReceiptError && err.reasonCode === 'INTERNAL_ID_AS_CONFIRMATION_REJECTED',
+    );
+  }
 });

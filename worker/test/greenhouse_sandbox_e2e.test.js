@@ -409,7 +409,7 @@ test('executePollCycle materializes backend Greenhouse artifacts and POSTs captu
   const backendOrigin = `http://127.0.0.1:${port}`;
   const worker = new BrowserWorker({
     statePath: path.join(root, 'state.json'),
-    artifactDir: root,
+    artifactDir: pollArtifactRoot,
     onPageCreated: fixture.attachToPage,
   });
 
@@ -464,6 +464,81 @@ test('executePollCycle materializes backend Greenhouse artifacts and POSTs captu
     );
   } finally {
     await new Promise((resolve, reject) => backendServer.close((err) => (err ? reject(err) : resolve())));
+    await fixture.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('negative: login wall after submit triggers HardStopError and mismatched postTargetPath cannot confirm', async () => {
+  const root1 = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-sandbox-login-'));
+  const loginFixture = await startGreenhouseSandboxFixture({ loginWallAfterSubmit: true });
+  const plan1 = buildSandboxGreenhousePlan(root1, loginFixture.targetUrl);
+  const worker1 = new BrowserWorker({
+    statePath: path.join(root1, 'state.json'),
+    artifactDir: root1,
+    onPageCreated: loginFixture.attachToPage,
+  });
+
+  try {
+    await assert.rejects(() => worker1.execute(plan1, { approve: true }), HardStopError);
+  } finally {
+    await loginFixture.close();
+    fs.rmSync(root1, { recursive: true, force: true });
+  }
+
+  const root2 = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-sandbox-postpath-'));
+  const wrongPathFixture = await startGreenhouseSandboxFixture({ postTargetPath: '/other-board/jobs/999' });
+  const plan2 = buildSandboxGreenhousePlan(root2, wrongPathFixture.targetUrl);
+  const worker2 = new BrowserWorker({
+    statePath: path.join(root2, 'state.json'),
+    artifactDir: root2,
+    onPageCreated: wrongPathFixture.attachToPage,
+  });
+
+  try {
+    const runResult = await worker2.execute(plan2, { approve: true });
+    assert.equal(runResult.submitResult.confirmed, false);
+    assert.equal(computePlanOutcome(plan2, runResult).outcome, 'RECONCILIATION_REQUIRED');
+  } finally {
+    await wrongPathFixture.close();
+    fs.rmSync(root2, { recursive: true, force: true });
+  }
+});
+
+test('negative: hidden inline script in confirmation DOM is stripped from containerText and tampered upload path is rejected', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-sandbox-xss-upload-'));
+  const fixture = await startGreenhouseSandboxFixture({
+    confirmationId: 'GH-SBX-CLEAN1',
+    confirmationText: 'Submitted cleanly.<script>window.__LEAKED_SCRIPT__="bad_secret";</script><input value="hidden_val" />',
+  });
+  const plan = buildSandboxGreenhousePlan(root, fixture.targetUrl);
+  const worker = new BrowserWorker({
+    statePath: path.join(root, 'state.json'),
+    artifactDir: root,
+    onPageCreated: fixture.attachToPage,
+  });
+
+  try {
+    const okRun = await worker.execute(plan, { approve: true });
+    assert.equal(okRun.submitResult.confirmed, true);
+    const parsedRaw = JSON.parse(okRun.submitResult.rawEvidence);
+    assert.doesNotMatch(parsedRaw.confirmationText, /bad_secret|__LEAKED_SCRIPT__|hidden_val/);
+    assert.doesNotMatch(parsedRaw.confirmationContainerHtml, /bad_secret|<script|<input/);
+
+    const evilPlan = buildSandboxGreenhousePlan(root, fixture.targetUrl, { applicationId: 'app-sbx-tamper', jobId: 'job-sbx-tamper' });
+    const evilFile = path.join(root, 'evil.pdf');
+    fs.writeFileSync(evilFile, 'evil');
+    evilPlan.steps.find((s) => s.id === 'upload-resume').params.path = evilFile;
+    const workerTamper = new BrowserWorker({
+      statePath: path.join(root, 'state-tamper.json'),
+      artifactDir: root,
+      onPageCreated: fixture.attachToPage,
+    });
+    await assert.rejects(
+      () => workerTamper.execute(evilPlan, { approve: true }),
+      (err) => err instanceof HardStopError && err.reason === 'GREENHOUSE_ARTIFACT_CORRELATION_MISMATCH',
+    );
+  } finally {
     await fixture.close();
     fs.rmSync(root, { recursive: true, force: true });
   }

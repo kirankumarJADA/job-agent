@@ -201,10 +201,30 @@ class SandboxRegistrationIT {
 
     @Test
     void rejectsCallerTrustFieldsArbitraryEmployerDomainsSsrfAndWorkerTokens() throws Exception {
-        // Unauthenticated
+        // Unauthenticated & CSRF enforcement
         mvc.perform(get("/api/v1/sandbox-registrations")).andExpect(status().isUnauthorized());
+        mvc.perform(post("/api/v1/sandbox-registrations")
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"atsPlatform":"GREENHOUSE","postingUrl":"https://boards.greenhouse.io/robin-sandbox/jobs/7002"}
+                                """))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(post("/api/v1/sandbox-registrations")
+                        .session(devSession)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"atsPlatform":"GREENHOUSE","postingUrl":"https://boards.greenhouse.io/robin-sandbox/jobs/7002"}
+                                """))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/api/v1/sandbox-registrations/" + UUID.randomUUID() + "/revoke")
+                        .session(devSession))
+                .andExpect(status().isForbidden());
 
-        // Worker bearer token cannot authenticate against candidate sandbox management (401)
+        // Worker bearer token cannot access or manage candidate sandboxes (401 across GET/POST/revoke)
+        mvc.perform(get("/api/v1/sandbox-registrations")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN))
+                .andExpect(status().isUnauthorized());
         mvc.perform(post("/api/v1/sandbox-registrations")
                         .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -212,33 +232,44 @@ class SandboxRegistrationIT {
                                 {"atsPlatform":"GREENHOUSE","postingUrl":"https://boards.greenhouse.io/robin-sandbox/jobs/7002"}
                                 """))
                 .andExpect(status().isUnauthorized());
+        mvc.perform(post("/api/v1/sandbox-registrations/" + UUID.randomUUID() + "/revoke")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN))
+                .andExpect(status().isUnauthorized());
 
-        // Caller-supplied profileId, permittedDomain or approvedBy are rejected (400)
-        mvc.perform(post("/api/v1/sandbox-registrations")
-                        .session(devSession)
-                        .with(csrf())
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {
-                                  "atsPlatform": "GREENHOUSE",
-                                  "postingUrl": "https://boards.greenhouse.io/robin-sandbox/jobs/7002",
-                                  "profileId": "%s"
-                                }
-                                """.formatted(otherProfileId)))
-                .andExpect(status().isBadRequest());
-
-        mvc.perform(post("/api/v1/sandbox-registrations")
-                        .session(devSession)
-                        .with(csrf())
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {
-                                  "atsPlatform": "GREENHOUSE",
-                                  "postingUrl": "https://boards.greenhouse.io/robin-sandbox/jobs/7002",
-                                  "permittedDomain": "evil.com"
-                                }
-                                """))
-                .andExpect(status().isBadRequest());
+        // Caller-supplied profileId, permittedDomain, approvedBy (even blank), approvedAt, revokedAt, and non-GREENHOUSE platform are rejected (400)
+        for (String rejectedBody : new String[] {
+                """
+                {"atsPlatform":"GREENHOUSE","postingUrl":"https://boards.greenhouse.io/robin-sandbox/jobs/7002","profileId":"%s"}
+                """.formatted(otherProfileId),
+                """
+                {"atsPlatform":"GREENHOUSE","postingUrl":"https://boards.greenhouse.io/robin-sandbox/jobs/7002","permittedDomain":"evil.com"}
+                """,
+                """
+                {"atsPlatform":"GREENHOUSE","postingUrl":"https://boards.greenhouse.io/robin-sandbox/jobs/7002","permittedDomain":"  "}
+                """,
+                """
+                {"atsPlatform":"GREENHOUSE","postingUrl":"https://boards.greenhouse.io/robin-sandbox/jobs/7002","approvedBy":"attacker@evil.com"}
+                """,
+                """
+                {"atsPlatform":"GREENHOUSE","postingUrl":"https://boards.greenhouse.io/robin-sandbox/jobs/7002","approvedBy":""}
+                """,
+                """
+                {"atsPlatform":"GREENHOUSE","postingUrl":"https://boards.greenhouse.io/robin-sandbox/jobs/7002","approvedAt":"2020-01-01T00:00:00Z"}
+                """,
+                """
+                {"atsPlatform":"GREENHOUSE","postingUrl":"https://boards.greenhouse.io/robin-sandbox/jobs/7002","revokedAt":"2020-01-01T00:00:00Z"}
+                """,
+                """
+                {"atsPlatform":"WORKDAY","postingUrl":"https://boards.greenhouse.io/robin-sandbox/jobs/7002"}
+                """
+        }) {
+            mvc.perform(post("/api/v1/sandbox-registrations")
+                            .session(devSession)
+                            .with(csrf())
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(rejectedBody))
+                    .andExpect(status().isBadRequest());
+        }
 
         // Arbitrary production employer on Greenhouse (outside allowed path prefix) & arbitrary custom domain & SSRF
         for (String badUrl : new String[] {

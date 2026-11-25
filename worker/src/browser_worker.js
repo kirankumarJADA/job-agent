@@ -441,11 +441,26 @@ export class BrowserWorker {
         const artifact = plan.planType === 'GREENHOUSE'
           ? (p.artifact === 'coverLetter' ? plan.package.coverLetter : p.artifact === 'cv' ? plan.package.cv : null)
           : (p.selector.includes('cover_letter') ? plan.package.coverLetter : plan.package.cv);
-        const filePath = p.path ?? artifact?.path;
-        if (!filePath || !fs.existsSync(filePath)) throw new Error(`FILE_NOT_FOUND:${filePath}`);
-        if (!artifact?.versionId || p.expectedVersionId !== artifact.versionId) throw new HardStopError('CV_VERSION_LINK_MISMATCH', { stepId: step.id });
+        if (!artifact?.versionId || p.expectedVersionId !== artifact.versionId) {
+          throw new HardStopError('CV_VERSION_LINK_MISMATCH', { stepId: step.id });
+        }
         if (plan.planType === 'GREENHOUSE' && artifact.sha256 !== p.sha256) {
           throw new HardStopError('PACKAGE_CHECKSUM_MISMATCH', { stepId: step.id });
+        }
+        if (artifact.path && p.path && path.resolve(artifact.path) !== path.resolve(p.path)) {
+          throw new HardStopError('GREENHOUSE_ARTIFACT_CORRELATION_MISMATCH', { stepId: step.id });
+        }
+        const filePath = artifact?.path ?? p.path;
+        if (!filePath) throw new Error('FILE_NOT_FOUND:missing');
+        if (this.artifactDir && artifact?.path) {
+          const allowedRoot = path.resolve(this.artifactDir);
+          const resolved = path.resolve(filePath);
+          if (!resolved.startsWith(allowedRoot + path.sep) && resolved !== allowedRoot) {
+            throw new HardStopError('ARTIFACT_PATH_OUTSIDE_SANDBOX_DIR', { stepId: step.id });
+          }
+        }
+        if (!fs.existsSync(filePath)) {
+          throw new Error(`FILE_NOT_FOUND:${path.basename(String(filePath))}`);
         }
         if (artifact.sha256) {
           const actual = crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
@@ -796,7 +811,7 @@ export class BrowserWorker {
       }
       return {
         containerHtml: (clone.outerHTML || '').slice(0, 40000),
-        containerText: (root.innerText || root.textContent || '').slice(0, 6000),
+        containerText: (clone.innerText || clone.textContent || '').slice(0, 6000),
         confirmationIdAttr,
       };
     }, after.confirmationContainerPresent).catch(() => ({}));

@@ -42,7 +42,9 @@ public class SandboxRegistrationController {
             String postingUrl,
             UUID profileId,
             String approvedBy,
-            String permittedDomain
+            String permittedDomain,
+            Object approvedAt,
+            Object revokedAt
     ) {}
 
     public record SandboxRegistrationDto(
@@ -95,10 +97,10 @@ public class SandboxRegistrationController {
         if (body == null) {
             throw new IllegalArgumentException("Request body is required");
         }
-        if (body.profileId() != null || (body.approvedBy() != null && !body.approvedBy().isBlank())
-                || (body.permittedDomain() != null && !body.permittedDomain().isBlank())) {
+        if (body.profileId() != null || body.approvedBy() != null || body.permittedDomain() != null
+                || body.approvedAt() != null || body.revokedAt() != null) {
             throw new IllegalArgumentException(
-                    "Caller-supplied profileId, approvedBy, and permittedDomain are forbidden");
+                    "Caller-supplied profileId, approvedBy, permittedDomain, approvedAt, and revokedAt are forbidden");
         }
         String actor = ownerContext.actorOr(profileId.toString());
         CandidateSandboxRegistration created = service.register(profileId, actor, body.atsPlatform(), body.postingUrl());

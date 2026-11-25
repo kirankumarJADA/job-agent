@@ -57,9 +57,15 @@ public final class InMemoryReceiptTrustFixture implements ReceiptTrustStore, Rec
 
     public InMemoryReceiptTrustFixture sandbox(UUID profileId, String atsPlatform, String postingUrl,
                                               String permittedDomain, Instant revokedAt) {
+        return sandbox(profileId, atsPlatform, postingUrl, permittedDomain,
+                Instant.parse("2026-11-01T00:00:00Z"), revokedAt);
+    }
+
+    public InMemoryReceiptTrustFixture sandbox(UUID profileId, String atsPlatform, String postingUrl,
+                                              String permittedDomain, Instant approvedAt, Instant revokedAt) {
         sandboxes.put(new SandboxKey(profileId, atsPlatform, postingUrl), new SandboxRegistration(
                 UUID.randomUUID(), profileId, atsPlatform, postingUrl, permittedDomain,
-                Instant.parse("2026-11-01T00:00:00Z"), revokedAt));
+                approvedAt, revokedAt));
         return this;
     }
 

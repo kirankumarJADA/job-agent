@@ -26,6 +26,13 @@ public class SandboxRegistrationPolicy {
     private static final Pattern GREENHOUSE_POSTING_PATH =
             Pattern.compile("^/[A-Za-z0-9_.-]{1,120}/jobs/[A-Za-z0-9_.-]{1,120}$");
 
+    private static final List<String> SHARED_MULTI_TENANT_ATS_HOSTS = List.of(
+            "boards.greenhouse.io",
+            "job-boards.greenhouse.io",
+            "jobs.ashbyhq.com",
+            "jobs.lever.co"
+    );
+
     private final List<String> allowedDomains;
     private final List<String> allowedPathPrefixes;
     private final boolean requireHttps;
@@ -71,7 +78,23 @@ public class SandboxRegistrationPolicy {
     }
 
     public boolean isConfigured() {
-        return !allowedDomains.isEmpty();
+        if (allowedDomains.isEmpty()) {
+            return false;
+        }
+        return !hasSharedMultiTenantDomainWithoutPrefixRestriction();
+    }
+
+    private boolean hasSharedMultiTenantDomainWithoutPrefixRestriction() {
+        return allowedPathPrefixes.isEmpty()
+                && allowedDomains.stream().anyMatch(SandboxRegistrationPolicy::isSharedMultiTenantDomain);
+    }
+
+    private static boolean isSharedMultiTenantDomain(String domain) {
+        return SHARED_MULTI_TENANT_ATS_HOSTS.contains(domain)
+                || domain.endsWith(".greenhouse.io")
+                || "greenhouse.io".equals(domain)
+                || domain.endsWith(".myworkdayjobs.com")
+                || "myworkdayjobs.com".equals(domain);
     }
 
     public List<String> allowedDomains() {
@@ -140,13 +163,18 @@ public class SandboxRegistrationPolicy {
         }
 
         String canonicalPath = normalizePostingPath(uri.getRawPath());
+        rejectDotSegments(canonicalPath);
         validatePlatformPath(platform, canonicalPath);
         if (!allowedPathPrefixes.isEmpty() && !matchesAllowedPathPrefix(canonicalPath)) {
             throw new IllegalArgumentException(
                     "Posting URL path is not within the server's configured sandbox path prefixes");
         }
 
-        String canonicalUrl = buildCanonicalUrl(scheme, host, isolatedLocalHost ? port : -1, canonicalPath);
+        int effectivePort = (!isolatedLocalHost
+                || ("https".equals(scheme) && port == 443)
+                || ("http".equals(scheme) && port == 80))
+                ? -1 : port;
+        String canonicalUrl = buildCanonicalUrl(scheme, host, effectivePort, canonicalPath);
         return new ValidatedSandboxTarget(platform, canonicalUrl, matchedDomain);
     }
 
@@ -237,6 +265,14 @@ public class SandboxRegistrationPolicy {
             }
         }
         return false;
+    }
+
+    private static void rejectDotSegments(String canonicalPath) {
+        for (String segment : canonicalPath.split("/")) {
+            if (".".equals(segment) || "..".equals(segment)) {
+                throw new IllegalArgumentException("Posting URL path must not contain dot segments");
+            }
+        }
     }
 
     private static void validatePlatformPath(String platform, String canonicalPath) {

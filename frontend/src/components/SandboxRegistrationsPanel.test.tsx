@@ -125,4 +125,30 @@ describe('SandboxRegistrationsPanel', () => {
       ).toBeTruthy(),
     );
   });
+
+  it('rejects blank URL client-side, renders server 400/409 errors, and retries on load failure', async () => {
+    // 1. Load error -> Retry recovers
+    mockedApiFetch
+      .mockRejectedValueOnce(new Error('Network offline'))
+      .mockResolvedValueOnce(catalogResponse([]));
+
+    render(<SandboxRegistrationsPanel />);
+    await waitFor(() => expect(screen.getByText('Network offline')).toBeTruthy());
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.getByText(/Allowed domains:/i)).toBeTruthy());
+
+    // 2. Blank URL triggers client validation without calling POST
+    await userEvent.click(screen.getByRole('button', { name: 'Authorize Sandbox Posting' }));
+    expect(screen.getByText(/Enter a canonical Greenhouse sandbox posting URL/i)).toBeTruthy();
+    expect(mockedApiFetch).toHaveBeenCalledTimes(2);
+
+    // 3. Server conflict (409) error message rendered visibly
+    mockedApiFetch.mockRejectedValueOnce(new Error('HTTP 409: Sandbox URL already registered'));
+    await userEvent.type(
+      screen.getByLabelText('Canonical Sandbox Posting URL'),
+      'https://boards.greenhouse.io/robin-sandbox/jobs/42',
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Authorize Sandbox Posting' }));
+    await waitFor(() => expect(screen.getByText(/Sandbox URL already registered/i)).toBeTruthy());
+  });
 });
