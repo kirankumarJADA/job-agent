@@ -181,6 +181,10 @@ export function computePlanOutcome(plan, runResult) {
         currentUrl: univ.currentUrl ?? plan.targetUrl,
         pageIndex: univ.pageIndex ?? 1,
         completedPages: univ.completedPages ?? [],
+        blockedResources: univ.blockedResources ?? [],
+        closedShadowHosts: univ.closedShadowHosts ?? [],
+        validationErrors: univ.validationErrors ?? [],
+        loginSucceeded: Boolean(univ.loginSucceeded),
       }],
     };
   }

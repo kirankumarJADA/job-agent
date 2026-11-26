@@ -50,6 +50,24 @@ test('normalizeHandoffReason maps error reasons to standard platform strings', (
     normalizeHandoffReason(new Error('Cloudflare turnstile challenge'), 'GREENHOUSE'),
     'CLOUDFLARE_TURNSTILE'
   );
+  assert.equal(
+    normalizeHandoffReason({ reason: 'UNIVERSAL_MFA_REQUIRED' }, 'UNIVERSAL'),
+    'MFA'
+  );
+  assert.equal(
+    normalizeHandoffReason({ reason: 'Two-factor OTP required' }, 'UNIVERSAL'),
+    'MFA'
+  );
+  assert.equal(
+    normalizeHandoffReason({ reason: 'UNIVERSAL_LOGIN_REQUIRED' }, 'UNIVERSAL'),
+    'EMPLOYER_SECURITY_CHECK'
+  );
+  assert.equal(
+    normalizeHandoffReason({ reason: 'CAPTCHA challenge' }, 'UNIVERSAL'),
+    'CAPTCHA'
+  );
+  assert.equal(isHandoffEligibleError({ reason: 'UNIVERSAL_LOGIN_REQUIRED' }), true);
+  assert.equal(isHandoffEligibleError({ reason: 'UNIVERSAL_LOGIN_FAILED' }), true);
 });
 
 test('Option B: initiateHandoff posts correct body with domScreenshotRef and returns session without blocking', async () => {

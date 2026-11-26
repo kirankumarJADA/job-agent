@@ -438,6 +438,28 @@ public class AutomationPlanRepository {
     }
 
     /**
+     * Stage 3D: atomically returns a paused pre-submit plan from {@code HANDOFF_REQUIRED}
+     * back to {@code PREPARED} after candidate login/security intervention. Refuses if any
+     * submit approval or pre-submit checkpoint/step already exists.
+     */
+    @Transactional
+    public boolean resumeFromHandoff(UUID id, Map<String, Object> updatedPlan) {
+        if (id == null || updatedPlan == null || hasPreSubmitAttemptCheckpoint(id)) {
+            return false;
+        }
+        try {
+            return db.update("""
+                    update automation_plans
+                    set plan=?::jsonb, status='PREPARED', result='[]'::jsonb, heartbeat_at=null, updated_at=now()
+                    where id=? and status='HANDOFF_REQUIRED' and submit_approved=false
+                      and not """ + "\n" + SUBMIT_STEP_EXISTS_SQL,
+                    json.writeValueAsString(updatedPlan), id) == 1;
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to resume plan after handoff", e);
+        }
+    }
+
+    /**
      * Reads durable {@code automation_steps} checkpoints for a plan in step order.
      */
     public List<Map<String, Object>> findSteps(UUID planId) {

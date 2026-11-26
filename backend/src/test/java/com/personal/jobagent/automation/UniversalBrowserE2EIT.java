@@ -2,6 +2,7 @@ package com.personal.jobagent.automation;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.discovery.platform.AddressGuard;
 import com.personal.jobagent.documents.DocumentFactValidator;
 import com.personal.jobagent.track.receipt.SubmissionEvidenceRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -9,6 +10,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockHttpSession;
@@ -21,6 +25,8 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
@@ -69,6 +75,20 @@ class UniversalBrowserE2EIT {
     private static final UUID GENERIC_SOURCE = UUID.fromString("00000000-0000-7000-8000-00000000aa91");
     private static final UUID USER_B = UUID.fromString("00000000-0000-7000-8000-00000000aa98");
     private static final UUID PROFILE_B = UUID.fromString("00000000-0000-7000-8000-00000000aa99");
+
+    @TestConfiguration
+    static class OfflineAddressGuardConfig {
+        @Bean
+        @Primary
+        AddressGuard universalE2eAddressGuard() {
+            return new AddressGuard(host -> {
+                if ("portal.example.com".equalsIgnoreCase(host) || "careers.example.com".equalsIgnoreCase(host)) {
+                    return new InetAddress[]{InetAddress.getByName("93.184.216.34")};
+                }
+                throw new UnknownHostException(host);
+            });
+        }
+    }
 
     @Container
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
@@ -397,6 +417,122 @@ class UniversalBrowserE2EIT {
                 .andExpect(jsonPath("$.quarantined").value(org.hamcrest.Matchers.greaterThanOrEqualTo(1)));
         assertThat(jdbc.queryForObject("select status from automation_plans where id = ?", String.class, crashPlanId))
                 .isEqualTo("RECONCILIATION_REQUIRED");
+    }
+
+    @Test
+    void stage3d_handoffResumeUpdatesSavedCredentialAndRefusesDuplicateOrPostSubmitResume() throws Exception {
+        String targetUrl = "https://portal.example.com/careers/jobs/login-apply";
+        var seeded = seedReadyApplication("univ-handoff-resume", targetUrl);
+
+        // 1. Package initially has hasSavedCredential = false
+        MvcResult pkgRes = mvc.perform(post("/api/v1/apply/applications/{id}/package", seeded.appId())
+                        .with(csrf()).session(devSession))
+                .andExpect(status().isOk())
+                .andReturn();
+        UUID planId = UUID.fromString(String.valueOf(json.readValue(pkgRes.getResponse().getContentAsString(), Map.class).get("planId")));
+        Map<String, Object> initialPlan = json.readValue(
+                jdbc.queryForObject("select plan::text from automation_plans where id = ?", String.class, planId), Map.class);
+        assertThat(String.valueOf(initialPlan.get("steps"))).contains("hasSavedCredential=false");
+
+        // 2. Worker claims plan and hits unresolved login/security gate -> initiates handoff
+        mvc.perform(post("/api/v1/automation/plans/claim-next")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN))
+                .andExpect(status().isOk());
+
+        MvcResult initRes = mvc.perform(post("/api/v1/handoff/initiate")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of(
+                                "planId", planId,
+                                "applicationId", seeded.appId(),
+                                "atsPlatform", "UNIVERSAL",
+                                "targetUrl", targetUrl,
+                                "blockReason", "UNIVERSAL_LOGIN_REQUIRED",
+                                "ttlMinutes", 15))))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.blockReason").value("EMPLOYER_SECURITY_CHECK"))
+                .andReturn();
+        UUID sessionId = UUID.fromString(String.valueOf(json.readValue(initRes.getResponse().getContentAsString(), Map.class).get("id")));
+        assertThat(jdbc.queryForObject("select status from automation_plans where id = ?", String.class, planId))
+                .isEqualTo("HANDOFF_REQUIRED");
+
+        // 3. Cross-candidate and worker tokens cannot call candidate /handoff/{id}/resume
+        mvc.perform(post("/api/v1/handoff/{id}/resume", sessionId).with(csrf()).session(sessionB))
+                .andExpect(status().isForbidden());
+        // WorkerEventTokenFilter does not authenticate worker tokens on candidate /handoff/{id}/resume -> 401
+        mvc.perform(post("/api/v1/handoff/{id}/resume", sessionId)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN))
+                .andExpect(status().isUnauthorized());
+
+        // 4. Candidate saves encrypted credential via API -> password never echoed on GET
+        mvc.perform(post("/api/v1/employer-credentials").with(csrf()).session(devSession)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"employerDomain\":\"portal.example.com\",\"username\":\"ada@inbox.example\",\"password\":\"PortalSecret!2026\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.saved").value(true));
+        String credListBody = mvc.perform(get("/api/v1/employer-credentials").session(devSession))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        assertThat(credListBody).contains("portal.example.com").contains("ada@inbox.example").doesNotContain("PortalSecret!2026");
+
+        // 5. Candidate resumes automation after resolving blocker -> PREPARED, hasSavedCredential=true, NOT APPLICATION_SUBMITTED
+        mvc.perform(post("/api/v1/handoff/{id}/resume", sessionId).with(csrf()).session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.planStatus").value("PREPARED"))
+                .andExpect(jsonPath("$.status").value("COMPLETED"));
+
+        assertThat(jdbc.queryForObject("select status from applications where id = ?", String.class, seeded.appId()))
+                .isEqualTo("READY_TO_APPLY");
+        assertThat(jdbc.queryForObject("select count(*) from audit_logs where action = 'ATS_HANDOFF_RESUMED' and entity_id = ?",
+                Integer.class, planId)).isEqualTo(1);
+
+        // Second /resume call on already-completed session fails closed with 409
+        mvc.perform(post("/api/v1/handoff/{id}/resume", sessionId).with(csrf()).session(devSession))
+                .andExpect(status().isConflict());
+
+        // Worker claims resumed plan -> hasSavedCredential is now true, and worker /resolve decrypts secret
+        MvcResult claimedResumed = mvc.perform(post("/api/v1/automation/plans/claim-next")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN))
+                .andExpect(status().isOk())
+                .andReturn();
+        assertThat(claimedResumed.getResponse().getContentAsString()).contains("\"hasSavedCredential\":true");
+        mvc.perform(post("/api/v1/employer-credentials/resolve")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("applicationId", seeded.appId(), "employerDomain", "portal.example.com"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.username").value("ada@inbox.example"))
+                .andExpect(jsonPath("$.password").value("PortalSecret!2026"));
+
+        // 6. Safety boundary: handoff AFTER PRE_SUBMIT_ATTEMPTING cannot be resumed back to PREPARED
+        String fencedUrl = "https://careers.example.com/jobs/fenced";
+        var fenced = seedReadyApplication("univ-handoff-fence", fencedUrl);
+        UUID fencedPlanId = UUID.fromString(String.valueOf(json.readValue(
+                mvc.perform(post("/api/v1/apply/applications/{id}/package", fenced.appId()).with(csrf()).session(devSession))
+                        .andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), Map.class).get("planId")));
+        mvc.perform(post("/api/v1/automation/plans/claim-next").header("Authorization", "Bearer " + WORKER_TOKEN)).andExpect(status().isOk());
+        mvc.perform(post("/api/v1/automation/plans/{id}/complete", fencedPlanId)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN).contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("outcome", "HUMAN_REQUIRED", "detail", "Ready",
+                                "result", List.of(Map.of("type", "UNIVERSAL_OUTCOME", "planType", "UNIVERSAL", "requiredGaps", List.of()))))))
+                .andExpect(status().isNoContent());
+        mvc.perform(post("/api/v1/automation/plans/{id}/approve-submit", fencedPlanId).with(csrf()).session(devSession)).andExpect(status().isOk());
+        mvc.perform(post("/api/v1/automation/plans/{id}/prepare-submit", fencedPlanId).with(csrf()).session(devSession)).andExpect(status().isOk());
+        mvc.perform(post("/api/v1/automation/plans/claim-next").header("Authorization", "Bearer " + WORKER_TOKEN)).andExpect(status().isOk());
+        mvc.perform(post("/api/v1/automation/plans/{id}/steps", fencedPlanId)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN).contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("index", 99, "stepId", "pre-submit-attempting", "status", "RUNNING",
+                                "result", Map.of("phase", "PRE_SUBMIT_ATTEMPTING")))))
+                .andExpect(status().isNoContent());
+        UUID fencedSessionId = UUID.fromString(String.valueOf(json.readValue(
+                mvc.perform(post("/api/v1/handoff/initiate")
+                                .header("Authorization", "Bearer " + WORKER_TOKEN).contentType(MediaType.APPLICATION_JSON)
+                                .content(json.writeValueAsString(Map.of(
+                                        "planId", fencedPlanId, "applicationId", fenced.appId(), "atsPlatform", "UNIVERSAL",
+                                        "targetUrl", fencedUrl, "blockReason", "MFA", "ttlMinutes", 15))))
+                        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString(), Map.class).get("id")));
+        mvc.perform(post("/api/v1/handoff/{id}/resume", fencedSessionId).with(csrf()).session(devSession))
+                .andExpect(status().isConflict());
     }
 
     private record SeededApp(UUID jobId, UUID appId, UUID cvVersionId, String cvSha) {}

@@ -176,6 +176,7 @@ public class ApplyReadinessService {
             item.put("answerState", answerState);
             item.put("answerOrigin", answer == null ? null : answer.answerOrigin());
             item.put("answerId", answer == null ? null : String.valueOf(answer.id()));
+            item.put("answerText", answer == null ? null : answer.answerText());
             // Phase 8.2.5 source hiding: the capture source names the ATS platform
             // (e.g. GREENHOUSE_PUBLIC_FORM), so it is kept server-side only. The
             // employer's own form URL is still shown.
@@ -220,6 +221,7 @@ public class ApplyReadinessService {
                     item.put("answerState", answerState);
                     item.put("answerOrigin", answer.answerOrigin());
                     item.put("answerId", String.valueOf(answer.id()));
+                    item.put("answerText", answer.answerText());
                     item.put("formUrl", answer.validationNotes().get("formUrl"));
                     items.add(item);
                 }

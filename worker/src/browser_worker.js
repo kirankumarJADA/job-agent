@@ -8,7 +8,14 @@ import { planZohoFormActions, ZohoFieldCategory, ZohoDocumentUploadState } from 
 import { planLeverFormActions, LeverFieldAction } from './lever.js';
 import { planAshbyFormActions, AshbyFieldCategory, AshbyDocumentUploadState, classifyAshbySubmission, AshbySubmissionCategory } from './ashby.js';
 import { classifyWorkdayField, planWorkdayFormActions, detectWorkdayStep, classifyWorkdaySubmission, isWorkdayHoneypot, WorkdayFieldCategory, WorkdayDocumentUploadState, WorkdaySubmissionCategory } from './workday.js';
-import { universalPageIdentityMatches, installUniversalNavigationGuard, inspectLiveFormDom, planUniversalControls, applyUniversalControlActions } from './universal_form.js';
+import {
+  universalPageIdentityMatches,
+  installUniversalNavigationGuard,
+  inspectLiveFormDom,
+  hydrateDynamicComboboxOptions,
+  planUniversalControls,
+  applyUniversalControlActions,
+} from './universal_form.js';
 import { executeAndVerifyUniversalSubmit, UniversalSubmitCategory } from './universal_confirmation.js';
 
 const MAX_WORKDAY_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -84,6 +91,8 @@ export class BrowserWorker {
     this.lastWorkdaySubmitResult = null;
     /** Stage 3B: the last UNIVERSAL_APPLY step's execution summary, if any. */
     this.lastUniversalResult = null;
+    /** Stage 3D: diagnostics captured by installUniversalNavigationGuard (redacted blocked resources). */
+    this.lastUniversalNavGuard = null;
     /** Stage 3B: the last UNIVERSAL_SUBMIT_CLICK step's verification result, if any. */
     this.lastUniversalSubmitResult = null;
     /**
@@ -162,8 +171,9 @@ export class BrowserWorker {
     fs.mkdirSync(sessionDir, { recursive: true });
     const context = await browser.newContext({ storageState: fs.existsSync(path.join(sessionDir, 'storage.json')) ? path.join(sessionDir, 'storage.json') : undefined });
     const page = await context.newPage();
+    this.lastUniversalNavGuard = null;
     if (plan.planType === 'UNIVERSAL') {
-      await installUniversalNavigationGuard(page, plan.targetUrl, {
+      this.lastUniversalNavGuard = await installUniversalNavigationGuard(page, plan.targetUrl, {
         allowLocalTestHosts: Boolean(plan.package?.allowLocalTestHosts),
       });
     }
@@ -2394,59 +2404,178 @@ export class BrowserWorker {
       }
     }
     const allFilled = new Set(prior?.filled ?? []);
+    const allUnsupported = new Map();
+    const allClosedShadowHosts = new Set();
     let resumeUploadState = 'NO_FIELD';
     let coverLetterUploadState = 'NO_FIELD';
+    let loginSucceeded = Boolean(prior?.loginSucceeded);
     const maxPages = 6;
+    const maxRevealPassesPerPage = 4;
+
+    const recordUnsupported = (inspected, planned) => {
+      for (const hostTag of inspected.closedShadowHosts ?? []) {
+        allClosedShadowHosts.add(hostTag);
+        allUnsupported.set(`closed-shadow:${hostTag}`, {
+          key: `closed-shadow:${hostTag}`,
+          label: `<${hostTag}>`,
+          reason: 'Closed Shadow DOM cannot be inspected or automated reliably',
+        });
+      }
+      for (const item of planned.unsupported ?? []) {
+        allUnsupported.set(item.key || item.label, item);
+      }
+    };
+
+    const navBlockedResources = () => this.lastUniversalNavGuard?.getDiagnostics?.().blockedResources ?? [];
 
     for (let pageLoop = 1; pageLoop <= maxPages; pageLoop += 1) {
       await page.waitForLoadState('domcontentloaded').catch(() => {});
-      const inspected = await inspectLiveFormDom(page);
+      let inspected = await inspectLiveFormDom(page);
+
+      // Reveal application form when landing on a job description view with an explicit "Apply Now" button
+      if (inspected.controls.length === 0 && inspected.applyRevealButton?.selector && !inspected.securitySignals?.loginWallPresent) {
+        await this.#retry(() => page.locator(inspected.applyRevealButton.selector).click());
+        await page.waitForLoadState('domcontentloaded').catch(() => {});
+        await page.waitForTimeout(150);
+        this.#assertUniversalIdentity(page, plan);
+        inspected = await inspectLiveFormDom(page);
+      }
+
       const sec = inspected.securitySignals ?? {};
       if (sec.captchaPresent) throw new HardStopError('BLOCKED_ANTI_BOT', { stepId: step.id });
       if (sec.mfaPresent) throw new HardStopError('UNIVERSAL_MFA_REQUIRED', { stepId: step.id });
-      if (sec.loginWallPresent) throw new HardStopError('UNIVERSAL_LOGIN_REQUIRED', { stepId: step.id });
+
+      if (sec.loginWallPresent) {
+        const employerDomain = (() => {
+          try {
+            return new URL(page.url()).hostname.toLowerCase();
+          } catch {
+            return plan.correlation?.employerDomain || '';
+          }
+        })();
+        if (!step.params?.hasSavedCredential || !this.credentialResolver) {
+          throw new HardStopError('UNIVERSAL_LOGIN_REQUIRED', { stepId: step.id });
+        }
+        if (!inspected.loginControls?.verified || inspected.loginControls?.ambiguous) {
+          throw new HardStopError('UNIVERSAL_LOGIN_SELECTOR_UNVERIFIED', { stepId: step.id });
+        }
+        let credential;
+        try {
+          credential = await this.credentialResolver({
+            applicationId: plan.correlation.applicationId,
+            employerDomain,
+            planId: plan.planId,
+          });
+        } catch {
+          throw new HardStopError('UNIVERSAL_LOGIN_REQUIRED', { stepId: step.id });
+        }
+        const username = String(credential?.username ?? '');
+        const password = String(credential?.password ?? '');
+        if (!username || !password) {
+          throw new HardStopError('UNIVERSAL_LOGIN_REQUIRED', { stepId: step.id });
+        }
+        // Fill credentials strictly in-memory against verified login inputs — never persist or log.
+        await page.locator('[data-robin-login-role="username"]').fill(username);
+        await page.locator('[data-robin-login-role="password"]').fill(password);
+        await this.#retry(() => page.locator('[data-robin-login-role="submit"]').click());
+        await page.waitForLoadState('domcontentloaded').catch(() => {});
+        await page.waitForTimeout(200);
+        this.#assertUniversalIdentity(page, plan);
+        inspected = await inspectLiveFormDom(page);
+        const postLoginSec = inspected.securitySignals ?? {};
+        if (postLoginSec.captchaPresent) throw new HardStopError('BLOCKED_ANTI_BOT', { stepId: step.id });
+        if (postLoginSec.mfaPresent) throw new HardStopError('UNIVERSAL_MFA_REQUIRED', { stepId: step.id });
+        if (postLoginSec.loginWallPresent) throw new HardStopError('UNIVERSAL_LOGIN_FAILED', { stepId: step.id });
+        loginSucceeded = true;
+      }
+
       if (inspected.crossOriginFrames > 0 && inspected.controls.length === 0) {
         throw new HardStopError('UNIVERSAL_CROSS_ORIGIN_IFRAME_UNSUPPORTED', { stepId: step.id });
       }
 
-      const activePageIndex = completedPages.has(pageLoop) ? pageLoop : pageLoop;
       await this.#reportUniversalPhase(plan, pageLoop * 10, `phase-inspecting-p${pageLoop}`, 'INSPECTING', {
         currentUrl: sanitizeUrl(page.url()),
         pageIndex: pageLoop,
       });
 
-      const planned = planUniversalControls(inspected, pkg);
       const pageAlreadyCompleted = completedPages.has(pageLoop);
-      if (!pageAlreadyCompleted) {
-        const upStates = await applyUniversalControlActions(page, planned, pkg, { artifactDir: this.artifactDir });
-        for (const label of planned.filled) allFilled.add(label);
-        if (upStates.cv !== 'NO_FIELD') resumeUploadState = upStates.cv;
-        if (upStates.coverLetter !== 'NO_FIELD') coverLetterUploadState = upStates.coverLetter;
-        await this.#reportUniversalPhase(plan, pageLoop * 10 + 1, `phase-filling-p${pageLoop}`, 'FILLING', {
-          currentUrl: sanitizeUrl(page.url()),
-          pageIndex: pageLoop,
-          filledCount: planned.filled.length,
-        });
-        if (upStates.cv === 'ATTACHED' || upStates.coverLetter === 'ATTACHED') {
-          await this.#reportUniversalPhase(plan, pageLoop * 10 + 2, `phase-uploading-p${pageLoop}`, 'UPLOADING', {
-            pageIndex: pageLoop,
-            cv: upStates.cv,
-            coverLetter: upStates.coverLetter,
+      let planned = null;
+      const appliedControlSignatures = new Set();
+
+      for (let revealPass = 1; revealPass <= maxRevealPassesPerPage; revealPass += 1) {
+        await hydrateDynamicComboboxOptions(page, inspected);
+        planned = planUniversalControls(inspected, pkg);
+        recordUnsupported(inspected, planned);
+
+        if (!pageAlreadyCompleted) {
+          const freshActions = (planned.actions ?? []).filter((a) => {
+            const ctrl = inspected.controls.find((c) => c.controlId === a.controlId);
+            const sig = `${ctrl?.nameAttr || ctrl?.idAttr || a.label}::${a.kind}::${a.value ?? a.checked}`;
+            if (appliedControlSignatures.has(sig)) return false;
+            appliedControlSignatures.add(sig);
+            return true;
           });
+          const freshUploads = (planned.uploads ?? []).filter((u) => u.filesAttached === 0 || u.rejectedByAccept);
+          if (freshActions.length > 0 || freshUploads.length > 0) {
+            const upStates = await applyUniversalControlActions(
+              page,
+              { actions: freshActions, uploads: freshUploads },
+              pkg,
+              { artifactDir: this.artifactDir }
+            );
+            for (const label of planned.filled) allFilled.add(label);
+            if (upStates.cv !== 'NO_FIELD') resumeUploadState = upStates.cv;
+            if (upStates.coverLetter !== 'NO_FIELD') coverLetterUploadState = upStates.coverLetter;
+            if (revealPass === 1) {
+              await this.#reportUniversalPhase(plan, pageLoop * 10 + 1, `phase-filling-p${pageLoop}`, 'FILLING', {
+                currentUrl: sanitizeUrl(page.url()),
+                pageIndex: pageLoop,
+                filledCount: planned.filled.length,
+              });
+            }
+            if (upStates.cv === 'ATTACHED' || upStates.coverLetter === 'ATTACHED') {
+              await this.#reportUniversalPhase(plan, pageLoop * 10 + 2, `phase-uploading-p${pageLoop}`, 'UPLOADING', {
+                pageIndex: pageLoop,
+                cv: upStates.cv,
+                coverLetter: upStates.coverLetter,
+              });
+            }
+            await page.waitForTimeout(150);
+            const nextInspected = await inspectLiveFormDom(page);
+            const prevControlKeys = new Set(inspected.controls.map((c) => `${c.nameAttr}:${c.idAttr}:${c.label}`));
+            const hasNewlyRevealedControls = nextInspected.controls.some(
+              (c) => !prevControlKeys.has(`${c.nameAttr}:${c.idAttr}:${c.label}`)
+            );
+            inspected = nextInspected;
+            if (hasNewlyRevealedControls && revealPass < maxRevealPassesPerPage) {
+              continue;
+            }
+          }
+        } else {
+          // On resumed passes, never overwrite already completed text inputs,
+          // only re-attach missing file inputs that browsers drop across reloads.
+          const missingFileUploads = { actions: [], uploads: planned.uploads.filter((u) => u.filesAttached === 0) };
+          if (missingFileUploads.uploads.length > 0) {
+            const upStates = await applyUniversalControlActions(page, missingFileUploads, pkg, { artifactDir: this.artifactDir });
+            if (upStates.cv !== 'NO_FIELD') resumeUploadState = upStates.cv;
+            if (upStates.coverLetter !== 'NO_FIELD') coverLetterUploadState = upStates.coverLetter;
+          }
         }
-      } else {
-        // On resumed passes, never overwrite already completed text inputs,
-        // only re-attach missing file inputs that browsers drop across reloads.
-        const missingFileUploads = { actions: [], uploads: planned.uploads.filter((u) => u.filesAttached === 0) };
-        if (missingFileUploads.uploads.length > 0) {
-          const upStates = await applyUniversalControlActions(page, missingFileUploads, pkg, { artifactDir: this.artifactDir });
-          if (upStates.cv !== 'NO_FIELD') resumeUploadState = upStates.cv;
-          if (upStates.coverLetter !== 'NO_FIELD') coverLetterUploadState = upStates.coverLetter;
-        }
+        break;
       }
 
-      if (planned.requiredGaps.length > 0) {
-        if (this.discoveredQuestionsReporter) {
+      // Final plan check after any conditional reveals settled
+      await hydrateDynamicComboboxOptions(page, inspected);
+      planned = planUniversalControls(inspected, pkg);
+      recordUnsupported(inspected, planned);
+
+      const postSec = inspected.securitySignals ?? {};
+      if (postSec.captchaPresent) throw new HardStopError('BLOCKED_ANTI_BOT', { stepId: step.id });
+      if (postSec.mfaPresent) throw new HardStopError('UNIVERSAL_MFA_REQUIRED', { stepId: step.id });
+
+      const visibleValidationErrors = inspected.validationErrors ?? [];
+      if (planned.requiredGaps.length > 0 || (inspected.nextButton?.selector && visibleValidationErrors.length > 0)) {
+        if (this.discoveredQuestionsReporter && planned.requiredGaps.length > 0) {
           await this.discoveredQuestionsReporter(plan.planId, {
             formUrl: sanitizeUrl(page.url()),
             pageIndex: pageLoop,
@@ -2465,10 +2594,14 @@ export class BrowserWorker {
           filled: [...allFilled],
           requiredGaps: planned.requiredGaps,
           skippedOptional: planned.skippedOptional,
-          unsupported: planned.unsupported,
+          unsupported: Array.from(allUnsupported.values()),
           resumeUploadState,
           coverLetterUploadState,
           currentUrl: sanitizeUrl(page.url()),
+          blockedResources: navBlockedResources(),
+          closedShadowHosts: Array.from(allClosedShadowHosts),
+          validationErrors: visibleValidationErrors,
+          loginSucceeded,
         };
       }
 
@@ -2497,10 +2630,14 @@ export class BrowserWorker {
         filled: [...allFilled],
         requiredGaps: [],
         skippedOptional: planned.skippedOptional,
-        unsupported: planned.unsupported,
+        unsupported: Array.from(allUnsupported.values()),
         resumeUploadState,
         coverLetterUploadState,
         currentUrl: sanitizeUrl(page.url()),
+        blockedResources: navBlockedResources(),
+        closedShadowHosts: Array.from(allClosedShadowHosts),
+        validationErrors: visibleValidationErrors,
+        loginSucceeded,
       };
     }
     throw new HardStopError('UNIVERSAL_MULTI_STEP_LIMIT_EXCEEDED');

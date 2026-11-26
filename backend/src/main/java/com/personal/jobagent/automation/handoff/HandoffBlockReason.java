@@ -20,7 +20,10 @@ public enum HandoffBlockReason {
         if (normalized.contains("TURNSTILE") || normalized.contains("CLOUDFLARE")) {
             return CLOUDFLARE_TURNSTILE;
         }
-        if (normalized.contains("ANTI_BOT") || normalized.contains("ANTI-BOT") || normalized.contains("SECURITY") || normalized.contains("CHALLENGE")) {
+        if (normalized.contains("ANTI_BOT") || normalized.contains("ANTI-BOT")
+                || normalized.contains("SECURITY") || normalized.contains("CHALLENGE")
+                || normalized.contains("LOGIN") || normalized.contains("CREDENTIAL")
+                || normalized.contains("SIGN_IN") || normalized.contains("SIGNIN")) {
             return EMPLOYER_SECURITY_CHECK;
         }
         if (normalized.contains("CAPTCHA")) {

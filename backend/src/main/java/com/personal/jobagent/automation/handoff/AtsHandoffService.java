@@ -4,6 +4,7 @@ import com.personal.jobagent.application.ApplicationStatusService;
 import com.personal.jobagent.audit.AuditEntry;
 import com.personal.jobagent.audit.AuditLogWriter;
 import com.personal.jobagent.automation.AutomationPlanRepository;
+import com.personal.jobagent.automation.UniversalBrowserPlanService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -34,25 +35,36 @@ public class AtsHandoffService {
     private final AuditLogWriter audit;
     private final TransactionTemplate transactionTemplate;
     private final ApplicationStatusService applicationStatus;
+    private final UniversalBrowserPlanService universalPlans;
 
     @Autowired
     public AtsHandoffService(HandoffSessionRepository handoffRepository,
                              AutomationPlanRepository planRepository,
                              @Autowired(required = false) AuditLogWriter audit,
                              @Autowired(required = false) TransactionTemplate transactionTemplate,
-                             @Autowired(required = false) ApplicationStatusService applicationStatus) {
+                             @Autowired(required = false) ApplicationStatusService applicationStatus,
+                             @Autowired(required = false) UniversalBrowserPlanService universalPlans) {
         this.handoffRepository = handoffRepository;
         this.planRepository = planRepository;
         this.audit = audit;
         this.transactionTemplate = transactionTemplate;
         this.applicationStatus = applicationStatus;
+        this.universalPlans = universalPlans;
+    }
+
+    public AtsHandoffService(HandoffSessionRepository handoffRepository,
+                             AutomationPlanRepository planRepository,
+                             AuditLogWriter audit,
+                             TransactionTemplate transactionTemplate,
+                             ApplicationStatusService applicationStatus) {
+        this(handoffRepository, planRepository, audit, transactionTemplate, applicationStatus, null);
     }
 
     public AtsHandoffService(HandoffSessionRepository handoffRepository,
                              AutomationPlanRepository planRepository,
                              AuditLogWriter audit,
                              TransactionTemplate transactionTemplate) {
-        this(handoffRepository, planRepository, audit, transactionTemplate, null);
+        this(handoffRepository, planRepository, audit, transactionTemplate, null, null);
     }
 
     /**
@@ -416,5 +428,76 @@ public class AtsHandoffService {
             }
         }
         return cancelled;
+    }
+
+    /**
+     * Stage 3D: Resumes the same pre-submit automation plan after candidate intervention on
+     * a handoff blocker (e.g. saving employer credentials or clearing login/security gate),
+     * transitioning {@code HANDOFF_REQUIRED -> PREPARED} without falsely marking external
+     * submission and refusing if any submission attempt has already occurred.
+     */
+    @Transactional
+    public UUID resumeAfterHandoff(UUID ownerProfileId, UUID sessionId) {
+        Optional<HandoffSessionRecord> sessionOpt = handoffRepository.findById(ownerProfileId, sessionId);
+        if (sessionOpt.isEmpty()) {
+            return null;
+        }
+        HandoffSessionRecord session = sessionOpt.get();
+        if (session.status() != HandoffStatus.PENDING) {
+            throw new IllegalStateException("Handoff session is not active (status: " + session.status() + ")");
+        }
+        if (session.isExpired()) {
+            expireStaleSessions();
+            throw new IllegalStateException("Handoff session expired; re-prepare the plan instead");
+        }
+
+        AutomationPlanRepository.PlanRow plan = planRepository.find(ownerProfileId, session.planId())
+                .orElseThrow(() -> new IllegalStateException("Automation plan not found or not owned"));
+        if (!"HANDOFF_REQUIRED".equals(plan.status()) || plan.submitApproved()
+                || planRepository.hasPreSubmitAttemptCheckpoint(plan.id())) {
+            throw new IllegalStateException("Plan cannot resume from handoff after submit approval or submit attempt");
+        }
+        Map<String, Object> stored = plan.plan() == null ? Map.of() : plan.plan();
+        if (stored.get("steps") instanceof List<?> steps) {
+            for (Object o : steps) {
+                if (o instanceof Map<?, ?> step) {
+                    Object type = step.get("type");
+                    if ("UNIVERSAL_SUBMIT_CLICK".equals(type) || "REAL_SUBMIT_CLICK".equals(type)
+                            || "ASHBY_SUBMIT_CLICK".equals(type) || "WORKDAY_SUBMIT_CLICK".equals(type)
+                            || "MOCK_SUBMIT".equals(type)) {
+                        throw new IllegalStateException("Plan already contains a submit step and cannot resume via handoff");
+                    }
+                }
+            }
+        }
+
+        if (!handoffRepository.completeSession(ownerProfileId, sessionId)) {
+            throw new IllegalStateException("Failed to complete active handoff session atomically");
+        }
+
+        Map<String, Object> nextPlanPayload = stored;
+        if ("UNIVERSAL".equals(stored.get("planType")) && universalPlans != null) {
+            nextPlanPayload = universalPlans.rebuildForResume(ownerProfileId, session.planId());
+        }
+
+        if (!planRepository.resumeFromHandoff(session.planId(), nextPlanPayload)) {
+            throw new IllegalStateException("Plan state changed concurrently and could not return to PREPARED");
+        }
+
+        if (audit != null) {
+            audit.write(new AuditEntry(
+                    "CANDIDATE",
+                    "ATS_HANDOFF_RESUMED",
+                    "AUTOMATION_PLAN",
+                    session.planId(),
+                    "HANDOFF_REQUIRED",
+                    Map.of("mode", "RESUME_AUTOMATION", "sessionId", sessionId.toString(),
+                            "blockReason", session.blockReason().name()),
+                    null,
+                    null
+            ));
+        }
+
+        return session.planId();
     }
 }

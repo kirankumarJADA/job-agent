@@ -111,14 +111,17 @@ export const ApplyWorkspace: React.FC<{
     }
   };
 
-  const confirmAnswer = async (answerId: string) => {
+  const confirmAnswer = async (answerId: string, editedText?: string) => {
     setBusy(`answer:${answerId}`);
     setRefusal(null);
     setSuccess(null);
     try {
+      const payload = editedText !== undefined
+        ? { status: 'ANSWERED', answerText: editedText, confirmForAutofill: true }
+        : { confirmForAutofill: true };
       await apiFetch(`/application-answers/${answerId}`, {
         method: 'PUT',
-        body: JSON.stringify({ confirmForAutofill: true }),
+        body: JSON.stringify(payload),
       });
       setSuccess('Answer confirmed. The state below is re-derived from your stored records.');
       onChanged?.();
@@ -441,43 +444,134 @@ const DocumentRow: React.FC<{ label: string; present: boolean; detail: string }>
 const QuestionRow: React.FC<{
   question: ApplyQuestionItem;
   busy: string | null;
-  onConfirm: (answerId: string) => void;
-}> = ({ question, busy, onConfirm }) => (
-  <li className="rounded-lg border border-line bg-surface-sunken px-3 py-2">
-    <div className="flex flex-wrap items-center gap-2 text-sm">
-      <span className="font-medium text-ink">{question.questionText || question.questionKey}</span>
-      <StatusPill tone={question.requiredState === 'REQUIRED' ? 'amber' : question.requiredState === 'UNKNOWN' ? 'sky' : 'slate'}>
-        {question.requiredState === 'UNKNOWN' ? 'requirement UNKNOWN' : question.requiredState}
-      </StatusPill>
-      <StatusPill tone={question.answerState === 'CONFIRMED' ? 'emerald' : 'red'}>
-        answer {question.answerState}
-      </StatusPill>
-      {question.answerOrigin && (
-        <span className="text-xs text-ink-faint">
-          {question.answerOrigin === 'CANDIDATE_CONFIRMED'
-            ? 'confirmed by you'
-            : `origin: ${question.answerOrigin}`}
-        </span>
+  onConfirm: (answerId: string, editedText?: string) => void;
+}> = ({ question, busy, onConfirm }) => {
+  const initialText = question.answerText ?? '';
+  const [draft, setDraft] = useState(initialText);
+  const [editingConfirmed, setEditingConfirmed] = useState(false);
+
+  useEffect(() => {
+    setDraft(question.answerText ?? '');
+    setEditingConfirmed(false);
+  }, [question.answerId, question.answerText, question.answerState]);
+
+  const needsInlineEdit = question.answerId && (question.answerState !== 'CONFIRMED' || editingConfirmed);
+  const hasModifiedDraft = draft.trim() !== initialText.trim();
+  const requiresTextEntry = question.answerState === 'NEEDS_USER_INPUT' || question.answerState === 'HARD_STOP' || editingConfirmed;
+  const labelText = question.questionText || question.questionKey;
+
+  return (
+    <li className="rounded-lg border border-line bg-surface-sunken px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <span className="font-medium text-ink">{labelText}</span>
+        <StatusPill tone={question.requiredState === 'REQUIRED' ? 'amber' : question.requiredState === 'UNKNOWN' ? 'sky' : 'slate'}>
+          {question.requiredState === 'UNKNOWN' ? 'requirement UNKNOWN' : question.requiredState}
+        </StatusPill>
+        <StatusPill tone={question.answerState === 'CONFIRMED' ? 'emerald' : 'red'}>
+          answer {question.answerState}
+        </StatusPill>
+        {question.answerOrigin && (
+          <span className="text-xs text-ink-faint">
+            {question.answerOrigin === 'CANDIDATE_CONFIRMED'
+              ? 'confirmed by you'
+              : `origin: ${question.answerOrigin}`}
+          </span>
+        )}
+        {question.answerState === 'CONFIRMED' && question.answerId && !editingConfirmed && (
+          <button
+            type="button"
+            className="ml-auto rounded-md border border-line px-2.5 py-1 text-xs font-medium text-ink-muted hover:text-ink"
+            disabled={busy !== null}
+            onClick={() => setEditingConfirmed(true)}
+          >
+            Edit answer
+          </button>
+        )}
+        {!needsInlineEdit && question.answerState !== 'CONFIRMED' && question.answerId && (
+          <button
+            type="button"
+            className="ml-auto rounded-md border border-emerald-500/40 px-3 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50"
+            disabled={busy !== null}
+            onClick={() => onConfirm(question.answerId!)}
+          >
+            {busy === `answer:${question.answerId}` ? 'Confirming…' : 'Confirm this answer'}
+          </button>
+        )}
+      </div>
+
+      {question.answerState === 'CONFIRMED' && !editingConfirmed && initialText && (
+        <p className="mt-1.5 text-xs text-ink-body">Answer: {initialText}</p>
       )}
-      {question.answerState !== 'CONFIRMED' && question.answerId && (
-        <button
-          type="button"
-          className="ml-auto rounded-md border border-emerald-500/40 px-3 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50"
-          disabled={busy !== null}
-          onClick={() => onConfirm(question.answerId!)}
-        >
-          {busy === `answer:${question.answerId}` ? 'Confirming…' : 'Confirm this answer'}
-        </button>
+
+      {needsInlineEdit && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          {Array.isArray(question.options) && question.options.length > 0 ? (
+            <select
+              aria-label={`Answer for ${labelText}`}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              disabled={busy !== null}
+              className="flex-1 min-w-[200px] rounded-md border border-line bg-surface px-2.5 py-1.5 text-xs text-ink"
+            >
+              <option value="">Select an answer…</option>
+              {question.options.map((opt) => (
+                <option key={opt} value={opt}>{opt}</option>
+              ))}
+            </select>
+          ) : (
+            <input
+              type="text"
+              aria-label={`Answer for ${labelText}`}
+              placeholder="Enter verified candidate answer…"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              disabled={busy !== null}
+              className="flex-1 min-w-[200px] rounded-md border border-line bg-surface px-2.5 py-1.5 text-xs text-ink"
+            />
+          )}
+          <button
+            type="button"
+            className="rounded-md border border-emerald-500/40 px-3 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50"
+            disabled={busy !== null || ((requiresTextEntry || hasModifiedDraft) && draft.trim().length === 0)}
+            onClick={() => {
+              if (requiresTextEntry || hasModifiedDraft) {
+                onConfirm(question.answerId!, draft.trim());
+              } else {
+                onConfirm(question.answerId!);
+              }
+            }}
+          >
+            {busy === `answer:${question.answerId}`
+              ? 'Saving…'
+              : (requiresTextEntry || hasModifiedDraft)
+                ? 'Save & confirm answer'
+                : 'Confirm this answer'}
+          </button>
+          {editingConfirmed && (
+            <button
+              type="button"
+              className="rounded-md border border-line px-2.5 py-1 text-xs text-ink-muted hover:text-ink"
+              disabled={busy !== null}
+              onClick={() => {
+                setDraft(initialText);
+                setEditingConfirmed(false);
+              }}
+            >
+              Cancel
+            </button>
+          )}
+        </div>
       )}
-    </div>
-    <p className="mt-1 text-xs text-ink-muted">
-      From the employer&apos;s application form ·{' '}
-      <a href={question.formUrl} target="_blank" rel="noopener noreferrer" className="underline">
-        open form
-      </a>
-    </p>
-  </li>
-);
+
+      <p className="mt-1 text-xs text-ink-muted">
+        From the employer&apos;s application form ·{' '}
+        <a href={question.formUrl} target="_blank" rel="noopener noreferrer" className="underline">
+          open form
+        </a>
+      </p>
+    </li>
+  );
+};
 
 function shorten(sha: string | null | undefined): string {
   if (!sha) return '—';

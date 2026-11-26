@@ -7,6 +7,7 @@ import { ZohoRecruitReviewPanel } from '../components/ZohoRecruitReviewPanel';
 import { LeverReviewPanel } from '../components/LeverReviewPanel';
 import { WorkdayReviewPanel } from '../components/WorkdayReviewPanel';
 import { AshbyReviewPanel } from '../components/AshbyReviewPanel';
+import { UniversalReviewPanel } from '../components/UniversalReviewPanel';
 import { HandoffModal } from '../components/HandoffModal';
 import { ApplicationTrackPanel } from '../components/ApplicationTrackPanel';
 import { GmailMailboxCard } from '../components/GmailMailboxCard';
@@ -341,6 +342,18 @@ export const ApplicationsPage: React.FC = () => {
                   <AshbyReviewPanel
                     planId={application.planId}
                     planStatus={application.planStatus}
+                    onChanged={fetchApplications}
+                  />
+                </div>
+              )}
+
+              {application.planId && application.planType === 'UNIVERSAL' && (
+                <div className="mt-3">
+                  <UniversalReviewPanel
+                    planId={application.planId}
+                    planStatus={application.planStatus}
+                    applicationId={application.id}
+                    embedded
                     onChanged={fetchApplications}
                   />
                 </div>

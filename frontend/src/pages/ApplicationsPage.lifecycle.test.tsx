@@ -240,4 +240,58 @@ describe('ApplicationsPage — Cross-ATS Lifecycle Consistency', () => {
     // Raw JSON brackets should not be shown to user
     expect(screen.queryByText(/RECONCILIATION_EVIDENCE_INSUFFICIENT/)).toBeNull();
   });
+
+  it('renders UniversalReviewPanel and approval controls for UNIVERSAL plans', async () => {
+    mocked.mockImplementation((async (path: string) => {
+      if (path === '/applications') {
+        return { items: [makeApp({ planId: 'plan-univ-1', planType: 'UNIVERSAL', planStatus: 'AWAITING_APPROVAL' })] };
+      }
+      if (path === '/track/reviews') return { items: [], mailboxConnected: false };
+      if (path === '/managed-mail/address') return { readiness: 'NOT_CONFIGURED', usableForRegistration: false };
+      if (path === '/automation/plans/plan-univ-1') {
+        return {
+          id: 'plan-univ-1',
+          applicationId: 'app-1',
+          targetUrl: 'https://careers.acme.com/apply',
+          status: 'AWAITING_APPROVAL',
+          submitApproved: false,
+          updatedAt: '2026-10-01T09:00:00Z',
+          result: [{
+            type: 'UNIVERSAL_OUTCOME',
+            planType: 'UNIVERSAL',
+            filled: ['First Name'],
+            requiredGaps: [],
+            resumeUploadState: 'ATTACHED',
+            pageIndex: 1,
+          }],
+        };
+      }
+      if (path.startsWith('/apply/applications/')) {
+        return {
+          availability: 'AVAILABLE',
+          application: { applicationId: 'app-1', jobId: 'job-1', jobTitle: 'Backend Engineer', company: 'TestCorp', status: 'READY_TO_APPLY' },
+          documents: { cv: { versionId: 'v1', pdfSha256: 'abc', byteSize: 100 }, coverLetter: null, coverLetterRequirement: 'OPTIONAL' },
+          questions: { formCaptured: true, items: [] },
+          duplicates: { status: 'NONE', items: [] },
+          decision: { applicationMode: 'ASSISTED', ruleAvailability: 'CONFIGURED' },
+          blockers: [],
+          warnings: [],
+          unknowns: [],
+          packageReady: true,
+          packagePreview: { documents: { cv: 'v1', coverLetter: null }, coverLetterRequirement: 'OPTIONAL', note: 'test' },
+        };
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    }) as never);
+
+    render(
+      <MemoryRouter>
+        <ApplicationsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('universal-review-panel')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Resume & retry form pass/ })).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: /Approve for submission/ }).length).toBeGreaterThan(0);
+  });
 });

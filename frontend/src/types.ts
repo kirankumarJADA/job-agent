@@ -416,6 +416,18 @@ export interface UniversalOutcome {
   currentUrl?: string;
   pageIndex?: number;
   completedPages?: number[];
+  blockedResources?: Array<{ url: string; resourceType: string; reason: string }>;
+  closedShadowHosts?: string[];
+  validationErrors?: string[];
+  loginSucceeded?: boolean;
+}
+
+export interface EmployerCredentialSummary {
+  id?: string;
+  employerDomain: string;
+  username: string;
+  status: string;
+  updatedAt?: string | null;
 }
 
 /** GET /automation/plans/{id} — the fields the Zoho Recruit / Lever / Workday / Ashby / Universal review panels read. */
@@ -1020,6 +1032,7 @@ export interface ApplyQuestionItem {
   answerState: 'CONFIRMED' | 'UNCONFIRMED' | 'MISSING' | 'NEEDS_USER_INPUT' | 'HARD_STOP' | string;
   answerOrigin?: string | null;
   answerId?: string | null;
+  answerText?: string | null;
   formUrl: string;
 }
 

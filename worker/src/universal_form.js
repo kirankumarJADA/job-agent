@@ -98,45 +98,214 @@ export function universalPageIdentityMatches(expectedUrl, actualUrl, { allowLoca
  * Attaches a fail-closed network request guard against SSRF / cross-origin redirects
  * for real Chromium browser navigation on UNIVERSAL plans.
  */
-export async function installUniversalNavigationGuard(page, expectedUrl, { allowLocalTestHosts = false } = {}) {
-  let expectedOrigin;
+export function sanitizeUrlForDiagnostic(rawUrl) {
+  if (!rawUrl) return '';
+  const text = String(rawUrl).trim();
+  if (text.startsWith('data:') || text.startsWith('blob:')) {
+    return text.slice(0, 32) + '...';
+  }
   try {
-    expectedOrigin = new URL(expectedUrl).origin;
+    const parsed = new URL(text);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return text.split('?')[0].split('#')[0].slice(0, 200);
+  }
+}
+
+/**
+ * Evaluates network navigation and subresource requests for UNIVERSAL execution.
+ * - Top-level documents remain restricted to same-origin (fail-closed) HTTPS (or explicit
+ *   loopback HTTP when allowLocalTestHosts is enabled).
+ * - Public HTTPS cross-origin subresources (CDNs, fonts, stylesheets, scripts, JSON APIs)
+ *   are permitted so modern career sites load reliably.
+ * - Private/loopback/metadata IPs, unsafe schemes, userinfo URLs, and redirect chains into
+ *   disallowed hosts always fail closed.
+ */
+export function evaluateUniversalResourceRequest({
+  reqUrl,
+  expectedUrl,
+  resourceType = 'other',
+  isNavigation = false,
+  allowLocalTestHosts = false,
+  redirectChain = [],
+} = {}) {
+  const isDocument = resourceType === 'document' && Boolean(isNavigation);
+  const urlStr = String(reqUrl ?? '');
+  if (!urlStr) return { allowed: false, reason: 'EMPTY_URL' };
+
+  if (urlStr.startsWith('data:') || urlStr.startsWith('blob:')) {
+    if (isDocument) return { allowed: false, reason: 'BLOCKED_DOCUMENT_DATA_URI' };
+    return { allowed: true, reason: 'DATA_OR_BLOB_SUBRESOURCE' };
+  }
+
+  const checkSingleUrl = (candidateUrl, asDocument) => {
+    let parsed;
+    try {
+      parsed = new URL(candidateUrl);
+    } catch {
+      return { allowed: false, reason: 'INVALID_URL' };
+    }
+    if (parsed.username || parsed.password) {
+      return { allowed: false, reason: 'BLOCKED_USERINFO_URL' };
+    }
+    if (isBlockedHost(parsed.hostname, allowLocalTestHosts)) {
+      return { allowed: false, reason: 'BLOCKED_PRIVATE_OR_LOCAL_HOST' };
+    }
+    if (asDocument) {
+      if (!universalPageIdentityMatches(expectedUrl, parsed.href, { allowLocalTestHosts })) {
+        return { allowed: false, reason: 'BLOCKED_CROSS_ORIGIN_DOCUMENT' };
+      }
+      return { allowed: true, reason: 'SAME_ORIGIN_DOCUMENT' };
+    }
+    const protocol = parsed.protocol.toLowerCase();
+    const isSecure = protocol === 'https:' || protocol === 'wss:';
+    const isAllowedLocalTest = allowLocalTestHosts && (protocol === 'http:' || protocol === 'ws:')
+      && isExplicitLoopbackHost(parsed.hostname);
+    if (!isSecure && !isAllowedLocalTest) {
+      return { allowed: false, reason: 'BLOCKED_INSECURE_SCHEME' };
+    }
+    return { allowed: true, reason: 'ALLOWED_SUBRESOURCE' };
+  };
+
+  for (const hopUrl of redirectChain ?? []) {
+    const hopDecision = checkSingleUrl(hopUrl, isDocument);
+    if (!hopDecision.allowed) {
+      return { allowed: false, reason: `REDIRECT_HOP_${hopDecision.reason}` };
+    }
+  }
+  return checkSingleUrl(urlStr, isDocument);
+}
+
+/**
+ * Attaches a fail-closed network request guard against SSRF / cross-origin document redirects
+ * for real Chromium browser navigation on UNIVERSAL plans, while allowing valid HTTPS CDN assets.
+ */
+export async function installUniversalNavigationGuard(page, expectedUrl, { allowLocalTestHosts = false } = {}) {
+  try {
+    new URL(expectedUrl);
   } catch {
     throw new UniversalHardStopError('UNSAFE_APPLICATION_URL');
   }
+  const blockedResources = [];
+  const recordBlocked = (reqUrl, resourceType, reason) => {
+    if (blockedResources.length < 50) {
+      blockedResources.push({
+        url: sanitizeUrlForDiagnostic(reqUrl),
+        resourceType: String(resourceType || 'other'),
+        reason,
+      });
+    }
+  };
+
   await page.route('**/*', async (route) => {
-    const reqUrl = route.request().url();
+    const request = route.request();
+    const reqUrl = request.url();
+    const resourceType = request.resourceType();
+    const isNavigation = request.isNavigationRequest();
+    const isDocument = resourceType === 'document' && isNavigation;
+    const redirectChain = [];
+    let prev = request.redirectedFrom();
+    while (prev) {
+      redirectChain.push(prev.url());
+      prev = prev.redirectedFrom();
+    }
+    const decision = evaluateUniversalResourceRequest({
+      reqUrl,
+      expectedUrl,
+      resourceType,
+      isNavigation,
+      allowLocalTestHosts,
+      redirectChain,
+    });
+    if (!decision.allowed) {
+      recordBlocked(reqUrl, resourceType, decision.reason);
+      await route.abort('blockedbyclient');
+      return;
+    }
+
     if (reqUrl.startsWith('data:') || reqUrl.startsWith('blob:')) {
       await route.fallback();
       return;
     }
-    let parsed;
+
+    // Intercept HTTP 3xx redirects explicitly via maxRedirects: 0 so a hostile
+    // 302 Location -> 169.254.169.254 or 10.0.0.1 is aborted before Chromium ever
+    // opens a socket to the redirect target.
     try {
-      parsed = new URL(reqUrl);
+      let currentUrl = reqUrl;
+      let currentMethod = request.method();
+      const requestHeaders = request.headers();
+      let currentPostData = request.postDataBuffer();
+      const maxHops = 5;
+
+      for (let hop = 0; hop <= maxHops; hop += 1) {
+        const fetchOpts = {
+          url: currentUrl,
+          method: currentMethod,
+          headers: requestHeaders,
+          maxRedirects: 0,
+        };
+        if (currentPostData && currentMethod !== 'GET' && currentMethod !== 'HEAD') {
+          fetchOpts.postData = currentPostData;
+        }
+        const resp = await route.fetch(fetchOpts);
+        const status = resp.status();
+        const locationHeader = resp.headers()['location'];
+        if (status >= 300 && status < 400 && locationHeader) {
+          let nextUrl;
+          try {
+            nextUrl = new URL(locationHeader, currentUrl).href;
+          } catch {
+            recordBlocked(locationHeader, resourceType, 'INVALID_REDIRECT_LOCATION');
+            await route.abort('blockedbyclient');
+            return;
+          }
+          const hopDecision = evaluateUniversalResourceRequest({
+            reqUrl: nextUrl,
+            expectedUrl,
+            resourceType,
+            isNavigation,
+            allowLocalTestHosts,
+            redirectChain: [currentUrl],
+          });
+          if (!hopDecision.allowed) {
+            recordBlocked(nextUrl, resourceType, `REDIRECT_${hopDecision.reason}`);
+            await route.abort('blockedbyclient');
+            return;
+          }
+          if (isDocument) {
+            // Same-origin document redirect validated safe; preserve browser URL semantics.
+            await route.fulfill({ response: resp });
+            return;
+          }
+          if (hop === maxHops) {
+            recordBlocked(nextUrl, resourceType, 'TOO_MANY_REDIRECTS');
+            await route.abort('blockedbyclient');
+            return;
+          }
+          if (status === 301 || status === 302 || status === 303) {
+            currentMethod = 'GET';
+            currentPostData = null;
+          }
+          currentUrl = nextUrl;
+          continue;
+        }
+        await route.fulfill({ response: resp });
+        return;
+      }
     } catch {
-      await route.abort('blockedbyclient');
-      return;
+      recordBlocked(reqUrl, resourceType, 'FETCH_ERROR');
+      await route.abort('failed');
     }
-    if (isBlockedHost(parsed.hostname, allowLocalTestHosts)) {
-      await route.abort('blockedbyclient');
-      return;
-    }
-    const isDocument = route.request().resourceType() === 'document' && route.request().isNavigationRequest();
-    if (isDocument && !universalPageIdentityMatches(expectedUrl, reqUrl, { allowLocalTestHosts })) {
-      await route.abort('blockedbyclient');
-      return;
-    }
-    if (!isDocument && parsed.origin !== expectedOrigin && !allowLocalTestHosts) {
-      await route.abort('blockedbyclient');
-      return;
-    }
-    await route.fallback();
   });
+
+  return {
+    getDiagnostics: () => ({ blockedResources: blockedResources.slice() }),
+  };
 }
 
 /**
- * Passively inspects the live DOM (including accessible same-origin iframes),
+ * Passively inspects the live DOM (including accessible same-origin iframes and open Shadow DOM),
  * assigning ephemeral numeric `data-robin-control-id` attributes so page strings
  * are NEVER interpolated into Playwright selectors.
  */
@@ -157,23 +326,94 @@ export async function inspectLiveFormDom(page) {
       }
     }
 
-    const isHiddenHoneypot = (el) => {
-      if (!el || el.disabled) return true;
-      if (el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'hidden') return true;
-      if (el.getAttribute('aria-hidden') === 'true' || el.closest('[aria-hidden="true"]')) return true;
+    const closedShadowHosts = new Set();
+    let openShadowRootCount = 0;
+
+    const collectElements = (rootDoc) => {
+      const results = [];
+      const visited = new Set();
+      const walk = (nodeRoot, inShadowDom) => {
+        if (!nodeRoot || typeof nodeRoot.querySelectorAll !== 'function') return;
+        for (const el of Array.from(nodeRoot.querySelectorAll('*'))) {
+          if (!visited.has(el)) {
+            visited.add(el);
+            results.push({ el, rootNode: nodeRoot, inShadowDom });
+          }
+          if (el.shadowRoot) {
+            openShadowRootCount += 1;
+            walk(el.shadowRoot, true);
+          } else if (el.tagName && el.tagName.includes('-')) {
+            closedShadowHosts.add(el.tagName.toLowerCase());
+          }
+        }
+      };
+      walk(rootDoc, false);
+      return results;
+    };
+
+    const isElementVisible = (el) => {
+      if (!el || el.disabled) return false;
+      if (el.getAttribute('aria-hidden') === 'true' || el.closest('[aria-hidden="true"]')) return false;
       const style = window.getComputedStyle(el);
-      if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) return true;
+      if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) return false;
       const rect = el.getBoundingClientRect();
-      if (rect.width === 0 && rect.height === 0) return true;
-      if (rect.left < -999 || rect.top < -999) return true;
+      if (rect.width === 0 && rect.height === 0) return false;
+      if (rect.left < -999 || rect.top < -999) return false;
       const tab = el.getAttribute('tabindex');
-      if (tab === '-1' && (el.getAttribute('aria-hidden') === 'true' || rect.width <= 2 || rect.height <= 2)) return true;
+      if (tab === '-1' && (rect.width <= 2 || rect.height <= 2)) return false;
+      return true;
+    };
+
+    const hasTrapMarkers = (el) => {
+      if (!el) return true;
+      if (el.getAttribute('aria-hidden') === 'true' || el.closest('[aria-hidden="true"]')) return true;
+      if (el.getAttribute('data-honeypot') === 'true') return true;
+      const signature = `${el.name || ''} ${el.id || ''} ${el.className || ''}`.toLowerCase();
+      return /honeypot|beecatcher|decoy|url[-_]?trap/.test(signature);
+    };
+
+    const hasVisibleFileInteractionPath = (rootNode, el) => {
+      if (!el || el.disabled || hasTrapMarkers(el)) return false;
+      if (isElementVisible(el)) return true;
+      if (el.id) {
+        const directLabel = Array.from(rootNode.querySelectorAll('label')).find((l) => l.htmlFor === el.id);
+        if (directLabel && isElementVisible(directLabel) && clean(directLabel.textContent)) return true;
+      }
+      const ancestorLabel = el.closest('label');
+      if (ancestorLabel && isElementVisible(ancestorLabel)) return true;
+      const dropzone = el.closest(
+        '[data-dropzone], [data-upload], [class*="dropzone" i], [class*="upload" i], [class*="file-input" i], .field, .form-group'
+      );
+      if (dropzone && isElementVisible(dropzone)) {
+        const isGenericWrapper = !dropzone.matches('[data-dropzone], [data-upload], [class*="dropzone" i], [class*="upload" i], [class*="file-input" i]');
+        const triggers = Array.from(dropzone.querySelectorAll('button, [role="button"], label, a, [data-upload-trigger]'));
+        if (triggers.some((t) => {
+          if (!isElementVisible(t) || hasTrapMarkers(t)) return false;
+          if (!isGenericWrapper) return true;
+          const labelSig = `${clean(t.textContent)} ${clean(t.getAttribute('aria-label'))}`.toLowerCase();
+          return /upload|attach|choose|browse|select\s*file|resume|cv|cover/.test(labelSig);
+        })) {
+          return true;
+        }
+      }
       return false;
     };
 
-    const resolveLabel = (doc, el) => {
+    const isHiddenHoneypot = (el, rootNode) => {
+      if (!el || el.disabled) return true;
+      const isFile = el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'file';
+      if (isFile) {
+        return !hasVisibleFileInteractionPath(rootNode, el);
+      }
+      if (el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'hidden') return true;
+      if (el.getAttribute('aria-hidden') === 'true' || el.closest('[aria-hidden="true"]')) return true;
+      if (hasTrapMarkers(el)) return true;
+      return !isElementVisible(el);
+    };
+
+    const resolveLabel = (rootNode, el) => {
       if (el.id) {
-        const direct = Array.from(doc.querySelectorAll('label')).find((l) => l.htmlFor === el.id);
+        const direct = Array.from(rootNode.querySelectorAll('label')).find((l) => l.htmlFor === el.id);
         if (direct && clean(direct.textContent)) return clean(direct.textContent);
       }
       const ancestorLabel = el.closest('label');
@@ -184,7 +424,7 @@ export async function inspectLiveFormDom(page) {
       }
       const labelledBy = el.getAttribute('aria-labelledby');
       if (labelledBy) {
-        const text = labelledBy.split(/\s+/).map((id) => doc.getElementById(id)?.textContent || '').join(' ');
+        const text = labelledBy.split(/\s+/).map((id) => rootNode.getElementById?.(id)?.textContent || document.getElementById(id)?.textContent || '').join(' ');
         if (clean(text)) return clean(text);
       }
       const ariaLabel = clean(el.getAttribute('aria-label'));
@@ -193,6 +433,13 @@ export async function inspectLiveFormDom(page) {
       if (fieldset) {
         const legend = fieldset.querySelector('legend');
         if (legend && clean(legend.textContent)) return clean(legend.textContent);
+      }
+      if (el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'file') {
+        const dropzone = el.closest('[data-dropzone], [data-upload], [class*="dropzone" i], [class*="upload" i], .field, .form-group');
+        if (dropzone) {
+          const trigger = dropzone.querySelector('label, button, [role="button"], .upload-label, h3, h4, p');
+          if (trigger && !trigger.contains(el) && clean(trigger.textContent)) return clean(trigger.textContent);
+        }
       }
       const fieldWrapper = el.closest('[class*="field"], [class*="question"], .form-group, .form-row, div');
       if (fieldWrapper) {
@@ -207,118 +454,158 @@ export async function inspectLiveFormDom(page) {
     let seq = 1;
     let nextButton = null;
     let submitButton = null;
+    let applyRevealButton = null;
+
+    const CONTROL_TAGS = new Set(['INPUT', 'SELECT', 'TEXTAREA']);
+    const BUTTON_TAGS = new Set(['BUTTON']);
+    const allErrors = [];
 
     for (const { doc, frameIndex } of docList) {
-      const elements = Array.from(doc.querySelectorAll('input, select, textarea, [role="combobox"], [role="radiogroup"]'));
-      for (const el of elements) {
-        if (isHiddenHoneypot(el)) continue;
-        const tag = el.tagName.toLowerCase();
-        const type = tag === 'input' ? (el.type || 'text').toLowerCase()
-          : tag === 'select' ? 'select'
-          : tag === 'textarea' ? 'textarea'
-          : (el.getAttribute('role') || 'custom').toLowerCase();
-        if (['submit', 'button', 'reset', 'image'].includes(type)) continue;
+      const collected = collectElements(doc);
+      for (const { el, rootNode, inShadowDom } of collected) {
+        const tag = el.tagName.toUpperCase();
+        const roleAttr = (el.getAttribute('role') || '').toLowerCase();
 
-        if (type === 'radio') {
-          const name = el.getAttribute('name') || '';
-          const groupKey = `${frameIndex}:${name || el.id || seq}`;
-          if (seenRadioNames.has(groupKey)) continue;
-          seenRadioNames.add(groupKey);
-          const peers = name
-            ? Array.from(doc.querySelectorAll('input[type="radio"]')).filter((r) => r.name === name && !isHiddenHoneypot(r))
-            : [el];
-          const optionControls = peers.map((r) => {
-            const cid = String(seq++);
-            r.setAttribute('data-robin-control-id', cid);
-            return {
-              controlId: cid,
-              value: clean(r.value),
-              label: clean(resolveLabel(doc, r) || r.value),
-              checked: Boolean(r.checked),
-            };
-          });
-          const fieldset = el.closest('fieldset, [role="radiogroup"], .field, .form-group, div');
-          const groupLabel = clean(fieldset?.querySelector('legend, label, h3, h4, p, .question-label')?.textContent)
-            || clean(name);
-          const req = peers.some((r) => r.required || r.getAttribute('aria-required') === 'true')
-            || /\*\s*$/.test(groupLabel);
+        if ((roleAttr === 'alert' || el.classList?.contains('error') || el.classList?.contains('field-error')
+            || el.classList?.contains('invalid-feedback') || el.getAttribute('aria-invalid') === 'true')
+            && isElementVisible(el)) {
+          const errText = clean(el.getAttribute('data-error-message') || el.textContent);
+          if (errText) allErrors.push(errText);
+        }
+
+        const isControl = CONTROL_TAGS.has(tag) || roleAttr === 'combobox' || roleAttr === 'radiogroup';
+        if (isControl) {
+          if (isHiddenHoneypot(el, rootNode)) continue;
+          const lowerTag = tag.toLowerCase();
+          const type = lowerTag === 'input' ? (el.type || 'text').toLowerCase()
+            : lowerTag === 'select' ? 'select'
+            : lowerTag === 'textarea' ? 'textarea'
+            : (roleAttr || 'custom');
+          if (['submit', 'button', 'reset', 'image'].includes(type)) continue;
+
+          if (type === 'radio') {
+            const name = el.getAttribute('name') || '';
+            const groupKey = `${frameIndex}:${inShadowDom ? 'sh' : 'doc'}:${name || el.id || seq}`;
+            if (seenRadioNames.has(groupKey)) continue;
+            seenRadioNames.add(groupKey);
+            const peers = name
+              ? Array.from(rootNode.querySelectorAll('input[type="radio"]')).filter((r) => r.name === name && !isHiddenHoneypot(r, rootNode))
+              : [el];
+            const optionControls = peers.map((r) => {
+              const cid = String(seq++);
+              r.setAttribute('data-robin-control-id', cid);
+              return {
+                controlId: cid,
+                value: clean(r.value),
+                label: clean(resolveLabel(rootNode, r) || r.value),
+                checked: Boolean(r.checked),
+              };
+            });
+            const fieldset = el.closest('fieldset, [role="radiogroup"], .field, .form-group, div');
+            const groupLabel = clean(fieldset?.querySelector('legend, label, h3, h4, p, .question-label')?.textContent)
+              || clean(name);
+            const req = peers.some((r) => r.required || r.getAttribute('aria-required') === 'true')
+              || /\*\s*$/.test(groupLabel);
+            controls.push({
+              controlId: optionControls[0]?.controlId,
+              frameIndex,
+              inShadowDom,
+              tagName: 'input',
+              htmlType: 'radio',
+              role: 'radio',
+              label: groupLabel,
+              nameAttr: clean(name),
+              idAttr: clean(el.id),
+              placeholder: '',
+              ariaLabel: clean(el.getAttribute('aria-label')),
+              required: req,
+              options: optionControls.map((o) => o.label),
+              radioOptions: optionControls,
+              currentValue: optionControls.find((o) => o.checked)?.label || '',
+              filesAttached: 0,
+            });
+            continue;
+          }
+
+          const cid = String(seq++);
+          el.setAttribute('data-robin-control-id', cid);
+          const label = resolveLabel(rootNode, el);
+          const req = Boolean(el.required)
+            || el.getAttribute('aria-required') === 'true'
+            || /\*\s*$/.test(label)
+            || /\(required\)/i.test(label)
+            || Boolean(el.closest('.field, .form-group')?.querySelector('.requiredInput[required], [data-required="true"]'));
+
+          let options = [];
+          if (lowerTag === 'select') {
+            options = Array.from(el.options)
+              .map((o) => ({ value: clean(o.value), label: clean(o.textContent) }))
+              .filter((o) => o.label && !/^select\b/i.test(o.label));
+          } else if (roleAttr === 'combobox') {
+            const listId = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
+            const listbox = (listId && (rootNode.getElementById?.(listId) || document.getElementById(listId)))
+              || el.parentElement?.querySelector('[role="listbox"]');
+            if (listbox) {
+              options = Array.from(listbox.querySelectorAll('[role="option"], option, li')).map((o) => ({
+                value: clean(o.getAttribute('data-value') || o.textContent),
+                label: clean(o.textContent),
+              }));
+            }
+          }
+
           controls.push({
-            controlId: optionControls[0]?.controlId,
+            controlId: cid,
             frameIndex,
-            tagName: 'input',
-            htmlType: 'radio',
-            role: 'radio',
-            label: groupLabel,
-            nameAttr: clean(name),
+            inShadowDom,
+            tagName: lowerTag,
+            htmlType: type,
+            role: roleAttr,
+            label,
+            nameAttr: clean(el.getAttribute('name')),
             idAttr: clean(el.id),
-            placeholder: '',
+            placeholder: clean(el.getAttribute('placeholder')),
             ariaLabel: clean(el.getAttribute('aria-label')),
+            ariaControls: clean(el.getAttribute('aria-controls') || el.getAttribute('aria-owns')),
+            accept: clean(el.getAttribute('accept')),
+            customTrigger: type === 'file' && !isElementVisible(el),
             required: req,
-            options: optionControls.map((o) => o.label),
-            radioOptions: optionControls,
-            currentValue: optionControls.find((o) => o.checked)?.label || '',
-            filesAttached: 0,
+            options: options.map((o) => o.label),
+            rawOptions: options,
+            currentValue: type === 'checkbox'
+              ? String(Boolean(el.checked))
+              : clean(el.value !== undefined ? el.value : (roleAttr === 'combobox' ? (el.getAttribute('data-value') || el.textContent) : '')),
+            filesAttached: type === 'file' ? (el.files ? el.files.length : 0) : 0,
           });
           continue;
         }
-
-        const cid = String(seq++);
-        el.setAttribute('data-robin-control-id', cid);
-        const label = resolveLabel(doc, el);
-        const req = Boolean(el.required)
-          || el.getAttribute('aria-required') === 'true'
-          || /\*\s*$/.test(label)
-          || /\(required\)/i.test(label)
-          || Boolean(el.closest('.field, .form-group')?.querySelector('.requiredInput[required], [data-required="true"]'));
-
-        let options = [];
-        if (tag === 'select') {
-          options = Array.from(el.options)
-            .map((o) => ({ value: clean(o.value), label: clean(o.textContent) }))
-            .filter((o) => o.label && !/^select\b/i.test(o.label));
-        } else if (el.getAttribute('role') === 'combobox') {
-          const listId = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
-          const listbox = listId ? doc.getElementById(listId) : el.parentElement?.querySelector('[role="listbox"]');
-          if (listbox) {
-            options = Array.from(listbox.querySelectorAll('[role="option"], option, li')).map((o) => ({
-              value: clean(o.getAttribute('data-value') || o.textContent),
-              label: clean(o.textContent),
-            }));
-          }
-        }
-
-        controls.push({
-          controlId: cid,
-          frameIndex,
-          tagName: tag,
-          htmlType: type,
-          role: clean(el.getAttribute('role')),
-          label,
-          nameAttr: clean(el.getAttribute('name')),
-          idAttr: clean(el.id),
-          placeholder: clean(el.getAttribute('placeholder')),
-          ariaLabel: clean(el.getAttribute('aria-label')),
-          accept: clean(el.getAttribute('accept')),
-          required: req,
-          options: options.map((o) => o.label),
-          rawOptions: options,
-          currentValue: type === 'checkbox' ? String(Boolean(el.checked)) : clean(el.value),
-          filesAttached: type === 'file' ? (el.files ? el.files.length : 0) : 0,
-        });
       }
 
-      const buttons = Array.from(doc.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]'));
-      for (const btn of buttons) {
-        if (isHiddenHoneypot(btn) || btn.disabled) continue;
+      const buttons = collected
+        .filter(({ el }) => BUTTON_TAGS.has(el.tagName.toUpperCase())
+          || (el.tagName.toUpperCase() === 'INPUT' && ['submit', 'button'].includes((el.getAttribute('type') || '').toLowerCase()))
+          || el.getAttribute('role') === 'button'
+          || (el.tagName.toUpperCase() === 'A' && el.hasAttribute('data-apply-trigger')))
+        .map(({ el, rootNode }) => ({ btn: el, rootNode }));
+
+      for (const { btn, rootNode } of buttons) {
+        if (isHiddenHoneypot(btn, rootNode) || btn.disabled) continue;
         const text = clean(btn.tagName === 'INPUT' ? btn.value : btn.textContent);
         const typeAttr = (btn.getAttribute('type') || '').toLowerCase();
-        const isSubmitMatch = /submit(\s+application)?|apply(\s+now)?|complete\s+application|send\s+application/i.test(text);
-        const isNextMatch = !isSubmitMatch && /^(continue|next|save\s*(&|and)?\s*continue|proceed|step\s*\d)/i.test(text);
-        if (isNextMatch && !nextButton) {
+        const isApplyRevealMatch = /^(apply(\s+now)?|apply\s+for\s+(this\s+)?(job|position|role)|start\s+application|begin\s+application)$/i.test(text);
+        const isExplicitSubmitMatch = !isApplyRevealMatch
+          && /\b(submit(\s+(my|your|this))?(\s+application)?|complete\s+(my\s+|your\s+)?application|send\s+application|finish\s*(&|and)\s*submit)\b/i.test(text);
+        const isNextMatch = !isApplyRevealMatch && !isExplicitSubmitMatch
+          && /^(continue|next|save\s*(&|and)?\s*continue|proceed|step\s*\d)/i.test(text);
+
+        if (isApplyRevealMatch && !applyRevealButton) {
+          const aid = String(seq++);
+          btn.setAttribute('data-robin-apply-reveal', aid);
+          applyRevealButton = { selector: `[data-robin-apply-reveal="${aid}"]`, label: text, frameIndex };
+        } else if (isNextMatch && !nextButton) {
           const nid = String(seq++);
           btn.setAttribute('data-robin-next', nid);
           nextButton = { selector: `[data-robin-next="${nid}"]`, label: text, frameIndex };
-        } else if ((isSubmitMatch || typeAttr === 'submit') && !submitButton) {
+        } else if ((isExplicitSubmitMatch || (typeAttr === 'submit' && !isApplyRevealMatch && !isNextMatch && !/sign\s*in|log\s*in/i.test(text))) && !submitButton) {
           const sid = String(seq++);
           btn.setAttribute('data-robin-submit', sid);
           submitButton = { selector: `[data-robin-submit="${sid}"]`, label: text || 'Submit', frameIndex };
@@ -331,14 +618,37 @@ export async function inspectLiveFormDom(page) {
       'iframe[src*="captcha" i], iframe[src*="hcaptcha" i], iframe[src*="turnstile" i], [data-sitekey], .g-recaptcha, .h-captcha, .cf-turnstile'
     ).length > 0 || /verify you are human|complete the captcha|cloudflare turnstile/.test(bodyText);
     const mfaPresent = /two-factor|one-time\s*(code|passcode)|authenticator code|enter\s*(the\s*)?(otp|verification code)/i.test(bodyText);
-    const loginWallPresent = document.querySelectorAll('input[type="password"]').length > 0
+    const passwordInputs = Array.from(document.querySelectorAll('input[type="password"]')).filter((el) => isElementVisible(el));
+    const loginWallPresent = passwordInputs.length > 0
       || /sign in to continue|log in to apply|please log in before applying/i.test(bodyText);
 
-    const validationErrors = Array.from(document.querySelectorAll(
-      '[role="alert"], .error, .field-error, .invalid-feedback, [aria-invalid="true"]'
-    ))
-      .map((el) => clean(el.textContent))
-      .filter((t) => t.length > 0);
+    let loginControls = null;
+    if (passwordInputs.length === 1) {
+      const pw = passwordInputs[0];
+      const loginForm = pw.closest('form') || pw.parentElement?.closest('div, section, main') || document.body;
+      const candidateUsers = Array.from(loginForm.querySelectorAll('input[type="email"], input[type="text"], input:not([type])'))
+        .filter((el) => el !== pw && isElementVisible(el) && !hasTrapMarkers(el))
+        .filter((el) => {
+          const sig = `${el.type || ''} ${el.autocomplete || ''} ${el.name || ''} ${el.id || ''} ${el.placeholder || ''} ${resolveLabel(document, el)}`.toLowerCase();
+          return /email|user|login|account|username/.test(sig);
+        });
+      const candidateSubmits = Array.from(loginForm.querySelectorAll('button[type="submit"], input[type="submit"], button'))
+        .filter((btn) => isElementVisible(btn) && !btn.disabled)
+        .filter((btn) => {
+          const text = clean(btn.tagName === 'INPUT' ? btn.value : btn.textContent);
+          return btn.getAttribute('type') === 'submit' || /^(sign\s*in|log\s*in|continue|next)$/i.test(text);
+        });
+      if (candidateUsers.length === 1 && candidateSubmits.length === 1) {
+        candidateUsers[0].setAttribute('data-robin-login-role', 'username');
+        pw.setAttribute('data-robin-login-role', 'password');
+        candidateSubmits[0].setAttribute('data-robin-login-role', 'submit');
+        loginControls = { verified: true, ambiguous: false };
+      } else {
+        loginControls = { verified: false, ambiguous: true };
+      }
+    } else if (passwordInputs.length > 1 || loginWallPresent) {
+      loginControls = { verified: false, ambiguous: true };
+    }
 
     const activeStepEl = document.querySelector('[data-step], [aria-current="step"], .step-indicator');
     const stepText = clean(activeStepEl?.textContent || '');
@@ -347,14 +657,92 @@ export async function inspectLiveFormDom(page) {
       url: location.href,
       formCount: document.querySelectorAll('form').length,
       crossOriginFrames,
+      openShadowRootCount,
+      closedShadowHosts: Array.from(closedShadowHosts),
       controls,
+      applyRevealButton,
       nextButton,
       submitButton,
-      validationErrors,
+      loginControls,
+      validationErrors: Array.from(new Set(allErrors)),
       stepHint: stepText,
       securitySignals: { captchaPresent, mfaPresent, loginWallPresent },
     };
   });
+}
+
+export function isArtifactCompatibleWithAccept(acceptAttr, contentType = '', filePathOrName = '') {
+  const raw = String(acceptAttr ?? '').trim();
+  if (!raw || raw === '*/*') return true;
+  const tokens = raw.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean);
+  if (tokens.length === 0) return true;
+  const mime = String(contentType || '').trim().toLowerCase();
+  const ext = path.extname(String(filePathOrName || '')).toLowerCase();
+  const inferredExt = ext || (mime === 'application/pdf' ? '.pdf' : mime.includes('wordprocessingml') ? '.docx' : '');
+  const inferredMime = mime || (ext === '.pdf' ? 'application/pdf' : ext === '.docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : ext === '.txt' ? 'text/plain' : '');
+  for (const token of tokens) {
+    if (token === '*/*') return true;
+    if (token.startsWith('.')) {
+      if (inferredExt && inferredExt === token) return true;
+    } else if (token.endsWith('/*')) {
+      const prefix = token.slice(0, -1);
+      if (inferredMime && inferredMime.startsWith(prefix)) return true;
+    } else if (inferredMime && inferredMime === token) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Discovers portal-mounted options for dynamic `[role="combobox"]` widgets whose
+ * listbox is only mounted in the DOM upon interaction, closing the popup afterward.
+ */
+export async function hydrateDynamicComboboxOptions(page, inspected) {
+  if (!inspected || !Array.isArray(inspected.controls)) return inspected;
+  const candidates = inspected.controls.filter(
+    (c) => (c.role === 'combobox' || c.htmlType === 'combobox') && (!Array.isArray(c.rawOptions) || c.rawOptions.length === 0)
+  ).slice(0, 15);
+  for (const control of candidates) {
+    const loc = page.locator(`[data-robin-control-id="${Number(control.controlId)}"]`);
+    if (await loc.count() === 0) continue;
+    try {
+      await loc.click({ timeout: 2000 });
+      await page.locator('[role="option"]').first().waitFor({ state: 'visible', timeout: 800 }).catch(() => {});
+      const discovered = await page.evaluate(({ ariaControls, controlId }) => {
+        const clean = (s) => String(s ?? '').replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300);
+        let scope = ariaControls ? document.getElementById(ariaControls) : null;
+        if (!scope) {
+          const trigger = document.querySelector(`[data-robin-control-id="${Number(controlId)}"]`);
+          scope = trigger?.parentElement?.querySelector('[role="listbox"]') || null;
+        }
+        const roots = scope
+          ? [scope]
+          : Array.from(document.querySelectorAll('[role="listbox"]')).filter((el) => {
+              const st = window.getComputedStyle(el);
+              return st.display !== 'none' && st.visibility !== 'hidden';
+            });
+        const items = [];
+        for (const r of roots) {
+          for (const opt of Array.from(r.querySelectorAll('[role="option"], option, li'))) {
+            const label = clean(opt.textContent);
+            const value = clean(opt.getAttribute('data-value') || label);
+            if (label) items.push({ value, label });
+          }
+        }
+        return items;
+      }, { ariaControls: control.ariaControls || '', controlId: control.controlId });
+      if (Array.isArray(discovered) && discovered.length > 0) {
+        control.rawOptions = discovered;
+        control.options = discovered.map((o) => o.label);
+      }
+    } catch {
+      // keep empty options if widget does not open interactively
+    } finally {
+      await page.keyboard.press('Escape').catch(() => {});
+    }
+  }
+  return inspected;
 }
 
 function isProtectedDemographic(normalized) {
@@ -438,7 +826,21 @@ export function planUniversalControls(inspected, pkg = {}) {
       const isResume = !isCover && (/resume|cv|curriculum/.test(combined) || !combined);
       if (isCover) {
         if (pkg.coverLetter?.path) {
-          uploads.push({ controlId: control.controlId, artifactKind: 'coverLetter', accept: control.accept || '', filesAttached: control.filesAttached || 0, label });
+          if (!isArtifactCompatibleWithAccept(control.accept, pkg.coverLetter.contentType, pkg.coverLetter.filename || pkg.coverLetter.path)) {
+            if (control.required) {
+              requiredGaps.push({
+                questionKey: control.nameAttr || control.idAttr || `file_${control.controlId}`,
+                questionText: label || 'Cover letter upload',
+                htmlType: 'file',
+                requiredState: 'REQUIRED',
+                options: [],
+                reason: `Prepared cover letter artifact does not match accepted format (${control.accept})`,
+              });
+            }
+            uploads.push({ controlId: control.controlId, artifactKind: 'coverLetter', accept: control.accept || '', filesAttached: control.filesAttached || 0, label, rejectedByAccept: true });
+          } else {
+            uploads.push({ controlId: control.controlId, artifactKind: 'coverLetter', accept: control.accept || '', filesAttached: control.filesAttached || 0, label, customTrigger: Boolean(control.customTrigger) });
+          }
         } else if (control.required) {
           requiredGaps.push({
             questionKey: control.nameAttr || control.idAttr || `file_${control.controlId}`,
@@ -453,7 +855,21 @@ export function planUniversalControls(inspected, pkg = {}) {
       }
       if (isResume) {
         if (pkg.cv?.path) {
-          uploads.push({ controlId: control.controlId, artifactKind: 'cv', accept: control.accept || '', filesAttached: control.filesAttached || 0, label });
+          if (!isArtifactCompatibleWithAccept(control.accept, pkg.cv.contentType, pkg.cv.filename || pkg.cv.path)) {
+            if (control.required) {
+              requiredGaps.push({
+                questionKey: control.nameAttr || control.idAttr || `file_${control.controlId}`,
+                questionText: label || 'Resume / CV upload',
+                htmlType: 'file',
+                requiredState: 'REQUIRED',
+                options: [],
+                reason: `Prepared CV artifact does not match accepted format (${control.accept})`,
+              });
+            }
+            uploads.push({ controlId: control.controlId, artifactKind: 'cv', accept: control.accept || '', filesAttached: control.filesAttached || 0, label, rejectedByAccept: true });
+          } else {
+            uploads.push({ controlId: control.controlId, artifactKind: 'cv', accept: control.accept || '', filesAttached: control.filesAttached || 0, label, customTrigger: Boolean(control.customTrigger) });
+          }
         } else if (control.required) {
           requiredGaps.push({
             questionKey: control.nameAttr || control.idAttr || `file_${control.controlId}`,
@@ -635,8 +1051,31 @@ export async function applyUniversalControlActions(page, planned, pkg, { artifac
         await loc.selectOption(String(action.value));
       } else {
         await loc.click();
-        const optionLoc = page.locator('[role="option"], li').filter({ hasText: String(action.value) }).first();
-        if (await optionLoc.count() > 0) await optionLoc.click();
+        await page.locator('[role="option"]').first().waitFor({ state: 'visible', timeout: 1000 }).catch(() => {});
+        const targetLower = String(action.value).trim().toLowerCase();
+        const clickedOption = await loc.evaluate((el, targetText) => {
+          const clean = (s) => String(s ?? '').replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+          const ariaId = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
+          let scope = ariaId ? document.getElementById(ariaId) : null;
+          if (!scope) {
+            scope = el.parentElement?.querySelector('[role="listbox"]') || null;
+          }
+          const containers = scope ? [scope] : Array.from(document.querySelectorAll('[role="listbox"]'));
+          for (const container of containers) {
+            for (const opt of Array.from(container.querySelectorAll('[role="option"], option, li'))) {
+              const label = clean(opt.textContent);
+              const val = clean(opt.getAttribute('data-value'));
+              if (label === targetText || (val && val === targetText)) {
+                opt.click();
+                return true;
+              }
+            }
+          }
+          return false;
+        }, targetLower);
+        if (!clickedOption) {
+          await page.keyboard.press('Escape').catch(() => {});
+        }
       }
     } else if (action.kind === 'radio') {
       await loc.check({ force: false });
@@ -651,6 +1090,10 @@ export async function applyUniversalControlActions(page, planned, pkg, { artifac
     const artifact = up.artifactKind === 'coverLetter' ? pkg.coverLetter : pkg.cv;
     if (!artifact?.path) {
       uploadStates[up.artifactKind] = 'NO_ARTIFACT';
+      continue;
+    }
+    if (up.rejectedByAccept || !isArtifactCompatibleWithAccept(up.accept, artifact.contentType, artifact.filename || artifact.path)) {
+      uploadStates[up.artifactKind] = 'REJECTED';
       continue;
     }
     const resolved = path.resolve(artifact.path);
@@ -673,7 +1116,12 @@ export async function applyUniversalControlActions(page, planned, pkg, { artifac
     const loc = page.locator(selector);
     if (await loc.count() > 0) {
       await loc.setInputFiles(resolved);
-      uploadStates[up.artifactKind] = 'ATTACHED';
+      const expectedName = path.basename(resolved);
+      const domVerified = await loc.evaluate(
+        (el, baseName) => Boolean(el.files && el.files.length > 0 && Array.from(el.files).some((f) => f.name === baseName)),
+        expectedName
+      ).catch(() => false);
+      uploadStates[up.artifactKind] = domVerified ? 'ATTACHED' : 'REJECTED';
     }
   }
   return uploadStates;

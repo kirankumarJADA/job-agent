@@ -1,4 +1,11 @@
-import type { ApplicationSummary, ExpandedQueryPlan, HandoffSession, SearchPlan, SearchPlanExecutionSummary } from '../types';
+import type {
+  ApplicationSummary,
+  EmployerCredentialSummary,
+  ExpandedQueryPlan,
+  HandoffSession,
+  SearchPlan,
+  SearchPlanExecutionSummary,
+} from '../types';
 
 export const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1';
 
@@ -264,6 +271,29 @@ export function completeHandoff(sessionId: string, payload?: { submittedExternal
 export function cancelHandoff(sessionId: string): Promise<{ sessionId: string; status: string; message: string }> {
   return apiFetch<{ sessionId: string; status: string; message: string }>(`/handoff/${sessionId}/cancel`, {
     method: 'POST',
+  });
+}
+
+export function resumeHandoff(sessionId: string): Promise<{ sessionId: string; planId: string; status: string; planStatus: string; message: string }> {
+  return apiFetch<{ sessionId: string; planId: string; status: string; planStatus: string; message: string }>(`/handoff/${sessionId}/resume`, {
+    method: 'POST',
+  });
+}
+
+export function fetchEmployerCredentials(): Promise<{ credentials: EmployerCredentialSummary[] }> {
+  return apiFetch<{ credentials: EmployerCredentialSummary[] }>('/employer-credentials');
+}
+
+export function saveEmployerCredential(payload: { employerDomain: string; username: string; password: string }): Promise<{ employerDomain: string; saved: boolean }> {
+  return apiFetch<{ employerDomain: string; saved: boolean }>('/employer-credentials', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteEmployerCredential(employerDomain: string): Promise<{ employerDomain: string; disabled: boolean }> {
+  return apiFetch<{ employerDomain: string; disabled: boolean }>(`/employer-credentials/${encodeURIComponent(employerDomain)}`, {
+    method: 'DELETE',
   });
 }
 
