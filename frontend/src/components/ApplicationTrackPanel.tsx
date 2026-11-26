@@ -146,15 +146,21 @@ export const ApplicationTrackPanel: React.FC<{
   const headerStatus = track
     ? {
         label: track.label,
-        // A conflict between evidence sources is shown in red, never as ordinary progress.
-        tone: track.conflicts.length > 0 ? ('red' as const) : stageTone(track.status, track.basis),
+        // A conflict between evidence sources is shown in red, and sandbox is never styled green.
+        tone: stageTone(track.status, track.basis, {
+          conflicting: track.conflicts.length > 0,
+          sandbox: Boolean(track.submission.sandbox),
+        }),
         submission: track.submission.state,
         sandbox: Boolean(track.submission.sandbox),
       }
     : summary && summary.availability === 'AVAILABLE'
       ? {
           label: summary.label ?? 'Status unknown',
-          tone: stageTone(summary.status, summary.basis),
+          tone: stageTone(summary.status, summary.basis, {
+            conflicting: summary.submission === 'CONFLICTING',
+            sandbox: Boolean(summary.sandbox),
+          }),
           submission: summary.submission,
           sandbox: Boolean(summary.sandbox),
         }
@@ -167,14 +173,20 @@ export const ApplicationTrackPanel: React.FC<{
         {headerStatus ? (
           <>
             <StatusPill tone={headerStatus.tone}>{headerStatus.label}</StatusPill>
-            <StatusPill tone={submissionTone(headerStatus.submission)}>
+            <StatusPill tone={submissionTone(headerStatus.submission, headerStatus.sandbox)}>
               {submissionSummary(headerStatus.submission, headerStatus.sandbox)}
             </StatusPill>
           </>
         ) : (
           <StatusPill tone="slate">Status unavailable</StatusPill>
         )}
-        {!track && summary?.needsReview && <span className="text-xs font-medium text-amber-800">Needs your review</span>}
+        {!track && summary?.needsReview && (
+          <span
+            className={`text-xs font-medium ${summary.submission === 'CONFLICTING' ? 'text-red-800' : 'text-amber-800'}`}
+          >
+            Needs your review
+          </span>
+        )}
         <button
           type="button"
           aria-expanded={open}
@@ -264,7 +276,14 @@ const StatusSection: React.FC<{ track: ApplicationTrack; onOpenReceipt: () => vo
   <section aria-label="Current status">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <div className="flex flex-wrap items-center gap-2">
-        <StatusPill tone={stageTone(track.status, track.basis)}>{track.label}</StatusPill>
+        <StatusPill
+          tone={stageTone(track.status, track.basis, {
+            conflicting: track.conflicts.length > 0,
+            sandbox: Boolean(track.submission.sandbox),
+          })}
+        >
+          {track.label}
+        </StatusPill>
         {track.since && (
           <span className="text-xs text-ink-muted">
             since {describeWhen(track.since, track.since, track.sincePrecision ?? 'EXACT')}

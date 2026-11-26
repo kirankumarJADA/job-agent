@@ -246,8 +246,10 @@ All commands are the CI job commands (`.github/workflows/ci.yml`), run locally o
 | … of which Phase 2 end-to-end | `ReceiptReconciliationIT` | 14 / 14 |
 | … new Phase 2 unit classes | `ApplicationReconcilerProgressionTest` 19, `ReceiptTemporalPolicyTest` 9, `SubmissionReferencePolicyTest` 7, `BrowserObservationPolicyTest` 6, `SubmissionEvidenceV2ContractTest` 3, `ReceiptVerificationPolicyTest` +1 | 45 / 45 |
 | Worker | `npm test` (worker) | **394 run, 393 passed, 0 failed, 1 skipped** (SIGTERM test, POSIX-only; runs on Linux CI); includes `universal_evidence_v2.test.js` 10 / 10 and the real-Chromium Universal slice asserting v2 |
-| Frontend | `npx tsc -b`, `npm test`, `npm run build` | type check clean; **49 files, 488 tests passed**; build succeeds |
+| Frontend | `npx tsc -b`, `npm test`, `npm run build` | type check clean; **49 files, 489 tests passed**; build succeeds |
 | Cloudflare email worker | `npm test --prefix cloudflare-email-worker`; `node --test scripts/phase20/*.test.mjs` | 25 / 25; 8 / 8 (unchanged code) |
+
+> **Post-`19be6de` hardening verification note:** Following the follow-up fail-closed schema/origin hardening (`UniversalSubmissionEvidence.Kind.UNKNOWN_VERSION`, `EVIDENCE_UNPARSEABLE`, missing `finalOrigin` rejection in `BrowserObservationPolicy`) and UI truthfulness fixes (`ApplicationsPage` `SubmittedPlanNotice` / `TrackStatusPill`, `trackShared` `stageTone` / `submissionTone` sandbox & conflict styling, and `ApplicationTrackPanel` conflict pill/text consistency), local runs verified Backend Surefire **2,029 run, 0 failures, 0 errors, 6 skipped** (Redis diagnostic/AB/TLS tests), Frontend **49 files, 489 tests passed** (+ `tsc -b` + `vite build`), Worker **394 run, 393 passed, 1 skipped** (POSIX-only SIGTERM test), and Cloudflare **25/25** + probes **8/8**. Local Failsafe Testcontainers ITs could not start because Docker Engine was unavailable on the Windows host (`Could not find a valid Docker environment`), so Testcontainers PostgreSQL 16 ITs are verified via the GitHub Actions `ubuntu-latest` CI run for the pushed commit (`19be6de` also passed all 4 CI jobs in run `45889637790`, including Failsafe **464 run, 0 failures, 0 errors, 7 skipped**).
 
 Existing tests changed on purpose (each a rule this stage changes, not a weakened check):
 

@@ -547,6 +547,8 @@ describe('ApplicationTrackPanel', () => {
     expect(screen.getByText('Submission confirmed by a sandbox receipt — not a live employer')).toBeTruthy();
     expect(screen.queryByText('Submission confirmed by verified employer evidence')).toBeNull();
     expect(screen.getByTestId('submission-level').innerHTML).not.toContain('emerald');
+    expect(screen.getAllByText('Applied — verified (sandbox)').every((el) => !el.className.includes('emerald'))).toBe(true);
+    expect(screen.getByText('Submission confirmed by a sandbox receipt — not a live employer').className).not.toContain('emerald');
   });
 
   it('shows a submission-reference conflict in red with both original values, and a contested receipt is never green', async () => {
@@ -592,7 +594,8 @@ describe('ApplicationTrackPanel', () => {
     expect(within(item).getByTestId('receipt-link-issue').textContent).toContain('APP-50599');
     expect(within(item).getByText(/time recorded by your mail provider/)).toBeTruthy();
     expect(within(item).getByRole('button', { name: 'It is about this application' })).toBeTruthy();
-    expect(screen.getAllByText('Needs your review')[0].className).toContain('red');
+    expect(screen.getAllByText('Needs your review').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText('Needs your review').every((el) => el.className.includes('red'))).toBe(true);
   });
 
   it('flags an acknowledgement that arrived before the submission, and a resolved one shows the candidate decision', async () => {

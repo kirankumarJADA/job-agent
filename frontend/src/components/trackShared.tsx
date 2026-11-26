@@ -140,7 +140,12 @@ export function describeWhen(
   return exact ? exact.toLocaleString(undefined, DATE_TIME) : 'Date unknown';
 }
 
-export function stageTone(status: TrackStage | undefined, basis: TrackBasis | null | undefined): PillTone {
+export function stageTone(
+  status: TrackStage | undefined,
+  basis: TrackBasis | null | undefined,
+  options?: { sandbox?: boolean; conflicting?: boolean },
+): PillTone {
+  if (options?.conflicting) return 'red';
   switch (status) {
     case 'NEEDS_REVIEW':
       return 'amber';
@@ -156,6 +161,7 @@ export function stageTone(status: TrackStage | undefined, basis: TrackBasis | nu
     case 'APPLYING':
       return 'sky';
     default:
+      if (options?.sandbox) return 'sky';
       if (basis === 'VERIFIED') return 'emerald';
       if (basis === 'UNVERIFIED' || basis === 'INFERRED') return 'amber';
       return 'forest';
@@ -188,10 +194,11 @@ export function eventTone(classification: TrackEventClassification, verification
   }
 }
 
-export function submissionTone(state: TrackSubmissionState | undefined): PillTone {
+export function submissionTone(state: TrackSubmissionState | undefined, sandbox = false): PillTone {
   switch (state) {
     case 'CONFIRMED':
-      return 'emerald';
+      // Sandbox confirmation comes from a synthetic test, never a live employer.
+      return sandbox ? 'sky' : 'emerald';
     case 'UNVERIFIED':
       return 'amber';
     case 'CONFLICTING':

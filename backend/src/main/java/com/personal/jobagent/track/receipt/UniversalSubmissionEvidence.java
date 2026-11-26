@@ -37,7 +37,7 @@ public final class UniversalSubmissionEvidence {
 
     private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
 
-    public enum Kind { V2, V1, UNVERSIONED, UNPARSEABLE }
+    public enum Kind { V2, V1, UNVERSIONED, UNKNOWN_VERSION, UNPARSEABLE }
 
     public enum DigestStatus { VALID, MISMATCH, ABSENT }
 
@@ -80,7 +80,14 @@ public final class UniversalSubmissionEvidence {
         if (root == null || !root.isObject()) return Parsed.legacy(Kind.UNPARSEABLE, null);
         String schema = text(root, "schemaVersion");
         if (!V2.equals(schema)) {
-            return Parsed.legacy(V1.equals(schema) ? Kind.V1 : Kind.UNVERSIONED, schema);
+            if (V1.equals(schema)) {
+                return Parsed.legacy(Kind.V1, schema);
+            }
+            if (root.has("schemaVersion")) {
+                // Explicit unknown, blank or non-string schemaVersion fails closed rather than posing as legacy.
+                return Parsed.legacy(Kind.UNKNOWN_VERSION, schema);
+            }
+            return Parsed.legacy(Kind.UNVERSIONED, null);
         }
 
         DigestStatus digest = DigestStatus.ABSENT;

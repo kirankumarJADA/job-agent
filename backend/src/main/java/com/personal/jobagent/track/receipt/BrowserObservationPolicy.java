@@ -74,7 +74,15 @@ public final class BrowserObservationPolicy {
         if (e.observedSignals() == null || e.observedSignals().isEmpty()) {
             return Assessment.fail("NO_SIGNALS", "no browser confirmation signals were recorded for this submission.", parsed);
         }
-        if (parsed != null && parsed.isV2()) {
+        if (parsed == null || parsed.kind() == UniversalSubmissionEvidence.Kind.UNPARSEABLE) {
+            return Assessment.fail("EVIDENCE_UNPARSEABLE",
+                    "the browser observation evidence is malformed and cannot be verified.", parsed);
+        }
+        if (parsed.kind() == UniversalSubmissionEvidence.Kind.UNKNOWN_VERSION) {
+            return Assessment.fail("UNSUPPORTED_EVIDENCE_SCHEMA",
+                    "the browser observation uses an unsupported evidence schema version.", parsed);
+        }
+        if (parsed.isV2()) {
             if (parsed.digest() != UniversalSubmissionEvidence.DigestStatus.VALID) {
                 return Assessment.fail("EVIDENCE_DIGEST_MISMATCH",
                         "the browser evidence's own canonical digest does not match its contents.", parsed);
@@ -95,7 +103,7 @@ public final class BrowserObservationPolicy {
                             "the submission was redirected through a host outside this employer's application address.", parsed);
                 }
             }
-            if (parsed.finalOrigin() != null && !target.equals(authority(parsed.finalOrigin()))) {
+            if (parsed.finalOrigin() == null || !target.equals(authority(parsed.finalOrigin()))) {
                 return Assessment.fail("FINAL_ORIGIN_MISMATCH",
                         "the confirmation page was not on this employer's application address.", parsed);
             }

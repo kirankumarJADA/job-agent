@@ -108,18 +108,37 @@ class BrowserObservationPolicyTest {
         String otherPort = v2(r -> ((ArrayNode) r.get("redirectChain")).addObject().put("host", "careers.acme.example:8443").put("status", 200));
         assertThat(assess(otherPort).code()).isEqualTo("REDIRECT_OUTSIDE_TARGET_HOST");
         assertThat(assess(v2(r -> r.put("finalOrigin", "https://evil.example"))).code()).isEqualTo("FINAL_ORIGIN_MISMATCH");
+        assertThat(assess(v2(r -> r.remove("finalOrigin"))).code()).isEqualTo("FINAL_ORIGIN_MISMATCH");
         // The default port written explicitly is the same origin.
         assertThat(assess(v2(r -> r.put("finalOrigin", "https://careers.acme.example:443"))).clean()).isTrue();
     }
 
     @Test
-    void historicalEvidenceBeforeV2IsStillABrowserObservation() {
+    void historicalEvidenceBeforeV2IsStillABrowserObservationButMalformedOrUnknownSchemasFailClosed() {
         var v1 = assess("{\"atsPlatform\":\"UNIVERSAL\",\"schemaVersion\":\"robin-submission-evidence-v1\"}");
         assertThat(v1.clean()).isTrue();
         assertThat(v1.code()).isEqualTo("BROWSER_OBSERVED_LEGACY_SCHEMA");
         assertThat(v1.parsed().kind()).isEqualTo(Kind.V1);
-        assertThat(assess("{\"atsPlatform\":\"UNIVERSAL\"}").parsed().kind()).isEqualTo(Kind.UNVERSIONED);
-        assertThat(assess("not json at all").clean()).isTrue();
+        var unversioned = assess("{\"atsPlatform\":\"UNIVERSAL\"}");
+        assertThat(unversioned.clean()).isTrue();
+        assertThat(unversioned.parsed().kind()).isEqualTo(Kind.UNVERSIONED);
+
+        for (String unknown : new String[]{
+                "{\"atsPlatform\":\"UNIVERSAL\",\"schemaVersion\":\"robin-submission-evidence-v99\"}",
+                "{\"atsPlatform\":\"UNIVERSAL\",\"schemaVersion\":99}",
+                "{\"atsPlatform\":\"UNIVERSAL\",\"schemaVersion\":null}"}) {
+            var rejected = assess(unknown);
+            assertThat(rejected.clean()).isFalse();
+            assertThat(rejected.code()).isEqualTo("UNSUPPORTED_EVIDENCE_SCHEMA");
+            assertThat(rejected.parsed().kind()).isEqualTo(Kind.UNKNOWN_VERSION);
+        }
+
+        for (String malformed : new String[]{"not json at all", "[1,2,3]"}) {
+            var rejected = assess(malformed);
+            assertThat(rejected.clean()).isFalse();
+            assertThat(rejected.code()).isEqualTo("EVIDENCE_UNPARSEABLE");
+            assertThat(rejected.parsed().kind()).isEqualTo(Kind.UNPARSEABLE);
+        }
     }
 
     @Test

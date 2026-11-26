@@ -397,9 +397,7 @@ export const ApplicationsPage: React.FC = () => {
                       </span>
                     )}
                     {application.planStatus === 'SUBMITTED' && (
-                      <span className="text-green-400 text-xs font-medium">
-                        Confirmed submitted by the employer&apos;s own form
-                      </span>
+                      <SubmittedPlanNotice track={application.track} />
                     )}
                     {application.planStatus === 'AWAITING_SUBMIT_APPROVAL' && (
                       <span className="text-red-400 text-xs font-medium">Submission is disabled</span>
@@ -647,6 +645,44 @@ const RobinDecisionPanel: React.FC<{ planId: string; applicationId: string }> = 
  * response without TRACK data (an older server) shows the recorded status,
  * labelled as such.
  */
+function SubmittedPlanNotice({ track }: { track?: ApplicationSummary['track'] }) {
+  if (track?.availability === 'AVAILABLE') {
+    if (track.submission === 'CONFLICTING') {
+      return (
+        <span className="text-red-400 text-xs font-medium">
+          Submission evidence contested — review details below
+        </span>
+      );
+    }
+    if (track.submission === 'CONFIRMED' && track.sandbox) {
+      return (
+        <span className="text-sky-400 text-xs font-medium">
+          Sandbox receipt verified (synthetic test — not a live employer)
+        </span>
+      );
+    }
+    if (track.submission === 'CONFIRMED') {
+      return (
+        <span className="text-green-400 text-xs font-medium">
+          Confirmed submitted — employer acknowledgement verified
+        </span>
+      );
+    }
+    if (track.submissionLevel === 'BROWSER_OBSERVED') {
+      return (
+        <span className="text-amber-400 text-xs font-medium">
+          Submitted in browser — awaiting employer verification
+        </span>
+      );
+    }
+  }
+  return (
+    <span className="text-amber-400 text-xs font-medium">
+      Submit attempt recorded — awaiting employer verification
+    </span>
+  );
+}
+
 function TrackStatusPill({ application }: { application: ApplicationSummary }) {
   const track = application.track;
   if (track === undefined || track === null) {
@@ -655,7 +691,16 @@ function TrackStatusPill({ application }: { application: ApplicationSummary }) {
   if (track.availability !== 'AVAILABLE') {
     return <StatusPill tone="slate">Status unavailable</StatusPill>;
   }
-  return <StatusPill tone={stageTone(track.status, track.basis)}>{track.label ?? 'Status unknown'}</StatusPill>;
+  return (
+    <StatusPill
+      tone={stageTone(track.status, track.basis, {
+        conflicting: track.submission === 'CONFLICTING',
+        sandbox: Boolean(track.sandbox),
+      })}
+    >
+      {track.label ?? 'Status unknown'}
+    </StatusPill>
+  );
 }
 
 function PlanStatusBadge({ status }: { status?: string | null }) {  if (!status) return null;
