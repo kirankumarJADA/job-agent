@@ -6,6 +6,16 @@ Each entry records evidence and status. Severity: **P0** user-facing truthfulnes
 
 ---
 
+## P1 — Controlled external validation (Stage 3G) — **BLOCKED: no operator authorisation (2026-11-26)**
+
+**Evidence:** `docs/STAGE_3G_CONTROLLED_EXTERNAL_VALIDATION.md`. Repository configuration, deployment docs and environment names contain no authorisation record, no staging hostname and no sandbox allow-list; the harness (`staging/harness/run.mjs`) refuses with `AUTHORISATION_RECORD_ABSENT` and records all 15 matrix scenarios as external BLOCKED. No external host was contacted and no external submission occurred.
+
+**Prepared (not deployed):** one shared synthetic fixture (`staging/universal-employer-fixture/src/app.js`, also used by local tests), a Cloudflare Worker + Durable Object package with host gate, admin-token diagnostics/teardown, HSTS and data expiry, a staging configuration contract, and the authorisation-gated harness.
+
+**Still open:** operator authorisation and provisioning; the staging scenario driver/seeding contract; UNIVERSAL verified-receipt design; host-level egress policy; backend AddressGuard connection pinning; SSO sub-domain policy; PDF cover-letter end-to-end proof; `ROBIN_WORKER_SESSION_KEY` provisioning.
+
+---
+
 ## P1 — Universal browser network isolation and credential scoping (Stage 3E SEC-1 … SEC-8) — **IMPLEMENTED ON `integration/wave-3` (Stage 3F), NOT MERGED**
 
 **Evidence:** Stage 3E (`docs/STAGE_3E_EXTERNAL_VALIDATION_READINESS_AUDIT.md`) demonstrated live bypasses of the worker's `page.route` guard (WebSocket, Service Worker, popup), no DNS-rebinding protection, plaintext `storage.json` sessions, and a `/employer-credentials/resolve` endpoint without employer-domain binding.

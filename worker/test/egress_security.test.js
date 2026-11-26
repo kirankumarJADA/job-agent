@@ -338,7 +338,19 @@ test('a popup that redirects to a private network is refused at the redirect hop
     // Same-page navigation exercises the hop check deterministically (popups are also closed on sight).
     await fx.page.goto(`${fx.app.origin}/to-private`).catch(() => {});
     await fx.page.goto(`${fx.app.origin}/to-metadata`).catch(() => {});
-    await fx.page.evaluate((o) => window.open(`${o}/to-private`), fx.app.origin);
+    // The refused navigations commit Chromium's error page asynchronously, which can interrupt
+    // the next navigation. Return to a stable document (bounded retry) before scripting it,
+    // so the popup step never races a navigation. This is test sequencing only.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await fx.page.goto(`${fx.app.origin}/apply`, { waitUntil: 'load' });
+        break;
+      } catch (error) {
+        if (attempt >= 5) throw error;
+        await settle(200);
+      }
+    }
+    await fx.page.evaluate((o) => { window.open(`${o}/to-private`); }, fx.app.origin);
     await settle(800);
     const reasons = fx.guard.getDiagnostics().blockedResources.map((b) => b.reason);
     assert.ok(reasons.some((r) => /REDIRECT/.test(r)), `redirect hops are refused: ${reasons.join(',')}`);
