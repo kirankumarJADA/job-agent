@@ -467,6 +467,13 @@ export function workdayPackageNeedsMaterialization(plan) {
   return plan.planType === 'WORKDAY' && Boolean(plan.package);
 }
 
+/**
+ * Stage 3B: Universal engine package materialization counterpart.
+ */
+export function universalPackageNeedsMaterialization(plan) {
+  return plan.planType === 'UNIVERSAL' && Boolean(plan.package);
+}
+
 export async function materializeArtifacts(plan, backendBase) {
   // Shared by GREENHOUSE and ZOHO_RECRUIT (any plan type whose package
   // carries cv/coverLetter + a matching artifacts list) — error identifiers
@@ -506,7 +513,33 @@ function planFromClaim(planId, claimed) {
     safetyContract: stored.safetyContract,
     fields: stored.fields ?? [],
     requiredGaps: stored.requiredGaps ?? [],
+    completedSteps: claimed.completedSteps ?? stored.completedSteps ?? [],
   };
+}
+
+async function reportPlanStep(planId, body, { pollUrl, authHeadersFn }) {
+  const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
+  const stepUrl = new URL(`${new URL(apiRoot).pathname.replace(/\/$/, '')}/plans/${encodeURIComponent(planId)}/steps`, apiRoot);
+  const res = await fetchWithRetry(stepUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeadersFn() },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 409) return { conflict: true };
+  if (!res.ok) throw new Error(`STEP_REPORT_FAILED:${res.status}`);
+  return { ok: true };
+}
+
+async function reportDiscoveredQuestions(planId, body, { pollUrl, authHeadersFn }) {
+  const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
+  const qUrl = new URL(`${new URL(apiRoot).pathname.replace(/\/$/, '')}/plans/${encodeURIComponent(planId)}/discovered-questions`, apiRoot);
+  const res = await fetchWithRetry(qUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeadersFn() },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`DISCOVERED_QUESTIONS_REPORT_FAILED:${res.status}`);
+  return res.json().catch(() => ({ ok: true }));
 }
 
 export async function executePollCycle({
@@ -517,6 +550,8 @@ export async function executePollCycle({
   runner = null,
   initiateHandoffFn = initiateHandoff,
   authHeadersFn = authHeaders,
+  stepsReporterFn = null,
+  discoveredQuestionsReporterFn = null,
   runtimeObj = runtime,
   statePathVal = statePath,
   artifactDirVal = artifactDir,
@@ -627,14 +662,19 @@ export async function executePollCycle({
       const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
       if (apiRoot === pollUrl) throw new Error('INVALID_WORKER_POLL_URL');
       await materializeArtifacts(plan, new URL(apiRoot).origin);
+    } else if (universalPackageNeedsMaterialization(plan)) {
+      const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
+      if (apiRoot === pollUrl) throw new Error('INVALID_WORKER_POLL_URL');
+      await materializeArtifacts(plan, new URL(apiRoot).origin);
     }
 
-    // Heartbeat on an interval while executing. A single missed beat is
-    // tolerated (network jitter), but if the backend stays unreachable the
-    // run must STOP: the backend's stale-plan sweeper will reclaim the plan
-    // for re-execution, and continuing to drive a real employer form with
-    // no live lease risks two workers operating the same application at
-    // once. Stopping is always the safe direction.
+    const activeStepsReporter = stepsReporterFn ?? (pollUrl && /\/plans\/claim-next\/?$/.test(pollUrl)
+      ? (pId, body) => reportPlanStep(pId, body, { pollUrl, authHeadersFn })
+      : null);
+    const activeQuestionsReporter = discoveredQuestionsReporterFn ?? (pollUrl && /\/plans\/claim-next\/?$/.test(pollUrl)
+      ? (pId, body) => reportDiscoveredQuestions(pId, body, { pollUrl, authHeadersFn })
+      : null);
+
     const runnerInstance = runner ?? new BrowserWorker({
       statePath: statePathVal,
       artifactDir: artifactDirVal,
@@ -642,6 +682,8 @@ export async function executePollCycle({
       verificationResolver: verificationResolverFn,
       identityResolver: identityResolverFn,
       credentialResolver: credentialResolverFn,
+      stepsReporter: activeStepsReporter,
+      discoveredQuestionsReporter: activeQuestionsReporter,
     });
     runtimeObj.runner = runnerInstance;
     let missedHeartbeats = 0;
@@ -669,8 +711,24 @@ export async function executePollCycle({
     // never an assumption about what a given run "should" have done).
     const isAshbySubmitAttempt = plan.planType === 'ASHBY'
       && plan.steps.at(-1)?.type === 'ASHBY_SUBMIT_CLICK';
+    const isUniversalSubmitAttempt = plan.planType === 'UNIVERSAL'
+      && plan.steps.at(-1)?.type === StepType.UNIVERSAL_SUBMIT_CLICK;
     const { outcome, detail, result } = computePlanOutcome(plan, runResult);
-    if (plan.planType === 'GREENHOUSE' && !isSubmitAttempt) {
+    if (plan.planType === 'UNIVERSAL' && !isUniversalSubmitAttempt) {
+      const univ = runResult.universalResult ?? {};
+      await Promise.allSettled([
+        passEventSink({
+          type: 'HUMAN_REVIEW_REQUIRED',
+          planId,
+          jobId: plan.correlation.jobId,
+          applicationId: plan.correlation.applicationId,
+          requiredGaps: univ.requiredGaps ?? [],
+          filled: univ.filled ?? [],
+          resumeUploadState: univ.resumeUploadState ?? 'NO_FIELD',
+          coverLetterUploadState: univ.coverLetterUploadState ?? 'NO_FIELD',
+        }),
+      ]);
+    } else if (plan.planType === 'GREENHOUSE' && !isSubmitAttempt) {
       await Promise.allSettled([
         passEventSink({ type: 'HUMAN_REVIEW_REQUIRED', planId, jobId: plan.correlation.jobId,
           applicationId: plan.correlation.applicationId, requiredGaps: plan.requiredGaps }),

@@ -8,6 +8,8 @@ import { planZohoFormActions, ZohoFieldCategory, ZohoDocumentUploadState } from 
 import { planLeverFormActions, LeverFieldAction } from './lever.js';
 import { planAshbyFormActions, AshbyFieldCategory, AshbyDocumentUploadState, classifyAshbySubmission, AshbySubmissionCategory } from './ashby.js';
 import { classifyWorkdayField, planWorkdayFormActions, detectWorkdayStep, classifyWorkdaySubmission, isWorkdayHoneypot, WorkdayFieldCategory, WorkdayDocumentUploadState, WorkdaySubmissionCategory } from './workday.js';
+import { universalPageIdentityMatches, installUniversalNavigationGuard, inspectLiveFormDom, planUniversalControls, applyUniversalControlActions } from './universal_form.js';
+import { executeAndVerifyUniversalSubmit, UniversalSubmitCategory } from './universal_confirmation.js';
 
 const MAX_WORKDAY_UPLOAD_BYTES = 10 * 1024 * 1024;
 import { StateStore } from './store.js';
@@ -48,7 +50,8 @@ export class HumanInputRequiredError extends Error {
 
 export class BrowserWorker {
   constructor({ statePath, artifactDir, eventSink = () => {}, verificationResolver = null, identityResolver = null,
-                credentialResolver = null, onPageCreated = null, chromium: customChromium = null } = {}) {
+                credentialResolver = null, stepsReporter = null, discoveredQuestionsReporter = null,
+                onPageCreated = null, chromium: customChromium = null } = {}) {
     this.store = new StateStore(statePath);
     this.chromium = customChromium ?? chromium;
     this.artifactDir = artifactDir;
@@ -59,6 +62,10 @@ export class BrowserWorker {
     /** Phase 8.5 continuation: asks the backend (EmployerCredentialService) for
      * this candidate's saved portal password for one employer domain. */
     this.credentialResolver = credentialResolver;
+    /** Stage 3B: synchronous checkpoint reporter to /plans/{id}/steps. */
+    this.stepsReporter = stepsReporter;
+    /** Stage 3B: persists newly discovered mandatory live-DOM questions to /plans/{id}/discovered-questions. */
+    this.discoveredQuestionsReporter = discoveredQuestionsReporter;
     /** Set by requestAbort(): the run stops at the next step boundary. */
     this.abortRequested = false;
     /** Phase 4: the last REAL_SUBMIT_CLICK step's {confirmed, evidence} result, if any. */
@@ -75,6 +82,10 @@ export class BrowserWorker {
     this.lastAshbySubmitResult = null;
     /** Phase 19: the last WORKDAY_SUBMIT_CLICK step's {confirmed, evidence} result, if any. */
     this.lastWorkdaySubmitResult = null;
+    /** Stage 3B: the last UNIVERSAL_APPLY step's execution summary, if any. */
+    this.lastUniversalResult = null;
+    /** Stage 3B: the last UNIVERSAL_SUBMIT_CLICK step's verification result, if any. */
+    this.lastUniversalSubmitResult = null;
     /**
      * Test seam only (never set in production: worker.js never passes it):
      * `async (page) => {}`, invoked once, right after the page is created and
@@ -128,6 +139,9 @@ export class BrowserWorker {
       this.#validateWorkdayPlan(plan);
     } else if (plan.planType === 'ASHBY') {
       this.#validateAshbyPlan(plan);
+    } else if (plan.planType === 'UNIVERSAL') {
+      this.#validateUniversalPlan(plan);
+      this.#validateUniversalArtifacts(plan);
     } else if (plan.planType !== 'INSPECTION' && plan.package) {
       validatePackage(plan.package);
     }
@@ -148,6 +162,11 @@ export class BrowserWorker {
     fs.mkdirSync(sessionDir, { recursive: true });
     const context = await browser.newContext({ storageState: fs.existsSync(path.join(sessionDir, 'storage.json')) ? path.join(sessionDir, 'storage.json') : undefined });
     const page = await context.newPage();
+    if (plan.planType === 'UNIVERSAL') {
+      await installUniversalNavigationGuard(page, plan.targetUrl, {
+        allowLocalTestHosts: Boolean(plan.package?.allowLocalTestHosts),
+      });
+    }
     if (this.onPageCreated) await this.onPageCreated(page);
     const values = {
       verification: state.verification,
@@ -156,19 +175,13 @@ export class BrowserWorker {
       identity: state.identity ?? null,
       greenhouseExpected: new Map(state.greenhouseExpected ?? []),
     };
-    // A paused or crashed worker may have completed the navigation step but
-    // not yet completed the next step. Restore the last durable URL before
-    // resuming so a fresh browser process never attempts a form action on
-    // about:blank.
-    if (state.status !== 'COMPLETED' && state.lastUrl) {
-      await page.goto(state.lastUrl, { waitUntil: 'domcontentloaded' });
+    const backendPausedUrl = Array.isArray(plan.completedSteps)
+      ? plan.completedSteps.slice().reverse().find((s) => s?.result?.currentUrl)?.result?.currentUrl
+      : null;
+    const resumeUrl = state.lastUrl || (plan.planType === 'UNIVERSAL' ? backendPausedUrl : null);
+    if (state.status !== 'COMPLETED' && resumeUrl) {
+      await page.goto(resumeUrl, { waitUntil: 'domcontentloaded' });
       if (plan.planType === 'GREENHOUSE') {
-        // The one legitimate exception: a prior process's REAL_SUBMIT_CLICK
-        // genuinely completed and its own last known URL is Greenhouse's
-        // confirmation route, not plan.targetUrl itself. Recognise that
-        // specific, already-durable case the same way #runRealSubmitClick's
-        // own post-step check does — anything else still requires an exact
-        // match.
         const realSubmitStep = plan.steps.find((candidate) => candidate.type === StepType.REAL_SUBMIT_CLICK);
         const resumedAfterRealSubmit = realSubmitStep && state.steps?.[realSubmitStep.id]?.status === 'COMPLETED';
         this.#assertGreenhouseIdentity(page, plan, resumedAfterRealSubmit ? realSubmitStep : undefined);
@@ -177,6 +190,7 @@ export class BrowserWorker {
       if (plan.planType === 'LEVER') this.#assertLeverIdentity(page, plan);
       if (plan.planType === 'WORKDAY') this.#assertWorkdayIdentity(page, plan);
       if (plan.planType === 'ASHBY') this.#assertAshbyIdentity(page, plan);
+      if (plan.planType === 'UNIVERSAL') this.#assertUniversalIdentity(page, plan);
     }
     this.#emit(plan, { type: 'WORKER_STARTED', planId: plan.planId });
 
@@ -190,19 +204,8 @@ export class BrowserWorker {
         const otpSubmitCompleted = this.store.step(plan.planId, 'account-verify-otp-submit')?.status === 'COMPLETED';
         const replayOtpFill = step.id === 'account-verify-otp-fill'
           && !otpSubmitCompleted && Boolean(state.verification?.otp);
-        if (prior?.status === 'COMPLETED' && !replayOtpFill) {
-          // Restoring, never reconstructing: a REAL_SUBMIT_CLICK step that
-          // already durably completed — in THIS process or an earlier one —
-          // is never re-run (no second click, ever). Its exact, previously
-          // persisted classification (confirmed or not) is restored verbatim
-          // so the final result reflects what genuinely happened, instead of
-          // silently reporting nothing (which outcome.js would otherwise
-          // treat as "no result recorded" — safe, but a needless loss of a
-          // real, already-verified outcome). A step completed before this
-          // fix shipped, with no `submitResult` ever persisted, correctly
-          // stays unrecoverable here — see the module comment on
-          // `#captureGreenhouseSubmissionDuringClick` for why that case must
-          // fall through to HUMAN_REQUIRED rather than guessing.
+        const replayUniversalPause = step.type === StepType.UNIVERSAL_APPLY && Boolean(prior?.universalPaused);
+        if (prior?.status === 'COMPLETED' && !replayOtpFill && !replayUniversalPause) {
           if (step.type === StepType.REAL_SUBMIT_CLICK && prior.submitResult) {
             this.lastSubmitResult = prior.submitResult;
           }
@@ -211,6 +214,12 @@ export class BrowserWorker {
           }
           if (step.type === StepType.WORKDAY_SUBMIT_CLICK && prior.submitResult) {
             this.lastWorkdaySubmitResult = prior.submitResult;
+          }
+          if (step.type === StepType.UNIVERSAL_SUBMIT_CLICK && prior.submitResult) {
+            this.lastUniversalSubmitResult = prior.submitResult;
+          }
+          if (step.type === StepType.UNIVERSAL_APPLY && prior.universalResult) {
+            this.lastUniversalResult = prior.universalResult;
           }
           continue;
         }
@@ -253,6 +262,15 @@ export class BrowserWorker {
           };
           continue;
         }
+        if (step.type === StepType.UNIVERSAL_SUBMIT_CLICK
+            && (prior?.status === REAL_SUBMIT_ATTEMPTING || this.#hasBackendPreSubmitAttempt(plan))) {
+          this.lastUniversalSubmitResult = {
+            confirmed: false,
+            category: UniversalSubmitCategory.PRIOR_ATTEMPT_UNVERIFIED,
+            evidence: 'a prior PRE_SUBMIT_ATTEMPTING checkpoint exists for this plan; human reconciliation is required before any further action',
+          };
+          continue;
+        }
         const policy = evaluatePolicy(step);
         if (policy.action === 'BLOCK') throw new HardStopError(policy.reason, { stepId: step.id });
         if (policy.action === 'PAUSE' && !approve) {
@@ -291,15 +309,19 @@ export class BrowserWorker {
           if (plan.planType === 'LEVER') this.#assertLeverIdentity(page, plan);
           if (plan.planType === 'WORKDAY') this.#assertWorkdayIdentity(page, plan);
           if (plan.planType === 'ASHBY') this.#assertAshbyIdentity(page, plan);
+          if (plan.planType === 'UNIVERSAL') this.#assertUniversalIdentity(page, plan);
           const stepExtra = { currentUrl: sanitizeUrl(page.url()) };
-          // Durable evidence, not just a "this step ran" marker: a
-          // REAL_SUBMIT_CLICK step's own classification (confirmed or not,
-          // with its evidence) is persisted alongside COMPLETED so a later
-          // resume can restore the exact authentic outcome instead of
-          // reconstructing — or losing — it. See the restore logic above.
           if (step.type === StepType.REAL_SUBMIT_CLICK) stepExtra.submitResult = this.lastSubmitResult;
           if (step.type === StepType.ASHBY_SUBMIT_CLICK) stepExtra.submitResult = this.lastAshbySubmitResult;
           if (step.type === StepType.WORKDAY_SUBMIT_CLICK) stepExtra.submitResult = this.lastWorkdaySubmitResult;
+          if (step.type === StepType.UNIVERSAL_APPLY && this.lastUniversalResult) {
+            stepExtra.universalPaused = Boolean(this.lastUniversalResult.pausedForInput);
+            stepExtra.completedPages = this.lastUniversalResult.completedPages ?? [];
+            stepExtra.universalResult = this.lastUniversalResult;
+          }
+          if (step.type === StepType.UNIVERSAL_SUBMIT_CLICK && this.lastUniversalSubmitResult) {
+            stepExtra.submitResult = this.lastUniversalSubmitResult;
+          }
           this.store.markStep(plan.planId, step.id, 'COMPLETED', stepExtra);
           if (step.id === 'account-verify-otp-submit') {
             values.verification = null;
@@ -335,7 +357,9 @@ export class BrowserWorker {
         zohoRecruitResult: this.lastZohoRecruitResult ?? null, leverResult: this.lastLeverResult ?? null,
         workdayResult: this.lastWorkdayResult ?? null, ashbyResult: this.lastAshbyResult ?? null,
         ashbySubmitResult: this.lastAshbySubmitResult ?? null,
-        workdaySubmitResult: this.lastWorkdaySubmitResult ?? null };
+        workdaySubmitResult: this.lastWorkdaySubmitResult ?? null,
+        universalResult: this.lastUniversalResult ?? null,
+        universalSubmitResult: this.lastUniversalSubmitResult ?? null };
     } catch (error) {
       if (!(error instanceof ApprovalRequiredError) && !(error instanceof HardStopError) && !String(error.message).startsWith('SIMULATED_WORKER_CRASH')) {
         this.store.fail(plan.planId, this.#safeError(error));
@@ -385,6 +409,9 @@ export class BrowserWorker {
         }
         if (plan.planType === 'WORKDAY' && !workdayPageIdentityMatches(p.url, page.url())) {
           throw new HardStopError('WORKDAY_PAGE_IDENTITY_MISMATCH', { stepId: step.id });
+        }
+        if (plan.planType === 'UNIVERSAL' && !universalPageIdentityMatches(plan.targetUrl, page.url(), { allowLocalTestHosts: Boolean(plan.package?.allowLocalTestHosts) })) {
+          throw new HardStopError('UNIVERSAL_PAGE_IDENTITY_MISMATCH', { stepId: step.id });
         }
         break;
       case StepType.FILL_FIELD: {
@@ -623,6 +650,12 @@ export class BrowserWorker {
         break;
       case StepType.ASHBY_SUBMIT_CLICK:
         this.lastAshbySubmitResult = await this.#runAshbySubmit(page, plan, step);
+        break;
+      case StepType.UNIVERSAL_APPLY:
+        this.lastUniversalResult = await this.#runUniversalApply(page, plan, step, values);
+        break;
+      case StepType.UNIVERSAL_SUBMIT_CLICK:
+        this.lastUniversalSubmitResult = await this.#runUniversalSubmitClick(page, plan, step);
         break;
       case StepType.MOCK_SUBMIT:
         await page.locator(p.selector).click();
@@ -2277,6 +2310,277 @@ export class BrowserWorker {
     if (!workdayPageIdentityMatches(plan.targetUrl, page.url())) {
       throw new HardStopError('WORKDAY_PAGE_IDENTITY_MISMATCH');
     }
+  }
+
+  #assertUniversalIdentity(page, plan) {
+    const allowLocalTestHosts = Boolean(plan.package?.allowLocalTestHosts);
+    if (!universalPageIdentityMatches(plan.targetUrl, page.url(), { allowLocalTestHosts })) {
+      throw new HardStopError('UNIVERSAL_PAGE_IDENTITY_MISMATCH');
+    }
+  }
+
+  #hasBackendPreSubmitAttempt(plan) {
+    return Array.isArray(plan.completedSteps) && plan.completedSteps.some((s) =>
+      s?.stepKey === 'pre-submit-attempting' || s?.result?.phase === 'PRE_SUBMIT_ATTEMPTING');
+  }
+
+  #validateUniversalPlan(plan) {
+    if (!plan.correlation?.applicationId || !plan.correlation?.jobId || !Array.isArray(plan.steps) || !plan.package) {
+      throw new HardStopError('INVALID_UNIVERSAL_PLAN_CORRELATION');
+    }
+    const allowLocalTestHosts = Boolean(plan.package?.allowLocalTestHosts);
+    const navigations = plan.steps.filter((step) => step.type === StepType.NAVIGATE);
+    const targetUrl = plan.targetUrl ?? navigations[0]?.params?.url;
+    if (navigations.length !== 1 || plan.steps[0] !== navigations[0]
+        || plan.package.expectedUrl !== targetUrl
+        || !universalPageIdentityMatches(targetUrl, navigations[0].params?.url, { allowLocalTestHosts })) {
+      throw new HardStopError('INVALID_UNIVERSAL_TARGET');
+    }
+    const ids = new Set();
+    for (const step of plan.steps) {
+      if (!step?.id || ids.has(step.id)) throw new HardStopError('INVALID_UNIVERSAL_STEP_ID');
+      ids.add(step.id);
+      if ([StepType.REAL_SUBMIT_CLICK, StepType.MOCK_SUBMIT, StepType.ASHBY_SUBMIT_CLICK, StepType.WORKDAY_SUBMIT_CLICK].includes(step.type)) {
+        throw new HardStopError('FORBIDDEN_UNIVERSAL_SUBMIT_STEP', { stepId: step.id });
+      }
+      if (![StepType.NAVIGATE, StepType.SCREENSHOT, StepType.UNIVERSAL_APPLY, StepType.UNIVERSAL_SUBMIT_CLICK].includes(step.type)) {
+        throw new HardStopError('FORBIDDEN_UNIVERSAL_STEP', { stepId: step.id });
+      }
+    }
+    const applySteps = plan.steps.filter((s) => s.type === StepType.UNIVERSAL_APPLY);
+    const submitSteps = plan.steps.filter((s) => s.type === StepType.UNIVERSAL_SUBMIT_CLICK);
+    if (applySteps.length !== 1) throw new HardStopError('UNIVERSAL_APPLY_STEP_COUNT_INVALID');
+    if (submitSteps.length > 1) throw new HardStopError('UNIVERSAL_SUBMIT_STEP_DUPLICATED');
+    if (submitSteps.length === 1 && plan.steps.at(-1).type !== StepType.UNIVERSAL_SUBMIT_CLICK) {
+      throw new HardStopError('UNIVERSAL_SUBMIT_STEP_MUST_BE_LAST');
+    }
+  }
+
+  #validateUniversalArtifacts(plan) {
+    const artifacts = plan.package?.artifacts ?? [];
+    if (!Array.isArray(artifacts)) throw new HardStopError('INVALID_UNIVERSAL_ARTIFACT_LIST');
+    const seen = new Set();
+    for (const artifact of artifacts) {
+      const expected = artifact.kind === 'cv' ? plan.package.cv : artifact.kind === 'coverLetter' ? plan.package.coverLetter : null;
+      if (!expected || seen.has(artifact.kind) || expected.versionId !== artifact.versionId || expected.sha256 !== artifact.sha256
+          || expected.jobId !== plan.correlation.jobId || expected.applicationId !== plan.correlation.applicationId
+          || !expected.path || !fs.existsSync(expected.path)) {
+        throw new HardStopError('UNIVERSAL_ARTIFACT_CORRELATION_MISMATCH');
+      }
+      const actual = crypto.createHash('sha256').update(fs.readFileSync(expected.path)).digest('hex');
+      if (actual !== artifact.sha256) throw new HardStopError('UNIVERSAL_ARTIFACT_CHECKSUM_MISMATCH');
+      seen.add(artifact.kind);
+    }
+  }
+
+  async #reportUniversalPhase(plan, index, stepKey, phase, extra = {}) {
+    if (!this.stepsReporter) return;
+    await this.stepsReporter(plan.planId, {
+      index,
+      stepId: stepKey,
+      status: phase === 'FAILED' ? 'FAILED' : 'COMPLETED',
+      result: { phase, ...extra },
+      screenshotRef: null,
+    });
+  }
+
+  async #runUniversalApply(page, plan, step) {
+    const pkg = plan.package ?? {};
+    const prior = this.store.step(plan.planId, step.id);
+    const completedPages = new Set(prior?.completedPages ?? []);
+    if (Array.isArray(plan.completedSteps)) {
+      for (const s of plan.completedSteps) {
+        if (s?.result?.completedPage) completedPages.add(Number(s.result.completedPage));
+      }
+    }
+    const allFilled = new Set(prior?.filled ?? []);
+    let resumeUploadState = 'NO_FIELD';
+    let coverLetterUploadState = 'NO_FIELD';
+    const maxPages = 6;
+
+    for (let pageLoop = 1; pageLoop <= maxPages; pageLoop += 1) {
+      await page.waitForLoadState('domcontentloaded').catch(() => {});
+      const inspected = await inspectLiveFormDom(page);
+      const sec = inspected.securitySignals ?? {};
+      if (sec.captchaPresent) throw new HardStopError('BLOCKED_ANTI_BOT', { stepId: step.id });
+      if (sec.mfaPresent) throw new HardStopError('UNIVERSAL_MFA_REQUIRED', { stepId: step.id });
+      if (sec.loginWallPresent) throw new HardStopError('UNIVERSAL_LOGIN_REQUIRED', { stepId: step.id });
+      if (inspected.crossOriginFrames > 0 && inspected.controls.length === 0) {
+        throw new HardStopError('UNIVERSAL_CROSS_ORIGIN_IFRAME_UNSUPPORTED', { stepId: step.id });
+      }
+
+      const activePageIndex = completedPages.has(pageLoop) ? pageLoop : pageLoop;
+      await this.#reportUniversalPhase(plan, pageLoop * 10, `phase-inspecting-p${pageLoop}`, 'INSPECTING', {
+        currentUrl: sanitizeUrl(page.url()),
+        pageIndex: pageLoop,
+      });
+
+      const planned = planUniversalControls(inspected, pkg);
+      const pageAlreadyCompleted = completedPages.has(pageLoop);
+      if (!pageAlreadyCompleted) {
+        const upStates = await applyUniversalControlActions(page, planned, pkg, { artifactDir: this.artifactDir });
+        for (const label of planned.filled) allFilled.add(label);
+        if (upStates.cv !== 'NO_FIELD') resumeUploadState = upStates.cv;
+        if (upStates.coverLetter !== 'NO_FIELD') coverLetterUploadState = upStates.coverLetter;
+        await this.#reportUniversalPhase(plan, pageLoop * 10 + 1, `phase-filling-p${pageLoop}`, 'FILLING', {
+          currentUrl: sanitizeUrl(page.url()),
+          pageIndex: pageLoop,
+          filledCount: planned.filled.length,
+        });
+        if (upStates.cv === 'ATTACHED' || upStates.coverLetter === 'ATTACHED') {
+          await this.#reportUniversalPhase(plan, pageLoop * 10 + 2, `phase-uploading-p${pageLoop}`, 'UPLOADING', {
+            pageIndex: pageLoop,
+            cv: upStates.cv,
+            coverLetter: upStates.coverLetter,
+          });
+        }
+      } else {
+        // On resumed passes, never overwrite already completed text inputs,
+        // only re-attach missing file inputs that browsers drop across reloads.
+        const missingFileUploads = { actions: [], uploads: planned.uploads.filter((u) => u.filesAttached === 0) };
+        if (missingFileUploads.uploads.length > 0) {
+          const upStates = await applyUniversalControlActions(page, missingFileUploads, pkg, { artifactDir: this.artifactDir });
+          if (upStates.cv !== 'NO_FIELD') resumeUploadState = upStates.cv;
+          if (upStates.coverLetter !== 'NO_FIELD') coverLetterUploadState = upStates.coverLetter;
+        }
+      }
+
+      if (planned.requiredGaps.length > 0) {
+        if (this.discoveredQuestionsReporter) {
+          await this.discoveredQuestionsReporter(plan.planId, {
+            formUrl: sanitizeUrl(page.url()),
+            pageIndex: pageLoop,
+            questions: planned.requiredGaps,
+          });
+        }
+        await this.#reportUniversalPhase(plan, pageLoop * 10 + 8, `phase-paused-p${pageLoop}`, 'PAUSED', {
+          currentUrl: sanitizeUrl(page.url()),
+          pageIndex: pageLoop,
+          gapCount: planned.requiredGaps.length,
+        });
+        return {
+          pausedForInput: true,
+          pageIndex: pageLoop,
+          completedPages: [...completedPages],
+          filled: [...allFilled],
+          requiredGaps: planned.requiredGaps,
+          skippedOptional: planned.skippedOptional,
+          unsupported: planned.unsupported,
+          resumeUploadState,
+          coverLetterUploadState,
+          currentUrl: sanitizeUrl(page.url()),
+        };
+      }
+
+      if (inspected.nextButton?.selector) {
+        completedPages.add(pageLoop);
+        await this.#reportUniversalPhase(plan, pageLoop * 10 + 3, `phase-completed-p${pageLoop}`, 'COMPLETED', {
+          completedPage: pageLoop,
+          currentUrl: sanitizeUrl(page.url()),
+        });
+        await this.#retry(() => page.locator(inspected.nextButton.selector).click());
+        await page.waitForLoadState('domcontentloaded').catch(() => {});
+        await page.waitForTimeout(200);
+        this.#assertUniversalIdentity(page, plan);
+        continue;
+      }
+
+      await this.#reportUniversalPhase(plan, pageLoop * 10 + 9, `phase-ready-p${pageLoop}`, 'PAUSED', {
+        currentUrl: sanitizeUrl(page.url()),
+        pageIndex: pageLoop,
+        gapCount: 0,
+      });
+      return {
+        pausedForInput: false,
+        pageIndex: pageLoop,
+        completedPages: [...completedPages],
+        filled: [...allFilled],
+        requiredGaps: [],
+        skippedOptional: planned.skippedOptional,
+        unsupported: planned.unsupported,
+        resumeUploadState,
+        coverLetterUploadState,
+        currentUrl: sanitizeUrl(page.url()),
+      };
+    }
+    throw new HardStopError('UNIVERSAL_MULTI_STEP_LIMIT_EXCEEDED');
+  }
+
+  async #runUniversalSubmitClick(page, plan, step) {
+    const pkg = plan.package ?? {};
+    const allowLocalTestHosts = Boolean(pkg.allowLocalTestHosts);
+    if (this.#hasBackendPreSubmitAttempt(plan)) {
+      return {
+        confirmed: false,
+        category: UniversalSubmitCategory.PRIOR_ATTEMPT_UNVERIFIED,
+        evidence: 'backend already recorded PRE_SUBMIT_ATTEMPTING for this plan',
+      };
+    }
+
+    const inspected = await inspectLiveFormDom(page);
+    const sec = inspected.securitySignals ?? {};
+    if (sec.captchaPresent) throw new HardStopError('BLOCKED_ANTI_BOT', { stepId: step.id });
+    if (sec.mfaPresent) throw new HardStopError('UNIVERSAL_MFA_REQUIRED', { stepId: step.id });
+    if (sec.loginWallPresent) {
+      return { confirmed: false, category: UniversalSubmitCategory.LOGIN_WALL, evidence: 'Sign-in wall intercepted submit' };
+    }
+
+    const planned = planUniversalControls(inspected, pkg);
+    if (planned.requiredGaps.length > 0) {
+      return {
+        confirmed: false,
+        category: UniversalSubmitCategory.VALIDATION_ERROR,
+        evidence: `Required fields remain unresolved before submit (${planned.requiredGaps.length})`,
+      };
+    }
+    const missingInputs = {
+      actions: planned.actions.filter((a) => {
+        const ctrl = inspected.controls.find((c) => c.controlId === a.controlId);
+        return !ctrl?.currentValue;
+      }),
+      uploads: planned.uploads.filter((u) => u.filesAttached === 0),
+    };
+    if (missingInputs.actions.length > 0 || missingInputs.uploads.length > 0) {
+      await applyUniversalControlActions(page, missingInputs, pkg, { artifactDir: this.artifactDir });
+    }
+
+    const refreshed = await inspectLiveFormDom(page);
+    if (!refreshed.submitButton?.selector) {
+      return {
+        confirmed: false,
+        category: UniversalSubmitCategory.FORM_STILL_PRESENT,
+        evidence: 'Submit button not found on active universal application step',
+      };
+    }
+
+    this.store.markStep(plan.planId, step.id, REAL_SUBMIT_ATTEMPTING, { currentUrl: sanitizeUrl(page.url()) });
+    if (this.stepsReporter) {
+      const fenceResult = await this.stepsReporter(plan.planId, {
+        index: 99,
+        stepId: 'pre-submit-attempting',
+        status: 'RUNNING',
+        result: { phase: 'PRE_SUBMIT_ATTEMPTING', currentUrl: sanitizeUrl(page.url()) },
+        screenshotRef: null,
+      });
+      if (fenceResult?.conflict) {
+        return {
+          confirmed: false,
+          category: UniversalSubmitCategory.PRIOR_ATTEMPT_UNVERIFIED,
+          evidence: 'Backend refused PRE_SUBMIT_ATTEMPTING fence (409 conflict)',
+        };
+      }
+    }
+    if (this.failAfterAttemptMarker === step.id) {
+      throw new Error(`SIMULATED_WORKER_CRASH_BEFORE_CLICK:${step.id}`);
+    }
+
+    return executeAndVerifyUniversalSubmit({
+      page,
+      submitSelector: refreshed.submitButton.selector,
+      expectedUrl: plan.targetUrl,
+      allowLocalTestHosts,
+      retryFn: (fn) => this.#retry(fn),
+    });
   }
 
   #validateGreenhouseArtifacts(plan) {

@@ -52,7 +52,7 @@ function extractErrorMessage(err: unknown, fallback: string): string {
 
 function isSubmissionCapablePlan(planType?: string | null, planId?: string | null): boolean {
   if (!planId || !planType) return false;
-  return planType === 'GREENHOUSE' || planType === 'ASHBY';
+  return planType === 'GREENHOUSE' || planType === 'ASHBY' || planType === 'UNIVERSAL';
 }
 
 export const ApplicationsPage: React.FC = () => {

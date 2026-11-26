@@ -144,6 +144,46 @@ export function computePlanOutcome(plan, runResult) {
       result: reconciliationResult('WORKDAY', submitResult),
     };
   }
+  // Stage 3B: Universal browser engine guarded submission & preparation outcomes
+  const isUniversalSubmitAttempt = plan.planType === 'UNIVERSAL' && plan.steps.at(-1)?.type === 'UNIVERSAL_SUBMIT_CLICK';
+  if (isUniversalSubmitAttempt) {
+    const submitResult = runResult.universalSubmitResult;
+    if (submitResult?.confirmed) {
+      return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: submissionEvidenceResult('UNIVERSAL', submitResult) };
+    }
+    return {
+      outcome: 'RECONCILIATION_REQUIRED',
+      detail: `Submit click completed but was not confirmed [${submitResult?.category ?? 'UNKNOWN'}]: ${submitResult?.evidence
+        ?? 'no result was recorded'}; this cannot be retried automatically — human reconciliation is required.`,
+      result: reconciliationResult('UNIVERSAL', submitResult),
+    };
+  }
+  if (plan.planType === 'UNIVERSAL') {
+    const univ = runResult.universalResult ?? {};
+    const filledCount = (univ.filled ?? []).length;
+    const gapCount = (univ.requiredGaps ?? []).length;
+    const resumeState = univ.resumeUploadState ?? 'NO_FIELD';
+    const note = gapCount > 0
+      ? `${gapCount} mandatory question(s) need candidate input before continuing.`
+      : 'form preparation ready for candidate review and approval.';
+    return {
+      outcome: 'HUMAN_REQUIRED',
+      detail: `Universal form preparation finished: ${filledCount} field(s) filled, ${resumeState} CV upload; ${note}`,
+      result: [{
+        type: 'UNIVERSAL_OUTCOME',
+        planType: 'UNIVERSAL',
+        filled: univ.filled ?? [],
+        requiredGaps: univ.requiredGaps ?? [],
+        skippedOptional: univ.skippedOptional ?? [],
+        unsupported: univ.unsupported ?? [],
+        resumeUploadState: resumeState,
+        coverLetterUploadState: univ.coverLetterUploadState ?? 'NO_FIELD',
+        currentUrl: univ.currentUrl ?? plan.targetUrl,
+        pageIndex: univ.pageIndex ?? 1,
+        completedPages: univ.completedPages ?? [],
+      }],
+    };
+  }
   if (plan.planType === 'ASHBY') {
     const ashby = runResult.ashbyResult ?? {};
     const filledCount = (ashby.filled ?? []).length;

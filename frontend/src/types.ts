@@ -399,19 +399,33 @@ export interface WorkdayApplicationOutcome {
  */
 export interface SubmissionReconciliationResult {
   type: 'SUBMISSION_RECONCILIATION';
-  planType: 'GREENHOUSE' | 'ASHBY' | 'WORKDAY';
+  planType: 'GREENHOUSE' | 'ASHBY' | 'WORKDAY' | 'UNIVERSAL';
   category: string;
   evidence: string;
 }
 
-/** GET /automation/plans/{id} — the fields the Zoho Recruit / Lever / Workday / Ashby review panels read. */
+export interface UniversalOutcome {
+  type: 'UNIVERSAL_OUTCOME';
+  planType: 'UNIVERSAL';
+  filled: string[];
+  requiredGaps: Array<{ questionKey?: string; questionText?: string; reason?: string }>;
+  skippedOptional?: string[];
+  unsupported?: Array<{ key?: string; label?: string; reason?: string }>;
+  resumeUploadState?: string;
+  coverLetterUploadState?: string;
+  currentUrl?: string;
+  pageIndex?: number;
+  completedPages?: number[];
+}
+
+/** GET /automation/plans/{id} — the fields the Zoho Recruit / Lever / Workday / Ashby / Universal review panels read. */
 export interface AutomationPlanView {
   id: string;
   applicationId: string;
   targetUrl: string;
   status: string;
   plan?: { planType?: string | null } | null;
-  result?: (ZohoRecruitOutcome | LeverOutcome | WorkdayOutcome | WorkdayApplicationOutcome | AshbyOutcome | PlanErrorResult | SubmissionReconciliationResult)[] | null;
+  result?: (ZohoRecruitOutcome | LeverOutcome | WorkdayOutcome | WorkdayApplicationOutcome | AshbyOutcome | UniversalOutcome | PlanErrorResult | SubmissionReconciliationResult)[] | null;
   submitApproved: boolean;
   heartbeatAt?: string | null;
   updatedAt: string;
