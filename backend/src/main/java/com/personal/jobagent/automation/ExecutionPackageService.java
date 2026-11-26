@@ -44,6 +44,9 @@ public class ExecutionPackageService {
                                    String packageDigest) {}
     public record ArtifactBytes(byte[] content, String sha256, String contentType, String fileName) {}
 
+    /** Stage 3F (Workstream D): the one artifact size ceiling, matching the worker's per-ATS caps. */
+    public static final int MAX_ARTIFACT_BYTES = 10 * 1024 * 1024;
+
     private final JdbcTemplate db;
     private final GreenhouseAdapter greenhouseAdapter;
     private final ApplyDocumentSelector documentSelector;
@@ -352,7 +355,7 @@ public class ExecutionPackageService {
             throw new IllegalArgumentException("artifact correlation and immutable version are required");
         if (!jobId.equals(db.queryForObject("select job_id from applications where id = ? and profile_id = ?", UUID.class, applicationId, profileId)))
             throw new IllegalArgumentException("artifact application/job mismatch");
-        return switch (kind) {
+        ArtifactBytes resolved = switch (kind) {
             case "cv" -> {
                 List<Map<String, Object>> rows = db.queryForList("""
                         select f.content, f.sha256, f.content_type from applications a
@@ -376,8 +379,24 @@ public class ExecutionPackageService {
                 byte[] content = String.valueOf(rows.getFirst().get("body_markdown")).getBytes(StandardCharsets.UTF_8);
                 yield new ArtifactBytes(content, Sha256.of(content), "text/plain; charset=utf-8", "cover-letter-" + versionId + ".txt");
             }
+            case "cover-letter-pdf" -> {
+                // Stage 3F: the letter's immutable rendered PDF, re-verified against its recorded checksum.
+                List<Map<String, Object>> rows = db.queryForList("""
+                        select f.content, f.sha256 from cover_letters c join files f on f.id = c.pdf_file_id
+                        where c.id = ? and c.profile_id = ? and c.job_id = ? and c.application_id = ? and f.content is not null
+                        """, versionId, profileId, jobId, applicationId);
+                if (rows.isEmpty()) yield null;
+                byte[] content = (byte[]) rows.getFirst().get("content");
+                String sha = (String) rows.getFirst().get("sha256");
+                if (content == null || sha == null || !sha.equals(Sha256.of(content))) throw new IllegalStateException("COVER_LETTER_PDF_CHECKSUM_MISMATCH");
+                yield new ArtifactBytes(content, sha, "application/pdf", "cover-letter-" + versionId + ".pdf");
+            }
             default -> throw new IllegalArgumentException("unknown artifact kind");
         };
+        if (resolved != null && resolved.content().length > MAX_ARTIFACT_BYTES) {
+            throw new IllegalStateException("ARTIFACT_TOO_LARGE");
+        }
+        return resolved;
     }
 
     private static boolean uniqueConfirmedQuestion(com.personal.jobagent.ats.AtsAdapter.FormFieldDescriptor field,

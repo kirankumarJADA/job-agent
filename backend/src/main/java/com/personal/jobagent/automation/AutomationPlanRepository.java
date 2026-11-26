@@ -430,7 +430,7 @@ public class AutomationPlanRepository {
                     update automation_plans
                     set plan=?::jsonb, status='PREPARED', result='[]'::jsonb, heartbeat_at=null, updated_at=now()
                     where id=? and status='AWAITING_APPROVAL' and submit_approved=false
-                      and not """ + "\n" + SUBMIT_STEP_EXISTS_SQL,
+                      and not """ + "\n" + SUBMIT_STEP_EXISTS_SQL + APPLICATION_NOT_ALREADY_SUBMITTED_SQL,
                     json.writeValueAsString(updatedPlan), id) == 1;
         } catch (Exception e) {
             throw new IllegalStateException("Unable to persist resumed Universal plan", e);
@@ -452,7 +452,7 @@ public class AutomationPlanRepository {
                     update automation_plans
                     set plan=?::jsonb, status='PREPARED', result='[]'::jsonb, heartbeat_at=null, updated_at=now()
                     where id=? and status='HANDOFF_REQUIRED' and submit_approved=false
-                      and not """ + "\n" + SUBMIT_STEP_EXISTS_SQL,
+                      and not """ + "\n" + SUBMIT_STEP_EXISTS_SQL + APPLICATION_NOT_ALREADY_SUBMITTED_SQL,
                     json.writeValueAsString(updatedPlan), id) == 1;
         } catch (Exception e) {
             throw new IllegalStateException("Unable to resume plan after handoff", e);
@@ -480,6 +480,34 @@ public class AutomationPlanRepository {
             row.put("updatedAt", rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toInstant().toString() : null);
             return row;
         }, planId);
+    }
+
+    /**
+     * Stage 3F (Workstream G): records the {@code PRE_SUBMIT_ATTEMPTING} fence in ONE statement,
+     * only while the plan is RUNNING and only if no fence exists yet. Always stored under the
+     * fixed step key {@code pre-submit-attempting}, so concurrent attempts collide on the
+     * unique (plan_id, step_key) index and exactly one can win.
+     *
+     * @return true only for the single caller whose fence was inserted
+     */
+    public boolean recordPreSubmitAttemptIfAbsent(UUID planId, int index, String status, Map<String, Object> result,
+                                                  String screenshot) {
+        if (planId == null) return false;
+        try {
+            String value = json.writeValueAsString(result == null ? Map.of() : result);
+            return db.update("""
+                    insert into automation_steps(id, plan_id, step_key, step_index, status, result, screenshot_ref)
+                    select ?, ?, 'pre-submit-attempting', ?, ?, ?::jsonb, ?
+                    where exists (select 1 from automation_plans where id = ? and status = 'RUNNING')
+                      and not exists (select 1 from automation_steps
+                                      where plan_id = ?
+                                        and (step_key = 'pre-submit-attempting'
+                                             or coalesce(result->>'phase', '') = 'PRE_SUBMIT_ATTEMPTING'))
+                    on conflict (plan_id, step_key) do nothing
+                    """, UuidV7.generate(), planId, index, status, value, screenshot, planId, planId) == 1;
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to record pre-submit attempt", e);
+        }
     }
 
     /** True once a synchronous {@code PRE_SUBMIT_ATTEMPTING} checkpoint was persisted for this plan. */
@@ -575,6 +603,18 @@ public class AutomationPlanRepository {
     }
 
     public record RecoveryResult(int recovered, int quarantined) {}
+
+    /**
+     * Stage 3F (Workstream G): a plan is never resumed when its application has already
+     * been submitted by any attempt (another plan in SUBMITTED, or the application itself
+     * recorded as APPLICATION_SUBMITTED). Appended to the guarded resume UPDATEs.
+     */
+    private static final String APPLICATION_NOT_ALREADY_SUBMITTED_SQL = """
+
+              and not exists (select 1 from automation_plans other
+                              where other.application_id = automation_plans.application_id and other.status = 'SUBMITTED')
+              and not exists (select 1 from applications app
+                              where app.id = automation_plans.application_id and app.status = 'APPLICATION_SUBMITTED')""";
 
     private static final String SUBMIT_STEP_EXISTS_SQL = """
             exists (

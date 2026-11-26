@@ -6,6 +6,16 @@ Each entry records evidence and status. Severity: **P0** user-facing truthfulnes
 
 ---
 
+## P1 — Universal browser network isolation and credential scoping (Stage 3E SEC-1 … SEC-8) — **IMPLEMENTED ON `integration/wave-3` (Stage 3F), NOT MERGED**
+
+**Evidence:** Stage 3E (`docs/STAGE_3E_EXTERNAL_VALIDATION_READINESS_AUDIT.md`) demonstrated live bypasses of the worker's `page.route` guard (WebSocket, Service Worker, popup), no DNS-rebinding protection, plaintext `storage.json` sessions, and a `/employer-credentials/resolve` endpoint without employer-domain binding.
+
+**Fix (Stage 3F, `docs/STAGE_3F_SECURITY_HARDENING_IMPLEMENTATION.md`):** connection-level loopback egress proxy (DNS resolved and pinned by the worker, private/metadata/special ranges refused), context-level guard with WebSocket routing, Service Workers blocked, popups closed, no plaintext session files (optional encrypted vault), exact-host credential binding to the application's job/plan host with an active run, 10 MiB artifact cap, cross-origin header stripping, URL redaction.
+
+**Still open:** proven only against local fixtures and injected DNS answers; no authorised external test environment exists, so external validation (Stage 3G) remains blocked; host-level egress control is not deployed; backend `AddressGuard` fetches still resolve before connecting.
+
+---
+
 ## P0 — Workday capability was overstated — **FIXED IN MERGED MASTER BASELINE**
 
 **Evidence:** the former `AtsCapabilityRegistry.WORKDAY` row reported form-filling capability even though `WorkdayExecutionPlanService` only verifies a saved credential against the real sign-in page and does not reach or fill the application form.

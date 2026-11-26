@@ -1104,7 +1104,7 @@ class AtsHandoffIntegrationIT {
 
         var initiateReq = new HandoffController.InitiateRequest(
                 seeded.planId(), seeded.applicationId(), "GREENHOUSE",
-                "https://boards.greenhouse.io/org/jobs/12345", "BLOCKED_ANTI_BOT", null, 15
+                "https://jobs.greenhouse.co/org/gh-plan-blocked-1", "BLOCKED_ANTI_BOT", null, 15
         );
 
         MvcResult initResult = mockMvc.perform(post("/api/v1/handoff/initiate")
@@ -1273,7 +1273,7 @@ class AtsHandoffIntegrationIT {
         // Initiate handoff for plan 2
         var req2 = new HandoffController.InitiateRequest(
                 seeded2.planId(), seeded2.applicationId(), "WORKDAY",
-                "https://workday.com/apply/multi-2", "WORKDAY_MFA_REQUIRED", null, 15
+                "https://jobs.workday.co/org/workday-plan-multi-2", "WORKDAY_MFA_REQUIRED", null, 15
         );
         MvcResult res2 = mockMvc.perform(post("/api/v1/handoff/initiate")
                         .header("Authorization", "Bearer " + WORKER_TOKEN)

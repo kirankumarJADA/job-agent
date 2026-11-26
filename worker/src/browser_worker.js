@@ -17,6 +17,9 @@ import {
   applyUniversalControlActions,
 } from './universal_form.js';
 import { executeAndVerifyUniversalSubmit, UniversalSubmitCategory } from './universal_confirmation.js';
+import { startEgressProxy } from './egress_proxy.js';
+import { assertArtifactAcceptable, ArtifactPolicyError, MAX_UNIVERSAL_UPLOAD_BYTES } from './artifact_policy.js';
+import { SessionVault } from './session_vault.js';
 
 const MAX_WORKDAY_UPLOAD_BYTES = 10 * 1024 * 1024;
 import { StateStore } from './store.js';
@@ -42,6 +45,75 @@ const MAX_ASHBY_UPLOAD_BYTES = 10 * 1024 * 1024;
 // uses to refuse ever clicking again automatically — see its own comment.
 const REAL_SUBMIT_ATTEMPTING = 'ATTEMPTING';
 
+/**
+ * Stage 3F: Chromium flags that keep WebRTC from opening UDP sockets outside
+ * the egress proxy (WebRTC media/ICE cannot be proxied over HTTP CONNECT).
+ */
+const EGRESS_CHROMIUM_ARGS = Object.freeze([
+  '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+  '--webrtc-ip-handling-policy=disable_non_proxied_udp',
+  '--disable-features=WebRtcHideLocalIpsWithMdns,DnsOverHttps',
+]);
+
+/** Stage 3F: removes WebRTC peer connections from every page before any page script runs. */
+const DISABLE_WEBRTC_INIT_SCRIPT = `(() => {
+  for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel']) {
+    try { Object.defineProperty(window, name, { value: undefined, configurable: false, writable: false }); } catch (e) {}
+  }
+})();`;
+
+
+/**
+ * Stage 3F: the one hardened way this worker opens Chromium. Exported so the
+ * adversarial tests exercise exactly the production configuration.
+ *
+ *  - starts the loopback egress proxy (connection-level DNS/IP enforcement);
+ *  - launches Chromium behind it, loopback included ('<-loopback>'), with
+ *    WebRTC prevented from using non-proxied UDP;
+ *  - creates an ephemeral context: Service Workers blocked, downloads refused,
+ *    WebRTC constructors removed before any page script, and only the given
+ *    (already decrypted, vault-checked) storageState — never a file path.
+ *
+ * Fails closed: if any part cannot be set up, everything started so far is
+ * torn down and the error propagates; no browser runs unguarded.
+ */
+export async function openHardenedBrowser({ chromiumImpl = chromium, headless = true, egressPolicy = {},
+  storageState = undefined, extraArgs = [] } = {}) {
+  const egress = await startEgressProxy(egressPolicy);
+  let browser;
+  let context;
+  try {
+    browser = await chromiumImpl.launch({
+      headless,
+      args: ['--disable-dev-shm-usage', '--no-sandbox', '--disable-gpu', ...EGRESS_CHROMIUM_ARGS, ...extraArgs],
+      proxy: { server: egress.url, bypass: '<-loopback>' },
+    });
+    context = await browser.newContext({ serviceWorkers: 'block', acceptDownloads: false,
+      ...(storageState ? { storageState } : {}) });
+    if (typeof context.addInitScript === 'function') await context.addInitScript(DISABLE_WEBRTC_INIT_SCRIPT);
+  } catch (error) {
+    await context?.close().catch(() => {});
+    await browser?.close().catch(() => {});
+    await egress.close();
+    throw error;
+  }
+  return { browser, context, egress };
+}
+
+/**
+ * Stage 3F (A3): closes every page except `mainPage` the moment it appears.
+ * Its first requests were already subject to the context guard and the
+ * egress proxy; this stops a popup from becoming a second browsing session.
+ */
+export function closeUnexpectedPages(context, mainPage, onClosed = () => {}) {
+  if (typeof context?.on !== 'function') return;
+  context.on('page', (extra) => {
+    if (extra === mainPage) return;
+    try { onClosed(extra.url?.() ?? ''); } catch { /* diagnostics only */ }
+    extra.close().catch(() => {});
+  });
+}
+
 export class HardStopError extends Error {
   constructor(reason, details = {}) { super(reason); this.name = 'HardStopError'; this.reason = reason; this.details = details; }
 }
@@ -58,7 +130,8 @@ export class HumanInputRequiredError extends Error {
 export class BrowserWorker {
   constructor({ statePath, artifactDir, eventSink = () => {}, verificationResolver = null, identityResolver = null,
                 credentialResolver = null, stepsReporter = null, discoveredQuestionsReporter = null,
-                onPageCreated = null, chromium: customChromium = null } = {}) {
+                onPageCreated = null, chromium: customChromium = null, localTestNetwork = false,
+                sessionKey = null } = {}) {
     this.store = new StateStore(statePath);
     this.chromium = customChromium ?? chromium;
     this.artifactDir = artifactDir;
@@ -108,6 +181,22 @@ export class BrowserWorker {
      * touching a real employer site.
      */
     this.onPageCreated = onPageCreated;
+    /**
+     * Stage 3F test seam (never set by worker.js): lets the dedicated-ATS test
+     * suites, which drive local mock servers, reach loopback on any port.
+     * Private, link-local and metadata ranges stay blocked even then. UNIVERSAL
+     * plans ignore this and use the backend-controlled
+     * `plan.package.allowLocalTestHosts` flag, restricted to the plan's own port.
+     */
+    this.localTestNetwork = Boolean(localTestNetwork);
+    /** Stage 3F: egress proxy diagnostics from the most recent run (host + reason only). */
+    this.lastEgressDiagnostics = null;
+    /**
+     * Stage 3F (Workstream B): encrypted, TTL-bound browser session at rest —
+     * disabled (purely in-memory sessions) unless a key is supplied. Never the
+     * plaintext storage.json earlier builds wrote.
+     */
+    this.sessionVault = new SessionVault({ artifactDir, key: sessionKey });
   }
 
   /**
@@ -163,19 +252,34 @@ export class BrowserWorker {
     // renderer, and the hardened images run without the user-namespace
     // sandbox. Both flags are required for reliable headless execution in
     // the production container (worker/Dockerfile).
-    const browser = await (this.chromium || chromium).launch({
+    // Stage 3F (Workstream A): every connection Chromium (and Playwright's own
+    // route.fetch) makes goes through a loopback egress proxy that resolves DNS
+    // itself, rejects private/loopback/link-local/metadata/special addresses
+    // and pins the socket to the validated IP. Fail closed: no proxy, no run.
+    const applicationId = plan.correlation.applicationId;
+    // Removes any legacy plaintext storage.json; returns a decrypted session only
+    // when the vault is enabled and the entry is fresh, untampered and this application's.
+    const savedSession = this.sessionVault.load(applicationId);
+    let keepSession = false;
+    const { browser, context, egress } = await openHardenedBrowser({
+      chromiumImpl: this.chromium || chromium,
       headless,
-      args: ['--disable-dev-shm-usage', '--no-sandbox', '--disable-gpu'],
+      egressPolicy: this.#egressPolicyFor(plan),
+      storageState: savedSession,
     });
-    const sessionDir = path.join(this.artifactDir, 'sessions', plan.correlation.applicationId);
-    fs.mkdirSync(sessionDir, { recursive: true });
-    const context = await browser.newContext({ storageState: fs.existsSync(path.join(sessionDir, 'storage.json')) ? path.join(sessionDir, 'storage.json') : undefined });
-    const page = await context.newPage();
     this.lastUniversalNavGuard = null;
     if (plan.planType === 'UNIVERSAL') {
-      this.lastUniversalNavGuard = await installUniversalNavigationGuard(page, plan.targetUrl, {
+      // Context-level guard: covers popups, new tabs and frames from their
+      // first request, and WebSocket handshakes (routeWebSocket).
+      this.lastUniversalNavGuard = await installUniversalNavigationGuard(context, plan.targetUrl, {
         allowLocalTestHosts: Boolean(plan.package?.allowLocalTestHosts),
       });
+    }
+    const page = await context.newPage();
+    if (plan.planType === 'UNIVERSAL') {
+      // Automation never needs a second page: popups and new tabs are closed and recorded.
+      closeUnexpectedPages(context, page,
+        (url) => this.lastUniversalNavGuard?.recordBlocked?.(url, 'popup', 'UNEXPECTED_PAGE_CLOSED'));
     }
     if (this.onPageCreated) await this.onPageCreated(page);
     const values = {
@@ -340,7 +444,8 @@ export class BrowserWorker {
           this.#emit(plan, { type: 'STEP_COMPLETED', stepId: step.id, stepType: step.type });
           const businessEvent = this.#businessEvent(step.id);
           if (businessEvent) this.#emit(plan, { type: businessEvent });
-          await context.storageState({ path: path.join(sessionDir, 'storage.json') });
+          // Stage 3F: only ever the encrypted vault (no-op when disabled), never plaintext.
+          if (this.sessionVault.enabled) this.sessionVault.save(applicationId, await context.storageState());
           if (failAfterStep === step.id) {
             // Simulate a process crash after durable commit. Do not convert
             // the already-completed step into FAILED; restart must skip it.
@@ -374,8 +479,14 @@ export class BrowserWorker {
       if (!(error instanceof ApprovalRequiredError) && !(error instanceof HardStopError) && !String(error.message).startsWith('SIMULATED_WORKER_CRASH')) {
         this.store.fail(plan.planId, this.#safeError(error));
       }
+      // The session survives only an approval pause (the same plan resumes) or a
+      // crash; completion, failure, hard stops, handoffs and shutdown delete it.
+      keepSession = error instanceof ApprovalRequiredError || String(error?.message).startsWith('SIMULATED_WORKER_CRASH');
       throw error;
     } finally {
+      try {
+        this.lastEgressDiagnostics = egress.getDiagnostics();
+      } catch { /* diagnostics are best effort */ }
       try {
         if (context) {
           await context.close();
@@ -397,9 +508,32 @@ export class BrowserWorker {
             target: 'browser',
             error: closeErr?.message || String(closeErr),
           }));
+        } finally {
+          await egress.close().catch(() => {});
+          try {
+            if (!keepSession) this.sessionVault.purge(applicationId);
+          } catch { /* best effort */ }
         }
       }
     }
+  }
+
+  /** Stage 3F: the egress policy for one plan. */
+  #egressPolicyFor(plan) {
+    if (plan.planType === 'UNIVERSAL') {
+      const allowLocalTestHosts = Boolean(plan.package?.allowLocalTestHosts);
+      let localTestPorts = [];
+      if (allowLocalTestHosts) {
+        try {
+          const target = new URL(plan.targetUrl);
+          localTestPorts = [Number(target.port || (target.protocol === 'https:' ? 443 : 80))];
+        } catch {
+          localTestPorts = [];
+        }
+      }
+      return { allowLocalTestHosts, localTestPorts };
+    }
+    return { allowLocalTestHosts: this.localTestNetwork, localTestPorts: null };
   }
 
   async #runStep(page, plan, step, values) {
@@ -2377,8 +2511,20 @@ export class BrowserWorker {
           || !expected.path || !fs.existsSync(expected.path)) {
         throw new HardStopError('UNIVERSAL_ARTIFACT_CORRELATION_MISMATCH');
       }
-      const actual = crypto.createHash('sha256').update(fs.readFileSync(expected.path)).digest('hex');
+      const bytes = fs.readFileSync(expected.path);
+      const actual = crypto.createHash('sha256').update(bytes).digest('hex');
       if (actual !== artifact.sha256) throw new HardStopError('UNIVERSAL_ARTIFACT_CHECKSUM_MISMATCH');
+      // Stage 3F (Workstream D): one 10 MiB cap, and the bytes must really be the declared type.
+      if (bytes.length > MAX_UNIVERSAL_UPLOAD_BYTES) throw new HardStopError('UNIVERSAL_ARTIFACT_TOO_LARGE');
+      try {
+        assertArtifactAcceptable(bytes, {
+          contentType: artifact.contentType ?? expected.contentType,
+          fileName: artifact.fileName ?? expected.fileName ?? expected.path,
+        });
+      } catch (error) {
+        if (error instanceof ArtifactPolicyError) throw new HardStopError(`UNIVERSAL_${error.reason}`);
+        throw error;
+      }
       seen.add(artifact.kind);
     }
   }
@@ -2784,9 +2930,15 @@ export class BrowserWorker {
 
   async #failureScreenshot(page, plan, stepId) {
     const dir = path.join(this.artifactDir, 'failures');
-    fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, `${plan.planId}-${stepId}.png`);
-    await page.screenshot({ path: file, fullPage: true }).catch(() => {});
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = path.join(dir, `${String(plan.planId).replace(/[^A-Za-z0-9_-]/g, '_')}-${String(stepId).replace(/[^A-Za-z0-9_-]/g, '_')}.png`);
+    // Stage 3F: diagnostics must not capture credentials or personal data —
+    // every form control's contents are masked in the screenshot.
+    const mask = typeof page.locator === 'function'
+      ? [page.locator('input, textarea, select, [contenteditable="true"]')]
+      : undefined;
+    await page.screenshot({ path: file, fullPage: true, mask }).catch(() => {});
+    try { if (fs.existsSync(file)) fs.chmodSync(file, 0o600); } catch { /* best effort */ }
     return file;
   }
 

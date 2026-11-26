@@ -237,7 +237,8 @@ public class UniversalBrowserPlanService {
             if (updated != 1) {
                 throw new IllegalStateException("UNIVERSAL_PLAN_NOT_PREPARED");
             }
-            log.info("UNIVERSAL plan {} prepared for application {} ({})", planId, applicationId, applicationUrl);
+            log.info("UNIVERSAL plan {} prepared for application {} ({})", planId, applicationId,
+                    com.personal.jobagent.common.SafeUrls.redactForLog(applicationUrl));
             return Optional.of(planId);
         } catch (Exception e) {
             if (e instanceof RuntimeException re) throw re;
@@ -308,7 +309,36 @@ public class UniversalBrowserPlanService {
             coverLetterMarkdown = db.queryForObject(
                     "select body_markdown from cover_letters where id = ? and profile_id = ? and job_id = ? and application_id = ?",
                     String.class, selectedCl.versionId(), profileId, jobId, applicationId);
-            if (coverLetterMarkdown != null) {
+            // Stage 3F (Workstream F): prefer the letter's own immutable, candidate-approved PDF
+            // (rendered by CoverLetterService, checksum recorded at render time) so PDF-only
+            // upload fields can accept it. Without a stored, intact PDF the plain-text export
+            // below is kept, and the worker refuses it against a PDF-only field and asks the
+            // candidate — it never uploads a mismatched format silently.
+            byte[] storedPdf = selectedCl.pdfStored() && selectedCl.pdfSha256() != null
+                    ? storedCoverLetterPdf(selectedCl.versionId(), profileId, jobId, applicationId, selectedCl.pdfSha256())
+                    : null;
+            if (storedPdf != null) {
+                String version = selectedCl.versionId().toString();
+                String url = "/api/v1/automation/plans/" + planId + "/artifacts/cover-letter-pdf?versionId=" + version;
+                artifacts.add(Map.of(
+                        "kind", "coverLetter",
+                        "url", url,
+                        "versionId", version,
+                        "sha256", selectedCl.pdfSha256(),
+                        "fileName", "cover-letter-" + version + ".pdf",
+                        "contentType", "application/pdf",
+                        "byteSize", (long) storedPdf.length));
+                coverLetter = new LinkedHashMap<>();
+                coverLetter.put("versionId", version);
+                coverLetter.put("sha256", selectedCl.pdfSha256());
+                coverLetter.put("jobId", jobId.toString());
+                coverLetter.put("applicationId", applicationId.toString());
+                coverLetter.put("fileName", "cover-letter-" + version + ".pdf");
+                coverLetter.put("contentType", "application/pdf");
+                coverLetter.put("url", url);
+                coverLetter.put("byteSize", (long) storedPdf.length);
+                coverLetter.put("bodySha256", selectedCl.bodySha256());
+            } else if (coverLetterMarkdown != null) {
                 byte[] bytes = coverLetterMarkdown.getBytes(StandardCharsets.UTF_8);
                 String sha = sha256Hex(bytes);
                 String version = selectedCl.versionId().toString();
@@ -319,6 +349,7 @@ public class UniversalBrowserPlanService {
                         "versionId", version,
                         "sha256", sha,
                         "fileName", "cover-letter-" + version + ".txt",
+                        "contentType", "text/plain; charset=utf-8",
                         "byteSize", (long) bytes.length));
                 coverLetter = new LinkedHashMap<>();
                 coverLetter.put("versionId", version);
@@ -326,6 +357,7 @@ public class UniversalBrowserPlanService {
                 coverLetter.put("jobId", jobId.toString());
                 coverLetter.put("applicationId", applicationId.toString());
                 coverLetter.put("fileName", "cover-letter-" + version + ".txt");
+                coverLetter.put("contentType", "text/plain; charset=utf-8");
                 coverLetter.put("url", url);
                 coverLetter.put("byteSize", (long) bytes.length);
             }
@@ -418,12 +450,31 @@ public class UniversalBrowserPlanService {
         }
     }
 
-    private static boolean isDedicatedAtsUrl(String url) {
-        String lower = url.toLowerCase(Locale.ROOT);
+    /**
+     * Stage 3F: canonical host-boundary match (never a substring of the URL text, so
+     * {@code ?ref=greenhouse.io} or {@code greenhouse.io.evil.example} do not count).
+     */
+    static boolean isDedicatedAtsUrl(String url) {
+        String host = com.personal.jobagent.common.SafeUrls.canonicalHost(url).orElse(null);
+        if (host == null) return false;
         for (String marker : DEDICATED_ATS_HOST_MARKERS) {
-            if (lower.contains(marker)) return true;
+            if (com.personal.jobagent.common.SafeUrls.hostIsOrIsSubdomainOf(host, marker)) return true;
         }
         return false;
+    }
+
+    /** The letter's stored PDF bytes, only when they still match the recorded checksum and fit the cap. */
+    private byte[] storedCoverLetterPdf(UUID letterId, UUID profileId, UUID jobId, UUID applicationId, String expectedSha) {
+        List<Map<String, Object>> rows = db.queryForList("""
+                select f.content from cover_letters c join files f on f.id = c.pdf_file_id
+                where c.id = ? and c.profile_id = ? and c.job_id = ? and c.application_id = ? and f.content is not null
+                """, letterId, profileId, jobId, applicationId);
+        if (rows.isEmpty()) return null;
+        byte[] content = (byte[]) rows.getFirst().get("content");
+        if (content == null || content.length == 0 || content.length > ExecutionPackageService.MAX_ARTIFACT_BYTES) return null;
+        if (!expectedSha.equals(sha256Hex(content))) return null;
+        if (content.length < 5 || content[0] != '%' || content[1] != 'P' || content[2] != 'D' || content[3] != 'F' || content[4] != '-') return null;
+        return content;
     }
 
     private static boolean isExplicitLoopbackHost(String lowerHost) {

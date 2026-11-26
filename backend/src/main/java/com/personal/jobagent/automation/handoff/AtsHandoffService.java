@@ -71,6 +71,30 @@ public class AtsHandoffService {
      * Validates that the target URL is an absolute HTTPS URL with a valid host,
      * no embedded user credentials, and no protocol-relative or dangerous schemes.
      */
+    /**
+     * Dedicated ATS platforms that serve one posting from several of their own hosts
+     * (e.g. {@code boards.greenhouse.io} and {@code job-boards.greenhouse.io}).
+     */
+    private static final java.util.Set<String> ATS_PLATFORM_DOMAINS = java.util.Set.of(
+            "greenhouse.io", "myworkdayjobs.com", "myworkday.com", "lever.co", "ashbyhq.com",
+            "zohorecruit.com", "zohorecruit.in");
+
+    /**
+     * Stage 3F: a handoff link is on "the same employer host" when it is the plan's own host,
+     * or when both hosts belong to the same dedicated ATS platform domain. Any other domain —
+     * including look-alikes such as {@code greenhouse.io.evil.example} — is refused.
+     */
+    public static boolean sameEmployerHost(String handoffHost, String planHost) {
+        if (handoffHost.equals(planHost)) return true;
+        for (String platform : ATS_PLATFORM_DOMAINS) {
+            if (com.personal.jobagent.common.SafeUrls.hostIsOrIsSubdomainOf(handoffHost, platform)
+                    && com.personal.jobagent.common.SafeUrls.hostIsOrIsSubdomainOf(planHost, platform)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static void validateTargetUrl(String targetUrl) {
         if (targetUrl == null || targetUrl.isBlank()) {
             throw new IllegalArgumentException("Target URL must not be null or blank");
@@ -118,6 +142,14 @@ public class AtsHandoffService {
         if (!applicationId.equals(plan.applicationId())) {
             throw new IllegalArgumentException("Mismatched plan and application: plan " + planId
                     + " belongs to application " + plan.applicationId() + ", but requested application was " + applicationId);
+        }
+
+        // Stage 3F: the link handed to the candidate must stay on this plan's own employer host —
+        // never a worker- or page-supplied redirect to some other (possibly phishing) domain.
+        String handoffHost = com.personal.jobagent.common.SafeUrls.canonicalHost(targetUrl).orElse(null);
+        String planHost = com.personal.jobagent.common.SafeUrls.canonicalHost(plan.targetUrl()).orElse(null);
+        if (handoffHost == null || planHost == null || !sameEmployerHost(handoffHost, planHost)) {
+            throw new IllegalArgumentException("Handoff target must be on the application's own employer host");
         }
 
         // Invariant: plan owner must match supplied ownerProfileId

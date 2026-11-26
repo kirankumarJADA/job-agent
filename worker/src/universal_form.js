@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { canonicalHost, evaluateHostName, EGRESS_BLOCKED_HEADER } from './egress_proxy.js';
 
 class UniversalHardStopError extends Error {
   constructor(reason, details = {}) {
@@ -45,29 +46,42 @@ function isIpv4PrivateOrSpecial(host) {
 }
 
 export function isExplicitLoopbackHost(hostname) {
-  const h = String(hostname ?? '').toLowerCase();
-  return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]';
+  // Stage 3F: canonicalise first, so `localhost.` / `127.0.0.1.` / `[::1]` are recognised.
+  const h = canonicalHost(hostname);
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1';
 }
 
+/**
+ * Name-level policy (no DNS). Stage 3F: delegates to the same canonicalising
+ * evaluator the connection-level egress proxy uses, which closes the
+ * trailing-dot bypass (`localhost.`, `127.0.0.1.`) and treats every IP literal
+ * outside explicit test loopback as blocked. DNS-resolved addresses are
+ * enforced at connection time by egress_proxy.js, not here.
+ */
 export function isBlockedHost(hostname, allowLocalTestHosts = false) {
-  const h = String(hostname ?? '').toLowerCase().replace(/^\[|\]$/g, '');
-  if (!h) return true;
-  if (allowLocalTestHosts && isExplicitLoopbackHost(h)) return false;
-  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')
-      || h.endsWith('.lan') || h.endsWith('.home.arpa')) {
-    return true;
+  return !evaluateHostName(hostname, { allowLocalTestHosts }).allowed;
+}
+
+/** Stage 3F: subresource/WebSocket port policy — public destinations only on the default TLS port. */
+export function isAllowedResourcePort(parsed, { allowLocalTestHosts = false } = {}) {
+  if (allowLocalTestHosts && isExplicitLoopbackHost(parsed.hostname)) return true;
+  const protocol = parsed.protocol.toLowerCase();
+  if (protocol !== 'https:' && protocol !== 'wss:') return false;
+  return parsed.port === '' || parsed.port === '443';
+}
+
+/** Request headers that must never follow a request across origins. */
+export const CROSS_ORIGIN_STRIPPED_HEADERS = Object.freeze([
+  'authorization', 'proxy-authorization', 'cookie', 'x-csrf-token', 'x-xsrf-token', 'x-api-key',
+  'x-auth-token', 'x-amz-security-token',
+]);
+
+export function stripCrossOriginHeaders(headers) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers ?? {})) {
+    if (!CROSS_ORIGIN_STRIPPED_HEADERS.includes(String(k).toLowerCase())) out[k] = v;
   }
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) {
-    return isIpv4PrivateOrSpecial(h) || true; // IP literals refused in production
-  }
-  if (h.includes(':')) {
-    if (h === '::1' || h === '::' || /^fe[89ab]/i.test(h) || /^f[cd]/i.test(h)
-        || h.includes('127.0.0.1') || h.includes('169.254.')) {
-      return true;
-    }
-    return true; // IPv6 literals refused in production
-  }
-  return !h.includes('.');
+  return out;
 }
 
 /**
@@ -164,6 +178,9 @@ export function evaluateUniversalResourceRequest({
     if (!isSecure && !isAllowedLocalTest) {
       return { allowed: false, reason: 'BLOCKED_INSECURE_SCHEME' };
     }
+    if (!isAllowedResourcePort(parsed, { allowLocalTestHosts })) {
+      return { allowed: false, reason: 'BLOCKED_PORT' };
+    }
     return { allowed: true, reason: 'ALLOWED_SUBRESOURCE' };
   };
 
@@ -179,8 +196,16 @@ export function evaluateUniversalResourceRequest({
 /**
  * Attaches a fail-closed network request guard against SSRF / cross-origin document redirects
  * for real Chromium browser navigation on UNIVERSAL plans, while allowing valid HTTPS CDN assets.
+ *
+ * Stage 3F: `target` should be the BrowserContext (a Page is still accepted for
+ * focused tests). On a context the HTTP guard covers every page and popup the
+ * context ever creates, from their first request, and `routeWebSocket` applies
+ * the same destination policy to WebSocket handshakes (which `route()` never
+ * sees). This is the policy layer; connection-level IP enforcement (DNS
+ * rebinding) is egress_proxy.js, which Chromium is launched behind.
  */
-export async function installUniversalNavigationGuard(page, expectedUrl, { allowLocalTestHosts = false } = {}) {
+export async function installUniversalNavigationGuard(target, expectedUrl, { allowLocalTestHosts = false } = {}) {
+  const page = target;
   try {
     new URL(expectedUrl);
   } catch {
@@ -234,7 +259,8 @@ export async function installUniversalNavigationGuard(page, expectedUrl, { allow
     try {
       let currentUrl = reqUrl;
       let currentMethod = request.method();
-      const requestHeaders = request.headers();
+      const originalOrigin = (() => { try { return new URL(reqUrl).origin; } catch { return null; } })();
+      let requestHeaders = request.headers();
       let currentPostData = request.postDataBuffer();
       const maxHops = 5;
 
@@ -250,6 +276,16 @@ export async function installUniversalNavigationGuard(page, expectedUrl, { allow
         }
         const resp = await route.fetch(fetchOpts);
         const status = resp.status();
+        // Stage 3F: a refusal generated by the egress proxy (DNS answer, port or name
+        // rejected at the connection boundary) becomes an explicit abort, never a
+        // synthetic empty response handed to the page.
+        const egressMarker = String(resp.headers()[EGRESS_BLOCKED_HEADER] ?? '');
+        if (egressMarker.startsWith('blocked')) {
+          const m = /reason=([A-Z_]+)/.exec(egressMarker);
+          recordBlocked(currentUrl, resourceType, `EGRESS_${m ? m[1] : 'BLOCKED'}`);
+          await route.abort('blockedbyclient');
+          return;
+        }
         const locationHeader = resp.headers()['location'];
         if (status >= 300 && status < 400 && locationHeader) {
           let nextUrl;
@@ -287,6 +323,10 @@ export async function installUniversalNavigationGuard(page, expectedUrl, { allow
             currentMethod = 'GET';
             currentPostData = null;
           }
+          // Stage 3F: never carry credentials or CSRF tokens to another origin.
+          if (new URL(nextUrl).origin !== originalOrigin) {
+            requestHeaders = stripCrossOriginHeaders(requestHeaders);
+          }
           currentUrl = nextUrl;
           continue;
         }
@@ -299,8 +339,27 @@ export async function installUniversalNavigationGuard(page, expectedUrl, { allow
     }
   });
 
+  // Stage 3F (SEC-1): WebSocket handshakes are invisible to route(); apply the
+  // same subresource destination policy here. Allowed sockets still connect
+  // from Chromium, i.e. through the egress proxy.
+  if (typeof page.routeWebSocket === 'function') {
+    await page.routeWebSocket(() => true, (ws) => {
+      const wsUrl = ws.url();
+      const decision = evaluateUniversalResourceRequest({
+        reqUrl: wsUrl, expectedUrl, resourceType: 'websocket', isNavigation: false, allowLocalTestHosts,
+      });
+      if (!decision.allowed) {
+        recordBlocked(wsUrl, 'websocket', decision.reason);
+        ws.close({ code: 1008, reason: 'blocked by policy' }).catch(() => {});
+        return;
+      }
+      ws.connectToServer();
+    });
+  }
+
   return {
     getDiagnostics: () => ({ blockedResources: blockedResources.slice() }),
+    recordBlocked,
   };
 }
 

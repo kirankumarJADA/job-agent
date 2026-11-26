@@ -39,6 +39,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -533,6 +534,200 @@ class UniversalBrowserE2EIT {
                         .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString(), Map.class).get("id")));
         mvc.perform(post("/api/v1/handoff/{id}/resume", fencedSessionId).with(csrf()).session(devSession))
                 .andExpect(status().isConflict());
+    }
+
+    // ── Stage 3F: security hardening against real PostgreSQL ─────────────────
+
+    private UUID packageAndClaim(SeededApp seeded) throws Exception {
+        MvcResult pkgRes = mvc.perform(post("/api/v1/apply/applications/{id}/package", seeded.appId())
+                        .with(csrf()).session(devSession))
+                .andExpect(status().isOk()).andReturn();
+        UUID planId = UUID.fromString(String.valueOf(json.readValue(pkgRes.getResponse().getContentAsString(), Map.class).get("planId")));
+        mvc.perform(post("/api/v1/automation/plans/{id}/claim", planId).header("Authorization", "Bearer " + WORKER_TOKEN))
+                .andExpect(status().isOk());
+        return planId;
+    }
+
+    /** Test isolation: never leave a PREPARED/RUNNING plan behind for another test's claim-next. */
+    private void retire(UUID... planIds) {
+        for (UUID id : planIds) jdbc.update("update automation_plans set status = 'ABANDONED' where id = ?", id);
+    }
+
+    private int resolveStatus(UUID appId, String domain) throws Exception {
+        return mvc.perform(post("/api/v1/employer-credentials/resolve")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("applicationId", appId, "employerDomain", domain))))
+                .andReturn().getResponse().getStatus();
+    }
+
+    @Test
+    void stage3f_credentialResolveIsBoundToTheApplicationsEmployerDomainAndActiveRun() throws Exception {
+        var seeded = seedReadyApplication("univ-3f-cred", "https://careers.example.com/jobs/cred-binding");
+        for (String domain : List.of("careers.example.com", "jobs.other-employer.example")) {
+            mvc.perform(post("/api/v1/employer-credentials").with(csrf()).session(devSession)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(json.writeValueAsString(Map.of("employerDomain", domain,
+                                    "username", "ada@" + domain, "password", "Secret-" + domain))))
+                    .andExpect(status().isOk());
+        }
+        MvcResult pkgRes = mvc.perform(post("/api/v1/apply/applications/{id}/package", seeded.appId())
+                        .with(csrf()).session(devSession))
+                .andExpect(status().isOk()).andReturn();
+        UUID planId = UUID.fromString(String.valueOf(json.readValue(pkgRes.getResponse().getContentAsString(), Map.class).get("planId")));
+
+        // Not running yet: no credential leaves the database.
+        assertThat(resolveStatus(seeded.appId(), "careers.example.com")).isEqualTo(409);
+
+        mvc.perform(post("/api/v1/automation/plans/{id}/claim", planId).header("Authorization", "Bearer " + WORKER_TOKEN))
+                .andExpect(status().isOk());
+
+        mvc.perform(post("/api/v1/employer-credentials/resolve")
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("applicationId", seeded.appId(), "employerDomain", "careers.example.com"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.username").value("ada@careers.example.com"));
+        // The candidate DOES have a credential for that other employer, but this application is not that employer.
+        assertThat(resolveStatus(seeded.appId(), "jobs.other-employer.example")).isEqualTo(403);
+        for (String lookalike : List.of("careers.example.com.evil.net", "evilcareers.example.com", "login.careers.example.com", "example.com")) {
+            assertThat(resolveStatus(seeded.appId(), lookalike)).as(lookalike).isEqualTo(403);
+        }
+        assertThat(resolveStatus(UUID.randomUUID(), "careers.example.com")).isEqualTo(404);
+        // Candidate sessions can never resolve (worker-only boundary).
+        mvc.perform(post("/api/v1/employer-credentials/resolve").with(csrf()).session(devSession)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("applicationId", seeded.appId(), "employerDomain", "careers.example.com"))))
+                .andExpect(result -> assertThat(result.getResponse().getStatus()).isIn(401, 403));
+        // Disabled credential: 404, never a stale secret.
+        mvc.perform(delete("/api/v1/employer-credentials/{d}", "careers.example.com").with(csrf()).session(devSession))
+                .andExpect(status().isOk());
+        assertThat(resolveStatus(seeded.appId(), "careers.example.com")).isEqualTo(404);
+        mvc.perform(delete("/api/v1/employer-credentials/{d}", "jobs.other-employer.example").with(csrf()).session(devSession))
+                .andExpect(status().isOk());
+        retire(planId);
+    }
+
+    @Test
+    void stage3f_concurrentPreSubmitFenceAcceptsExactlyOneAttempt() throws Exception {
+        var seeded = seedReadyApplication("univ-3f-fence", "https://careers.example.com/jobs/fence-race");
+        UUID planId = packageAndClaim(seeded);
+        int threads = 8;
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        var start = new java.util.concurrent.CountDownLatch(1);
+        List<java.util.concurrent.Future<Integer>> results = new java.util.ArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            final int n = i;
+            results.add(pool.submit(() -> {
+                start.await();
+                return mvc.perform(post("/api/v1/automation/plans/{id}/steps", planId)
+                                .header("Authorization", "Bearer " + WORKER_TOKEN)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(json.writeValueAsString(Map.of(
+                                        "index", 90 + n, "stepId", n % 2 == 0 ? "pre-submit-attempting" : "racer-" + n,
+                                        "status", "COMPLETED", "result", Map.of("phase", "PRE_SUBMIT_ATTEMPTING")))))
+                        .andReturn().getResponse().getStatus();
+            }));
+        }
+        start.countDown();
+        List<Integer> statuses = new java.util.ArrayList<>();
+        for (var f : results) statuses.add(f.get(30, java.util.concurrent.TimeUnit.SECONDS));
+        pool.shutdownNow();
+        assertThat(statuses.stream().filter(s -> s == 204).count()).as(statuses.toString()).isEqualTo(1);
+        assertThat(statuses.stream().filter(s -> s == 409).count()).isEqualTo(threads - 1);
+        assertThat(jdbc.queryForObject("""
+                select count(*) from automation_steps where plan_id = ?
+                  and (step_key = 'pre-submit-attempting' or result->>'phase' = 'PRE_SUBMIT_ATTEMPTING')
+                """, Integer.class, planId)).isEqualTo(1);
+        retire(planId);
+    }
+
+    @Test
+    void stage3f_resumeIsRefusedOnceTheApplicationWasSubmittedByAnyAttempt() throws Exception {
+        var control = seedReadyApplication("univ-3f-resume-ok", "https://careers.example.com/jobs/resume-ok");
+        var submitted = seedReadyApplication("univ-3f-resume-sub", "https://careers.example.com/jobs/resume-sub");
+        UUID controlPlan = packageAndClaim(control);
+        UUID submittedPlan = packageAndClaim(submitted);
+        for (UUID planId : List.of(controlPlan, submittedPlan)) {
+            mvc.perform(post("/api/v1/automation/plans/{id}/complete", planId)
+                            .header("Authorization", "Bearer " + WORKER_TOKEN).contentType(MediaType.APPLICATION_JSON)
+                            .content(json.writeValueAsString(Map.of("outcome", "HUMAN_REQUIRED", "detail", "paused",
+                                    "result", List.of(Map.of("type", "UNIVERSAL_OUTCOME", "planType", "UNIVERSAL", "requiredGaps", List.of()))))))
+                    .andExpect(status().isNoContent());
+        }
+        // Fixture: another attempt for this application already reached the employer.
+        jdbc.update("update applications set status = 'APPLICATION_SUBMITTED' where id = ?", submitted.appId());
+
+        Map<String, Object> rebuilt = Map.of("planType", "UNIVERSAL", "steps", List.of());
+        assertThat(planRepository.resumeUniversalPlan(submittedPlan, rebuilt)).isFalse();
+        assertThat(jdbc.queryForObject("select status from automation_plans where id = ?", String.class, submittedPlan))
+                .isEqualTo("AWAITING_APPROVAL");
+        jdbc.update("update automation_plans set status = 'HANDOFF_REQUIRED' where id = ?", submittedPlan);
+        assertThat(planRepository.resumeFromHandoff(submittedPlan, rebuilt)).isFalse();
+        assertThat(jdbc.queryForObject("select status from automation_plans where id = ?", String.class, submittedPlan))
+                .isEqualTo("HANDOFF_REQUIRED");
+        // Control: the same guarded update still works for an application nobody has submitted.
+        assertThat(planRepository.resumeUniversalPlan(controlPlan, rebuilt)).isTrue();
+        retire(controlPlan, submittedPlan);
+    }
+
+    @Test
+    void stage3f_handoffLinkStaysOnTheEmployerHostAndConcurrentResumeSucceedsOnce() throws Exception {
+        String targetUrl = "https://portal.example.com/careers/jobs/race-resume";
+        var seeded = seedReadyApplication("univ-3f-handoff", targetUrl);
+        UUID planId = packageAndClaim(seeded);
+        Map<String, Object> base = Map.of("planId", planId, "applicationId", seeded.appId(), "atsPlatform", "UNIVERSAL",
+                "blockReason", "UNIVERSAL_LOGIN_REQUIRED", "ttlMinutes", 15);
+        Map<String, Object> phishing = new LinkedHashMap<>(base);
+        phishing.put("targetUrl", "https://portal-example.login-check.net/careers/jobs/race-resume");
+        int refused = mvc.perform(post("/api/v1/handoff/initiate").header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(phishing)))
+                .andReturn().getResponse().getStatus();
+        assertThat(refused).isBetween(400, 499);
+        assertThat(jdbc.queryForObject("select status from automation_plans where id = ?", String.class, planId)).isEqualTo("RUNNING");
+
+        Map<String, Object> genuine = new LinkedHashMap<>(base);
+        genuine.put("targetUrl", targetUrl);
+        MvcResult initRes = mvc.perform(post("/api/v1/handoff/initiate").header("Authorization", "Bearer " + WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(genuine)))
+                .andExpect(status().isCreated()).andReturn();
+        UUID sessionId = UUID.fromString(String.valueOf(json.readValue(initRes.getResponse().getContentAsString(), Map.class).get("id")));
+
+        int threads = 6;
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        var start = new java.util.concurrent.CountDownLatch(1);
+        List<java.util.concurrent.Future<Integer>> results = new java.util.ArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            results.add(pool.submit(() -> {
+                start.await();
+                return mvc.perform(post("/api/v1/handoff/{id}/resume", sessionId).with(csrf()).session(devSession))
+                        .andReturn().getResponse().getStatus();
+            }));
+        }
+        start.countDown();
+        List<Integer> statuses = new java.util.ArrayList<>();
+        for (var f : results) statuses.add(f.get(30, java.util.concurrent.TimeUnit.SECONDS));
+        pool.shutdownNow();
+        assertThat(statuses.stream().filter(s -> s == 200).count()).as(statuses.toString()).isEqualTo(1);
+        assertThat(statuses.stream().allMatch(s -> s == 200 || s == 409)).as(statuses.toString()).isTrue();
+        assertThat(jdbc.queryForObject("select count(*) from audit_logs where action = 'ATS_HANDOFF_RESUMED' and entity_id = ?",
+                Integer.class, planId)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select status from automation_plans where id = ?", String.class, planId)).isEqualTo("PREPARED");
+        retire(planId);
+    }
+
+    @Test
+    void stage3f_applyPackageAuditStoresARedactedApplicationUrl() throws Exception {
+        var seeded = seedReadyApplication("univ-3f-audit",
+                "https://careers.example.com/jobs/audit-redact?token=SECRET-TOKEN-123&email=dev@example.local#section");
+        MvcResult pkg = mvc.perform(post("/api/v1/apply/applications/{id}/package", seeded.appId()).with(csrf()).session(devSession))
+                .andExpect(status().isOk()).andReturn();
+        retire(UUID.fromString(String.valueOf(json.readValue(pkg.getResponse().getContentAsString(), Map.class).get("planId"))));
+        String after = jdbc.queryForObject("""
+                select after_state::text from audit_logs where action = 'APPLY_PACKAGE_CREATED' and entity_id = ?
+                order by created_at desc limit 1""", String.class, seeded.appId());
+        assertThat(after).contains("https://careers.example.com/jobs/audit-redact")
+                .doesNotContain("SECRET-TOKEN-123").doesNotContain("dev@example.local").doesNotContain("#section");
     }
 
     private record SeededApp(UUID jobId, UUID appId, UUID cvVersionId, String cvSha) {}

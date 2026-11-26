@@ -166,7 +166,8 @@ public class ApplyController {
             }
             audit.write(new AuditEntry(ownerContext.actorOr("user"), "APPLY_PACKAGE_CREATED", "APPLICATION", id,
                     null, Map.of("planId", planId.get().toString(), "jobId", jobId.toString(),
-                            "applicationUrl", applicationUrl), null, UuidV7.generate()));
+                            "applicationUrl", com.personal.jobagent.common.SafeUrls.redactForLog(applicationUrl)),
+                    null, UuidV7.generate()));
             return ResponseEntity.ok(Map.of("planId", planId.get().toString(), "status", "PREPARED"));
         } catch (ExecutionPackageBlockedException blocked) {
             audit.write(new AuditEntry(ownerContext.actorOr("user"), "APPLY_PACKAGE_REFUSED", "APPLICATION", id,

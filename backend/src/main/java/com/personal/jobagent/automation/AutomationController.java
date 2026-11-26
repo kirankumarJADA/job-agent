@@ -336,11 +336,15 @@ public class AutomationController {
         boolean isPreSubmitFence = phase == UniversalExecutionPhase.PRE_SUBMIT_ATTEMPTING
                 || "pre-submit-attempting".equals(r.stepId());
         if (isPreSubmitFence) {
-            if (!"RUNNING".equals(plan.status()) || plans.hasPreSubmitAttemptCheckpoint(id)) {
-                return ResponseEntity.status(409).body(Map.of(
-                        "error", "a pre-submit attempt checkpoint already exists or plan is not RUNNING",
-                        "code", "DUPLICATE_PRE_SUBMIT_ATTEMPT"));
-            }
+            // Stage 3F (Workstream G): one atomic insert-if-absent under the fixed fence key, so
+            // two concurrent reports can never both be accepted (the unique (plan_id, step_key)
+            // index decides), and a plan that is not RUNNING can never record one.
+            boolean recorded = plans.recordPreSubmitAttemptIfAbsent(id, r.index(), r.status(), resultMap, r.screenshotRef());
+            return recorded
+                    ? ResponseEntity.noContent().build()
+                    : ResponseEntity.status(409).body(Map.of(
+                            "error", "a pre-submit attempt checkpoint already exists or plan is not RUNNING",
+                            "code", "DUPLICATE_PRE_SUBMIT_ATTEMPT"));
         }
         return plans.appendStep(id, r.index(), r.stepId(), r.status(), resultMap, r.screenshotRef())
                 ? ResponseEntity.noContent().build()
@@ -1219,7 +1223,7 @@ public class AutomationController {
         if (profileId == null || jobId == null) {
             return notFound();
         }
-        if (!kind.equals("cv") && !kind.equals("cover-letter")) {
+        if (!kind.equals("cv") && !kind.equals("cover-letter") && !kind.equals("cover-letter-pdf")) {
             return ResponseEntity.badRequest().body(Map.of("error", "unknown artifact kind"));
         }
         ExecutionPackageService.ArtifactBytes bytes;

@@ -8,6 +8,8 @@ import { computePlanOutcome } from './outcome.js';
 import { initiateHandoff, isHandoffEligibleError } from './handoff.js';
 import { redactSecrets, sanitizeUrl } from './secret_redaction.js';
 import { StateStore } from './store.js';
+import { SessionVault } from './session_vault.js';
+import { assertArtifactAcceptable, ArtifactPolicyError, MAX_UNIVERSAL_UPLOAD_BYTES } from './artifact_policy.js';
 
 const args = new Map();
 for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i], process.argv[i + 1] ?? true);
@@ -15,6 +17,9 @@ for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i], proce
 const planFile = args.get('--plan') ?? process.env.WORKER_PLAN_FILE;
 const statePath = args.get('--state') ?? process.env.WORKER_STATE_PATH ?? '/data/worker-state.json';
 const artifactDir = args.get('--artifacts') ?? process.env.WORKER_ARTIFACT_DIR ?? '/data/artifacts';
+// Stage 3F: optional AES-256-GCM key (base64, 32 bytes) for the encrypted browser
+// session vault. Unset (the default) = sessions are never written to disk.
+const sessionKey = process.env.ROBIN_WORKER_SESSION_KEY || null;
 const approve = args.get('--approve') === true || args.get('--approve') === 'true';
 const eventUrl = process.env.WORKER_EVENT_URL;
 const eventToken = process.env.WORKER_EVENT_TOKEN;
@@ -69,10 +74,22 @@ const credentialResolver = employerCredentialUrl
 // Reporting FAILED instead would strand it terminal for a full re-prepare.
 const runtime = { shuttingDown: false, runner: null, pollTimer: null };
 
+/** Stage 3F: on shutdown no browser session may outlive the process, encrypted or not. */
+function purgeAllSessionsOnShutdown() {
+  try {
+    const removed = new SessionVault({ artifactDir }).purgeAll();
+    process.stdout.write(`${JSON.stringify({ type: 'WORKER_SESSIONS_PURGED', count: removed })}\n`);
+  } catch (error) {
+    process.stderr.write(`${JSON.stringify({ type: 'WORKER_SESSION_PURGE_FAILED', error: redactSecrets(error?.message ?? error) })}\n`);
+  }
+}
+
 function requestShutdown(signal) {
   if (runtime.shuttingDown) return;
   runtime.shuttingDown = true;
   process.stdout.write(`${JSON.stringify({ type: 'WORKER_SHUTDOWN', signal })}\n`);
+  // Runs after an active run has unwound (and its own per-plan purge), or now when idle.
+  process.once('exit', purgeAllSessionsOnShutdown);
   if (runtime.pollTimer) clearInterval(runtime.pollTimer);
   if (runtime.runner) {
     // Active run: abort cooperatively at the next step boundary; the process
@@ -412,19 +429,40 @@ export async function sendHeartbeat(planId, { apiCallFn = apiCall, heartbeatUrlV
   await apiCallFn(target.replace('{id}', encodeURIComponent(planId)));
 }
 
-async function downloadArtifact(baseUrl, artifact, destination) {
+async function downloadArtifact(baseUrl, artifact, destination, { enforceSignature = false } = {}) {
   const url = new URL(artifact.url, baseUrl);
   if (url.origin !== new URL(baseUrl).origin || !url.pathname.startsWith('/api/v1/automation/plans/')) {
     throw new Error(`ARTIFACT_URL_REJECTED:${artifact.kind}`);
   }
+  // Stage 3F (Workstream D): one 10 MiB ceiling for every artifact, checked
+  // against both the declared size and the bytes actually received.
+  if (Number.isSafeInteger(artifact.byteSize) && artifact.byteSize > MAX_UNIVERSAL_UPLOAD_BYTES) {
+    throw new Error(`ARTIFACT_TOO_LARGE:${artifact.kind}`);
+  }
   const response = await fetchWithRetry(url, { headers: authHeaders() });
   if (!response.ok) throw new Error(`ARTIFACT_DOWNLOAD_FAILED:${artifact.kind}:${response.status}`);
+  const declaredLength = Number(response.headers?.get?.('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_UNIVERSAL_UPLOAD_BYTES) {
+    throw new Error(`ARTIFACT_TOO_LARGE:${artifact.kind}`);
+  }
   const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length > MAX_UNIVERSAL_UPLOAD_BYTES) throw new Error(`ARTIFACT_TOO_LARGE:${artifact.kind}`);
   const expected = artifact.sha256;
   const actual = crypto.createHash('sha256').update(bytes).digest('hex');
   if (!expected || actual !== expected) throw new Error(`ARTIFACT_CHECKSUM_MISMATCH:${artifact.kind}`);
   if (Number.isSafeInteger(artifact.byteSize) && bytes.length !== artifact.byteSize) throw new Error(`ARTIFACT_SIZE_MISMATCH:${artifact.kind}`);
-  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  if (enforceSignature) {
+    try {
+      assertArtifactAcceptable(bytes, {
+        contentType: artifact.contentType ?? response.headers?.get?.('content-type'),
+        fileName: artifact.fileName,
+      });
+    } catch (error) {
+      if (error instanceof ArtifactPolicyError) throw new Error(`${error.reason}:${artifact.kind}`);
+      throw error;
+    }
+  }
+  fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
   const temporary = `${destination}.tmp-${process.pid}`;
   fs.writeFileSync(temporary, bytes, { mode: 0o600 });
   fs.renameSync(temporary, destination);
@@ -492,7 +530,7 @@ export async function materializeArtifacts(plan, backendBase) {
     const safeName = path.basename(artifact.fileName ?? '');
     if (!safeName || safeName !== artifact.fileName) throw new Error('UNSAFE_ARTIFACT_FILENAME');
     const destination = path.join(artifactDir, 'package', plan.correlation.applicationId, safeName);
-    await downloadArtifact(backendBase, artifact, destination);
+    await downloadArtifact(backendBase, artifact, destination, { enforceSignature: plan.planType === 'UNIVERSAL' });
     plan.package[artifact.kind === 'cv' ? 'cv' : 'coverLetter'].path = destination;
   }
 }
@@ -684,6 +722,7 @@ export async function executePollCycle({
       credentialResolver: credentialResolverFn,
       stepsReporter: activeStepsReporter,
       discoveredQuestionsReporter: activeQuestionsReporter,
+      sessionKey,
     });
     runtimeObj.runner = runnerInstance;
     let missedHeartbeats = 0;
@@ -1004,9 +1043,16 @@ export function createPollHandler({
 // same distinction CommonJS's `require.main === module` draws.
 const isMainModule = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
 if (isMainModule) {
+// Stage 3F: remove legacy plaintext session files and expired/unreadable vault entries left by a crash.
+try {
+  const swept = new SessionVault({ artifactDir, key: sessionKey }).sweep();
+  if (swept) console.log(JSON.stringify({ type: 'WORKER_SESSIONS_SWEPT', count: swept }));
+} catch (error) {
+  console.error(JSON.stringify({ type: 'WORKER_SESSION_SWEEP_FAILED', error: redactSecrets(error?.message ?? error) }));
+}
 if (planFile) {
   const plan = JSON.parse(fs.readFileSync(path.resolve(planFile), 'utf8'));
-  const worker = new BrowserWorker({ statePath, artifactDir, eventSink, verificationResolver, identityResolver, credentialResolver });
+  const worker = new BrowserWorker({ statePath, artifactDir, eventSink, verificationResolver, identityResolver, credentialResolver, sessionKey });
   runtime.runner = worker;
   worker.execute(plan, { approve, headless: true })
     .then((result) => process.stdout.write(`${JSON.stringify({ type: 'WORKER_RESULT', status: result.status })}\n`))
