@@ -57,7 +57,7 @@ public class JdbcReceiptTrustStore implements ReceiptTrustStore {
               and ap.profile_id = ?
               and ap.submit_approved = true
               and al.entity_type = 'AUTOMATION_PLAN'
-              and al.action in ('GREENHOUSE_SUBMIT_APPROVED', 'ASHBY_SUBMIT_APPROVED', 'WORKDAY_SUBMIT_APPROVED')
+              and al.action in ('GREENHOUSE_SUBMIT_APPROVED', 'ASHBY_SUBMIT_APPROVED', 'WORKDAY_SUBMIT_APPROVED', 'UNIVERSAL_SUBMIT_APPROVED')
               and al.action = coalesce(ap.plan ->> 'planType', 'GREENHOUSE') || '_SUBMIT_APPROVED'
               and al.after_state is not null
               and (al.after_state ->> 'approvedForSubmission') = 'true'

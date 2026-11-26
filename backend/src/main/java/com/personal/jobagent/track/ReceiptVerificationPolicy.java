@@ -68,7 +68,16 @@ public final class ReceiptVerificationPolicy {
     public record Evidence(EvidenceType type, Channel channel, boolean identifiesThisApplication,
                            boolean identifiesOtherApplication, boolean explicitReceiptPhrase,
                            String fromDomain, SenderAuthentication authentication,
-                           boolean deliveredToConnectedMailbox, Instant evidenceTime, Instant now) {
+                           boolean deliveredToConnectedMailbox, Instant evidenceTime, Instant now,
+                           EmployerDomainPolicy.DomainBinding domainBinding) {
+        /** Convenience constructor without an explicit employer-domain binding (fails closed for external emails). */
+        public Evidence(EvidenceType type, Channel channel, boolean identifiesThisApplication,
+                        boolean identifiesOtherApplication, boolean explicitReceiptPhrase,
+                        String fromDomain, SenderAuthentication authentication,
+                        boolean deliveredToConnectedMailbox, Instant evidenceTime, Instant now) {
+            this(type, channel, identifiesThisApplication, identifiesOtherApplication, explicitReceiptPhrase,
+                    fromDomain, authentication, deliveredToConnectedMailbox, evidenceTime, now, null);
+        }
     }
 
     public record Outcome(Verification status, List<Map<String, String>> reasons) {
@@ -121,6 +130,22 @@ public final class ReceiptVerificationPolicy {
                         "The mail provider did not report a passing signature for the sender's own domain."));
             } else {
                 reasons.add(reason("SENDER_AUTHENTICATED", "The mail provider reported a passing signature for the sender's domain."));
+            }
+            EmployerDomainPolicy.DomainBinding binding = e.domainBinding() == null
+                    ? EmployerDomainPolicy.DomainBinding.unknown()
+                    : e.domainBinding();
+            if (!binding.isBound()) {
+                verified = false;
+                if (binding.status() == EmployerDomainPolicy.BindingStatus.UNBOUND_MISMATCH) {
+                    reasons.add(reason("SENDER_DOMAIN_NOT_BOUND_TO_EMPLOYER",
+                            "The authenticated sender domain is not bound to this employer's corporate domain or a vetted ATS notification domain."));
+                } else {
+                    reasons.add(reason("EMPLOYER_TARGET_DOMAIN_UNKNOWN",
+                            "The employer's verified target domain for this application is unknown or ambiguous."));
+                }
+            } else {
+                reasons.add(reason("EMPLOYER_DOMAIN_BOUND",
+                        "The authenticated sender domain matches the employer's corporate domain or a vetted ATS notification domain."));
             }
             if (!e.deliveredToConnectedMailbox()) {
                 verified = false;

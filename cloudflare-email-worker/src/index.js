@@ -42,7 +42,7 @@ export default {
     }
 
     const rawText = new TextDecoder('utf-8').decode(rawBuffer);
-    const parsed = parseMime(rawText);
+    const parsed = parseMime(rawText, { trustedAuthServIds: env.TRUSTED_AUTHSERV_IDS });
 
     const payload = {
       envelopeRecipient: message.to,
@@ -57,6 +57,11 @@ export default {
       date: parsed.date,
       spf: parsed.spf,
       dkim: parsed.dkim,
+      dkimDomain: parsed.dkimDomain,
+      dmarc: parsed.dmarc,
+      authServId: parsed.authServId,
+      authTrusted: parsed.authTrusted,
+      authConflict: parsed.authConflict,
       spam: parsed.spam
     };
 

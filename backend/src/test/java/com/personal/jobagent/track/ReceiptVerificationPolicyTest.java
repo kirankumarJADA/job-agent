@@ -17,13 +17,20 @@ class ReceiptVerificationPolicyTest {
 
     private static final Instant NOW = Instant.parse("2026-10-10T12:00:00Z");
     private static final SenderAuthentication PASS = new SenderAuthentication("pass", "acme.example", "pass", "pass");
+    private static final EmployerDomainPolicy.DomainBinding BOUND = EmployerDomainPolicy.DomainBinding.bound("acme.example");
 
     private final ReceiptVerificationPolicy policy = new ReceiptVerificationPolicy();
 
     private static Evidence email(Channel channel, boolean identifiesThis, boolean identifiesOther, boolean explicit,
                                   SenderAuthentication auth, boolean delivered, Instant time) {
+        return email(channel, identifiesThis, identifiesOther, explicit, auth, delivered, time, BOUND);
+    }
+
+    private static Evidence email(Channel channel, boolean identifiesThis, boolean identifiesOther, boolean explicit,
+                                  SenderAuthentication auth, boolean delivered, Instant time,
+                                  EmployerDomainPolicy.DomainBinding binding) {
         return new Evidence(EvidenceType.EMPLOYER_ACKNOWLEDGEMENT_EMAIL, channel, identifiesThis, identifiesOther, explicit,
-                "talent.acme.example", auth, delivered, time, NOW);
+                "talent.acme.example", auth, delivered, time, NOW, binding);
     }
 
     private static Evidence valid() {
@@ -110,5 +117,21 @@ class ReceiptVerificationPolicyTest {
     void anUnknownEvidenceTimeIsNotFabricatedAndDoesNotFailVerification() {
         var outcome = policy.evaluate(email(Channel.MAILBOX_CONNECTOR, true, false, true, PASS, true, null));
         assertThat(outcome.status()).isEqualTo(Verification.VERIFIED);
+    }
+
+    @Test
+    void unboundOrUnknownEmployerDomainNeverVerifiesEvenWhenDkimPasses() {
+        var mismatched = policy.evaluate(email(Channel.MAILBOX_CONNECTOR, true, false, true, PASS, true, NOW,
+                EmployerDomainPolicy.DomainBinding.mismatch("SENDER_DOMAIN_NOT_BOUND_TO_EMPLOYER")));
+        var unknown = policy.evaluate(email(Channel.MAILBOX_CONNECTOR, true, false, true, PASS, true, NOW,
+                EmployerDomainPolicy.DomainBinding.unknown()));
+        var missingBinding = policy.evaluate(email(Channel.MAILBOX_CONNECTOR, true, false, true, PASS, true, NOW, null));
+
+        assertThat(mismatched.status()).isEqualTo(Verification.UNVERIFIED);
+        assertThat(mismatched.reasons()).extracting(r -> r.get("code")).contains("SENDER_DOMAIN_NOT_BOUND_TO_EMPLOYER");
+        assertThat(unknown.status()).isEqualTo(Verification.UNVERIFIED);
+        assertThat(unknown.reasons()).extracting(r -> r.get("code")).contains("EMPLOYER_TARGET_DOMAIN_UNKNOWN");
+        assertThat(missingBinding.status()).isEqualTo(Verification.UNVERIFIED);
+        assertThat(missingBinding.reasons()).extracting(r -> r.get("code")).contains("EMPLOYER_TARGET_DOMAIN_UNKNOWN");
     }
 }

@@ -557,3 +557,113 @@ test('executePollCycle orchestrates UNIVERSAL artifact download, /steps phases, 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('universal confirmation parity: drops data.id, disqualifies internal/mock IDs, rejects generic/negative banners, canonicalizes rawEvidence', () => {
+  const internalJobId = '00000000-0000-7000-8000-000000001111';
+  const internalAppId = '00000000-0000-7000-8000-000000002222';
+  const internalPlanId = '00000000-0000-7000-8000-000000003333';
+  const postingUrl = 'https://careers.acme.example/jobs/987654/apply';
+
+  // 1. Generic response.id and MOCK- / REQ- / internal IDs are never promoted to confirmationNumber
+  for (const badPayload of [
+    JSON.stringify({ id: '999888777', status: 'ok' }),
+    JSON.stringify({ confirmationId: 'MOCK-12345' }),
+    JSON.stringify({ confirmationNumber: 'REQ-ACME-101' }),
+    JSON.stringify({ reference: internalJobId }),
+    JSON.stringify({ reference: internalAppId }),
+    JSON.stringify({ reference: internalPlanId }),
+    JSON.stringify({ confirmationId: '987654' }),
+  ]) {
+    const out = classifyUniversalSubmitOutcome({
+      expectedUrl: postingUrl,
+      finalUrl: 'https://careers.acme.example/jobs/987654/confirmation',
+      networkResponses: [{ method: 'POST', url: postingUrl, status: 200, observedAt: '2026-10-22T12:00:00Z', responseBodyText: badPayload }],
+      domState: {
+        formCount: 0,
+        controlsCount: 0,
+        bodyText: 'Your application has been submitted. Requisition ID: REQ-ACME-101',
+        hasConfirmationContainer: true,
+        containerText: 'Your application has been submitted.',
+      },
+      jobId: internalJobId,
+      applicationId: internalAppId,
+      planId: internalPlanId,
+    });
+    assert.equal(out.confirmed, true);
+    assert.equal(out.confirmationNumber, undefined, `Must disqualify fake/internal ID from ${badPayload}`);
+    assert.ok(!out.signals.includes('EMPLOYER_CONFIRMATION_ID_OBSERVED'));
+  }
+
+  // 2. Generic "Success!" banner without genuine application confirmation wording or confirmation route is rejected
+  const genericBanner = classifyUniversalSubmitOutcome({
+    expectedUrl: postingUrl,
+    finalUrl: postingUrl,
+    networkResponses: [{ method: 'POST', url: postingUrl, status: 200, observedAt: '2026-10-22T12:00:00Z' }],
+    domState: {
+      formCount: 0,
+      controlsCount: 0,
+      hasConfirmationContainer: true,
+      containerText: 'Success!',
+      bodyText: 'Success! Thank you for visiting our careers page.',
+    },
+  });
+  assert.equal(genericBanner.confirmed, false);
+  assert.equal(genericBanner.category, UniversalSubmitCategory.CONFIRMATION_UNOBSERVED);
+
+  // 3. Confirmation wording tainted with negative/error phrasing is never confirmed
+  const negativeWording = classifyUniversalSubmitOutcome({
+    expectedUrl: postingUrl,
+    finalUrl: 'https://careers.acme.example/jobs/987654/confirmation',
+    networkResponses: [{ method: 'POST', url: postingUrl, status: 200, observedAt: '2026-10-22T12:00:00Z' }],
+    domState: {
+      formCount: 0,
+      controlsCount: 0,
+      hasConfirmationContainer: true,
+      bodyText: 'Thank you for applying — unfortunately your application could not be submitted. Please try again.',
+    },
+  });
+  assert.equal(negativeWording.confirmed, false);
+  assert.equal(negativeWording.category, UniversalSubmitCategory.CONFIRMATION_UNOBSERVED);
+  assert.ok(negativeWording.signals.includes('UNIVERSAL_NEGATIVE_PHRASING_PRESENT'));
+
+  // 4. Valid observation emits deterministic canonical robin-submission-evidence-v1 JSON with sanitized HTML/secrets
+  const valid = classifyUniversalSubmitOutcome({
+    expectedUrl: postingUrl,
+    finalUrl: 'https://careers.acme.example/jobs/987654/confirmation?token=topsecret',
+    networkResponses: [{
+      method: 'POST',
+      url: postingUrl,
+      status: 201,
+      observedAt: '2026-10-22T12:00:00Z',
+      responseBodyText: JSON.stringify({ confirmationId: 'EMP-REAL-4201' }),
+    }],
+    domState: {
+      formCount: 0,
+      controlsCount: 0,
+      hasConfirmationContainer: true,
+      containerHtml: '<div data-confirmation="true"><script>alert(1)</script><p>We have received your application. Bearer supersecrettoken123</p></div>',
+      containerText: 'We have received your application. Bearer supersecrettoken123 Confirmation ID: EMP-REAL-4201',
+      bodyText: 'We have received your application.',
+    },
+    jobId: internalJobId,
+    applicationId: internalAppId,
+    planId: internalPlanId,
+  });
+  assert.equal(valid.confirmed, true);
+  assert.equal(valid.confirmationNumber, 'EMP-REAL-4201');
+  const rawParsed = JSON.parse(valid.rawEvidence);
+  assert.equal(rawParsed.schemaVersion, 'robin-submission-evidence-v1');
+  assert.equal(rawParsed.atsPlatform, 'UNIVERSAL');
+  assert.deepEqual(rawParsed.attemptCorrelation, {
+    planId: internalPlanId,
+    applicationId: internalAppId,
+    jobId: internalJobId,
+  });
+  assert.equal(rawParsed.confirmationNumber, 'EMP-REAL-4201');
+  assert.ok(!rawParsed.confirmationContainerHtml.includes('<script>'));
+  assert.ok(!rawParsed.confirmationContainerHtml.includes('supersecrettoken123'));
+  assert.ok(!rawParsed.confirmationText.includes('supersecrettoken123'));
+  assert.ok(!rawParsed.confirmationPageUrl.includes('topsecret'));
+  // Canonical sorted keys check: top-level keys appear in sorted order
+  assert.deepEqual(Object.keys(rawParsed), [...Object.keys(rawParsed)].sort());
+});

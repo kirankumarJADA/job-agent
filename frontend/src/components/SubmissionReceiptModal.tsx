@@ -81,17 +81,25 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
     receipt.confirmation?.confirmed === true &&
     receipt.reconciliation?.required !== true;
 
+  const isBrowserObserved =
+    receipt != null &&
+    receipt.status === 'SUBMITTED' &&
+    !isConfirmedProof &&
+    receipt.verificationLevel === 'BROWSER_OBSERVED' &&
+    receipt.reconciliation?.required !== true;
+
   const needsReconciliation =
     receipt != null &&
     (receipt.status === 'RECONCILIATION_REQUIRED' ||
       receipt.reconciliation?.required === true ||
-      (receipt.status === 'SUBMITTED' && !isConfirmedProof));
+      (receipt.status === 'SUBMITTED' && !isConfirmedProof && !isBrowserObserved));
 
   const isFailedAttempt =
     receipt != null &&
     !isConfirmedProof &&
+    !isBrowserObserved &&
     !needsReconciliation &&
-    (receipt.status === 'FAILED' || receipt.failure?.failed === true);
+    (receipt.status === 'FAILED' || receipt.status === 'BLOCKED_ANTI_BOT' || receipt.failure?.failed === true);
 
   return (
     <div
@@ -121,6 +129,8 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                   tone={
                     isConfirmedProof
                       ? 'emerald'
+                      : isBrowserObserved
+                      ? 'sky'
                       : needsReconciliation
                       ? 'amber'
                       : isFailedAttempt
@@ -128,7 +138,9 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                       : 'slate'
                   }
                 >
-                  {receipt.status === 'SUBMITTED' && !isConfirmedProof
+                  {isBrowserObserved
+                    ? 'SUBMITTED — BROWSER OBSERVED'
+                    : receipt.status === 'SUBMITTED' && !isConfirmedProof
                     ? 'SUBMITTED — UNVERIFIED'
                     : receipt.status}
                 </StatusPill>
@@ -272,6 +284,47 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                 </div>
               )}
 
+              {isBrowserObserved && (
+                <div className="rounded-xl border border-sky-300 bg-sky-50/80 p-4">
+                  <div className="flex items-start gap-3">
+                    <div className="rounded-full bg-sky-100 p-1.5 text-sky-800">
+                      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                    </div>
+                    <div className="flex-1">
+                      <h3 className="text-sm font-semibold text-sky-950">
+                        Browser-Observed Submission — Awaiting Employer Verification
+                      </h3>
+                      <p className="mt-1 text-xs text-sky-900 leading-relaxed">
+                        Robin observed the form submission and confirmation view in the browser and archived encrypted DOM
+                        evidence. Employer acknowledgement has not yet been independently verified by email or ATS API.
+                      </p>
+                      <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                        {receipt.confirmation?.confirmationId && (
+                          <div className="rounded-lg bg-sky-100/70 p-2">
+                            <span className="font-semibold text-sky-950">Observed Reference:</span>{' '}
+                            <span className="font-mono font-medium">{receipt.confirmation.confirmationId}</span>
+                          </div>
+                        )}
+                        {receipt.submittedAt && (
+                          <div className="rounded-lg bg-sky-100/70 p-2">
+                            <span className="font-semibold text-sky-950">Submitted At:</span>{' '}
+                            <span>{new Date(receipt.submittedAt).toLocaleString()}</span>
+                          </div>
+                        )}
+                        {receipt.confirmation?.summary && (
+                          <div className="sm:col-span-2 rounded-lg bg-sky-100/70 p-2">
+                            <span className="font-semibold text-sky-950">Observation Summary:</span>{' '}
+                            <span>{receipt.confirmation.summary}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {needsReconciliation && (
                 <div className="rounded-xl border border-amber-300 bg-amber-50/80 p-4">
                   <div className="flex items-start gap-3">
@@ -324,7 +377,7 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                 </div>
               )}
 
-              {!isConfirmedProof && !needsReconciliation && !isFailedAttempt && receipt.attemptNumber === 0 && (
+              {!isConfirmedProof && !isBrowserObserved && !needsReconciliation && !isFailedAttempt && receipt.attemptNumber === 0 && (
                 <div className="rounded-xl border border-line bg-surface-sunken p-4">
                   <h3 className="text-sm font-semibold text-ink">No Submission Executed Yet</h3>
                   <p className="mt-1 text-xs text-ink-muted leading-relaxed">

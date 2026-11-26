@@ -2,34 +2,39 @@
 
 Each entry records evidence and status. Severity: **P0** user-facing truthfulness/safety defect; **P1** blocks a core promise or phase exit; **P2** genuine but not a current phase blocker.
 
-**Updated 2026-11-17** after PR #11 merged (`199e051`); appended **2026-11-26** with Stage 3G preparation and Stage 3H receipt architecture audit findings on `integration/wave-3`. Dated production observations below are historical evidence, not a statement of current production state.
+**Updated 2026-11-17** after PR #11 merged (`199e051`); appended **2026-11-26** with Stage 3G preparation, Stage 3H receipt architecture audit findings, and Stage 3I Phase 0 security remediation on `integration/wave-3`. Dated production observations below are historical evidence, not a statement of current production state.
 
 ---
 
-## P0 — Managed Mail (Cloudflare / Mailgun) DKIM authentication bypass & `dkimDomain` aliasing in TRACK receipts (discovered in Stage 3H, 2026-11-26)
+## P0 — Managed Mail (Cloudflare / Mailgun) DKIM authentication bypass & `dkimDomain` aliasing in TRACK receipts — **REMEDIATED ON `integration/wave-3` (Stage 3I Phase 0, 2026-11-26), NOT YET MERGED/DEPLOYED**
 
-**Evidence (`4fe3642` on `integration/wave-3`):**
-1. `cloudflare-email-worker/src/mime_parser.js:39-48` extracts `Authentication-Results` without verifying a trusted receiver `authserv-id` (unlike `GmailMessageMapper.java:20, 119-135`), takes only the first matching header, and falls back at line `48` to `else if (getHeader(headers, 'dkim-signature')) dkim = 'pass';` — treating the mere presence of any sender-supplied `DKIM-Signature` header as a verified pass with zero cryptographic validation.
-2. `backend/src/main/java/com/personal/jobagent/mailbox/managed/ManagedInboundService.java:197-199` constructs `new ReceiptVerificationPolicy.SenderAuthentication(dkim, message.senderDomain(), spf, null)`, copying the sender-controlled `From:` header domain (`message.senderDomain()`) straight into `dkimDomain` and passing `null` for `dmarc`.
-3. `track/ReceiptVerificationPolicy.java:58-65` only validates `fromDomain` alignment against `dkimDomain`, and has no check binding the sender domain to the target employer's domain (`jobs.application_url`/`targetUrl`).
+**Original Evidence (`4fe3642` on `integration/wave-3`):**
+1. `cloudflare-email-worker/src/mime_parser.js:39-48` extracted `Authentication-Results` without verifying a trusted receiver `authserv-id`, took only the first matching header, and fell back to treating any `DKIM-Signature` header presence as `dkim=pass`.
+2. `ManagedInboundService.java` copied `message.senderDomain()` (the unauthenticated `From:` domain) into `SenderAuthentication.dkimDomain` and passed `null` for `dmarc`.
+3. `track/ReceiptVerificationPolicy.java` checked `fromDomain` alignment against `dkimDomain` without server-owned employer-domain binding.
 
-**Risk:** Whenever Managed Mail (`MAILBOX_CONNECTOR`) is active, any unauthenticated sender sending a MIME message with a spoofed `From: hr@employer.com`, an arbitrary `DKIM-Signature` header, the target job URL/requisition token, and `"we have received your application"` can forge a `Verification.VERIFIED` email receipt row in `application_receipts` (`V038`), falsely moving TRACK to `ACKNOWLEDGED — verified` and `SubmissionState.CONFIRMED`. Even over Gmail, any legitimate third-party domain DKIM-signing an email that quotes a victim's public job URL can satisfy alignment today without employer-domain binding.
+**Remediation (`docs/STAGE_3I_PHASE_0_RECEIPT_TRUST_SECURITY_REMEDIATION.md`):**
+- Removed the `DKIM-Signature` existence fallback in `cloudflare-email-worker/src/mime_parser.js`, bound `Authentication-Results` strictly to explicit `TRUSTED_AUTHSERV_IDS` (topmost header only, conflicting headers fail closed), and forwarded extracted `dkimDomain` (`header.d`/`header.i`), `dmarc`, `authServId`, `authTrusted`, and `authConflict`.
+- Removed `message.senderDomain()` aliasing in `ManagedInboundService.java`, enforced `app.managed-mail.cloudflare.trusted-authserv-ids` (fail closed by default when blank), and updated `CloudflareInboundParser` + `InboundMailMessage` to fail closed on missing/untrusted/conflicted DKIM metadata.
+- Added `EmployerDomainPolicy` (`track/ReceiptVerificationPolicy.java`, `TrackRepository.java`, `TrackEvidenceRecorder.java`) binding verified email receipts to employer corporate registrable domains, vetted ATS notification domains, or server-configured `app.track.vetted-sender-mappings`.
 
-**Recommended Gate 0 Fix (not implemented in Stage 3H):** Remove the `dkim-signature` header-presence fallback and untrusted `Authentication-Results` parsing in `mime_parser.js`; authenticate DKIM cryptographically or strictly via Cloudflare Edge trusted receiver metadata extracting real `header.d=`/`header.i=` signer domains + DMARC verdict; pass real extracted `dkimDomain` (never `message.senderDomain()`) from `ManagedInboundService` (failing closed to `null`/unverified if unavailable); add employer-domain binding in `track/ReceiptVerificationPolicy`.
+**Remaining deployment/operational condition:** Deployments relying on Cloudflare Email Routing DKIM verification must configure `TRUSTED_AUTHSERV_IDS` / `app.managed-mail.cloudflare.trusted-authserv-ids`; PR `#21` remains `OPEN` / `DRAFT` (not merged to `master` or deployed).
 
 ---
 
-## P1 — Universal receipt verification & evidence trust architecture (Stage 3H audit, 2026-11-26) — **BLOCKED: architectural & security defects**
+## P1 — Universal receipt verification & evidence trust architecture (Stage 3H audit → Stage 3I Phase 0 partial remediation, 2026-11-26) — **PARTIALLY REMEDIATED (Gate 0A–0F complete; Phases 1–3 still open)**
 
-**Evidence:** `docs/STAGE_3H_UNIVERSAL_RECEIPT_VERIFICATION_ARCHITECTURE_AUDIT.md`. CI run `45856716570` on `4fe364202343bc3921ab5894d0b6774eb58f1252` completed `success` across all 4 jobs (`backend`, `frontend`, `worker`, `cloudflare-email-worker`); PR `#21` remains `OPEN` / `DRAFT`.
+**Evidence:** `docs/STAGE_3H_UNIVERSAL_RECEIPT_VERIFICATION_ARCHITECTURE_AUDIT.md`, `docs/STAGE_3I_PHASE_0_RECEIPT_TRUST_SECURITY_REMEDIATION.md`.
 
-**Verified Architectural & Contract Blockers:**
-- **Approval attestation mismatch:** `JdbcReceiptTrustStore.STRICT_APPROVAL_SQL` (`L60`) omits `'UNIVERSAL_SUBMIT_APPROVED'`, causing human-approved `UNIVERSAL` plans to report `authorization.approved = false` (`MISSING_ATTESTATION`) via `ApplicationReceiptService:570`.
-- **Level B / `RECONCILIATION_REQUIRED` conflation:** `ApplicationReceiptService.java:337-340` forces `reconciliation.required = true` (`UNVERIFIED_RECEIPT_EVIDENCE`) whenever `submitted && !confirmation.confirmed()`, and `SubmissionReceiptModal.tsx:84-88` renders `"Unconfirmed Submission — Reconciliation Required"`, conflating healthy browser-observed submissions (Level B) with failed/ambiguous clicks (`RECONCILIATION_REQUIRED`).
-- **Managed Mail invisible to TRACK UI:** `ApplicationTrackingService.mailboxConnected()` (`L110-120`) checks Gmail OAuth only, ignoring active `managed_mail_addresses`.
-- **Timeline projection gaps:** `TrackRepository.PROJECTED_AUDIT_ACTIONS` and `TrackTimelineMapper#fromAudit` omit `UNIVERSAL_FORM_REVIEWED`, `UNIVERSAL_SUBMIT_APPROVED`, `UNIVERSAL_SUBMIT_QUEUED`, `AUTOMATION_PLAN_SUBMITTED`, and `AUTOMATION_PLAN_RECONCILIATION_REQUIRED`.
-- **Worker Universal evidence gaps:** `worker/src/universal_confirmation.js` lacks `greenhouse_evidence.js`'s `isDisqualifiedIdentifier` filter (accepting raw JSON `data.id`, mock/req prefixes) and canonical structured `rawEvidence` (`robin-submission-evidence-v2`).
-- **V069 schema lock-in:** `submission_receipts` (`V069`) enforces `NOT NULL` `employer_confirmation_id` and `sandbox_registration_id`, so non-sandbox real-employer Universal receipts require additive `V071+` architecture (leaving `V001`–`V070` untouched).
+**Gate 0B–0F Remediations Implemented ON `integration/wave-3`:**
+- **Approval attestation mismatch:** `JdbcReceiptTrustStore.STRICT_APPROVAL_SQL` now includes `'UNIVERSAL_SUBMIT_APPROVED'` while keeping `'UNIVERSAL'` excluded from `track/receipt/ReceiptVerificationPolicy.ALLOWED_ATS_PLATFORMS`.
+- **Level B / `RECONCILIATION_REQUIRED` conflation:** `ApplicationReceiptService.SubmissionReceipt`, `frontend/src/types.ts`, contract fixtures, and `SubmissionReceiptModal.tsx` now distinguish clean `BROWSER_OBSERVED` (`confirmed = false`, `reconciliation.required = false`) from genuine `RECONCILIATION_REQUIRED` / tampered evidence errors.
+- **Managed Mail visibility:** `ApplicationTrackingService.mailboxConnected()` now recognises active, domain-configured `managed_mail_addresses` entries (`status = 'ACTIVE'`) for the owning profile and fails closed when disabled/misconfigured.
+- **Timeline projection gaps:** Added `UNIVERSAL_FORM_REVIEWED`, `UNIVERSAL_SUBMIT_APPROVED`, `UNIVERSAL_SUBMIT_APPROVAL_REFUSED`, `UNIVERSAL_SUBMIT_QUEUED`, `AUTOMATION_PLAN_SUBMITTED`, and `AUTOMATION_PLAN_RECONCILIATION_REQUIRED` to `TrackRepository.PROJECTED_AUDIT_ACTIONS` and `TrackTimelineMapper#fromAudit`.
+- **Worker Universal evidence hardening:** `worker/src/universal_confirmation.js` now shares `greenhouse_evidence.js` validation (`isDisqualifiedIdentifier`, `sanitizeContainerHtml`, `sanitizeEvidenceText`, `canonicalJson`), drops `data.id`, disqualifies `MOCK-*`/`REQ-*`/internal IDs and negative/generic banners, and emits canonical `robin-submission-evidence-v1` payloads.
+
+**Still open (Stage 3I Phases 1–3):**
+- Multi-channel real-employer receipt verification (`Level C2`/`Level D` email correlation and post-submit reconciliation workers for non-sandbox Universal portals), which requires additive `V071+` architecture once authorized (`V001`–`V070` left untouched in Phase 0).
 
 ---
 

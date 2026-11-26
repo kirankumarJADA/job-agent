@@ -1151,6 +1151,71 @@ class ApplicationReceiptIT {
                 .andExpect(jsonPath("$.attemptHistory").isEmpty());
     }
 
+    @Test
+    void universalSubmissionRecognizesApprovalAndSeparatesCleanBrowserObservedFromTamperedReconciliation() throws Exception {
+        String univUrl = "https://careers.acme-univ.example/jobs/505";
+        UUID jobId = seedJob("Universal Platform Engineer", "Acme Univ", univUrl);
+        UUID appId = seedApplication(devProfileId, jobId);
+        UUID cvId = seedCv(devProfileId, jobId, appId);
+        String cvSha = jdbc.queryForObject("select content_sha256 from cv_versions where id = ?", String.class, cvId);
+        Map<String, Object> plan = Map.of(
+                "planType", "UNIVERSAL",
+                "correlation", Map.of("applicationId", appId.toString(), "jobId", jobId.toString()),
+                "package", Map.of("cv", Map.of("versionId", cvId.toString(), "sha256", cvSha, "fileName", "ada-cv.pdf", "byteSize", 1024)),
+                "steps", List.of(
+                        Map.of("id", "apply", "type", "UNIVERSAL_APPLY", "params", Map.of(
+                                "identity", Map.of("name", "Ada Lovelace", "firstName", "Ada", "lastName", "Lovelace",
+                                        "email", "dev@example.local", "phone", "+44 7700 900123", "addressLine1", "London, UK")))));
+        UUID planId = seedPlan(devProfileId, appId, univUrl, "AWAITING_APPROVAL", false,
+                "universal:route:" + appId, plan,
+                List.of(Map.of("type", "UNIVERSAL_OUTCOME", "requiredGaps", List.of())));
+
+        approveQueueAndClaim(planId);
+
+        Map<String, Object> univEvidence = new LinkedHashMap<>();
+        univEvidence.put("type", "SUBMISSION_EVIDENCE");
+        univEvidence.put("planType", "UNIVERSAL");
+        univEvidence.put("category", "CONFIRMED");
+        univEvidence.put("confirmed", true);
+        univEvidence.put("evidence", "Browser observed 200 response and confirmation wording on employer page.");
+        univEvidence.put("confirmationNumber", "APP-50599");
+        univEvidence.put("signals", List.of("UNIVERSAL_SUBMISSION_RESPONSE_2XX", "UNIVERSAL_CONFIRMATION_DOM_MATCHED"));
+        univEvidence.put("rawEvidence", "{\"atsPlatform\":\"UNIVERSAL\",\"schemaVersion\":\"robin-submission-evidence-v1\"}");
+        univEvidence.put("summary", "Browser observed submission on employer form. Employer receipt has not yet been independently verified.");
+
+        MvcResult completeRes = workerComplete(planId, submittedBody(univEvidence));
+        assertThat(completeRes.getResponse().getStatus()).isEqualTo(204);
+
+        mvc.perform(get("/api/v1/applications/" + appId + "/receipt").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SUBMITTED"))
+                .andExpect(jsonPath("$.atsKind").value("UNIVERSAL"))
+                .andExpect(jsonPath("$.verificationLevel").value("BROWSER_OBSERVED"))
+                .andExpect(jsonPath("$.authorization.approved").value(true))
+                .andExpect(jsonPath("$.authorization.policy").value("EXPLICIT_CANDIDATE_APPROVAL"))
+                .andExpect(jsonPath("$.confirmation.confirmed").value(false))
+                .andExpect(jsonPath("$.confirmation.confirmationId").value("APP-50599"))
+                .andExpect(jsonPath("$.reconciliation.required").value(false));
+
+        assertThat(count("select count(*) from application_receipts where application_id = ?", appId)).isZero();
+
+        // Tampering with stored UNIVERSAL encrypted evidence flips cleanly back to RECONCILIATION / UNVERIFIED_RECEIPT_EVIDENCE
+        jdbc.execute("alter table submission_evidence disable trigger submission_evidence_immutable");
+        try {
+            jdbc.update("update submission_evidence set raw_evidence_ciphertext = ? where plan_id = ?",
+                    cipher.encrypt("{\"atsPlatform\":\"UNIVERSAL\",\"tampered\":true}"), planId);
+        } finally {
+            jdbc.execute("alter table submission_evidence enable trigger submission_evidence_immutable");
+        }
+        mvc.perform(get("/api/v1/applications/" + appId + "/receipt").session(devSession))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SUBMITTED"))
+                .andExpect(jsonPath("$.verificationLevel").value("ATTEMPT_RECORDED"))
+                .andExpect(jsonPath("$.confirmation.confirmed").value(false))
+                .andExpect(jsonPath("$.reconciliation.required").value(true))
+                .andExpect(jsonPath("$.reconciliation.reason").value("UNVERIFIED_RECEIPT_EVIDENCE"));
+    }
+
     private static String sha256Hex(byte[] content) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(content);

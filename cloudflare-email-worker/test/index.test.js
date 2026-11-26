@@ -238,8 +238,111 @@ describe('Cloudflare Email Worker', () => {
       assert.equal(parsed.subject, 'Re: Application for Senior Engineer');
       assert.equal(parsed.messageId, '<part-1234@company.example>');
       assert.equal(parsed.spf, 'pass');
+      assert.equal(parsed.dkim, '');
+      assert.equal(parsed.dkimDomain, '');
+      assert.equal(parsed.authTrusted, false);
       assert.ok(parsed.text.includes('Thank you for applying to our position'));
       assert.ok(parsed.html.includes('<p>Thank you for applying to our position.</p>'));
+    });
+
+    it('never infers dkim=pass from DKIM-Signature header existence alone', () => {
+      const mime = 'From: Acme Hiring <jobs@acme.com>\r\n' +
+        'Subject: Application received\r\n' +
+        'DKIM-Signature: v=1; a=rsa-sha256; d=acme.com; s=sel1; b=ZmFrZQ==\r\n\r\n' +
+        'We received your application.';
+
+      const parsed = parseMime(mime, { trustedAuthServIds: ['mx.cloudflare.net'] });
+      assert.equal(parsed.dkim, '');
+      assert.equal(parsed.dkimDomain, '');
+      assert.equal(parsed.dmarc, '');
+      assert.equal(parsed.authTrusted, false);
+    });
+
+    it('fails closed when trustedAuthServIds is omitted or untrusted authserv-id comes first', () => {
+      const spoofedMime = 'Authentication-Results: evil.attacker.example; dkim=pass header.d=acme.com; spf=pass; dmarc=pass\r\n' +
+        'Authentication-Results: mx.cloudflare.net; dkim=fail header.d=acme.com\r\n' +
+        'From: Acme Hiring <jobs@acme.com>\r\n\r\n' +
+        'Application received.';
+
+      const noConfig = parseMime(spoofedMime);
+      assert.equal(noConfig.dkim, '');
+      assert.equal(noConfig.dkimDomain, '');
+      assert.equal(noConfig.dmarc, '');
+      assert.equal(noConfig.spf, '');
+      assert.equal(noConfig.authTrusted, false);
+
+      const untrustedTop = parseMime(spoofedMime, { trustedAuthServIds: 'mx.cloudflare.net' });
+      assert.equal(untrustedTop.dkim, '');
+      assert.equal(untrustedTop.dkimDomain, '');
+      assert.equal(untrustedTop.dmarc, '');
+      assert.equal(untrustedTop.authTrusted, false);
+      assert.equal(untrustedTop.authServId, 'evil.attacker.example');
+    });
+
+    it('extracts dkimDomain from trusted Authentication-Results without aliasing From domain', () => {
+      const mime = 'Authentication-Results: mx.cloudflare.net; dkim=pass header.d=us.greenhouse-mail.io; spf=pass; dmarc=pass\r\n' +
+        'Authentication-Results: upstream.attacker.example; dkim=pass header.d=forged.example\r\n' +
+        'From: Acme via Greenhouse <no-reply@acme.com>\r\n' +
+        'Subject: Application Received\r\n\r\n' +
+        'We have received your application.';
+
+      const parsed = parseMime(mime, { trustedAuthServIds: ['mx.cloudflare.net'] });
+      assert.equal(parsed.authTrusted, true);
+      assert.equal(parsed.authConflict, false);
+      assert.equal(parsed.authServId, 'mx.cloudflare.net');
+      assert.equal(parsed.dkim, 'pass');
+      assert.equal(parsed.dkimDomain, 'us.greenhouse-mail.io');
+      assert.equal(parsed.spf, 'pass');
+      assert.equal(parsed.dmarc, 'pass');
+    });
+
+    it('rejects conflicting trusted Authentication-Results or conflicting Received-SPF headers', () => {
+      const conflictMime = 'Authentication-Results: mx.cloudflare.net; dkim=pass header.d=acme.com; dmarc=pass\r\n' +
+        'Authentication-Results: mx.cloudflare.net; dkim=fail header.d=acme.com; dmarc=fail\r\n' +
+        'Received-SPF: Pass\r\n' +
+        'Received-SPF: Fail\r\n' +
+        'From: Acme <hr@acme.com>\r\n\r\nBody';
+
+      const parsed = parseMime(conflictMime, { trustedAuthServIds: ['mx.cloudflare.net'] });
+      assert.equal(parsed.authConflict, true);
+      assert.equal(parsed.authTrusted, false);
+      assert.equal(parsed.dkim, 'fail');
+      assert.equal(parsed.dkimDomain, '');
+      assert.equal(parsed.spf, 'fail');
+    });
+
+    it('delivers dkimDomain and authServId to backend only when TRUSTED_AUTHSERV_IDS verifies receiver', async () => {
+      let sentBody = null;
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async (_url, opts) => {
+        sentBody = JSON.parse(opts.body);
+        return { status: 200, json: async () => ({ status: 'stored' }) };
+      };
+      try {
+        const rawEmail = 'Authentication-Results: mx.cloudflare.net; dkim=pass header.i=bounce@mail.acme.com; spf=pass; dmarc=pass\r\n' +
+          'DKIM-Signature: v=1; a=rsa-sha256; d=mail.acme.com\r\n' +
+          'From: Acme Careers <careers@mail.acme.com>\r\n' +
+          'Subject: Application confirmation\r\n\r\nWe have received your application.';
+        const msg = {
+          to: 'robin+abc@mail.aplivenosi.com',
+          from: 'bounce@mail.acme.com',
+          raw: new Blob([rawEmail]).stream(),
+          rawSize: rawEmail.length,
+        };
+        await worker.email(msg, {
+          ROBIN_BACKEND_URL: BACKEND,
+          CLOUDFLARE_EMAIL_WORKER_SECRET: SECRET,
+          TRUSTED_AUTHSERV_IDS: 'mx.cloudflare.net',
+        }, {});
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+      assert.equal(sentBody.dkim, 'pass');
+      assert.equal(sentBody.dkimDomain, 'mail.acme.com');
+      assert.equal(sentBody.dmarc, 'pass');
+      assert.equal(sentBody.authServId, 'mx.cloudflare.net');
+      assert.equal(sentBody.authTrusted, true);
+      assert.equal(sentBody.authConflict, false);
     });
   });
 });

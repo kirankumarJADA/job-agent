@@ -5,7 +5,9 @@ import com.personal.jobagent.audit.AuditEntry;
 import com.personal.jobagent.audit.AuditLogWriter;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.gmail.GmailConnectionStore;
+import com.personal.jobagent.mailbox.managed.ManagedMailboxService;
 import com.personal.jobagent.security.OwnerContext;
+import org.springframework.beans.factory.annotation.Autowired;
 import com.personal.jobagent.track.ReceiptVerificationPolicy.SenderAuthentication;
 import com.personal.jobagent.track.TrackEvidenceRecorder.IdentityFacts;
 import com.personal.jobagent.track.TrackEvidenceRecorder.MessageFacts;
@@ -88,32 +90,70 @@ public class ApplicationTrackingService {
     private final OwnerContext ownerContext;
     private final TrackTimelineMapper timelineMapper;
     private final GmailConnectionStore gmailConnections;
+    private final ManagedMailboxService managedMailboxes;
     private final ApplicationReconciler reconciler = new ApplicationReconciler();
     private final ReceiptVerificationPolicy policy = new ReceiptVerificationPolicy();
 
+    @Autowired
     public ApplicationTrackingService(TrackRepository repository, TrackEvidenceRecorder recorder, AuditLogWriter audit,
                                       OwnerContext ownerContext, ObjectMapper json,
-                                      GmailConnectionStore gmailConnections) {
+                                      GmailConnectionStore gmailConnections,
+                                      @Autowired(required = false) ManagedMailboxService managedMailboxes) {
         this.repository = repository;
         this.recorder = recorder;
         this.audit = audit;
         this.ownerContext = ownerContext;
         this.timelineMapper = new TrackTimelineMapper(json);
         this.gmailConnections = gmailConnections;
+        this.managedMailboxes = managedMailboxes;
+    }
+
+    public ApplicationTrackingService(TrackRepository repository, TrackEvidenceRecorder recorder, AuditLogWriter audit,
+                                      OwnerContext ownerContext, ObjectMapper json,
+                                      GmailConnectionStore gmailConnections) {
+        this(repository, recorder, audit, ownerContext, json, gmailConnections, null);
     }
 
     /**
-     * True when the signed-in candidate has an active Gmail connection
-     * (Phase 8.4). The reconciler only treats MAILBOX_CONNECTOR evidence as
-     * verifiable when this is backed by a real, connected mailbox.
+     * True when the signed-in candidate has an active Gmail connection or an
+     * active, domain-configured Robin-managed inbound address. The reconciler only
+     * treats MAILBOX_CONNECTOR evidence as verifiable when backed by a connected mailbox.
      */
     public boolean mailboxConnected() {
         try {
             UUID profileId = ownerContext.profileIdOrNull();
             if (profileId == null) return false;
-            return gmailConnections.find(profileId)
+            return gmailActive(profileId) || managedMailboxActive(profileId);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean gmailActive(UUID profileId) {
+        try {
+            return gmailConnections != null && gmailConnections.find(profileId)
                     .map(GmailConnectionStore.Connection::active)
                     .orElse(false);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean managedMailboxActive(UUID profileId) {
+        try {
+            if (managedMailboxes == null) return false;
+            ManagedMailboxService.Status status = managedMailboxes.status(profileId);
+            if (status == null || status.readiness() == ManagedMailboxService.Readiness.NOT_CONFIGURED) {
+                return false;
+            }
+            if (status.domain() == null || status.domain().isBlank()) {
+                return false;
+            }
+            ManagedMailboxService.ManagedAddress addr = status.address();
+            return addr != null
+                    && profileId.equals(addr.profileId())
+                    && status.domain().equalsIgnoreCase(addr.domain())
+                    && "ACTIVE".equalsIgnoreCase(addr.status());
         } catch (Exception e) {
             return false;
         }
@@ -137,12 +177,24 @@ public class ApplicationTrackingService {
                 .filter(l -> applicationId.equals(l.applicationId()) || candidateIds(l).contains(applicationId))
                 .toList();
         out.put("reviews", reviewMaps(profileId, concerning));
-        out.put("mailbox", Map.of("connected", mailboxConnected(),
-                "note", mailboxConnected()
-                        ? "Connected to your Gmail account. Robin reads new employer messages read-only; they are "
-                          + "classified and verified under the same policy as everything else."
-                        : "Robin cannot read your mailbox: no mailbox connection exists in this version. Add employer "
-                          + "messages yourself; they are recorded as added by you and cannot be verified."));
+        boolean gmailConnected = gmailActive(profileId);
+        boolean managedConnected = managedMailboxActive(profileId);
+        boolean anyMailboxConnected = gmailConnected || managedConnected;
+        String mailboxNote;
+        if (gmailConnected && managedConnected) {
+            mailboxNote = "Connected to your Gmail account and Robin-managed mailbox. Employer messages "
+                    + "delivered there are classified and verified under the same policy.";
+        } else if (gmailConnected) {
+            mailboxNote = "Connected to your Gmail account. Robin reads new employer messages read-only; they are "
+                    + "classified and verified under the same policy as everything else.";
+        } else if (managedConnected) {
+            mailboxNote = "Connected to your Robin-managed inbound mailbox. Employer messages delivered there "
+                    + "are classified and verified under the same policy as everything else.";
+        } else {
+            mailboxNote = "Robin cannot read your mailbox: no mailbox connection exists in this version. Add employer "
+                    + "messages yourself; they are recorded as added by you and cannot be verified.";
+        }
+        out.put("mailbox", Map.of("connected", anyMailboxConnected, "note", mailboxNote));
         out.put("versions", Map.of("reconciler", ApplicationReconciler.VERSION, "receiptPolicy", ReceiptVerificationPolicy.VERSION,
                 "classifier", TrackEmailClassifier.VERSION, "matcher", EmailApplicationMatcher.VERSION));
         out.put("threads", repository.threadsForApplication(profileId, applicationId));

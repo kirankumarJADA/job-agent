@@ -2862,6 +2862,9 @@ export class BrowserWorker {
       submitSelector: refreshed.submitButton.selector,
       expectedUrl: plan.targetUrl,
       allowLocalTestHosts,
+      jobId: plan?.correlation?.jobId ?? null,
+      applicationId: plan?.correlation?.applicationId ?? null,
+      planId: plan?.planId ?? null,
       retryFn: (fn) => this.#retry(fn),
     });
   }

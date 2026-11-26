@@ -156,8 +156,39 @@ public class ApplicationReceiptService {
             ConfirmationEvidence confirmation,
             ReconciliationDetails reconciliation,
             FailureDetails failure,
-            List<AttemptSummary> attemptHistory
-    ) {}
+            List<AttemptSummary> attemptHistory,
+            String verificationLevel
+    ) {
+        /** Backward-compatible 24-arg constructor deriving verificationLevel conservatively. */
+        public SubmissionReceipt(
+                UUID receiptId, UUID applicationId, UUID jobId, String jobTitle, String company,
+                String applicationUrl, String atsKind, int attemptNumber, boolean isLatest,
+                String idempotencyKey, String status, boolean submitted, Instant submittedAt,
+                Instant createdAt, Instant updatedAt, AuthorizationRecord authorization,
+                IdentityReceipt submittedIdentity, List<AnswerReceipt> submittedAnswers,
+                DocumentReceipt cv, DocumentReceipt coverLetter, ConfirmationEvidence confirmation,
+                ReconciliationDetails reconciliation, FailureDetails failure, List<AttemptSummary> attemptHistory) {
+            this(receiptId, applicationId, jobId, jobTitle, company, applicationUrl, atsKind, attemptNumber,
+                    isLatest, idempotencyKey, status, submitted, submittedAt, createdAt, updatedAt,
+                    authorization, submittedIdentity, submittedAnswers, cv, coverLetter, confirmation,
+                    reconciliation, failure, attemptHistory,
+                    deriveFallbackVerificationLevel(status, submitted, confirmation, failure));
+        }
+
+        private static String deriveFallbackVerificationLevel(String status, boolean submitted,
+                                                              ConfirmationEvidence confirmation,
+                                                              FailureDetails failure) {
+            if (submitted && confirmation != null && confirmation.confirmed()) return "SANDBOX_VERIFIED";
+            if ((failure != null && failure.failed()) || "FAILED".equals(status) || "BLOCKED_ANTI_BOT".equals(status)) {
+                return "FAILED";
+            }
+            if (submitted || "RECONCILIATION_REQUIRED".equals(status) || "PRE_SUBMIT_ATTEMPTING".equals(status)
+                    || "HANDOFF_REQUIRED".equals(status) || "RUNNING".equals(status)) {
+                return "ATTEMPT_RECORDED";
+            }
+            return "NOT_ATTEMPTED";
+        }
+    }
 
     private record AppHeader(UUID applicationId, UUID jobId, String jobTitle, String company, String applicationUrl,
                              String status, UUID cvVersionId, Instant createdAt) {}
@@ -328,16 +359,23 @@ public class ApplicationReceiptService {
         DocumentReceipt clReceipt = extractDocumentReceipt(profileId, pkg.get("coverLetter"), "COVER_LETTER");
 
         AuthorizationRecord auth = extractAuthorization(plan.id, plan.applicationId, profileId, plan.submitApproved, plan.updatedAt);
-        ConfirmationEvidence confirmation = extractConfirmation(profileId, app, plan, atsKind, auth, submitted,
+        ConfirmationOutcome confirmationOutcome = extractConfirmationOutcome(profileId, app, plan, atsKind, auth, submitted,
                 identity, answers, cvReceipt, clReceipt, attemptNumber);
+        ConfirmationEvidence confirmation = confirmationOutcome.evidence();
         ReconciliationDetails reconciliation = extractReconciliation(plan.status, plan.resultJson);
         FailureDetails failure = extractFailure(plan.status, plan.resultJson);
 
-        // If submitted but confirmation failed verification, reflect unverified state in reconciliation
-        if (submitted && !confirmation.confirmed() && !reconciliation.required()) {
+        // If submitted without confirmed employer/sandbox proof:
+        // - Clean browser-observed UNIVERSAL submissions stay unconfirmed (confirmed=false) at level
+        //   BROWSER_OBSERVED WITHOUT flagging a reconciliation error (reconciliation.required=false).
+        // - Missing/tampered/unapproved evidence or unverified ATS submissions fail closed with reconciliation.required=true.
+        if (submitted && !confirmation.confirmed() && !confirmationOutcome.cleanBrowserObserved() && !reconciliation.required()) {
             reconciliation = new ReconciliationDetails(true, "UNVERIFIED_RECEIPT_EVIDENCE",
                     "Genuine employer confirmation evidence is unavailable or unverified. Verify directly with the employer.");
         }
+
+        String verificationLevel = resolveVerificationLevel(plan.status, submitted, confirmation,
+                confirmationOutcome.cleanBrowserObserved(), failure);
 
         return new SubmissionReceipt(
                 plan.id,
@@ -363,7 +401,8 @@ public class ApplicationReceiptService {
                 confirmation,
                 reconciliation,
                 failure,
-                summaries
+                summaries,
+                verificationLevel
         );
     }
 
@@ -397,7 +436,8 @@ public class ApplicationReceiptService {
                 new ConfirmationEvidence(false, null, List.of(), "No submission attempt has been executed yet."),
                 new ReconciliationDetails(false, null, null),
                 new FailureDetails(false, null, null),
-                List.of()
+                List.of(),
+                "NOT_ATTEMPTED"
         );
     }
 
@@ -620,21 +660,47 @@ public class ApplicationReceiptService {
      * failure all yield {@code confirmed=false}. Observed signals are reported
      * exactly as recorded and are never synthesised.
      */
-    private ConfirmationEvidence extractConfirmation(UUID profileId, AppHeader app, PlanRow plan, String atsKind,
-                                                    AuthorizationRecord auth, boolean isSubmitted,
-                                                    IdentityReceipt identity, List<AnswerReceipt> answers,
-                                                    DocumentReceipt cvReceipt, DocumentReceipt clReceipt,
-                                                    int attemptNumber) {
+    private record ConfirmationOutcome(ConfirmationEvidence evidence, boolean cleanBrowserObserved) {}
+
+    private static String resolveVerificationLevel(String status, boolean submitted, ConfirmationEvidence confirmation,
+                                                   boolean cleanBrowserObserved, FailureDetails failure) {
+        if (submitted && confirmation.confirmed()) {
+            return "SANDBOX_VERIFIED";
+        }
+        if (submitted && cleanBrowserObserved) {
+            return "BROWSER_OBSERVED";
+        }
+        if ((failure != null && failure.failed()) || "FAILED".equals(status) || "BLOCKED_ANTI_BOT".equals(status)) {
+            return "FAILED";
+        }
+        if (submitted || "RECONCILIATION_REQUIRED".equals(status) || "PRE_SUBMIT_ATTEMPTING".equals(status)
+                || "HANDOFF_REQUIRED".equals(status) || "RUNNING".equals(status)) {
+            return "ATTEMPT_RECORDED";
+        }
+        return "NOT_ATTEMPTED";
+    }
+
+    private ConfirmationOutcome extractConfirmationOutcome(UUID profileId, AppHeader app, PlanRow plan, String atsKind,
+                                                             AuthorizationRecord auth, boolean isSubmitted,
+                                                             IdentityReceipt identity, List<AnswerReceipt> answers,
+                                                             DocumentReceipt cvReceipt, DocumentReceipt clReceipt,
+                                                             int attemptNumber) {
         if (!isSubmitted) {
-            return new ConfirmationEvidence(false, null, List.of(), "Application has not been confirmed as submitted.");
+            return new ConfirmationOutcome(
+                    new ConfirmationEvidence(false, null, List.of(), "Application has not been confirmed as submitted."),
+                    false);
         }
         ReportedConfirmation reported = reportedConfirmation(plan.resultJson);
         String reportedId = redactSensitive(reported.confirmationId());
         List<String> reportedSignals = reported.signals();
 
+        if ("UNIVERSAL".equalsIgnoreCase(atsKind)) {
+            return evaluateUniversalObservation(profileId, app, plan, auth, reported, reportedId, reportedSignals);
+        }
+
         if (receiptCaptureService == null || evidenceRepository == null) {
-            return unverified(reportedId, reportedSignals,
-                    "receipt verification is unavailable, so this submission cannot be shown as confirmed.");
+            return new ConfirmationOutcome(unverified(reportedId, reportedSignals,
+                    "receipt verification is unavailable, so this submission cannot be shown as confirmed."), false);
         }
 
         ReceiptCaptureService.StoredReceiptVerification storedVerification;
@@ -642,17 +708,19 @@ public class ApplicationReceiptService {
             storedVerification = receiptCaptureService.revalidateStoredReceipt(profileId, app.applicationId, plan.id);
         } catch (RuntimeException e) {
             log.warn("Could not revalidate stored receipt for plan {}: {}", plan.id, e.getMessage());
-            return unverified(reportedId, reportedSignals, "the stored receipt could not be verified.");
+            return new ConfirmationOutcome(
+                    unverified(reportedId, reportedSignals, "the stored receipt could not be verified."), false);
         }
         if (storedVerification.isVerified()) {
             StoredReceipt verifiedReceipt = storedVerification.verifiedReceipt().orElseThrow();
-            return new ConfirmationEvidence(true, redactSensitive(verifiedReceipt.employerConfirmationId()),
+            return new ConfirmationOutcome(new ConfirmationEvidence(true, redactSensitive(verifiedReceipt.employerConfirmationId()),
                     verifiedReceipt.observedSignals(),
                     redactSensitive(reported.summary() != null ? reported.summary()
-                            : "Submission confirmed with verified " + verifiedReceipt.atsPlatform() + " platform evidence."));
+                            : "Submission confirmed with verified " + verifiedReceipt.atsPlatform() + " platform evidence.")),
+                    false);
         }
         if (storedVerification.isInvalid()) {
-            return unverified(reportedId, reportedSignals, storedVerification.failureReason());
+            return new ConfirmationOutcome(unverified(reportedId, reportedSignals, storedVerification.failureReason()), false);
         }
 
         StoredEvidence evidence;
@@ -660,18 +728,19 @@ public class ApplicationReceiptService {
         try {
             evidence = evidenceRepository.findForPlan(profileId, app.applicationId, plan.id).orElse(null);
             if (evidence == null) {
-                return unverified(reportedId, reportedSignals,
-                        "no evidence was recorded by the authenticated worker for this attempt.");
+                return new ConfirmationOutcome(unverified(reportedId, reportedSignals,
+                        "no evidence was recorded by the authenticated worker for this attempt."), false);
             }
             rawEvidence = evidenceRepository.decryptRawEvidence(evidence).orElse(null);
         } catch (RuntimeException e) {
             log.warn("Stored evidence for plan {} could not be read: {}", plan.id, e.getMessage());
-            return unverified(reportedId, reportedSignals,
-                    "the stored evidence could not be decrypted or failed its integrity check.");
+            return new ConfirmationOutcome(unverified(reportedId, reportedSignals,
+                    "the stored evidence could not be decrypted or failed its integrity check."), false);
         }
         if (rawEvidence == null) {
-            return unverified(reportedId, reportedSignals,
-                    "no raw DOM/screenshot evidence was stored for this attempt (" + evidence.rawEvidenceStatus() + ").");
+            return new ConfirmationOutcome(unverified(reportedId, reportedSignals,
+                    "no raw DOM/screenshot evidence was stored for this attempt (" + evidence.rawEvidenceStatus() + ")."),
+                    false);
         }
 
         try {
@@ -697,16 +766,68 @@ public class ApplicationReceiptService {
                     .attemptNumber(attemptNumber)
                     .build();
             SubmissionReceipt captured = receiptCaptureService.captureReceipt(cmd);
-            return new ConfirmationEvidence(true, redactSensitive(captured.confirmation().confirmationId()),
-                    captured.confirmation().observedSignals(), redactSensitive(captured.confirmation().summary()));
+            return new ConfirmationOutcome(new ConfirmationEvidence(true, redactSensitive(captured.confirmation().confirmationId()),
+                    captured.confirmation().observedSignals(), redactSensitive(captured.confirmation().summary())), false);
         } catch (InvalidReceiptException e) {
             log.warn("Receipt verification failed for plan {} [{}]: {}", plan.id, e.getReasonCode(), e.getMessage());
-            return unverified(reportedId, evidence.observedSignals(),
-                    "[" + e.getReasonCode() + "] " + e.getMessage());
+            return new ConfirmationOutcome(unverified(reportedId, evidence.observedSignals(),
+                    "[" + e.getReasonCode() + "] " + e.getMessage()), false);
         } catch (RuntimeException e) {
             log.error("Receipt verification errored for plan {}: {}", plan.id, e.getMessage());
-            return unverified(reportedId, evidence.observedSignals(), "receipt verification failed.");
+            return new ConfirmationOutcome(
+                    unverified(reportedId, evidence.observedSignals(), "receipt verification failed."), false);
         }
+    }
+
+    private ConfirmationOutcome evaluateUniversalObservation(UUID profileId, AppHeader app, PlanRow plan,
+                                                             AuthorizationRecord auth, ReportedConfirmation reported,
+                                                             String reportedId, List<String> reportedSignals) {
+        if (evidenceRepository == null) {
+            return new ConfirmationOutcome(unverified(reportedId, reportedSignals,
+                    "submission evidence storage is unavailable, so browser observation cannot be verified."), false);
+        }
+        if (auth == null || !auth.approved()) {
+            return new ConfirmationOutcome(unverified(reportedId, reportedSignals,
+                    "explicit candidate submission approval attestation is missing."), false);
+        }
+        StoredEvidence evidence;
+        String rawEvidence;
+        try {
+            evidence = evidenceRepository.findForPlan(profileId, app.applicationId, plan.id).orElse(null);
+            if (evidence == null) {
+                return new ConfirmationOutcome(unverified(reportedId, reportedSignals,
+                        "no evidence was recorded by the authenticated worker for this attempt."), false);
+            }
+            rawEvidence = evidenceRepository.decryptRawEvidence(evidence).orElse(null);
+        } catch (RuntimeException e) {
+            log.warn("Stored evidence for UNIVERSAL plan {} could not be read: {}", plan.id, e.getMessage());
+            return new ConfirmationOutcome(unverified(reportedId, reportedSignals,
+                    "the stored evidence could not be decrypted or failed its integrity check."), false);
+        }
+        if (!"STORED_ENCRYPTED".equals(evidence.rawEvidenceStatus()) || rawEvidence == null || rawEvidence.isBlank()) {
+            return new ConfirmationOutcome(unverified(reportedId, evidence.observedSignals(),
+                    "no raw DOM/screenshot evidence was stored for this attempt (" + evidence.rawEvidenceStatus() + ")."),
+                    false);
+        }
+        if (!"worker".equals(evidence.workerPrincipal())
+                || !SubmissionEvidenceRepository.RECORDED_VIA_WORKER_COMPLETE.equals(evidence.recordedVia())
+                || !"UNIVERSAL".equalsIgnoreCase(evidence.atsPlatform())) {
+            return new ConfirmationOutcome(unverified(reportedId, evidence.observedSignals(),
+                    "evidence provenance did not match an authenticated worker completion."), false);
+        }
+        if (evidence.observedSignals() == null || evidence.observedSignals().isEmpty()) {
+            return new ConfirmationOutcome(unverified(reportedId, reportedSignals,
+                    "no browser confirmation signals were recorded for this submission."), false);
+        }
+        String obsId = redactSensitive(evidence.employerConfirmationId() != null
+                ? evidence.employerConfirmationId()
+                : reportedId);
+        String summary = reported.summary() != null && !reported.summary().isBlank()
+                ? reported.summary()
+                : "Browser observed submission on employer form. Employer receipt has not yet been independently verified.";
+        return new ConfirmationOutcome(
+                new ConfirmationEvidence(false, obsId, evidence.observedSignals(), redactSensitive(summary)),
+                true);
     }
 
     private static ConfirmationEvidence unverified(String reportedId, List<String> signals, String why) {

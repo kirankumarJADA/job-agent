@@ -326,6 +326,36 @@ public class TrackRepository {
                         """, (rs, n) -> header(rs), applicationId, profileId).stream().findFirst();
     }
 
+    /**
+     * Owner-scoped server-owned URL and employer metadata for an application, used to bind
+     * inbound acknowledgement emails to legitimate employer or vetted ATS domains.
+     */
+    public Optional<EmployerDomainPolicy.ApplicationTarget> applicationTarget(UUID profileId, UUID applicationId) {
+        if (profileId == null || applicationId == null) return Optional.empty();
+        List<Map<String, Object>> rows = db.queryForList("""
+                select j.application_url, j.canonical_url, j.company_name_raw, p.target_url
+                from applications a
+                join jobs j on j.id = a.job_id
+                left join automation_plans p on p.application_id = a.id and p.profile_id = a.profile_id
+                where a.id = ? and a.profile_id = ?
+                order by p.created_at desc nulls last
+                """, applicationId, profileId);
+        if (rows.isEmpty()) {
+            return Optional.empty();
+        }
+        Map<String, Object> first = rows.get(0);
+        String applicationUrl = first.get("application_url") instanceof String s ? s : null;
+        String canonicalUrl = first.get("canonical_url") instanceof String s ? s : null;
+        String company = first.get("company_name_raw") instanceof String s ? s : null;
+        List<String> planUrls = new ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            if (row.get("target_url") instanceof String tu && !tu.isBlank() && !planUrls.contains(tu)) {
+                planUrls.add(tu);
+            }
+        }
+        return Optional.of(EmployerDomainPolicy.ApplicationTarget.ofUrls(applicationUrl, canonicalUrl, company, planUrls));
+    }
+
     public List<ApplicationHeader> applications(UUID profileId, List<UUID> ids) {
         if (profileId == null || ids == null || ids.isEmpty()) return List.of();
         return db.query("""
@@ -489,8 +519,10 @@ public class TrackRepository {
             "RESUME_ATS_TAILORED", "TAILORED_CV_APPROVED", "TAILORED_CV_APPROVAL_WITHDRAWN",
             "COVER_LETTER_GENERATED", "COVER_LETTER_CORRECTED", "COVER_LETTER_APPROVAL_UPDATED",
             "APPLY_PACKAGE_CREATED", "APPLY_PACKAGE_REFUSED", "GREENHOUSE_FORM_REVIEWED", "GREENHOUSE_SUBMIT_APPROVED",
-            "GREENHOUSE_SUBMIT_APPROVAL_REFUSED", "PACKAGE_APPROVAL_INVALIDATED", "AUTOMATION_PLAN_HUMAN_REQUIRED",
-            "AUTOMATION_PLAN_FAILED", "AUTOMATION_PLAN_BLOCKED_ANTI_BOT", "AUTOMATION_PLAN_COMPLETED",
+            "GREENHOUSE_SUBMIT_APPROVAL_REFUSED", "UNIVERSAL_FORM_REVIEWED", "UNIVERSAL_SUBMIT_APPROVED",
+            "UNIVERSAL_SUBMIT_APPROVAL_REFUSED", "UNIVERSAL_SUBMIT_QUEUED", "PACKAGE_APPROVAL_INVALIDATED",
+            "AUTOMATION_PLAN_HUMAN_REQUIRED", "AUTOMATION_PLAN_FAILED", "AUTOMATION_PLAN_BLOCKED_ANTI_BOT",
+            "AUTOMATION_PLAN_COMPLETED", "AUTOMATION_PLAN_SUBMITTED", "AUTOMATION_PLAN_RECONCILIATION_REQUIRED",
             "REVIEW_ITEM_APPROVED");
 
     /**

@@ -98,7 +98,8 @@
         "updatedAt": "2026-10-22T11:59:00Z",
         "isLatest": true
       }
-    ]
+    ],
+    "verificationLevel": "SANDBOX_VERIFIED"
   },
   "reconciliation": {
     "receiptId": "66666666-6666-7666-8666-666666666661",
@@ -196,7 +197,8 @@
         "updatedAt": "2026-10-22T11:59:00Z",
         "isLatest": true
       }
-    ]
+    ],
+    "verificationLevel": "ATTEMPT_RECORDED"
   },
   "submittedUnverified": {
     "receiptId": "66666666-6666-7666-8666-666666666662",
@@ -289,7 +291,8 @@
         "updatedAt": "2026-10-22T12:01:00Z",
         "isLatest": true
       }
-    ]
+    ],
+    "verificationLevel": "ATTEMPT_RECORDED"
   },
   "failed": {
     "receiptId": "66666666-6666-7666-8666-666666666663",
@@ -382,7 +385,8 @@
         "updatedAt": "2026-10-22T12:01:00Z",
         "isLatest": true
       }
-    ]
+    ],
+    "verificationLevel": "FAILED"
   },
   "empty": {
     "receiptId": null,
@@ -434,6 +438,84 @@
       "reason": null,
       "code": null
     },
-    "attemptHistory": []
+    "attemptHistory": [],
+    "verificationLevel": "NOT_ATTEMPTED"
+  },
+  "browserObserved": {
+    "receiptId": "66666666-6666-7666-8666-666666666664",
+    "applicationId": "22222222-2222-7222-8222-222222222222",
+    "jobId": "33333333-3333-7333-8333-333333333333",
+    "jobTitle": "Senior Platform Engineer",
+    "company": "Acme Corp",
+    "applicationUrl": "https://careers.acme.example/apply",
+    "atsKind": "UNIVERSAL",
+    "attemptNumber": 1,
+    "isLatest": true,
+    "idempotencyKey": "universal:22222222-2222-7222-8222-222222222222",
+    "status": "SUBMITTED",
+    "submitted": true,
+    "submittedAt": "2026-10-22T12:00:00Z",
+    "createdAt": "2026-10-22T11:55:00Z",
+    "updatedAt": "2026-10-22T12:00:00Z",
+    "authorization": {
+      "approved": true,
+      "policy": "EXPLICIT_CANDIDATE_APPROVAL",
+      "approvedAt": "2026-10-22T11:54:00Z",
+      "actor": "Jane Doe"
+    },
+    "submittedIdentity": {
+      "name": "Jane Doe",
+      "firstName": "Jane",
+      "lastName": "Doe",
+      "email": "jane@example.com",
+      "phone": "+44 7700 900123",
+      "addressLine1": "London, UK",
+      "linkedIn": null
+    },
+    "submittedAnswers": [],
+    "cv": {
+      "versionId": "44444444-4444-7444-8444-444444444444",
+      "title": "Tailored Platform CV",
+      "kind": "PDF",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "byteSize": 54321,
+      "purpose": "TAILORED_CV",
+      "fileName": "cv-44444444-4444-7444-8444-444444444444.pdf",
+      "validationPassed": true
+    },
+    "coverLetter": null,
+    "confirmation": {
+      "confirmed": false,
+      "confirmationId": "APP-98765",
+      "observedSignals": [
+        "CONFIRMATION_PAGE_URL_CHANGED",
+        "EMPLOYER_CONFIRMATION_ID_OBSERVED"
+      ],
+      "summary": "Browser observed submission on employer form. Employer receipt has not yet been independently verified."
+    },
+    "reconciliation": {
+      "required": false,
+      "reason": null,
+      "suggestedAction": null
+    },
+    "failure": {
+      "failed": false,
+      "reason": null,
+      "code": null
+    },
+    "attemptHistory": [
+      {
+        "attemptId": "66666666-6666-7666-8666-666666666664",
+        "attemptNumber": 1,
+        "atsKind": "UNIVERSAL",
+        "idempotencyKey": "universal:22222222-2222-7222-8222-222222222222",
+        "status": "SUBMITTED",
+        "submitted": true,
+        "createdAt": "2026-10-22T11:55:00Z",
+        "updatedAt": "2026-10-22T12:00:00Z",
+        "isLatest": true
+      }
+    ],
+    "verificationLevel": "BROWSER_OBSERVED"
   }
 }

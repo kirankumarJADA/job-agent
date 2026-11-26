@@ -53,21 +53,34 @@ export function sanitizeContainerHtml(rawHtml, maxChars = MAX_CONTAINER_HTML_CHA
 
 function postingJobIdFromUrl(targetUrl) {
   const confPath = greenhouseConfirmationPath(targetUrl);
-  if (!confPath) return null;
-  const match = confPath.match(/^\/[^/]+\/jobs\/([^/]+)\/confirmation$/);
-  return match ? match[1] : null;
+  if (confPath) {
+    const match = confPath.match(/^\/[^/]+\/jobs\/([^/]+)\/confirmation$/);
+    if (match) return match[1];
+  }
+  if (!targetUrl || typeof targetUrl !== 'string') return null;
+  try {
+    const pathname = new URL(targetUrl).pathname;
+    const match = pathname.match(/\/(?:jobs?|positions?|openings?|roles?|apply)\/([A-Za-z0-9._-]{3,128})(?:\/|$)/i);
+    if (match && !/^(?:apply|confirmation|submitted|thank-you|thanks|receipt|new|form)$/i.test(match[1])) {
+      return match[1];
+    }
+  } catch {
+    // Ignore non-URL strings
+  }
+  return null;
 }
 
-function isDisqualifiedIdentifier(candidate, { jobId, applicationId, targetUrl } = {}) {
+export function isDisqualifiedIdentifier(candidate, { jobId, applicationId, planId, targetUrl } = {}) {
   if (!candidate || typeof candidate !== 'string') return true;
   const trimmed = candidate.trim();
   if (trimmed.length < 3 || trimmed.length > 128) return true;
   if (isMockOrSynthetic(trimmed)) return true;
   if (isRequisitionOrReceiptFallback(trimmed)) return true;
   const lower = trimmed.toLowerCase();
-  // Never confuse job ID, application ID, or URL job posting ID with an employer confirmation ID.
+  // Never confuse job ID, application ID, plan ID, or URL job posting ID with an employer confirmation ID.
   if (jobId && lower === String(jobId).trim().toLowerCase()) return true;
   if (applicationId && lower === String(applicationId).trim().toLowerCase()) return true;
+  if (planId && lower === String(planId).trim().toLowerCase()) return true;
   const urlJobId = postingJobIdFromUrl(targetUrl);
   if (urlJobId && lower === urlJobId.trim().toLowerCase()) return true;
   return false;
@@ -77,31 +90,36 @@ function isDisqualifiedIdentifier(candidate, { jobId, applicationId, targetUrl }
  * Extracts a genuine employer confirmation identifier strictly from verified 2xx response JSON,
  * explicit confirmation container attributes, or explicit labeled confirmation text inside the
  * captured confirmation container. Never manufactures an identifier and never accepts job,
- * application, or requisition IDs as confirmation identifiers.
+ * application, plan, or requisition IDs as confirmation identifiers.
  */
 export function extractGenuineConfirmationId({
   responseBodyText = null,
   containerDataId = null,
   containerText = '',
+  extraJsonKeys = [],
   jobId = null,
   applicationId = null,
+  planId = null,
   targetUrl = null,
 } = {}) {
-  const ctx = { jobId, applicationId, targetUrl };
+  const ctx = { jobId, applicationId, planId, targetUrl };
 
   // 1. Explicit confirmation keys in the 2xx submission JSON response (when JSON was returned).
   if (typeof responseBodyText === 'string' && responseBodyText.trim().startsWith('{')) {
     try {
       const parsed = JSON.parse(responseBodyText.slice(0, MAX_RESPONSE_SNIPPET_CHARS));
       if (parsed && typeof parsed === 'object') {
-        for (const key of [
+        const jsonKeys = [
           'confirmationId',
           'confirmation_id',
           'confirmationNumber',
           'confirmation_number',
           'applicationConfirmationId',
           'application_confirmation_id',
-        ]) {
+          ...extraJsonKeys,
+        ];
+        for (const key of jsonKeys) {
+          if (key === 'id') continue; // Never treat generic object.id as confirmation proof
           const val = parsed[key];
           if (typeof val === 'string' && !isDisqualifiedIdentifier(val, ctx)) {
             return val.trim();

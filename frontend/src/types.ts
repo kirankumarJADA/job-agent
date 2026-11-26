@@ -1353,6 +1353,13 @@ export interface AttemptSummary {
   isLatest: boolean;
 }
 
+export type VerificationLevel =
+  | 'NOT_ATTEMPTED'
+  | 'ATTEMPT_RECORDED'
+  | 'BROWSER_OBSERVED'
+  | 'SANDBOX_VERIFIED'
+  | 'FAILED';
+
 export interface SubmissionReceipt {
   receiptId: string | null;
   applicationId: string;
@@ -1378,6 +1385,7 @@ export interface SubmissionReceipt {
   reconciliation: ReconciliationDetails;
   failure: FailureDetails;
   attemptHistory: AttemptSummary[];
+  verificationLevel?: VerificationLevel | string;
 }
 
 export type HandoffBlockReason = 'CAPTCHA' | 'MFA' | 'CLOUDFLARE_TURNSTILE' | 'EMPLOYER_SECURITY_CHECK';

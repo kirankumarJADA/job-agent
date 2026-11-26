@@ -652,7 +652,8 @@ public class ReceiptCaptureService {
                 confirmation,
                 new ReconciliationDetails(false, null, null),
                 new FailureDetails(false, null, null),
-                List.of(attempt));
+                List.of(attempt),
+                "SANDBOX_VERIFIED");
         return new GenuineReceiptRecord(receipt, stored.receiptId(), stored.evidenceSha256(),
                 stored.employerConfirmationId(), stored.atsPlatform(), stored.capturedAt(), true);
     }

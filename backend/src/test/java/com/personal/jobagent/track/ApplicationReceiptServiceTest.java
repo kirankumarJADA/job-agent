@@ -817,12 +817,96 @@ class ApplicationReceiptServiceTest {
                 .thenThrow(new EmptyResultDataAccessException(1));
         var empty = emptyService.getReceipt(fixedProfile, fixedApp, null).orElseThrow();
 
+        // Clean UNIVERSAL browser-observed receipt (no reconciliation error, unconfirmed by employer email)
+        UUID plan4Id = UUID.fromString("66666666-6666-7666-8666-666666666664");
+        JdbcTemplate browserDb = mock(JdbcTemplate.class);
+        ReceiptCaptureService browserCapture = mock(ReceiptCaptureService.class);
+        SubmissionEvidenceRepository browserEvRepo = mock(SubmissionEvidenceRepository.class);
+        ApplicationReceiptService browserService = new ApplicationReceiptService(browserDb, json, browserCapture, browserEvRepo);
+        when(browserDb.queryForObject(contains("from applications a"), any(RowMapper.class), eq(fixedApp), eq(fixedProfile)))
+                .thenAnswer(inv -> {
+                    RowMapper<?> mapper = inv.getArgument(1);
+                    java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+                    when(rs.getObject("application_id")).thenReturn(fixedApp);
+                    when(rs.getObject("job_id")).thenReturn(fixedJob);
+                    when(rs.getString("job_title")).thenReturn("Senior Platform Engineer");
+                    when(rs.getString("company")).thenReturn("Acme Corp");
+                    when(rs.getString("application_url")).thenReturn("https://careers.acme.example/apply");
+                    when(rs.getString("status")).thenReturn("SUBMITTED");
+                    when(rs.getObject("cv_version_id")).thenReturn(fixedCv);
+                    when(rs.getTimestamp("created_at")).thenReturn(Timestamp.from(Instant.parse("2026-10-22T11:55:00Z")));
+                    return mapper.mapRow(rs, 1);
+                });
+        String univPlanJson = json.writeValueAsString(Map.of(
+                "planType", "UNIVERSAL",
+                "package", Map.of(
+                        "cv", Map.of("versionId", fixedCv.toString(), "sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                                "fileName", "cv-" + fixedCv + ".pdf", "byteSize", 54321)
+                ),
+                "steps", List.of(
+                        Map.of("id", "apply", "type", "UNIVERSAL_APPLY", "params", Map.of(
+                                "identity", Map.of(
+                                        "name", "Jane Doe",
+                                        "firstName", "Jane",
+                                        "lastName", "Doe",
+                                        "email", "jane@example.com",
+                                        "phone", "+44 7700 900123",
+                                        "addressLine1", "London, UK"
+                                )
+                        ))
+                )
+        ));
+        String univResultJson = json.writeValueAsString(List.of(Map.of(
+                "type", "SUBMISSION_EVIDENCE",
+                "planType", "UNIVERSAL",
+                "confirmationNumber", "APP-98765",
+                "signals", List.of("CONFIRMATION_PAGE_URL_CHANGED", "EMPLOYER_CONFIRMATION_ID_OBSERVED"),
+                "summary", "Browser observed submission on employer form. Employer receipt has not yet been independently verified."
+        )));
+        when(browserDb.query(contains("from automation_plans p"), any(RowMapper.class), eq(fixedApp), eq(fixedProfile)))
+                .thenAnswer(inv -> {
+                    RowMapper<?> mapper = inv.getArgument(1);
+                    java.sql.ResultSet rs4 = mock(java.sql.ResultSet.class);
+                    when(rs4.getObject("id")).thenReturn(plan4Id);
+                    when(rs4.getObject("application_id")).thenReturn(fixedApp);
+                    when(rs4.getString("target_url")).thenReturn("https://careers.acme.example/apply");
+                    when(rs4.getString("status")).thenReturn("SUBMITTED");
+                    when(rs4.getString("plan_json")).thenReturn(univPlanJson);
+                    when(rs4.getString("result_json")).thenReturn(univResultJson);
+                    when(rs4.getBoolean("submit_approved")).thenReturn(true);
+                    when(rs4.getString("idempotency_key")).thenReturn("universal:" + fixedApp);
+                    when(rs4.getTimestamp("created_at")).thenReturn(Timestamp.from(Instant.parse("2026-10-22T11:55:00Z")));
+                    when(rs4.getTimestamp("updated_at")).thenReturn(Timestamp.from(Instant.parse("2026-10-22T12:00:00Z")));
+                    return List.of(mapper.mapRow(rs4, 1));
+                });
+        when(browserDb.queryForMap(contains("from cv_versions where id"), eq(fixedCv), eq(fixedProfile)))
+                .thenReturn(Map.of("title", "Tailored Platform CV", "val", "{\"passed\":true}"));
+        when(browserDb.queryForObject(contains("from cover_letters cl"), any(RowMapper.class), eq(fixedProfile), eq(fixedApp), eq(fixedJob)))
+                .thenThrow(new EmptyResultDataAccessException(1));
+        when(browserDb.queryForObject(contains("from profiles p"), any(RowMapper.class), eq(fixedProfile)))
+                .thenThrow(new EmptyResultDataAccessException(1));
+        when(browserDb.queryForList(contains("from audit_logs al"), eq(plan4Id), eq(fixedApp), eq(fixedProfile)))
+                .thenReturn(List.of(Map.of("actor", "Jane Doe", "created_at", Timestamp.from(Instant.parse("2026-10-22T11:54:00Z")))));
+        SubmissionEvidenceRepository.StoredEvidence storedUnivEvidence = new SubmissionEvidenceRepository.StoredEvidence(
+                evidenceId, plan4Id, fixedApp, fixedProfile, "worker",
+                SubmissionEvidenceRepository.RECORDED_VIA_WORKER_COMPLETE, "UNIVERSAL",
+                "https://careers.acme.example/apply", "CONFIRMED", "APP-98765",
+                List.of("CONFIRMATION_PAGE_URL_CHANGED", "EMPLOYER_CONFIRMATION_ID_OBSERVED"),
+                "Browser observed submission on employer form.",
+                "e".repeat(64), 120, "STORED_ENCRYPTED",
+                Instant.parse("2026-10-22T12:00:00Z"), null);
+        when(browserEvRepo.findForPlan(fixedProfile, fixedApp, plan4Id)).thenReturn(Optional.of(storedUnivEvidence));
+        when(browserEvRepo.decryptRawEvidence(storedUnivEvidence))
+                .thenReturn(Optional.of("{\"atsPlatform\":\"UNIVERSAL\",\"schemaVersion\":\"robin-submission-evidence-v1\"}"));
+        var browserObserved = browserService.getReceipt(fixedProfile, fixedApp, plan4Id).orElseThrow();
+
         Map<String, Object> actualFixtures = new java.util.LinkedHashMap<>();
         actualFixtures.put("confirmed", confirmed);
         actualFixtures.put("reconciliation", reconciliation);
         actualFixtures.put("submittedUnverified", submittedUnverified);
         actualFixtures.put("failed", failed);
         actualFixtures.put("empty", empty);
+        actualFixtures.put("browserObserved", browserObserved);
 
         String actualJson = json.writerWithDefaultPrettyPrinter().writeValueAsString(actualFixtures);
         Path backendFixture = Path.of("src/test/resources/contracts/submissionReceiptFixtures.json");
@@ -834,5 +918,52 @@ class ApplicationReceiptServiceTest {
         assertThat(Files.exists(frontendFixture)).isTrue();
         assertThat(json.readTree(actualJson))
                 .isEqualTo(json.readTree(Files.readString(frontendFixture, StandardCharsets.UTF_8)));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void universalTamperedOrUnencryptedEvidenceFallsBackToReconciliationRequired() throws Exception {
+        stubApplication();
+        String univPlanJson = json.writeValueAsString(Map.of(
+                "planType", "UNIVERSAL",
+                "steps", List.of(Map.of("id", "apply", "type", "UNIVERSAL_APPLY", "params", Map.of()))
+        ));
+        when(db.query(contains("from automation_plans p"), any(RowMapper.class), eq(APP_ID), eq(PROFILE_ID)))
+                .thenAnswer(inv -> {
+                    RowMapper<?> mapper = inv.getArgument(1);
+                    java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+                    when(rs.getObject("id")).thenReturn(PLAN_ID_1);
+                    when(rs.getObject("application_id")).thenReturn(APP_ID);
+                    when(rs.getString("target_url")).thenReturn("https://careers.acme.example/apply");
+                    when(rs.getString("status")).thenReturn("SUBMITTED");
+                    when(rs.getString("plan_json")).thenReturn(univPlanJson);
+                    when(rs.getString("result_json")).thenReturn("[]");
+                    when(rs.getBoolean("submit_approved")).thenReturn(true);
+                    when(rs.getString("idempotency_key")).thenReturn("universal:" + APP_ID);
+                    when(rs.getTimestamp("created_at")).thenReturn(Timestamp.from(Instant.parse("2026-10-01T10:05:00Z")));
+                    when(rs.getTimestamp("updated_at")).thenReturn(Timestamp.from(Instant.parse("2026-10-01T10:07:00Z")));
+                    return List.of(mapper.mapRow(rs, 1));
+                });
+        when(db.queryForMap(contains("from cv_versions where id"), eq(CV_VERSION_ID), eq(PROFILE_ID)))
+                .thenReturn(Map.of("title", "Tailored Systems CV", "val", "{\"passed\":true}"));
+        when(db.queryForList(contains("from audit_logs al"), eq(PLAN_ID_1), eq(APP_ID), eq(PROFILE_ID)))
+                .thenReturn(List.of(Map.of("actor", "ada@example.com", "created_at", Timestamp.from(Instant.parse("2026-10-01T10:06:00Z")))));
+
+        SubmissionEvidenceRepository evRepo = mock(SubmissionEvidenceRepository.class);
+        ApplicationReceiptService svc = new ApplicationReceiptService(db, json, mock(ReceiptCaptureService.class), evRepo);
+        SubmissionEvidenceRepository.StoredEvidence tamperedEvidence = new SubmissionEvidenceRepository.StoredEvidence(
+                UUID.randomUUID(), PLAN_ID_1, APP_ID, PROFILE_ID, "worker",
+                SubmissionEvidenceRepository.RECORDED_VIA_WORKER_COMPLETE, "UNIVERSAL",
+                "https://careers.acme.example/apply", "CONFIRMED", "EMP-1",
+                List.of("UNIVERSAL_CONFIRMATION_DOM_MATCHED"), "obs",
+                "a".repeat(64), 90, "STORED_ENCRYPTED", Instant.now(), null);
+        when(evRepo.findForPlan(PROFILE_ID, APP_ID, PLAN_ID_1)).thenReturn(Optional.of(tamperedEvidence));
+        when(evRepo.decryptRawEvidence(tamperedEvidence)).thenThrow(new com.personal.jobagent.track.receipt.EvidenceIntegrityException("tampered"));
+
+        var receipt = svc.getReceipt(PROFILE_ID, APP_ID, PLAN_ID_1).orElseThrow();
+        assertThat(receipt.verificationLevel()).isEqualTo("ATTEMPT_RECORDED");
+        assertThat(receipt.confirmation().confirmed()).isFalse();
+        assertThat(receipt.reconciliation().required()).isTrue();
+        assertThat(receipt.reconciliation().reason()).isEqualTo("UNVERIFIED_RECEIPT_EVIDENCE");
     }
 }

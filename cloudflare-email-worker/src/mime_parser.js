@@ -2,21 +2,31 @@
  * Lightweight, zero-dependency RFC 5322 MIME parser for Cloudflare Workers.
  */
 
-export function parseMime(rawText) {
+const DOMAIN_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+const AUTHSERV_RE = /^[a-z0-9._-]+$/;
+
+export function parseMime(rawText, options = {}) {
+  const empty = {
+    from: '',
+    subject: '',
+    date: '',
+    messageId: '',
+    inReplyTo: '',
+    references: '',
+    text: '',
+    html: '',
+    spf: '',
+    dkim: '',
+    dkimDomain: '',
+    dmarc: '',
+    authServId: '',
+    authTrusted: false,
+    authConflict: false,
+    spam: 'no'
+  };
+
   if (!rawText || typeof rawText !== 'string') {
-    return {
-      from: '',
-      subject: '',
-      date: '',
-      messageId: '',
-      inReplyTo: '',
-      references: '',
-      text: '',
-      html: '',
-      spf: '',
-      dkim: '',
-      spam: 'no'
-    };
+    return empty;
   }
 
   // Split headers and body at the first blank line
@@ -35,17 +45,7 @@ export function parseMime(rawText) {
   const references = getHeader(headers, 'references');
   const contentType = getHeader(headers, 'content-type') || 'text/plain';
 
-  // Authentication verdict extraction
-  const receivedSpf = getHeader(headers, 'received-spf');
-  const authResults = getHeader(headers, 'authentication-results');
-  let spf = '';
-  if (receivedSpf && /pass/i.test(receivedSpf)) spf = 'pass';
-  else if (authResults && /spf=pass/i.test(authResults)) spf = 'pass';
-  else if (receivedSpf && /fail/i.test(receivedSpf)) spf = 'fail';
-
-  let dkim = '';
-  if (authResults && /dkim=pass/i.test(authResults)) dkim = 'pass';
-  else if (getHeader(headers, 'dkim-signature')) dkim = 'pass';
+  const auth = extractAuthenticationVerdicts(headers, options?.trustedAuthServIds);
 
   let spam = 'no';
   const spamHeader = getHeader(headers, 'x-spam-flag') || getHeader(headers, 'x-spam-status');
@@ -63,10 +63,306 @@ export function parseMime(rawText) {
     references,
     text,
     html,
-    spf,
-    dkim,
+    spf: auth.spf,
+    dkim: auth.dkim,
+    dkimDomain: auth.dkimDomain,
+    dmarc: auth.dmarc,
+    authServId: auth.authServId,
+    authTrusted: auth.authTrusted,
+    authConflict: auth.authConflict,
     spam
   };
+}
+
+function normalizeTrustedAuthServIds(raw) {
+  if (!raw) return new Set();
+  const items = typeof raw === 'string'
+    ? raw.split(/[\s,]+/)
+    : Array.isArray(raw) || raw instanceof Set
+      ? Array.from(raw)
+      : [];
+  const out = new Set();
+  for (const item of items) {
+    const cleaned = String(item || '').trim().toLowerCase().replace(/\.$/, '');
+    if (cleaned && AUTHSERV_RE.test(cleaned)) {
+      out.add(cleaned);
+    }
+  }
+  return out;
+}
+
+/**
+ * Fail-closed authentication extraction:
+ * - Never infer dkim=pass from the presence of a DKIM-Signature header.
+ * - Never trust Authentication-Results unless an explicit trusted authserv-id
+ *   allowlist is configured AND the topmost header's authserv-id matches it.
+ * - Reject conflicting verdicts across headers from the same trusted receiver
+ *   or multiple Received-SPF headers.
+ */
+function extractAuthenticationVerdicts(headers, trustedAuthServIdsRaw) {
+  const trustedSet = normalizeTrustedAuthServIds(trustedAuthServIdsRaw);
+  const authHeaders = headers.get('authentication-results') || [];
+  const receivedSpfHeaders = headers.get('received-spf') || [];
+
+  const receivedSpfVerdicts = receivedSpfHeaders
+    .map(parseReceivedSpfVerdict)
+    .filter(Boolean);
+  const distinctReceivedSpf = [...new Set(receivedSpfVerdicts)];
+
+  let authConflict = false;
+  let spf = '';
+  if (distinctReceivedSpf.length > 1) {
+    authConflict = true;
+    spf = 'fail';
+  } else if (distinctReceivedSpf.length === 1) {
+    spf = distinctReceivedSpf[0];
+  }
+
+  let dkim = '';
+  let dkimDomain = '';
+  let dmarc = '';
+  let authServId = '';
+  let authTrusted = false;
+
+  if (trustedSet.size === 0 || authHeaders.length === 0) {
+    return { spf, dkim, dkimDomain, dmarc, authServId, authTrusted, authConflict };
+  }
+
+  const parsedTop = parseAuthResultsHeader(authHeaders[0]);
+  authServId = parsedTop.authServId;
+  if (!authServId || !trustedSet.has(authServId)) {
+    return { spf, dkim, dkimDomain, dmarc, authServId, authTrusted: false, authConflict };
+  }
+
+  authTrusted = true;
+
+  // Fail closed if another Authentication-Results header claiming a trusted
+  // authserv-id disagrees with the topmost header.
+  for (let i = 1; i < authHeaders.length; i++) {
+    const other = parseAuthResultsHeader(authHeaders[i]);
+    if (other.authServId && trustedSet.has(other.authServId)) {
+      if (other.dkim !== parsedTop.dkim
+          || other.dkimDomain !== parsedTop.dkimDomain
+          || other.dmarc !== parsedTop.dmarc
+          || other.spf !== parsedTop.spf) {
+        return {
+          spf: 'fail',
+          dkim: 'fail',
+          dkimDomain: '',
+          dmarc: 'fail',
+          authServId,
+          authTrusted: false,
+          authConflict: true
+        };
+      }
+    }
+  }
+
+  if (parsedTop.conflict) {
+    return {
+      spf: 'fail',
+      dkim: 'fail',
+      dkimDomain: '',
+      dmarc: 'fail',
+      authServId,
+      authTrusted: false,
+      authConflict: true
+    };
+  }
+
+  dkim = parsedTop.dkim;
+  dkimDomain = dkim === 'pass' ? parsedTop.dkimDomain : '';
+  dmarc = parsedTop.dmarc;
+
+  if (parsedTop.spf) {
+    if (spf && spf !== parsedTop.spf) {
+      authConflict = true;
+      spf = 'fail';
+    } else {
+      spf = parsedTop.spf;
+    }
+  }
+
+  return { spf, dkim, dkimDomain, dmarc, authServId, authTrusted, authConflict };
+}
+
+function parseReceivedSpfVerdict(headerVal) {
+  const cleaned = stripCommentsOutsideQuotes(String(headerVal || '')).trim().toLowerCase();
+  const m = cleaned.match(/^(pass|fail|softfail|neutral|none|temperror|permerror)\b/);
+  return m ? m[1] : '';
+}
+
+function parseAuthResultsHeader(rawValue) {
+  const cleaned = stripCommentsOutsideQuotes(String(rawValue || ''));
+  const semi = splitOutsideQuotes(cleaned, ';');
+  if (semi.length < 2) {
+    return { authServId: '', dkim: '', dkimDomain: '', spf: '', dmarc: '', conflict: false };
+  }
+  const authServToken = semi[0].trim().split(/\s+/)[0].toLowerCase().replace(/\.$/, '');
+  const authServId = AUTHSERV_RE.test(authServToken) ? authServToken : '';
+
+  const dkimEntries = [];
+  const spfVerdicts = [];
+  const dmarcVerdicts = [];
+
+  for (let i = 1; i < semi.length; i++) {
+    const clause = semi[i].trim();
+    if (!clause) continue;
+
+    const dkimMatch = clause.match(/^dkim\s*=\s*([a-z0-9_-]+)/i);
+    if (dkimMatch) {
+      const verdict = dkimMatch[1].toLowerCase();
+      const domain = extractDkimDomainFromClause(clause);
+      dkimEntries.push({ verdict, domain });
+      continue;
+    }
+
+    const spfMatch = clause.match(/^spf\s*=\s*([a-z0-9_-]+)/i);
+    if (spfMatch) {
+      spfVerdicts.push(spfMatch[1].toLowerCase());
+      continue;
+    }
+
+    const dmarcMatch = clause.match(/^dmarc\s*=\s*([a-z0-9_-]+)/i);
+    if (dmarcMatch) {
+      dmarcVerdicts.push(dmarcMatch[1].toLowerCase());
+    }
+  }
+
+  let conflict = false;
+  let dkim = '';
+  let dkimDomain = '';
+
+  const distinctSpf = [...new Set(spfVerdicts)];
+  const spf = distinctSpf.length > 1 ? 'fail' : (distinctSpf[0] || '');
+  if (distinctSpf.length > 1) conflict = true;
+
+  const distinctDmarc = [...new Set(dmarcVerdicts)];
+  const dmarc = distinctDmarc.length > 1 ? 'fail' : (distinctDmarc[0] || '');
+  if (distinctDmarc.length > 1) conflict = true;
+
+  if (dkimEntries.length > 0) {
+    const anyBad = dkimEntries.some((e) => e.verdict === 'fail' || e.verdict === 'permerror' || e.verdict === 'temperror' || e.verdict === 'policy');
+    const passes = dkimEntries.filter((e) => e.verdict === 'pass');
+    if (anyBad && passes.length > 0) {
+      conflict = true;
+      dkim = 'fail';
+    } else if (anyBad) {
+      const bad = dkimEntries.find((e) => e.verdict === 'fail' || e.verdict === 'permerror' || e.verdict === 'temperror' || e.verdict === 'policy');
+      dkim = bad.verdict;
+    } else if (passes.length > 0) {
+      const passDomains = [...new Set(passes.map((e) => e.domain).filter(Boolean))];
+      if (passDomains.length > 1) {
+        conflict = true;
+        dkim = 'fail';
+      } else if (passDomains.length === 1) {
+        dkim = 'pass';
+        dkimDomain = passDomains[0];
+      }
+      // If dkim=pass lacks a valid header.d / header.i domain, leave dkim='' and dkimDomain='' (fail closed).
+    } else {
+      dkim = dkimEntries[0].verdict;
+    }
+  }
+
+  return { authServId, dkim, dkimDomain, spf, dmarc, conflict };
+}
+
+function extractDkimDomainFromClause(clause) {
+  const headerD = clause.match(/(?:^|\s)header\.d\s*=\s*(?:"([^"]+)"|([^\s;()]+))/i);
+  if (headerD) {
+    const candidate = normalizeDomain(headerD[1] || headerD[2] || '');
+    if (candidate) return candidate;
+  }
+  const headerI = clause.match(/(?:^|\s)header\.i\s*=\s*(?:"[^"@]*@([^"]+)"|[^\s;@]*@([^\s;()]+))/i);
+  if (headerI) {
+    const candidate = normalizeDomain(headerI[1] || headerI[2] || '');
+    if (candidate) return candidate;
+  }
+  return '';
+}
+
+function normalizeDomain(raw) {
+  const cleaned = String(raw || '').trim().toLowerCase().replace(/^@+/, '').replace(/\.+$/, '');
+  return DOMAIN_RE.test(cleaned) ? cleaned : '';
+}
+
+function stripCommentsOutsideQuotes(text) {
+  let out = '';
+  let inQuotes = false;
+  let escaped = false;
+  let commentDepth = 0;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (escaped) {
+      if (commentDepth === 0) out += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      if (inQuotes || commentDepth > 0) {
+        if (commentDepth === 0) out += ch;
+        escaped = true;
+        continue;
+      }
+    }
+    if (!commentDepth && ch === '"') {
+      inQuotes = !inQuotes;
+      out += ch;
+      continue;
+    }
+    if (!inQuotes) {
+      if (ch === '(') {
+        commentDepth++;
+        out += ' ';
+        continue;
+      }
+      if (ch === ')') {
+        if (commentDepth > 0) commentDepth--;
+        out += ' ';
+        continue;
+      }
+    }
+    if (commentDepth === 0) {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+function splitOutsideQuotes(text, delimiter) {
+  const parts = [];
+  let current = '';
+  let inQuotes = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (inQuotes && ch === '\\') {
+      current += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      current += ch;
+      continue;
+    }
+    if (!inQuotes && ch === delimiter) {
+      parts.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+  return parts;
 }
 
 function parseHeaders(headerText) {

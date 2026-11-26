@@ -14,6 +14,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.Locale;
 import java.util.Optional;
 
 /**
@@ -167,6 +168,9 @@ public class ManagedInboundService {
         ManagedMailboxService.ManagedAddress owner = address.get();
         boolean keepContent = !message.authenticationFailed() && !message.spamFlagged();
         String encrypted = keepContent ? content.encrypt(message) : null;
+        ReceiptVerificationPolicy.SenderAuthentication trustedAuth = buildSenderAuthentication(providerId, message);
+        String persistedDkimResult = persistableDkimResult(providerId, message, trustedAuth);
+
         int stored = db.update("""
                         insert into managed_inbound_messages
                             (id, profile_id, address_id, provider_id, message_id_sha256, content_sha256,
@@ -181,7 +185,7 @@ public class ManagedInboundService {
                 contentFingerprint(message), message.envelopeRecipient(), message.envelopeSender(),
                 message.fromAddress(), message.senderDomain(), redactedSubject(message.subject()),
                 encrypted, encrypted == null ? Timestamp.from(now) : null,
-                message.spfResult(), message.dkimResult(), message.spamFlagged(), message.authenticationFailed(),
+                message.spfResult(), persistedDkimResult, message.spamFlagged(), message.authenticationFailed(),
                 Timestamp.from(signedAt), Timestamp.from(now));
         Outcome outcome = stored == 1 ? Outcome.STORED : Outcome.DUPLICATE_MESSAGE;
         // Identifiers only: never the alias, subject, body, code or token.
@@ -192,11 +196,6 @@ public class ManagedInboundService {
             EmailIntelligenceService intel = emailIntelligence.getIfAvailable();
             if (intel != null) {
                 try {
-                    String dkim = message.dkimResult();
-                    String spf = message.spfResult();
-                    ReceiptVerificationPolicy.SenderAuthentication auth = new ReceiptVerificationPolicy.SenderAuthentication(
-                            dkim, message.senderDomain(),
-                            spf, null);
                     EmailIntelligenceService.ConnectorMessage connectorMessage = new EmailIntelligenceService.ConnectorMessage(
                             message.providerId(),
                             message.messageId(),
@@ -206,7 +205,7 @@ public class ManagedInboundService {
                             message.text(),
                             signedAt != null ? signedAt : now,
                             message.envelopeRecipient(),
-                            auth,
+                            trustedAuth,
                             message.threadReferences()
                     );
                     intel.ingestFromMailboxConnector(owner.profileId(), connectorMessage);
@@ -218,6 +217,72 @@ public class ManagedInboundService {
         }
 
         return outcome;
+    }
+
+    /**
+     * Build cryptographic/provider-verified sender authentication metadata.
+     *
+     * <p>Fail closed:
+     * <ul>
+     *   <li>Never copy {@code message.senderDomain()} (the unauthenticated {@code From:} domain)
+     *       into {@code dkimDomain}.</li>
+     *   <li>For Cloudflare, accept a {@code dkim=pass} verdict only when the message has no conflict,
+     *       reports an {@code authServId} explicitly present in {@code settings.cloudflareTrustedAuthServIds()},
+     *       and specifies an explicit verified {@code dkimDomain}.</li>
+     *   <li>For providers that do not supply a verified {@code dkimDomain} (such as Mailgun webhooks),
+     *       preserve explicit failures ({@code "fail"}) while failing closed on {@code dkim="pass"}.</li>
+     * </ul>
+     */
+    private ReceiptVerificationPolicy.SenderAuthentication buildSenderAuthentication(String providerId,
+                                                                                     InboundMailMessage message) {
+        if (message.authConflict() || message.authenticationFailed()) {
+            return new ReceiptVerificationPolicy.SenderAuthentication(
+                    "fail", null,
+                    "fail".equalsIgnoreCase(message.spfResult()) ? "fail" : message.spfResult(),
+                    "fail".equalsIgnoreCase(message.dmarcResult()) ? "fail" : message.dmarcResult());
+        }
+
+        if (ManagedMailSettings.PROVIDER_CLOUDFLARE.equals(providerId)
+                || ManagedMailSettings.PROVIDER_CLOUDFLARE.equals(message.providerId())) {
+            boolean trustedReceiver = message.authServId() != null
+                    && settings.cloudflareTrustedAuthServIds().contains(message.authServId().toLowerCase(Locale.ROOT));
+            if (!trustedReceiver) {
+                return new ReceiptVerificationPolicy.SenderAuthentication(
+                        "fail".equalsIgnoreCase(message.dkimResult()) ? "fail" : null,
+                        null,
+                        "fail".equalsIgnoreCase(message.spfResult()) ? "fail" : null,
+                        "fail".equalsIgnoreCase(message.dmarcResult()) ? "fail" : null);
+            }
+            boolean dkimVerified = "pass".equalsIgnoreCase(message.dkimResult()) && message.dkimDomain() != null;
+            String dkim = dkimVerified ? "pass"
+                    : ("fail".equalsIgnoreCase(message.dkimResult()) || "permerror".equalsIgnoreCase(message.dkimResult())
+                    ? message.dkimResult() : null);
+            String dkimDomain = dkimVerified ? message.dkimDomain() : null;
+            return new ReceiptVerificationPolicy.SenderAuthentication(
+                    dkim, dkimDomain, message.spfResult(), message.dmarcResult());
+        }
+
+        // Other providers (e.g. Mailgun): only pass dkimDomain if the provider explicitly
+        // extracted a real DKIM d= domain; never synthesize from message.senderDomain().
+        boolean hasVerifiedDkimDomain = "pass".equalsIgnoreCase(message.dkimResult()) && message.dkimDomain() != null;
+        String dkim = hasVerifiedDkimDomain ? "pass"
+                : ("fail".equalsIgnoreCase(message.dkimResult()) || "permerror".equalsIgnoreCase(message.dkimResult())
+                ? message.dkimResult() : null);
+        String dkimDomain = hasVerifiedDkimDomain ? message.dkimDomain() : null;
+        return new ReceiptVerificationPolicy.SenderAuthentication(
+                dkim, dkimDomain, message.spfResult(), message.dmarcResult());
+    }
+
+    private static String persistableDkimResult(String providerId, InboundMailMessage message,
+                                                ReceiptVerificationPolicy.SenderAuthentication trustedAuth) {
+        if ("fail".equalsIgnoreCase(message.dkimResult()) || "permerror".equalsIgnoreCase(message.dkimResult())) {
+            return message.dkimResult();
+        }
+        if (ManagedMailSettings.PROVIDER_CLOUDFLARE.equals(providerId)
+                || ManagedMailSettings.PROVIDER_CLOUDFLARE.equals(message.providerId())) {
+            return trustedAuth.dkim();
+        }
+        return message.dkimResult();
     }
 
     /** Subject with numbers (codes), links and addresses removed, for display and audit. */

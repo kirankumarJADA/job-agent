@@ -15,6 +15,7 @@ const contractFixtures: {
   submittedUnverified: SubmissionReceipt;
   failed: SubmissionReceipt;
   empty: SubmissionReceipt;
+  browserObserved: SubmissionReceipt;
 } = rawFixtures;
 
 const CONFIRMED_RECEIPT = contractFixtures.confirmed;
@@ -22,6 +23,7 @@ const RECONCILIATION_RECEIPT = contractFixtures.reconciliation;
 const SUBMITTED_UNVERIFIED_RECEIPT = contractFixtures.submittedUnverified;
 const FAILED_RECEIPT = contractFixtures.failed;
 const EMPTY_RECEIPT = contractFixtures.empty;
+const BROWSER_OBSERVED_RECEIPT = contractFixtures.browserObserved;
 
 describe('SubmissionReceiptModal', () => {
   afterEach(() => {
@@ -176,5 +178,23 @@ describe('SubmissionReceiptModal', () => {
     fireEvent.click(closeBtn);
 
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders clean UNIVERSAL browser-observed submission distinctly from confirmed proof and reconciliation errors', async () => {
+    mockedApiFetch.mockResolvedValueOnce(BROWSER_OBSERVED_RECEIPT);
+
+    render(
+      <SubmissionReceiptModal
+        isOpen={true}
+        onClose={vi.fn()}
+        applicationId="22222222-2222-7222-8222-222222222222"
+      />
+    );
+
+    expect(await screen.findByText('Browser-Observed Submission — Awaiting Employer Verification')).toBeTruthy();
+    expect(screen.getByText('SUBMITTED — BROWSER OBSERVED')).toBeTruthy();
+    expect(screen.getByText('APP-98765')).toBeTruthy();
+    expect(screen.queryByText('Confirmed Submission Proof')).toBeNull();
+    expect(screen.queryByText('Unconfirmed Submission — Reconciliation Required')).toBeNull();
   });
 });

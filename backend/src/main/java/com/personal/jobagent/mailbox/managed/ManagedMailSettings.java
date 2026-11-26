@@ -7,8 +7,10 @@ import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * Deployment configuration for Robin-managed email (Phase 8.5, Phase 20).
@@ -33,6 +35,7 @@ public class ManagedMailSettings {
     private final Duration mailgunMaxAge;
     private final String cloudflareWebhookSecret;
     private final Duration cloudflareMaxAge;
+    private final Set<String> cloudflareTrustedAuthServIds;
     private final String addressPrefix;
     private final Duration futureSkew;
     private final Duration contentRetention;
@@ -46,6 +49,7 @@ public class ManagedMailSettings {
                                @Value("${app.managed-mail.mailgun.max-age-seconds:900}") long maxAgeSeconds,
                                @Value("${app.managed-mail.cloudflare.webhook-secret:}") String cloudflareWebhookSecret,
                                @Value("${app.managed-mail.cloudflare.max-age-seconds:900}") long cloudflareMaxAgeSeconds,
+                               @Value("${app.managed-mail.cloudflare.trusted-authserv-ids:}") String cloudflareTrustedAuthServIds,
                                @Value("${app.managed-mail.address-prefix:}") String addressPrefix,
                                @Value("${app.managed-mail.content-retention-minutes:120}") long contentRetentionMinutes,
                                @Value("${app.managed-mail.metadata-retention-days:30}") long metadataRetentionDays,
@@ -57,6 +61,7 @@ public class ManagedMailSettings {
         this.cloudflareWebhookSecret = cloudflareWebhookSecret == null ? "" : cloudflareWebhookSecret.trim();
         this.mailgunMaxAge = Duration.ofSeconds(Math.max(60, Math.min(maxAgeSeconds, 12 * 3600)));
         this.cloudflareMaxAge = Duration.ofSeconds(Math.max(60, Math.min(cloudflareMaxAgeSeconds, 12 * 3600)));
+        this.cloudflareTrustedAuthServIds = parseAuthServIds(cloudflareTrustedAuthServIds);
 
         if (addressPrefix != null && !addressPrefix.isBlank()) {
             this.addressPrefix = addressPrefix.trim().toLowerCase(Locale.ROOT);
@@ -72,11 +77,22 @@ public class ManagedMailSettings {
         this.cipher = cipher;
     }
 
+    /** Backward-compatible constructor preserving existing callers without trusted authserv list. */
+    public ManagedMailSettings(String domain, String provider, String mailgunSigningKey,
+                               long maxAgeSeconds, String cloudflareWebhookSecret,
+                               long cloudflareMaxAgeSeconds, String addressPrefix,
+                               long contentRetentionMinutes, long metadataRetentionDays,
+                               SecretCipher cipher) {
+        this(domain, provider, mailgunSigningKey, maxAgeSeconds, cloudflareWebhookSecret,
+                cloudflareMaxAgeSeconds, "", addressPrefix, contentRetentionMinutes, metadataRetentionDays, cipher);
+    }
+
     /** Backward-compatible constructor for existing tests and Mailgun-only usage. */
     public ManagedMailSettings(String domain, String provider, String mailgunSigningKey,
                                long maxAgeSeconds, long contentRetentionMinutes,
                                long metadataRetentionDays, SecretCipher cipher) {
-        this(domain, provider, mailgunSigningKey, maxAgeSeconds, "", 900, "", contentRetentionMinutes, metadataRetentionDays, cipher);
+        this(domain, provider, mailgunSigningKey, maxAgeSeconds, "", 900, "", "",
+                contentRetentionMinutes, metadataRetentionDays, cipher);
     }
 
     /** The configured receiving domain, lower-case, or "" when unset or invalid. */
@@ -102,6 +118,27 @@ public class ManagedMailSettings {
 
     public Duration cloudflareMaxAge() {
         return cloudflareMaxAge;
+    }
+
+    /**
+     * Explicit allowlist of trusted Cloudflare/receiver {@code authserv-id} values.
+     * Defaults to empty (fail-closed: inbound DKIM/DMARC assertions are never promoted).
+     */
+    public Set<String> cloudflareTrustedAuthServIds() {
+        return cloudflareTrustedAuthServIds;
+    }
+
+    private static Set<String> parseAuthServIds(String raw) {
+        if (raw == null || raw.isBlank()) return Set.of();
+        Set<String> parsed = new LinkedHashSet<>();
+        for (String token : raw.split("[,\\s]+")) {
+            String cleaned = token.trim().toLowerCase(Locale.ROOT);
+            while (cleaned.endsWith(".")) cleaned = cleaned.substring(0, cleaned.length() - 1);
+            if (!cleaned.isBlank() && cleaned.matches("^[a-z0-9._-]+$")) {
+                parsed.add(cleaned);
+            }
+        }
+        return Set.copyOf(parsed);
     }
 
     public String addressPrefix() {

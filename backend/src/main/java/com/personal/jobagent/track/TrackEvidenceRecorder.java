@@ -12,6 +12,7 @@ import com.personal.jobagent.track.TrackVocabulary.EventClassification;
 import com.personal.jobagent.track.TrackVocabulary.EvidenceType;
 import com.personal.jobagent.track.TrackVocabulary.TimePrecision;
 import com.personal.jobagent.track.TrackVocabulary.Verification;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -37,11 +38,19 @@ public class TrackEvidenceRecorder {
 
     private final TrackRepository repository;
     private final AuditLogWriter audit;
+    private final EmployerDomainPolicy domainPolicy;
     private final ReceiptVerificationPolicy policy = new ReceiptVerificationPolicy();
 
-    public TrackEvidenceRecorder(TrackRepository repository, AuditLogWriter audit) {
+    @Autowired
+    public TrackEvidenceRecorder(TrackRepository repository, AuditLogWriter audit,
+                                 @Autowired(required = false) EmployerDomainPolicy domainPolicy) {
         this.repository = repository;
         this.audit = audit;
+        this.domainPolicy = domainPolicy != null ? domainPolicy : new EmployerDomainPolicy();
+    }
+
+    public TrackEvidenceRecorder(TrackRepository repository, AuditLogWriter audit) {
+        this(repository, audit, new EmployerDomainPolicy());
     }
 
     /** What is known about one stored message; contains no message body. */
@@ -96,17 +105,22 @@ public class TrackEvidenceRecorder {
      */
     public ReceiptOutcome recordAcknowledgement(UUID profileId, UUID applicationId, MessageFacts facts,
                                                 IdentityFacts identity, String actor) {
+        String fromDomain = TrackText.domainOf(facts.fromAddress());
+        String dkimDomain = facts.authentication() == null ? null : facts.authentication().dkimDomain();
+        EmployerDomainPolicy.ApplicationTarget target = repository.applicationTarget(profileId, applicationId).orElse(null);
+        EmployerDomainPolicy.DomainBinding domainBinding = domainPolicy.evaluate(target, fromDomain, dkimDomain);
+
         ReceiptVerificationPolicy.Outcome outcome = policy.evaluate(new ReceiptVerificationPolicy.Evidence(
                 EvidenceType.EMPLOYER_ACKNOWLEDGEMENT_EMAIL, facts.channel(), identity.identifiesThisApplication(),
-                identity.identifiesOtherApplication(), facts.explicitReceipt(), TrackText.domainOf(facts.fromAddress()),
+                identity.identifiesOtherApplication(), facts.explicitReceipt(), fromDomain,
                 facts.authentication(), facts.deliveredToConnectedMailbox(),
-                facts.receivedTimeKnown() ? facts.receivedAt() : null, Instant.now()));
+                facts.receivedTimeKnown() ? facts.receivedAt() : null, Instant.now(), domainBinding));
         String fingerprint = TrackText.sha256("EMAIL|" + (facts.providerMessageId() != null
                 ? "mid:" + facts.providerMessageId() : "fp:" + facts.contentFingerprint()));
         String summary = "Employer acknowledgement email — " + TrackVocabulary.verificationLabel(outcome.status()).toLowerCase(Locale.ROOT);
         Optional<UUID> inserted = repository.insertReceipt(new ReceiptWrite(profileId, applicationId,
                 EvidenceType.EMPLOYER_ACKNOWLEDGEMENT_EMAIL, facts.channel(), facts.emailId(), facts.providerMessageId(),
-                facts.quotedReference(), TrackText.domainOf(facts.fromAddress()),
+                facts.quotedReference(), fromDomain,
                 facts.receivedTimeKnown() ? facts.receivedAt() : null,
                 facts.receivedTimeKnown() ? TimePrecision.EXACT : TimePrecision.UNKNOWN, fingerprint, outcome.status(),
                 outcome.reasons(), summary, identity.identityEvidence()));

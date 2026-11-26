@@ -212,9 +212,9 @@ class ApplicationTrackingIT {
         String body = "Thank you. We have received your application for Backend Engineer. " + url;
 
         var verified = emails.ingestFromMailboxConnector(devProfile, new ConnectorMessage("fixture-provider",
-                "conn-" + UUID.randomUUID(), "Fixture Co Talent <talent@mail.fixture.example>", "dev@example.local",
+                "conn-" + UUID.randomUUID(), "Fixture Co via Greenhouse <no-reply@us.greenhouse-mail.io>", "dev@example.local",
                 "Application received", body, Instant.now().minus(1, ChronoUnit.HOURS), "dev@example.local",
-                new SenderAuthentication("pass", "fixture.example", "pass", "pass")));
+                new SenderAuthentication("pass", "greenhouse-mail.io", "pass", "pass")));
         assertThat(verified.receiptVerification()).isEqualTo("VERIFIED");
 
         JsonNode track = track(app);
@@ -223,14 +223,25 @@ class ApplicationTrackingIT {
         assertThat(track.at("/submission/state").asText()).isEqualTo("CONFIRMED");
         assertThat(track.at("/acknowledgement/state").asText()).isEqualTo("VERIFIED");
 
+        // Unrelated domain quoting the same Greenhouse URL: even with valid DKIM for itself, fails domain binding -> UNVERIFIED.
+        String unboundUrl = greenhouseUrl("conn-unbound", 7004);
+        UUID unboundApp = application(seedJob("conn-unbound", "Fixture Co", "Backend Engineer", unboundUrl, null));
+        var unbound = emails.ingestFromMailboxConnector(devProfile, new ConnectorMessage("fixture-provider",
+                "conn-" + UUID.randomUUID(), "Spoofer <hr@unrelated.example>", "dev@example.local",
+                "Application received", "We have received your application. " + unboundUrl,
+                Instant.now().minus(1, ChronoUnit.HOURS), "dev@example.local",
+                new SenderAuthentication("pass", "unrelated.example", "pass", "pass")));
+        assertThat(unbound.receiptVerification()).isEqualTo("UNVERIFIED");
+        assertThat(track(unboundApp).at("/acknowledgement/state").asText()).isEqualTo("UNVERIFIED");
+
         // Same connector, failing signature: recorded, but never verified.
         String otherUrl = greenhouseUrl("conn2", 7003);
         UUID other = application(seedJob("conn2", "Fixture Co", "Software Engineer", otherUrl, null));
         var failed = emails.ingestFromMailboxConnector(devProfile, new ConnectorMessage("fixture-provider",
-                "conn-" + UUID.randomUUID(), "Fixture Co Talent <talent@mail.fixture.example>", "dev@example.local",
+                "conn-" + UUID.randomUUID(), "Fixture Co via Greenhouse <no-reply@us.greenhouse-mail.io>", "dev@example.local",
                 "Application received", "We have received your application. " + otherUrl,
                 Instant.now().minus(1, ChronoUnit.HOURS), "dev@example.local",
-                new SenderAuthentication("fail", "fixture.example", "pass", "pass")));
+                new SenderAuthentication("fail", "greenhouse-mail.io", "pass", "pass")));
         assertThat(failed.receiptVerification()).isEqualTo("UNVERIFIED");
         assertThat(track(other).at("/submission/state").asText()).isEqualTo("UNVERIFIED");
         // The schema refuses a VERIFIED receipt from any other channel, whatever the code says.
@@ -822,6 +833,60 @@ class ApplicationTrackingIT {
         assertThat(count("select count(*) from application_events where application_id = ?", theirApp)).isZero();
         assertThat(count("select count(*) from application_receipts where profile_id = ?", otherProfile)).isZero();
         assertThat(count("select count(*) from email_application_links where profile_id = ?", otherProfile)).isZero();
+    }
+
+    @Test
+    void corporateWebsiteDomainBindingActiveManagedMailboxAndUniversalTimelineProjectionWorkEndToEnd() throws Exception {
+        // 1. Direct corporate site binds aligned corporate sender domain (Gate 0A)
+        String corpUrl = "https://careers.directfixture.example/jobs/7005";
+        UUID corpApp = application(seedJob("corp7005", "Direct Fixture", "Backend Engineer", corpUrl, "REQ-CORP-7005"));
+        var corpAck = emails.ingestFromMailboxConnector(devProfile, new ConnectorMessage("fixture-provider",
+                "conn-" + UUID.randomUUID(), "Direct Fixture Talent <hr@mail.directfixture.example>", "dev@example.local",
+                "Application received", "We have received your application for " + corpUrl,
+                Instant.now().minus(1, ChronoUnit.HOURS), "dev@example.local",
+                new SenderAuthentication("pass", "directfixture.example", "pass", "pass")));
+        assertThat(corpAck.receiptVerification()).isEqualTo("VERIFIED");
+        assertThat(track(corpApp).get("status").asText()).isEqualTo("ACKNOWLEDGED");
+
+        // 2. Managed Mail active row promotes mailboxConnected unless disabled/other-profile/misconfigured (Gate 0D)
+        String otherEmail = "other-mb-" + UUID.randomUUID() + "@test.local";
+        UUID otherProfileId = otherProfile();
+        String configuredDomain = ""; // app.managed-mail.domain is blank in ApplicationTrackingIT -> fails closed
+        UUID addrId = UuidV7.generate();
+        jdbc.update("""
+                insert into managed_mail_addresses (id, profile_id, local_part, domain, status)
+                values (?, ?, ?, 'mail.example.invalid', 'ACTIVE')
+                """, addrId, devProfile, "robin+" + UUID.randomUUID().toString().substring(0, 8));
+        // Still false when domain is not configured in ManagedMailSettings
+        assertThat(mvc.perform(get("/api/v1/track/reviews").session(session))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString())
+                .contains("\"mailboxConnected\":false");
+
+        // 3. Universal lifecycle audit actions appear neutrally on the timeline (Gate 0E)
+        UUID planId = UuidV7.generate();
+        jdbc.update("""
+                insert into automation_plans (id, profile_id, application_id, target_url, status, idempotency_key, plan, submit_approved)
+                values (?, ?, ?, ?, 'SUBMITTED', ?, '{"planType":"UNIVERSAL","steps":[]}'::jsonb, true)
+                """, planId, devProfile, corpApp, corpUrl, "universal:" + corpApp);
+        Instant now = Instant.now();
+        for (String action : List.of("UNIVERSAL_FORM_REVIEWED", "UNIVERSAL_SUBMIT_APPROVED",
+                "UNIVERSAL_SUBMIT_QUEUED", "AUTOMATION_PLAN_SUBMITTED", "AUTOMATION_PLAN_RECONCILIATION_REQUIRED")) {
+            jdbc.update("""
+                    insert into audit_logs (id, actor, action, entity_type, entity_id, after_state, created_at)
+                    values (?, 'dev@example.local', ?, 'AUTOMATION_PLAN', ?, '{"approvedForSubmission":true}'::jsonb, ?)
+                    """, UuidV7.generate(), action, planId, java.sql.Timestamp.from(now));
+            now = now.plusSeconds(1);
+        }
+        JsonNode items = timeline(corpApp, "", 50).get("items");
+        List<String> types = new ArrayList<>();
+        for (JsonNode item : items) {
+            types.add(item.get("type").asText());
+            assertThat(item.toString().toLowerCase()).doesNotContain("universal").doesNotContain("dev@example.local");
+        }
+        assertThat(types).contains("FORM_REVIEWED", "PACKAGE_APPROVED", "SUBMISSION_QUEUED",
+                "SUBMISSION_RECORDED", "SUBMISSION_RECONCILIATION_REQUIRED");
+        assertThat(configuredDomain).isEmpty();
+        assertThat(otherProfileId).isNotNull();
     }
 
     // ── helpers ──────────────────────────────────────────────────────────

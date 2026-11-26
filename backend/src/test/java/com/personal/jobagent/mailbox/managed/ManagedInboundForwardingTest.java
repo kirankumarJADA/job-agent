@@ -74,7 +74,7 @@ class ManagedInboundForwardingTest {
     }
 
     @Test
-    void forwardsStoredMessageToEmailIntelligenceWithConnectorChannelAndSenderAuthentication() {
+    void mailgunPassWithoutVerifiedDkimDomainNeverSynthesizesFromDomain() {
         String to = "alias123@" + DOMAIN;
         var parsed = validParsed("recruiter@employer.example", to, "Your Application at Acme",
                 "Thank you for applying. We received your application.", false, false);
@@ -102,9 +102,60 @@ class ManagedInboundForwardingTest {
         assertThat(forwarded.subject()).isEqualTo("Your Application at Acme");
         assertThat(forwarded.body()).contains("Thank you for applying");
         assertThat(forwarded.authentication()).isNotNull();
-        assertThat(forwarded.authentication().dkim()).isEqualTo("pass");
-        assertThat(forwarded.authentication().dkimDomain()).isEqualTo("employer.example");
+        // Mailgun webhook headers report no DKIM signing d= domain, so DKIM verification fails closed.
+        assertThat(forwarded.authentication().dkim()).isNull();
+        assertThat(forwarded.authentication().dkimDomain()).isNull();
         assertThat(forwarded.authentication().spf()).isEqualTo("pass");
+    }
+
+    @Test
+    void cloudflareForwardsRealDkimDomainOnlyWhenAuthServIdMatchesConfig() {
+        ManagedMailSettings cfSettings = new ManagedMailSettings(
+                DOMAIN, "cloudflare", "", 900, "cf-secret", 900,
+                "mx.cloudflare.net", "robin+", 120, 30,
+                new SecretCipher("6M5mXo2C0eP1Ztq0QzZ0n7cYk1o0r8sB3m6Gq9v2T8U="));
+        ManagedInboundService cfService = new ManagedInboundService(db, cfSettings, mailboxes, content, provider);
+
+        String to = "robin+alias123@" + DOMAIN;
+        when(db.update(contains("managed_mail_webhook_tokens"), any(), any(), any(), any())).thenReturn(1);
+        when(mailboxes.routeEnvelopeRecipient(to)).thenReturn(Optional.of(
+                new ManagedMailboxService.ManagedAddress(ADDRESS_ID, PROFILE_ID, "robin+alias123", DOMAIN, "ACTIVE")
+        ));
+        when(content.encrypt(any())).thenReturn("encrypted-bytes");
+        when(db.update(contains("insert into managed_inbound_messages"), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(1);
+
+        InboundMailMessage untrustedReceiver = new InboundMailMessage(
+                ManagedMailSettings.PROVIDER_CLOUDFLARE, to, "bounce@unrelated.example",
+                "hr@acme.example", "hr@acme.example", "Ack", "Application received",
+                List.of(), "<m-untrusted@acme.example>", "Sat, 11 Oct 2026 10:00:00 +0000",
+                List.of("pass"), List.of("pass"), List.of("no"), List.of(),
+                "acme.example", "pass", "evil.example", false);
+        cfService.accept(ManagedMailSettings.PROVIDER_CLOUDFLARE, untrustedReceiver, null, "tok-u", Instant.now(), "sha-u");
+
+        ArgumentCaptor<EmailIntelligenceService.ConnectorMessage> captorU =
+                ArgumentCaptor.forClass(EmailIntelligenceService.ConnectorMessage.class);
+        verify(emailIntelligence).ingestFromMailboxConnector(eq(PROFILE_ID), captorU.capture());
+        assertThat(captorU.getValue().authentication().dkim()).isNull();
+        assertThat(captorU.getValue().authentication().dkimDomain()).isNull();
+
+        InboundMailMessage trustedReceiver = new InboundMailMessage(
+                ManagedMailSettings.PROVIDER_CLOUDFLARE, to, "bounce@greenhouse-mail.io",
+                "Acme via Greenhouse <no-reply@us.greenhouse-mail.io>", "no-reply@us.greenhouse-mail.io",
+                "Ack", "We have received your application",
+                List.of(), "<m-trusted@greenhouse-mail.io>", "Sat, 11 Oct 2026 10:01:00 +0000",
+                List.of("pass"), List.of("pass"), List.of("no"), List.of(),
+                "greenhouse-mail.io", "pass", "mx.cloudflare.net", false);
+        cfService.accept(ManagedMailSettings.PROVIDER_CLOUDFLARE, trustedReceiver, null, "tok-t", Instant.now(), "sha-t");
+
+        ArgumentCaptor<EmailIntelligenceService.ConnectorMessage> captorT =
+                ArgumentCaptor.forClass(EmailIntelligenceService.ConnectorMessage.class);
+        verify(emailIntelligence, org.mockito.Mockito.times(2)).ingestFromMailboxConnector(eq(PROFILE_ID), captorT.capture());
+        var authT = captorT.getAllValues().get(1).authentication();
+        assertThat(authT.dkim()).isEqualTo("pass");
+        assertThat(authT.dkimDomain()).isEqualTo("greenhouse-mail.io");
+        assertThat(authT.dmarc()).isEqualTo("pass");
+        assertThat(authT.spf()).isEqualTo("pass");
     }
 
     @Test
