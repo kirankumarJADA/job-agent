@@ -2,29 +2,30 @@
 
 Each entry records evidence and status. Severity: **P0** user-facing truthfulness/safety defect; **P1** blocks a core promise or phase exit; **P2** genuine but not a current phase blocker.
 
-**Updated 2026-11-17** after PR #11 merged (`199e051`); appended **2026-11-26** with Stage 3G preparation, Stage 3H receipt architecture audit findings, and Stage 3I Phase 0 security remediation on `integration/wave-3`. Dated production observations below are historical evidence, not a statement of current production state.
+**Updated 2026-11-17** after PR #11 merged (`199e051`); appended **2026-11-26** with Stage 3G preparation, Stage 3H receipt architecture audit findings, Stage 3I Phase 0 security remediation, and Stage 3I Phase 1 Cloudflare `message.headers` trust-boundary hardening + multi-channel receipt architecture on `integration/wave-3`. Dated production observations below are historical evidence, not a statement of current production state.
 
 ---
 
-## P0 — Managed Mail (Cloudflare / Mailgun) DKIM authentication bypass & `dkimDomain` aliasing in TRACK receipts — **REMEDIATED ON `integration/wave-3` (Stage 3I Phase 0, 2026-11-26), NOT YET MERGED/DEPLOYED**
+## P0 — Managed Mail (Cloudflare / Mailgun) DKIM authentication bypass & `dkimDomain` aliasing in TRACK receipts — **REMEDIATED ON `integration/wave-3` (Stage 3I Phase 0 + Phase 1, 2026-11-26), NOT YET MERGED/DEPLOYED**
 
 **Original Evidence (`4fe3642` on `integration/wave-3`):**
 1. `cloudflare-email-worker/src/mime_parser.js:39-48` extracted `Authentication-Results` without verifying a trusted receiver `authserv-id`, took only the first matching header, and fell back to treating any `DKIM-Signature` header presence as `dkim=pass`.
 2. `ManagedInboundService.java` copied `message.senderDomain()` (the unauthenticated `From:` domain) into `SenderAuthentication.dkimDomain` and passed `null` for `dmarc`.
 3. `track/ReceiptVerificationPolicy.java` checked `fromDomain` alignment against `dkimDomain` without server-owned employer-domain binding.
 
-**Remediation (`docs/STAGE_3I_PHASE_0_RECEIPT_TRUST_SECURITY_REMEDIATION.md`):**
+**Remediation (`docs/STAGE_3I_PHASE_0_RECEIPT_TRUST_SECURITY_REMEDIATION.md`, `docs/STAGE_3I_PHASE_1_MULTI_CHANNEL_RECEIPT_ARCHITECTURE.md`):**
 - Removed the `DKIM-Signature` existence fallback in `cloudflare-email-worker/src/mime_parser.js`, bound `Authentication-Results` strictly to explicit `TRUSTED_AUTHSERV_IDS` (topmost header only, conflicting headers fail closed), and forwarded extracted `dkimDomain` (`header.d`/`header.i`), `dmarc`, `authServId`, `authTrusted`, and `authConflict`.
-- Removed `message.senderDomain()` aliasing in `ManagedInboundService.java`, enforced `app.managed-mail.cloudflare.trusted-authserv-ids` (fail closed by default when blank), and updated `CloudflareInboundParser` + `InboundMailMessage` to fail closed on missing/untrusted/conflicted DKIM metadata.
+- **Stage 3I Phase 1 `message.headers` follow-up:** Updated `cloudflare-email-worker/src/index.js` and `mime_parser.js` so `worker.email` derives authentication verdicts (`spf`, `dkim`, `dkimDomain`, `dmarc`, `authServId`, `authTrusted`, `authConflict`) **exclusively** from Cloudflare's documented `ForwardableEmailMessage.headers` interface (`message.headers.get('authentication-results')`), ignoring sender-injected auth headers in `message.raw` and failing closed when `message.headers` is missing/untrusted/conflicting, while continuing to parse MIME body and standard headers from `message.raw`.
+- Removed `message.senderDomain()` aliasing in `ManagedInboundService.java`, wired `app.managed-mail.cloudflare.trusted-authserv-ids` in `application.yml` aligned with `cloudflare-email-worker/wrangler.toml` (`TRUSTED_AUTHSERV_IDS`, both fail-closed empty by default), and hardened `CloudflareInboundParser` to require explicit `"authTrusted": true` alongside valid `dkimDomain` and `authServId`.
 - Added `EmployerDomainPolicy` (`track/ReceiptVerificationPolicy.java`, `TrackRepository.java`, `TrackEvidenceRecorder.java`) binding verified email receipts to employer corporate registrable domains, vetted ATS notification domains, or server-configured `app.track.vetted-sender-mappings`.
 
-**Remaining deployment/operational condition:** Deployments relying on Cloudflare Email Routing DKIM verification must configure `TRUSTED_AUTHSERV_IDS` / `app.managed-mail.cloudflare.trusted-authserv-ids`; PR `#21` remains `OPEN` / `DRAFT` (not merged to `master` or deployed).
+**Remaining deployment/operational condition:** Deployments relying on Cloudflare Email Routing DKIM verification must configure matching `TRUSTED_AUTHSERV_IDS` / `app.managed-mail.cloudflare.trusted-authserv-ids` (e.g. `mx.cloudflare.net`) and verify live Cloudflare Edge `Authentication-Results` delivery once authorized; live Cloudflare Email Routing delivery has **not** been tested in Stage 3I Phase 0/1. PR `#21` remains `OPEN` / `DRAFT` (not merged to `master` or deployed).
 
 ---
 
-## P1 — Universal receipt verification & evidence trust architecture (Stage 3H audit → Stage 3I Phase 0 partial remediation, 2026-11-26) — **PARTIALLY REMEDIATED (Gate 0A–0F complete; Phases 1–3 still open)**
+## P1 — Universal receipt verification & evidence trust architecture (Stage 3H → Stage 3I Phase 0–1, 2026-11-26) — **PARTIALLY REMEDIATED (Gate 0A–0F + Phase 1 architecture complete; Phases 2–4 code & `V071+` implementation still open)**
 
-**Evidence:** `docs/STAGE_3H_UNIVERSAL_RECEIPT_VERIFICATION_ARCHITECTURE_AUDIT.md`, `docs/STAGE_3I_PHASE_0_RECEIPT_TRUST_SECURITY_REMEDIATION.md`.
+**Evidence:** `docs/STAGE_3H_UNIVERSAL_RECEIPT_VERIFICATION_ARCHITECTURE_AUDIT.md`, `docs/STAGE_3I_PHASE_0_RECEIPT_TRUST_SECURITY_REMEDIATION.md`, `docs/STAGE_3I_PHASE_1_MULTI_CHANNEL_RECEIPT_ARCHITECTURE.md`.
 
 **Gate 0B–0F Remediations Implemented ON `integration/wave-3`:**
 - **Approval attestation mismatch:** `JdbcReceiptTrustStore.STRICT_APPROVAL_SQL` now includes `'UNIVERSAL_SUBMIT_APPROVED'` while keeping `'UNIVERSAL'` excluded from `track/receipt/ReceiptVerificationPolicy.ALLOWED_ATS_PLATFORMS`.
@@ -33,8 +34,11 @@ Each entry records evidence and status. Severity: **P0** user-facing truthfulnes
 - **Timeline projection gaps:** Added `UNIVERSAL_FORM_REVIEWED`, `UNIVERSAL_SUBMIT_APPROVED`, `UNIVERSAL_SUBMIT_APPROVAL_REFUSED`, `UNIVERSAL_SUBMIT_QUEUED`, `AUTOMATION_PLAN_SUBMITTED`, and `AUTOMATION_PLAN_RECONCILIATION_REQUIRED` to `TrackRepository.PROJECTED_AUDIT_ACTIONS` and `TrackTimelineMapper#fromAudit`.
 - **Worker Universal evidence hardening:** `worker/src/universal_confirmation.js` now shares `greenhouse_evidence.js` validation (`isDisqualifiedIdentifier`, `sanitizeContainerHtml`, `sanitizeEvidenceText`, `canonicalJson`), drops `data.id`, disqualifies `MOCK-*`/`REQ-*`/internal IDs and negative/generic banners, and emits canonical `robin-submission-evidence-v1` payloads.
 
-**Still open (Stage 3I Phases 1–3):**
-- Multi-channel real-employer receipt verification (`Level C2`/`Level D` email correlation and post-submit reconciliation workers for non-sandbox Universal portals), which requires additive `V071+` architecture once authorized (`V001`–`V070` left untouched in Phase 0).
+**Stage 3I Phase 1 Architecture Completed (`docs/STAGE_3I_PHASE_1_MULTI_CHANNEL_RECEIPT_ARCHITECTURE.md`):**
+- Formalised the 5-level evidence trust model (`ATTEMPT_RECORDED`, `BROWSER_OBSERVED`, `EMPLOYER_EMAIL_VERIFIED`, `SANDBOX_VERIFIED`, `EMPLOYER_STATUS_RECONCILED`), unified 7-channel ingestion contract, deterministic correlation + `TrackVocabulary`-reusing reconciliation state machine, additive `V071+` schema proposal (`V001`–`V070` untouched), and 15-scenario adversarial test plan.
+
+**Still open (Stage 3I Phases 2–4):**
+- Phase 2+ code implementation: advancing `ApplicationReconciler` past `Stage.APPLIED` for `SUBMITTED` plans when verified `C1` / reconciled `Level D` evidence exists, browser-vs-email `employer_confirmation_id` conflict checks (`SUBMISSION_REFERENCE_CONFLICT`), temporal plausibility checks, additive `V071+` verification linking migration, plus future Outlook/IMAP/webhook adapters (`ExternalMailboxProviders.Outlook`/`Imap` remain fail-closed stubs; no employer webhook endpoint exists).
 
 ---
 

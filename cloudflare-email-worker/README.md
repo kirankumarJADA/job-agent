@@ -66,6 +66,7 @@ Save this exact value on **both sides**:
    APP_MANAGED_MAIL_DOMAIN=mail.aplivenosi.com
    APP_MANAGED_MAIL_ADDRESS_PREFIX=robin+
    APP_MANAGED_MAIL_CLOUDFLARE_WEBHOOK_SECRET=<your-generated-secret>
+   APP_MANAGED_MAIL_CLOUDFLARE_TRUSTED_AUTHSERV_IDS=mx.cloudflare.net
    APP_SECRETS_KEY=<your-32-byte-base64-encryption-key>
    ```
 2. On **Cloudflare Worker**:
@@ -73,6 +74,7 @@ Save this exact value on **both sides**:
    cd cloudflare-email-worker
    npx wrangler secret put CLOUDFLARE_EMAIL_WORKER_SECRET
    # Paste the secret when prompted
+   # Keep TRUSTED_AUTHSERV_IDS (e.g. "mx.cloudflare.net") aligned with APP_MANAGED_MAIL_CLOUDFLARE_TRUSTED_AUTHSERV_IDS
    ```
 
 ### Step 2.4: Deploy the Worker

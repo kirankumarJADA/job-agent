@@ -45,7 +45,9 @@ export function parseMime(rawText, options = {}) {
   const references = getHeader(headers, 'references');
   const contentType = getHeader(headers, 'content-type') || 'text/plain';
 
-  const auth = extractAuthenticationVerdicts(headers, options?.trustedAuthServIds);
+  const auth = options?.ignoreAuthHeaders
+    ? { spf: '', dkim: '', dkimDomain: '', dmarc: '', authServId: '', authTrusted: false, authConflict: false }
+    : extractAuthenticationVerdicts(headers, options?.trustedAuthServIds);
 
   let spam = 'no';
   const spamHeader = getHeader(headers, 'x-spam-flag') || getHeader(headers, 'x-spam-status');
@@ -72,6 +74,60 @@ export function parseMime(rawText, options = {}) {
     authConflict: auth.authConflict,
     spam
   };
+}
+
+/**
+ * Extracts authentication verdicts strictly from Cloudflare's documented
+ * ForwardableEmailMessage.headers (`Headers`) interface, ignoring raw MIME
+ * headers which cannot be relied upon to preserve Cloudflare's prepended order.
+ *
+ * Fail-closed rules:
+ * - If message.headers is missing or exposes no Authentication-Results, fail closed.
+ * - Never call Headers.getAll on non-Set-Cookie headers (unsupported in Workers runtime);
+ *   split comma-joined Fetch Headers values outside RFC 5322 comments and quotes.
+ * - Ignore sender-injected Received-SPF unless a trusted Authentication-Results is present;
+ *   do not derive SPF/DKIM/DMARC from untrusted headers or DKIM-Signature presence.
+ */
+export function extractAuthenticationFromHeaders(messageHeaders, trustedAuthServIdsRaw) {
+  const unverified = {
+    spf: '',
+    dkim: '',
+    dkimDomain: '',
+    dmarc: '',
+    authServId: '',
+    authTrusted: false,
+    authConflict: false
+  };
+
+  if (!messageHeaders || typeof messageHeaders.get !== 'function') {
+    return unverified;
+  }
+
+  const rawAuthResults = messageHeaders.get('authentication-results');
+  const authHeaders = splitCombinedHeaderValues(rawAuthResults);
+
+  // Only consume Authentication-Results from the documented provider Headers interface.
+  // Never fall back to Received-SPF or raw MIME authentication headers.
+  const headerMap = new Map();
+  if (authHeaders.length > 0) {
+    headerMap.set('authentication-results', authHeaders);
+  }
+  return extractAuthenticationVerdicts(headerMap, trustedAuthServIdsRaw);
+}
+
+function splitCombinedHeaderValues(rawValue) {
+  if (Array.isArray(rawValue)) {
+    return rawValue
+      .map((item) => String(item || '').trim())
+      .filter(Boolean);
+  }
+  if (!rawValue || typeof rawValue !== 'string') {
+    return [];
+  }
+  const withoutComments = stripCommentsOutsideQuotes(rawValue);
+  return splitOutsideQuotes(withoutComments, ',')
+    .map((part) => part.trim())
+    .filter(Boolean);
 }
 
 function normalizeTrustedAuthServIds(raw) {

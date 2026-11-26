@@ -87,6 +87,23 @@ class CloudflareInboundParserTest {
         assertThat(untrusted.dkimResult()).isNull();
         assertThat(untrusted.dkimDomain()).isNull();
 
+        String omittedTrustPayload = """
+                {
+                  "envelopeRecipient": "robin+u7kq2m9x4vb3tn5p@mail.aplivenosi.com",
+                  "from": "hr@acme.example",
+                  "spf": "pass",
+                  "dkim": "pass",
+                  "dkimDomain": "acme.example",
+                  "dmarc": "pass",
+                  "authServId": "mx.cloudflare.net",
+                  "spam": "no"
+                }
+                """;
+        InboundMailMessage omittedTrust = CloudflareInboundParser.parse(omittedTrustPayload, json).message();
+        assertThat(omittedTrust.dkimResult()).isNull();
+        assertThat(omittedTrust.dkimDomain()).isNull();
+        assertThat(omittedTrust.dmarcResult()).isNull();
+
         String conflictPayload = """
                 {
                   "envelopeRecipient": "robin+u7kq2m9x4vb3tn5p@mail.aplivenosi.com",

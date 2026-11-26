@@ -133,6 +133,8 @@ app:
       # Cloudflare Email Worker shared webhook secret.
       webhook-secret: ${CLOUDFLARE_EMAIL_WORKER_SECRET:}
       max-age-seconds: ${CLOUDFLARE_WEBHOOK_MAX_AGE_SECONDS:900}
+      # Fail-closed allowlist of trusted receiver authserv-ids (must match worker TRUSTED_AUTHSERV_IDS, e.g. mx.cloudflare.net).
+      trusted-authserv-ids: ${APP_MANAGED_MAIL_CLOUDFLARE_TRUSTED_AUTHSERV_IDS:${CLOUDFLARE_TRUSTED_AUTHSERV_IDS:}}
   mailbox-verification:
     # How old a verification message may be when the worker asks for it.
     window-minutes: ${APP_MAILBOX_VERIFICATION_WINDOW_MINUTES:30}

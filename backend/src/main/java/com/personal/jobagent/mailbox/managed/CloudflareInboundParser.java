@@ -103,15 +103,17 @@ public final class CloudflareInboundParser {
         String authServId = text(root, "authServId");
         boolean authConflict = root.has("authConflict") && root.get("authConflict").isBoolean()
                 && root.get("authConflict").asBoolean(false);
-        boolean explicitlyUntrusted = root.has("authTrusted") && root.get("authTrusted").isBoolean()
-                && !root.get("authTrusted").asBoolean(false);
+        boolean explicitlyTrusted = root.has("authTrusted") && root.get("authTrusted").isBoolean()
+                && root.get("authTrusted").asBoolean(false);
+        boolean untrusted = !explicitlyTrusted;
 
         // Fail closed: never retain a DKIM "pass" claim unless the worker explicitly
         // extracted a valid signing domain under an identified receiver (authServId),
+        // explicitly asserted authTrusted=true from the provider's header interface,
         // without untrusted/conflicted signals. Never derive dkimDomain from From.
-        String dkimDomain = (authConflict || explicitlyUntrusted) ? null : validDomainOrNull(rawDkimDomain);
-        String effectiveDmarc = (authConflict || explicitlyUntrusted) ? ("fail".equalsIgnoreCase(dmarc) ? "fail" : null) : dmarc;
-        List<String> dkimResults = sanitizeDkimResults(rawDkimResults, dkimDomain, authServId, authConflict, explicitlyUntrusted);
+        String dkimDomain = (authConflict || untrusted) ? null : validDomainOrNull(rawDkimDomain);
+        String effectiveDmarc = (authConflict || untrusted) ? ("fail".equalsIgnoreCase(dmarc) ? "fail" : null) : dmarc;
+        List<String> dkimResults = sanitizeDkimResults(rawDkimResults, dkimDomain, authServId, authConflict, untrusted);
 
         InboundMailMessage message = new InboundMailMessage(
                 ManagedMailSettings.PROVIDER_CLOUDFLARE,
