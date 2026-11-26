@@ -1111,6 +1111,16 @@ export type TrackStage =
 export type TrackBasis = 'VERIFIED' | 'CANDIDATE_CONFIRMED' | 'CANDIDATE_REPORTED' | 'UNVERIFIED' | 'INTERNAL' | 'INFERRED';
 export type TrackSubmissionState = 'CONFIRMED' | 'UNVERIFIED' | 'UNKNOWN' | 'CONFLICTING';
 export type TrackAcknowledgementState = 'VERIFIED' | 'UNVERIFIED' | 'NONE';
+/** The strongest source behind the submission state (Stage 3I Phase 2). Browser observation is never employer verification. */
+export type TrackSubmissionLevel =
+  | 'NOT_ATTEMPTED'
+  | 'ATTEMPT_RECORDED'
+  | 'BROWSER_OBSERVED'
+  | 'CANDIDATE_REPORTED'
+  | 'EMPLOYER_EMAIL_UNVERIFIED'
+  | 'SANDBOX_VERIFIED'
+  | 'EMPLOYER_EMAIL_VERIFIED'
+  | 'CONFLICTING';
 export type TrackEventClassification = 'INTERNAL' | 'EXTERNAL' | 'INFERRED' | 'CANDIDATE_REPORTED';
 export type TrackVerification = 'NOT_APPLICABLE' | 'VERIFIED' | 'UNVERIFIED' | 'REJECTED' | 'UNKNOWN';
 export type TrackTimePrecision = 'EXACT' | 'DATE' | 'UNKNOWN';
@@ -1131,6 +1141,8 @@ export interface TrackSummary {
   label?: string;
   basis?: TrackBasis | null;
   submission?: TrackSubmissionState;
+  submissionLevel?: TrackSubmissionLevel | null;
+  sandbox?: boolean;
   needsReview?: boolean;
   attentionCount?: number;
   pending?: string | null;
@@ -1154,6 +1166,45 @@ export interface TrackAttention {
 export interface TrackConflict {
   code: string;
   message: string;
+  /** Both original values with their provenance, e.g. "acknowledgement:APP-1", "browser-observed:APP-2". */
+  references?: string[];
+}
+
+/** The current durable correlation decision for a receipt (V071 application_receipt_links). */
+export interface TrackReceiptLink {
+  decision: 'LINKED' | 'CANDIDATE_CONFIRMED' | 'CANDIDATE_REJECTED' | 'NOT_ASSESSED';
+  origin: 'INGESTION' | 'CANDIDATE_REVIEW' | 'V071_BACKFILL';
+  referenceConsistency: 'ALIGNED' | 'CONFLICTING' | 'NOT_COMPARABLE' | 'NOT_ASSESSED';
+  referenceDetail: string | null;
+  submissionReference: string | null;
+  temporalStatus:
+    | 'PLAUSIBLE'
+    | 'BEFORE_SUBMISSION'
+    | 'FUTURE_DATED'
+    | 'EVIDENCE_TIME_UNKNOWN'
+    | 'NO_SUBMISSION_ANCHOR'
+    | 'NOT_ASSESSED';
+  anchorSource: 'PRE_SUBMIT_ATTEMPT' | 'SUBMIT_APPROVAL' | 'CANDIDATE_REPORTED_SUBMISSION' | 'NONE';
+  anchorAt: string | null;
+  linkedAt: string | null;
+  policyVersion: string;
+}
+
+/** Robin's own submission record: where it came from and when — never employer verification. */
+export interface TrackSubmissionEvidence {
+  recorded: boolean;
+  anchor: { source: string; at: string; precision: TrackTimePrecision; clockSkewSeconds: number } | null;
+  source?: string;
+  recordedAt?: string | null;
+  recordedAtSource?: string;
+  atsPlatform?: string;
+  browserObserved?: boolean;
+  sandboxVerified?: boolean;
+  employerVerified?: false;
+  schema?: string;
+  observation?: string | null;
+  confirmationReference?: string | null;
+  documentsWithoutUploadProof?: string[];
 }
 
 /** One piece of submission evidence and the verification policy's outcome for it. */
@@ -1177,6 +1228,9 @@ export interface TrackReceipt {
   candidateReviewedAt: string | null;
   reviewVersion: number;
   emailId: string | null;
+  /** Where the evidence time came from: the mail provider, or a value you entered. */
+  evidenceAtSource?: 'PROVIDER_RECEIPT' | 'CANDIDATE_SUPPLIED' | 'NONE';
+  link?: TrackReceiptLink | null;
 }
 
 /** An employer message waiting for the candidate's decision. */
@@ -1217,7 +1271,13 @@ export interface ApplicationTrack {
   evidenceStage: TrackStage;
   recordedStatus: string;
   recordedStatusLabel: string;
-  submission: { state: TrackSubmissionState; label: string; reason: string };
+  submission: {
+    state: TrackSubmissionState;
+    label: string;
+    reason: string;
+    verificationLevel?: TrackSubmissionLevel | null;
+    sandbox?: boolean;
+  };
   acknowledgement: { state: TrackAcknowledgementState; label: string };
   communications: { linkedMessages: number; awaitingReview: number };
   pending: { stage: TrackStage; label: string; emailId: string | null } | null;
@@ -1227,6 +1287,7 @@ export interface ApplicationTrack {
   needsReview: boolean;
   robinSubmission: { submitted: boolean; note: string };
   receipts: TrackReceipt[];
+  submissionEvidence?: TrackSubmissionEvidence;
   reviews: TrackReviewItem[];
   mailbox: { connected: boolean; note: string };
   versions?: Record<string, string>;
@@ -1386,6 +1447,30 @@ export interface SubmissionReceipt {
   failure: FailureDetails;
   attemptHistory: AttemptSummary[];
   verificationLevel?: VerificationLevel | string;
+  /** Stage 3I Phase 2: what the browser evidence of a Universal attempt shows. Never employer verification. */
+  browserEvidence?: BrowserEvidenceView | null;
+}
+
+export interface DocumentUploadView {
+  kind: 'cv' | 'coverLetter' | string;
+  uploadVerification: 'FILE_PART_OBSERVED' | 'ATTACHED_NOT_CONFIRMED' | 'NOT_ATTACHED' | 'NO_FIELD' | 'NOT_RECORDED' | string;
+  label: string;
+  attachedSha256: string | null;
+  bytesObserved: boolean;
+}
+
+export interface BrowserEvidenceView {
+  schemaVersion: string | null;
+  schemaKind: string;
+  browserObserved: boolean;
+  assessment: string;
+  assessmentReason: string;
+  redirectChain: Array<{ host: string | null; status: number | null }>;
+  finalOrigin: string | null;
+  documents: DocumentUploadView[];
+  observedAt: string | null;
+  identifierSource: string | null;
+  employerVerification: 'NOT_VERIFIED_BY_BROWSER' | string;
 }
 
 export type HandoffBlockReason = 'CAPTCHA' | 'MFA' | 'CLOUDFLARE_TURNSTILE' | 'EMPLOYER_SECURITY_CHECK';

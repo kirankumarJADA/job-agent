@@ -114,9 +114,36 @@ class ReceiptVerificationPolicyTest {
     }
 
     @Test
-    void anUnknownEvidenceTimeIsNotFabricatedAndDoesNotFailVerification() {
+    void timingAgainstTheSubmissionAnchorDecidesWhetherAnAuthenticatedAcknowledgementCanVerify() {
+        Instant submitted = NOW.minus(Duration.ofHours(3));
+        var anchor = new ReceiptTemporalPolicy.SubmissionAnchor(submitted, TrackVocabulary.TimePrecision.EXACT,
+                ReceiptTemporalPolicy.AnchorSource.PRE_SUBMIT_ATTEMPT);
+        var temporal = new ReceiptTemporalPolicy();
+        java.util.function.Function<Instant, Evidence> at = time -> new Evidence(EvidenceType.EMPLOYER_ACKNOWLEDGEMENT_EMAIL,
+                Channel.MAILBOX_CONNECTOR, true, false, true, "talent.acme.example", PASS, true, time, NOW, BOUND,
+                temporal.assess(time, TrackVocabulary.TimePrecision.EXACT, ReceiptTemporalPolicy.TimeSource.PROVIDER_RECEIPT,
+                        anchor, NOW));
+
+        var after = policy.evaluate(at.apply(submitted.plus(Duration.ofMinutes(2))));
+        assertThat(after.status()).isEqualTo(Verification.VERIFIED);
+        assertThat(after.reasons()).extracting(r -> r.get("code")).contains("TIMING_PLAUSIBLE");
+
+        var before = policy.evaluate(at.apply(submitted.minus(Duration.ofHours(1))));
+        assertThat(before.status()).isEqualTo(Verification.UNVERIFIED);
+        assertThat(before.reasons()).extracting(r -> r.get("code")).contains("RECEIPT_PREDATES_SUBMISSION");
+
+        var future = policy.evaluate(at.apply(NOW.plus(Duration.ofMinutes(30))));
+        assertThat(future.status()).isEqualTo(Verification.REJECTED);
+        assertThat(future.reasons()).extracting(r -> r.get("code")).contains("FUTURE_DATED");
+    }
+
+    @Test
+    void anUnknownEvidenceTimeIsNotFabricatedAndCannotBeVerified() {
+        // Stage 3I Phase 2: a missing provider-assigned time produces an unverified outcome, never
+        // fabricated certainty — the receipt cannot be checked against the submission.
         var outcome = policy.evaluate(email(Channel.MAILBOX_CONNECTOR, true, false, true, PASS, true, null));
-        assertThat(outcome.status()).isEqualTo(Verification.VERIFIED);
+        assertThat(outcome.status()).isEqualTo(Verification.UNVERIFIED);
+        assertThat(outcome.reasons()).extracting(r -> r.get("code")).contains("EVIDENCE_TIME_UNKNOWN");
     }
 
     @Test

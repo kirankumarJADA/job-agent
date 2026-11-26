@@ -172,7 +172,13 @@ public class ApplicationTrackingService {
         out.put("applicationId", applicationId.toString());
         out.put("availability", "AVAILABLE");
         out.put("application", applicationMap(header));
-        out.put("receipts", repository.receipts(profileId, applicationId).stream().map(this::receiptMap).toList());
+        Map<UUID, TrackRepository.ReceiptLinkRow> currentLinks = new LinkedHashMap<>();
+        for (TrackRepository.ReceiptLinkRow link : repository.receiptLinks(profileId, applicationId)) {
+            if (link.current()) currentLinks.put(link.receiptId(), link);
+        }
+        out.put("receipts", repository.receipts(profileId, applicationId).stream()
+                .map(r -> receiptMap(r, currentLinks.get(r.id()))).toList());
+        out.put("submissionEvidence", submissionEvidenceMap(parts.submissions().get(applicationId), parts.anchorFor(applicationId)));
         List<LinkRow> concerning = repository.reviewQueue(profileId, 200).stream()
                 .filter(l -> applicationId.equals(l.applicationId()) || candidateIds(l).contains(applicationId))
                 .toList();
@@ -196,7 +202,8 @@ public class ApplicationTrackingService {
         }
         out.put("mailbox", Map.of("connected", anyMailboxConnected, "note", mailboxNote));
         out.put("versions", Map.of("reconciler", ApplicationReconciler.VERSION, "receiptPolicy", ReceiptVerificationPolicy.VERSION,
-                "classifier", TrackEmailClassifier.VERSION, "matcher", EmailApplicationMatcher.VERSION));
+                "classifier", TrackEmailClassifier.VERSION, "matcher", EmailApplicationMatcher.VERSION,
+                "temporalPolicy", ReceiptTemporalPolicy.VERSION, "referencePolicy", SubmissionReferencePolicy.VERSION));
         out.put("threads", repository.threadsForApplication(profileId, applicationId));
 
         Instant createdAt = header.createdAt();
@@ -256,6 +263,8 @@ public class ApplicationTrackingService {
             summary.put("label", state.label());
             summary.put("basis", state.basis() == null ? null : state.basis().name());
             summary.put("submission", state.submission().state().name());
+            summary.put("submissionLevel", state.submission().verificationLevel());
+            summary.put("sandbox", state.submission().sandbox());
             summary.put("needsReview", state.needsReview());
             summary.put("attentionCount", state.attention().size() + state.conflicts().size());
             summary.put("pending", state.pending() == null ? null : state.pending().label());
@@ -349,10 +358,15 @@ public class ApplicationTrackingService {
             ReceiptVerificationPolicy.Outcome outcome = policy.evaluate(new ReceiptVerificationPolicy.Evidence(
                     EvidenceType.CANDIDATE_STATEMENT, Channel.CANDIDATE_ENTERED, false, false, false, null,
                     SenderAuthentication.none(), false, eventTime, Instant.now()));
+            String statementFingerprint = TrackText.sha256("STATEMENT|" + eventKey);
             receiptId = repository.insertReceipt(new ReceiptWrite(profileId, applicationId, EvidenceType.CANDIDATE_STATEMENT,
                     Channel.CANDIDATE_ENTERED, null, null, null, null, eventTime, precision,
-                    TrackText.sha256("STATEMENT|" + eventKey), outcome.status(), outcome.reasons(),
+                    statementFingerprint, outcome.status(), outcome.reasons(),
                     "Your statement that you submitted this application — not verified", List.of())).orElse(null);
+            if (receiptId != null) {
+                recorder.recordCandidateStatementLink(profileId, applicationId, receiptId, statementFingerprint,
+                        eventTime, precision, actor());
+            }
         }
 
         Map<String, Object> payload = new LinkedHashMap<>();
@@ -392,6 +406,7 @@ public class ApplicationTrackingService {
             throw new TrackConflictException("This evidence was reviewed in the meantime. Reload and try again.");
         }
         appendReceiptReview(profileId, applicationId, receipt, value, receipt.reviewVersion() + 1);
+        recorder.recordReceiptReview(profileId, applicationId, receiptId, value, actor());
         audit.write(new AuditEntry(actor(), "TRACK_RECEIPT_REVIEWED", "APPLICATION", applicationId,
                 mapOf("receiptId", receiptId.toString(), "candidateReview", nullToEmpty(receipt.candidateReview())),
                 mapOf("receiptId", receiptId.toString(), "candidateReview", value,
@@ -508,6 +523,7 @@ public class ApplicationTrackingService {
             if (repository.reviewReceipt(profileId, applicationId, receipt.id(), receipt.reviewVersion(), "REJECTED",
                     "The message was removed from this application")) {
                 appendReceiptReview(profileId, applicationId, receipt, "REJECTED", receipt.reviewVersion() + 1);
+                recorder.recordReceiptReview(profileId, applicationId, receipt.id(), "REJECTED", actor());
             }
         }
     }
@@ -529,7 +545,9 @@ public class ApplicationTrackingService {
                 parts.preparation().getOrDefault(id, TrackModels.Preparation.none()), parts.plans().get(id),
                 parts.statusChanges().getOrDefault(id, List.of()), parts.reports().getOrDefault(id, List.of()),
                 parts.receipts().getOrDefault(id, List.of()), parts.messages().getOrDefault(id, List.of()),
-                mailboxConnected(), Instant.now());
+                mailboxConnected(), Instant.now(), parts.submissions().get(id), parts.anchorFor(id),
+                parts.disqualifiedReferences().getOrDefault(id, Set.of()),
+                parts.foreignReferences().getOrDefault(id, Set.of()));
     }
 
     private Map<String, Object> stateMap(TrackState state) {
@@ -547,7 +565,8 @@ public class ApplicationTrackingService {
         out.put("recordedStatus", state.recordedStatus());
         out.put("recordedStatusLabel", state.recordedStatusLabel());
         out.put("submission", mapOf("state", state.submission().state().name(), "label", state.submission().label(),
-                "reason", state.submission().reason()));
+                "reason", state.submission().reason(), "verificationLevel", state.submission().verificationLevel(),
+                "sandbox", state.submission().sandbox()));
         out.put("acknowledgement", mapOf("state", state.acknowledgement().state().name(),
                 "label", state.acknowledgement().label()));
         out.put("communications", mapOf("linkedMessages", state.communications().linkedMessages(),
@@ -559,9 +578,60 @@ public class ApplicationTrackingService {
                 "emailId", a.emailId() == null ? null : a.emailId().toString(),
                 "receiptId", a.receiptId() == null ? null : a.receiptId().toString())).toList());
         out.put("unknowns", state.unknowns());
-        out.put("conflicts", state.conflicts().stream().map(c -> mapOf("code", c.code(), "message", c.message())).toList());
+        out.put("conflicts", state.conflicts().stream().map(c -> mapOf("code", c.code(), "message", c.message(),
+                "references", c.references())).toList());
         out.put("needsReview", state.needsReview());
         out.put("robinSubmission", mapOf("submitted", state.robinSubmitted(), "note", state.robinSubmissionNote()));
+        return out;
+    }
+
+    /**
+     * Robin's own submission record for the API: where it came from and when, never presented as employer
+     * verification. {@code recorded = false} when Robin holds no submission evidence for the application;
+     * the anchor is reported either way.
+     */
+    private static Map<String, Object> submissionEvidenceMap(TrackModels.SubmissionFacts facts,
+                                                             ReceiptTemporalPolicy.SubmissionAnchor anchor) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("anchor", anchor == null || !anchor.present() ? null : mapOf(
+                "source", anchor.source().name(),
+                "at", anchor.precision() == TimePrecision.DATE
+                        ? LocalDate.ofInstant(anchor.time(), ZoneOffset.UTC).toString() : anchor.time().toString(),
+                "precision", anchor.precision().name(),
+                "clockSkewSeconds", ReceiptTemporalPolicy.CLOCK_SKEW.toSeconds()));
+        if (facts == null) {
+            out.put("recorded", false);
+            return out;
+        }
+        out.put("recorded", true);
+        out.put("source", "AUTHENTICATED_WORKER_BROWSER_OBSERVATION");
+        out.put("recordedAt", facts.recordedAt() == null ? null : facts.recordedAt().toString());
+        out.put("recordedAtSource", "SERVER_CLOCK");
+        out.put("atsPlatform", facts.atsPlatform());
+        out.put("browserObserved", facts.browserObserved());
+        out.put("sandboxVerified", facts.sandboxVerified());
+        out.put("employerVerified", false);
+        out.put("schema", facts.schemaKind());
+        out.put("observation", facts.observationCode());
+        out.put("confirmationReference", facts.referenceTrusted() ? facts.employerConfirmationId() : null);
+        out.put("documentsWithoutUploadProof", facts.documentsWithoutUploadProof());
+        return out;
+    }
+
+    private Map<String, Object> receiptMap(ReceiptRow r, TrackRepository.ReceiptLinkRow link) {
+        Map<String, Object> out = receiptMap(r);
+        out.put("evidenceAtSource", ReceiptTemporalPolicy.sourceFor(r.channel(), r.evidenceTime(), r.precision()).name());
+        out.put("link", link == null ? null : mapOf(
+                "decision", link.decision(),
+                "origin", link.origin(),
+                "referenceConsistency", link.referenceConsistency(),
+                "referenceDetail", link.referenceDetail(),
+                "submissionReference", link.submissionReference(),
+                "temporalStatus", link.temporalStatus(),
+                "anchorSource", link.anchorSource(),
+                "anchorAt", link.anchorTime() == null ? null : link.anchorTime().toString(),
+                "linkedAt", link.linkedAt() == null ? null : link.linkedAt().toString(),
+                "policyVersion", link.policyVersion()));
         return out;
     }
 

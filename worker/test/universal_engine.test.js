@@ -10,7 +10,7 @@ import { computePlanOutcome } from '../src/outcome.js';
 import { StepType, Policy } from '../src/plan.js';
 import { isHandoffEligibleError } from '../src/handoff.js';
 import { universalPageIdentityMatches, planUniversalControls } from '../src/universal_form.js';
-import { classifyUniversalSubmitOutcome, UniversalSubmitCategory } from '../src/universal_confirmation.js';
+import { classifyUniversalSubmitOutcome, UniversalSubmitCategory, verifyUniversalEvidenceDigest } from '../src/universal_confirmation.js';
 import { startUniversalEmployerFixture } from './fixtures/universal_employer_fixture.js';
 
 const univPollArtifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'univ-poll-artifacts-'));
@@ -190,7 +190,20 @@ test('full multi-step Chromium slice: fill Page 1 -> pause on Page 2 mandatory g
     assert.equal(out3.result[0].confirmationNumber, 'EMP-2026-8841');
     assert.ok(out3.result[0].signals.includes('UNIVERSAL_SUBMISSION_RESPONSE_2XX'));
     assert.ok(out3.result[0].signals.includes('UNIVERSAL_CONFIRMATION_DOM_MATCHED'));
-    assert.ok(out3.result[0].rawEvidence.includes('robin-submission-evidence-v1'));
+    // Stage 3I Phase 2: Universal evidence is v2, self-digested, correlated and honest about uploads.
+    const v2 = JSON.parse(out3.result[0].rawEvidence);
+    assert.equal(v2.schemaVersion, 'robin-submission-evidence-v2');
+    assert.ok(verifyUniversalEvidenceDigest(out3.result[0].rawEvidence));
+    assert.equal(v2.attemptCorrelation.planId, submitPlan.planId);
+    assert.equal(v2.employerVerification, 'NOT_VERIFIED_BY_BROWSER');
+    assert.equal(v2.finalOrigin, new URL(fixture.targetUrl).origin);
+    assert.ok(v2.redirectChain.length >= 1);
+    assert.ok(v2.redirectChain.every((hop) => hop.host === new URL(fixture.targetUrl).host));
+    // The fixture posts the CV's name and size as JSON, never the file: attached, but not confirmed sent.
+    assert.equal(v2.documents.cv.formAttachment, 'ATTACHED');
+    assert.equal(v2.documents.cv.uploadVerification, 'ATTACHED_NOT_CONFIRMED');
+    assert.equal(v2.documents.cv.bytesTransmissionObserved, false);
+    assert.equal(v2.submittedCvSha256, null);
     assert.ok(reportedSteps.some((s) => s.result?.phase === 'PRE_SUBMIT_ATTEMPTING'));
   } finally {
     await fixture.close();
@@ -652,7 +665,9 @@ test('universal confirmation parity: drops data.id, disqualifies internal/mock I
   assert.equal(valid.confirmed, true);
   assert.equal(valid.confirmationNumber, 'EMP-REAL-4201');
   const rawParsed = JSON.parse(valid.rawEvidence);
-  assert.equal(rawParsed.schemaVersion, 'robin-submission-evidence-v1');
+  assert.equal(rawParsed.schemaVersion, 'robin-submission-evidence-v2');
+  assert.ok(verifyUniversalEvidenceDigest(valid.rawEvidence));
+  assert.equal(rawParsed.confirmationIdentifierSource, 'RESPONSE_JSON');
   assert.equal(rawParsed.atsPlatform, 'UNIVERSAL');
   assert.deepEqual(rawParsed.attemptCorrelation, {
     planId: internalPlanId,

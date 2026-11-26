@@ -16,7 +16,7 @@ import {
   planUniversalControls,
   applyUniversalControlActions,
 } from './universal_form.js';
-import { executeAndVerifyUniversalSubmit, UniversalSubmitCategory } from './universal_confirmation.js';
+import { executeAndVerifyUniversalSubmit, identityValuesOf, UniversalSubmitCategory } from './universal_confirmation.js';
 import { startEgressProxy } from './egress_proxy.js';
 import { assertArtifactAcceptable, ArtifactPolicyError, MAX_UNIVERSAL_UPLOAD_BYTES } from './artifact_policy.js';
 import { SessionVault } from './session_vault.js';
@@ -2823,8 +2823,23 @@ export class BrowserWorker {
       }),
       uploads: planned.uploads.filter((u) => u.filesAttached === 0),
     };
+    // Stage 3I Phase 2: upload states recorded when the documents were attached (apply pass), refined
+    // by anything attached now; the evidence reports them without ever claiming an upload.
+    const uploadStates = {
+      cv: this.lastUniversalResult?.resumeUploadState ?? 'NOT_ATTEMPTED',
+      coverLetter: this.lastUniversalResult?.coverLetterUploadState ?? 'NOT_ATTEMPTED',
+    };
+    // A multi-page form attaches documents on an earlier page, in an earlier pass: the DOM-verified
+    // UPLOADING checkpoint that pass reported is the record of it.
+    for (const kind of ['cv', 'coverLetter']) {
+      const attachedEarlier = (plan.completedSteps ?? []).some((s) => s?.result?.phase === 'UPLOADING' && s.result[kind] === 'ATTACHED');
+      if (attachedEarlier && ['NO_FIELD', 'NOT_ATTEMPTED'].includes(uploadStates[kind])) uploadStates[kind] = 'ATTACHED';
+    }
     if (missingInputs.actions.length > 0 || missingInputs.uploads.length > 0) {
-      await applyUniversalControlActions(page, missingInputs, pkg, { artifactDir: this.artifactDir });
+      const applied = await applyUniversalControlActions(page, missingInputs, pkg, { artifactDir: this.artifactDir });
+      for (const kind of ['cv', 'coverLetter']) {
+        if (applied?.[kind] && applied[kind] !== 'NO_FIELD') uploadStates[kind] = applied[kind];
+      }
     }
 
     const refreshed = await inspectLiveFormDom(page);
@@ -2866,6 +2881,9 @@ export class BrowserWorker {
       applicationId: plan?.correlation?.applicationId ?? null,
       planId: plan?.planId ?? null,
       retryFn: (fn) => this.#retry(fn),
+      pkg,
+      uploadStates,
+      identityValues: identityValuesOf(pkg),
     });
   }
 

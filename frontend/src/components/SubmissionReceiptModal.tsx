@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../api/client';
-import type { SubmissionReceipt } from '../types';
+import type { BrowserEvidenceView, SubmissionReceipt } from '../types';
 import { Alert, Loading, SecondaryButton, StatusPill } from './ui';
 
 export interface SubmissionReceiptModalProps {
@@ -429,6 +429,7 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                     ) : (
                       <p className="mt-1 text-xs text-ink-faint italic">No CV checksum recorded</p>
                     )}
+                    <UploadProof receipt={receipt} kind="cv" />
                   </div>
 
                   {/* Cover Letter Record */}
@@ -460,8 +461,10 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                         </button>
                       </div>
                     )}
+                    <UploadProof receipt={receipt} kind="coverLetter" />
                   </div>
                 </div>
+                {receipt.browserEvidence && <BrowserEvidenceBlock evidence={receipt.browserEvidence} />}
               </div>
 
               {/* Candidate Identity Section */}
@@ -622,3 +625,47 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
     </div>
   );
 };
+
+/**
+ * Stage 3I Phase 2: what the browser evidence shows about one document. A browser can see that a file
+ * was attached and that a file part was sent, never the bytes the employer received — so no label here
+ * says "uploaded" or "received", and none is green.
+ */
+const UploadProof: React.FC<{ receipt: SubmissionReceipt; kind: 'cv' | 'coverLetter' }> = ({ receipt, kind }) => {
+  const doc = receipt.browserEvidence?.documents?.find((d) => d.kind === kind);
+  if (!doc) return null;
+  const tone = doc.uploadVerification === 'FILE_PART_OBSERVED' ? 'sky'
+    : doc.uploadVerification === 'NOT_RECORDED' || doc.uploadVerification === 'NO_FIELD' ? 'slate' : 'amber';
+  const label = {
+    FILE_PART_OBSERVED: 'Included in the submitted form',
+    ATTACHED_NOT_CONFIRMED: 'Attached — inclusion not confirmed',
+    NOT_ATTACHED: 'Not attached',
+    NO_FIELD: 'No field on the form',
+    NOT_RECORDED: 'Upload proof not recorded',
+  }[doc.uploadVerification] ?? 'Upload proof unknown';
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2" data-testid={`upload-proof-${kind}`}>
+      <StatusPill tone={tone}>{label}</StatusPill>
+      <span className="text-[11px] text-ink-muted">{doc.label}</span>
+    </div>
+  );
+};
+
+const BrowserEvidenceBlock: React.FC<{ evidence: BrowserEvidenceView }> = ({ evidence }) => (
+  <div className="mt-3 rounded-lg border border-line bg-surface-sunken p-3 text-xs" data-testid="browser-evidence">
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="font-semibold text-ink">Browser evidence</span>
+      <StatusPill tone={evidence.browserObserved ? 'amber' : 'red'}>
+        {evidence.browserObserved ? 'Browser-observed — not employer verified' : 'Browser evidence failed its checks'}
+      </StatusPill>
+      <span className="text-ink-faint">{evidence.schemaVersion ?? 'schema not recorded'}</span>
+    </div>
+    <p className="mt-1 text-ink-muted">{evidence.assessmentReason}</p>
+    {evidence.redirectChain.length > 0 && (
+      <p className="mt-1 text-ink-muted">
+        Pages seen during submission: {evidence.redirectChain.map((h) => `${h.host ?? 'unknown host'} (${h.status ?? '—'})`).join(' → ')}
+        {evidence.finalOrigin ? ` · confirmation page on ${evidence.finalOrigin}` : ''}
+      </p>
+    )}
+  </div>
+);

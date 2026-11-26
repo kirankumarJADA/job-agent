@@ -19,7 +19,13 @@ import com.personal.jobagent.track.TrackVocabulary.LinkStatus;
 import com.personal.jobagent.track.TrackVocabulary.ReportKind;
 import com.personal.jobagent.track.TrackVocabulary.TimePrecision;
 import com.personal.jobagent.track.TrackVocabulary.Verification;
+import com.personal.jobagent.track.ReceiptTemporalPolicy.AnchorSource;
+import com.personal.jobagent.track.ReceiptTemporalPolicy.SubmissionAnchor;
+import com.personal.jobagent.track.TrackModels.SubmissionFacts;
+import com.personal.jobagent.track.receipt.BrowserObservationReader;
 import com.personal.jobagent.track.receipt.ReceiptCaptureService;
+import com.personal.jobagent.track.receipt.SubmissionEvidenceRepository;
+import com.personal.jobagent.track.receipt.UniversalSubmissionEvidence;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -59,17 +65,24 @@ public class TrackRepository {
     private final JdbcTemplate db;
     private final ObjectMapper json;
     private final ReceiptCaptureService receiptCaptureService;
+    private final BrowserObservationReader observationReader;
 
     @Autowired
     public TrackRepository(JdbcTemplate db, ObjectMapper json,
-                           @Autowired(required = false) ReceiptCaptureService receiptCaptureService) {
+                           @Autowired(required = false) ReceiptCaptureService receiptCaptureService,
+                           @Autowired(required = false) BrowserObservationReader observationReader) {
         this.db = db;
         this.json = json;
         this.receiptCaptureService = receiptCaptureService;
+        this.observationReader = observationReader;
+    }
+
+    public TrackRepository(JdbcTemplate db, ObjectMapper json, ReceiptCaptureService receiptCaptureService) {
+        this(db, json, receiptCaptureService, null);
     }
 
     public TrackRepository(JdbcTemplate db, ObjectMapper json) {
-        this(db, json, null);
+        this(db, json, null, null);
     }
 
     // ── writes ───────────────────────────────────────────────────────────
@@ -262,6 +275,147 @@ public class TrackRepository {
                         """, decision, note, receiptId, applicationId, profileId, expectedVersion) == 1;
     }
 
+    // ── receipt links (V071) ─────────────────────────────────────────────
+
+    /** One append-only correlation decision about one receipt (see V071). */
+    public record ReceiptLinkWrite(UUID profileId, UUID applicationId, UUID receiptId, UUID planId, UUID evidenceId,
+                                   UUID supersedesLinkId, String origin, String decision, Channel channel,
+                                   String providerId, Verification receiptVerification, String receiptFingerprint,
+                                   String evidenceSha256, String receiptReference, String submissionReference,
+                                   String referenceConsistency, String referenceDetail, Instant evidenceTime,
+                                   TimePrecision evidencePrecision, String evidenceTimeSource, Instant anchorTime,
+                                   TimePrecision anchorPrecision, String anchorSource, String temporalStatus,
+                                   long clockSkewSeconds, String policyVersion, Map<String, Object> correlation,
+                                   String actor) {
+    }
+
+    /**
+     * Appends a link row; empty when it would duplicate the current one (a repeated or concurrent
+     * write of the same decision: the receipt's root, or a second supersede of the same row).
+     */
+    public Optional<UUID> insertReceiptLink(ReceiptLinkWrite w) {
+        if (!receiptLinksPresent()) return Optional.empty();
+        UUID id = UuidV7.generate();
+        List<UUID> inserted = db.query("""
+                        insert into application_receipt_links (id, profile_id, application_id, receipt_id, plan_id,
+                            submission_evidence_id, supersedes_link_id, origin, decision, channel, provider_id,
+                            receipt_verification, receipt_fingerprint, evidence_sha256, receipt_reference,
+                            submission_reference, reference_consistency, reference_detail, evidence_time,
+                            evidence_time_precision, evidence_time_source, anchor_time, anchor_precision, anchor_source,
+                            temporal_status, clock_skew_seconds, policy_version, correlation, actor)
+                        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
+                        on conflict do nothing
+                        returning id
+                        """, (rs, n) -> (UUID) rs.getObject(1),
+                id, w.profileId(), w.applicationId(), w.receiptId(), w.planId(), w.evidenceId(), w.supersedesLinkId(),
+                w.origin(), w.decision(), w.channel().name(), w.providerId(), w.receiptVerification().name(),
+                w.receiptFingerprint(), w.evidenceSha256(), w.receiptReference(), w.submissionReference(),
+                w.referenceConsistency(), w.referenceDetail(), ts(w.evidenceTime()), w.evidencePrecision().name(),
+                w.evidenceTimeSource(), ts(w.anchorTime()), w.anchorPrecision() == null ? null : w.anchorPrecision().name(),
+                w.anchorSource(), w.temporalStatus(), (int) Math.max(0, w.clockSkewSeconds()), w.policyVersion(),
+                write(w.correlation()), w.actor() == null ? "SYSTEM" : w.actor());
+        return inserted.stream().findFirst();
+    }
+
+    public record ReceiptLinkRow(UUID id, UUID receiptId, UUID planId, UUID evidenceId, UUID supersedesLinkId,
+                                 String origin, String decision, String channel, String providerId,
+                                 String receiptVerification, String receiptFingerprint, String evidenceSha256,
+                                 String receiptReference, String submissionReference, String referenceConsistency,
+                                 String referenceDetail, Instant evidenceTime, String evidencePrecision,
+                                 String evidenceTimeSource, Instant anchorTime, String anchorPrecision,
+                                 String anchorSource, String temporalStatus, int clockSkewSeconds,
+                                 String policyVersion, Instant linkedAt, boolean current) {
+    }
+
+    private static final String LINK_ROW_COLUMNS = """
+            k.id, k.receipt_id, k.plan_id, k.submission_evidence_id, k.supersedes_link_id, k.origin, k.decision, k.channel,
+            k.provider_id, k.receipt_verification, k.receipt_fingerprint, k.evidence_sha256, k.receipt_reference,
+            k.submission_reference, k.reference_consistency, k.reference_detail, k.evidence_time, k.evidence_time_precision,
+            k.evidence_time_source, k.anchor_time, k.anchor_precision, k.anchor_source, k.temporal_status,
+            k.clock_skew_seconds, k.policy_version, k.linked_at,
+            not exists (select 1 from application_receipt_links s where s.supersedes_link_id = k.id) as current
+            """;
+
+    /** Every link row for the owner's application, oldest first. */
+    public List<ReceiptLinkRow> receiptLinks(UUID profileId, UUID applicationId) {
+        if (profileId == null || applicationId == null || !receiptLinksPresent()) return List.of();
+        return db.query("select " + LINK_ROW_COLUMNS + """
+                        from application_receipt_links k
+                        where k.profile_id = ? and k.application_id = ?
+                        order by k.linked_at, k.id
+                        """, (rs, n) -> linkRowOf(rs), profileId, applicationId);
+    }
+
+    /** The current (unsuperseded) link row for one of the owner's receipts. */
+    public Optional<ReceiptLinkRow> currentReceiptLink(UUID profileId, UUID applicationId, UUID receiptId) {
+        if (profileId == null || receiptId == null || !receiptLinksPresent()) return Optional.empty();
+        return db.query("select " + LINK_ROW_COLUMNS + """
+                        from application_receipt_links k
+                        where k.profile_id = ? and k.application_id = ? and k.receipt_id = ?
+                          and not exists (select 1 from application_receipt_links s where s.supersedes_link_id = k.id)
+                        """, (rs, n) -> linkRowOf(rs), profileId, applicationId, receiptId).stream().findFirst();
+    }
+
+    private ReceiptLinkRow linkRowOf(ResultSet rs) throws SQLException {
+        String sha = rs.getString("evidence_sha256");
+        return new ReceiptLinkRow((UUID) rs.getObject("id"), (UUID) rs.getObject("receipt_id"),
+                (UUID) rs.getObject("plan_id"), (UUID) rs.getObject("submission_evidence_id"),
+                (UUID) rs.getObject("supersedes_link_id"), rs.getString("origin"), rs.getString("decision"),
+                rs.getString("channel"), rs.getString("provider_id"), rs.getString("receipt_verification"),
+                rs.getString("receipt_fingerprint"), sha == null ? null : sha.trim(), rs.getString("receipt_reference"),
+                rs.getString("submission_reference"), rs.getString("reference_consistency"),
+                rs.getString("reference_detail"), instant(rs, "evidence_time"), rs.getString("evidence_time_precision"),
+                rs.getString("evidence_time_source"), instant(rs, "anchor_time"), rs.getString("anchor_precision"),
+                rs.getString("anchor_source"), rs.getString("temporal_status"), rs.getInt("clock_skew_seconds"),
+                rs.getString("policy_version"), instant(rs, "linked_at"), rs.getBoolean("current"));
+    }
+
+    private volatile Boolean linksPresent;
+
+    private boolean receiptLinksPresent() {
+        Boolean present = linksPresent;
+        if (present == null) {
+            present = Boolean.TRUE.equals(db.queryForObject(
+                    "select to_regclass('application_receipt_links') is not null", Boolean.class));
+            if (present) linksPresent = true; // only cache the positive answer: a migration may still add it
+        }
+        return present;
+    }
+
+    // ── submission context (Stage 3I Phase 2) ────────────────────────────
+
+    /** What an acknowledgement for one application is checked against when it is recorded. */
+    public record SubmissionContext(SubmissionAnchor anchor, UUID anchorPlanId, SubmissionFacts submission,
+                                    Set<String> disqualifiedReferences) {
+    }
+
+    /** Owner-scoped: the submission anchor, Robin's submission record and the identifiers never compared. */
+    public SubmissionContext submissionContext(UUID profileId, UUID applicationId) {
+        SnapshotParts parts = snapshotParts(profileId, applicationId);
+        ApplicationHeader header = parts.applications().get(applicationId);
+        if (header == null) {
+            return new SubmissionContext(SubmissionAnchor.none(), null, null, Set.of());
+        }
+        AnchorChoice choice = parts.anchorChoices().get(applicationId);
+        SubmissionAnchor anchor = withCandidateReport(choice == null ? SubmissionAnchor.none() : choice.anchor(),
+                parts.reports().getOrDefault(applicationId, List.of()));
+        UUID anchorPlan = choice != null && anchor.equals(choice.anchor()) ? choice.planId() : null;
+        return new SubmissionContext(anchor, anchorPlan, parts.submissions().get(applicationId),
+                parts.disqualifiedReferences().getOrDefault(applicationId, Set.of()));
+    }
+
+    /** The earliest of a Robin attempt anchor and the day the candidate said they submitted it. */
+    public static SubmissionAnchor withCandidateReport(SubmissionAnchor robin, List<CandidateReport> reports) {
+        SubmissionAnchor out = robin == null ? SubmissionAnchor.none() : robin;
+        for (CandidateReport r : reports == null ? List.<CandidateReport>of() : reports) {
+            if (r.kind() == ReportKind.SUBMITTED && r.occurredOn() != null) {
+                out = out.earliest(new SubmissionAnchor(r.occurredOn().atStartOfDay(java.time.ZoneOffset.UTC).toInstant(),
+                        TimePrecision.DATE, AnchorSource.CANDIDATE_REPORTED_SUBMISSION));
+            }
+        }
+        return out;
+    }
+
     /**
      * Groups email messages for an application into threads using e.thread_id.
      */
@@ -372,7 +526,29 @@ public class TrackRepository {
     public record SnapshotParts(Map<UUID, ApplicationHeader> applications, Map<UUID, Preparation> preparation,
                                 Map<UUID, PlanState> plans, Map<UUID, List<StatusChange>> statusChanges,
                                 Map<UUID, List<CandidateReport>> reports, Map<UUID, List<ReceiptRecord>> receipts,
-                                Map<UUID, List<MessageRecord>> messages) {
+                                Map<UUID, List<MessageRecord>> messages, Map<UUID, SubmissionFacts> submissions,
+                                Map<UUID, AnchorChoice> anchorChoices, Map<UUID, Set<String>> disqualifiedReferences,
+                                Map<UUID, Set<String>> foreignReferences) {
+
+        /** Pre-Phase-2 shape: no submission facts, anchors or reference sets. */
+        public SnapshotParts(Map<UUID, ApplicationHeader> applications, Map<UUID, Preparation> preparation,
+                             Map<UUID, PlanState> plans, Map<UUID, List<StatusChange>> statusChanges,
+                             Map<UUID, List<CandidateReport>> reports, Map<UUID, List<ReceiptRecord>> receipts,
+                             Map<UUID, List<MessageRecord>> messages) {
+            this(applications, preparation, plans, statusChanges, reports, receipts, messages, Map.of(), Map.of(),
+                    Map.of(), Map.of());
+        }
+
+        /** The full anchor for one application: its Robin attempt anchor, or the candidate's reported date. */
+        public SubmissionAnchor anchorFor(UUID applicationId) {
+            AnchorChoice choice = anchorChoices.get(applicationId);
+            return withCandidateReport(choice == null ? SubmissionAnchor.none() : choice.anchor(),
+                    reports.getOrDefault(applicationId, List.of()));
+        }
+    }
+
+    /** A Robin attempt anchor and the plan it came from. */
+    public record AnchorChoice(SubmissionAnchor anchor, UUID planId) {
     }
 
     public SnapshotParts snapshotParts(UUID profileId, UUID onlyApplicationId) {
@@ -409,10 +585,12 @@ public class TrackRepository {
         boolean receiptTablesPresent = Boolean.TRUE.equals(db.queryForObject(
                 "select to_regclass('submission_receipts') is not null and to_regclass('submission_evidence') is not null",
                 Boolean.class));
-        record PlanRow(UUID applicationId, UUID planId, String status, boolean submitApproved, String reconciliationNote) {}
+        record PlanRow(UUID applicationId, UUID planId, String status, boolean submitApproved, String reconciliationNote,
+                       UUID jobId, String targetUrl) {}
         List<PlanRow> planRows = new ArrayList<>();
         db.query("""
-                select distinct on (p.application_id) p.application_id, p.id as plan_id, p.status, p.submit_approved, p.result::text as result
+                select distinct on (p.application_id) p.application_id, p.id as plan_id, p.status, p.submit_approved,
+                       p.result::text as result, a.job_id, p.target_url
                 from automation_plans p join applications a on a.id = p.application_id and a.profile_id = p.profile_id
                 where a.profile_id = ?""" + appFilter + "\n" + """
                 order by p.application_id, p.created_at desc, p.id desc
@@ -423,29 +601,123 @@ public class TrackRepository {
                     (UUID) rs.getObject("plan_id"),
                     status,
                     rs.getBoolean("submit_approved"),
-                    "RECONCILIATION_REQUIRED".equals(status) ? reconciliationNoteOf(rs.getString("result")) : null));
+                    "RECONCILIATION_REQUIRED".equals(status) ? reconciliationNoteOf(rs.getString("result")) : null,
+                    (UUID) rs.getObject("job_id"),
+                    rs.getString("target_url")));
         }, args);
+
+        // Identifiers that are never employer confirmation references: Robin's own ids and the job's keys.
+        Map<UUID, Set<String>> disqualified = new HashMap<>();
+        db.query("""
+                select a.id as application_id, a.job_id, j.application_url, j.canonical_url,
+                       coalesce((select string_agg(k.key, E'\\n') from job_identity_keys k where k.job_id = a.job_id), '') as keys,
+                       coalesce((select string_agg(p.id::text, E'\\n') from automation_plans p
+                                 where p.application_id = a.id and p.profile_id = a.profile_id), '') as plan_ids
+                from applications a join jobs j on j.id = a.job_id
+                where a.profile_id = ?""" + appFilter, (ResultSet rs) -> {
+            List<String> values = new ArrayList<>();
+            values.add(String.valueOf(rs.getObject("application_id")));
+            values.add(String.valueOf(rs.getObject("job_id")));
+            values.addAll(splitKeys(rs.getString("keys")));
+            values.addAll(splitKeys(rs.getString("plan_ids")));
+            values.add(postingIdOf(rs.getString("application_url")));
+            values.add(postingIdOf(rs.getString("canonical_url")));
+            disqualified.put((UUID) rs.getObject("application_id"), SubmissionReferencePolicy.disqualifiedIdentifiers(values));
+        }, args);
+
         Map<UUID, PlanState> plans = new HashMap<>();
+        Map<UUID, SubmissionFacts> submissions = new HashMap<>();
         for (PlanRow row : planRows) {
+            boolean submitted = "SUBMITTED".equals(row.status());
             boolean verifiedReceipt = receiptTablesPresent
                     && receiptCaptureService != null
-                    && "SUBMITTED".equals(row.status())
+                    && submitted
                     && receiptCaptureService.isStoredReceiptIntegrityVerified(profileId, row.applicationId(), row.planId());
+            boolean browserObserved = false;
+            if (submitted && receiptTablesPresent && observationReader != null) {
+                SubmissionFacts facts = submissionFacts(profileId, row.applicationId(), row.planId(), row.jobId(),
+                        row.targetUrl(), verifiedReceipt, disqualified.getOrDefault(row.applicationId(), Set.of()));
+                if (facts != null) {
+                    submissions.put(row.applicationId(), facts);
+                    browserObserved = facts.browserObserved();
+                }
+            }
             plans.put(row.applicationId(),
-                    new PlanState(row.status(), row.submitApproved(), row.reconciliationNote(), verifiedReceipt));
+                    new PlanState(row.status(), row.submitApproved(), row.reconciliationNote(), verifiedReceipt, browserObserved));
+        }
+
+        // Submission anchors: per plan, Robin's pre-submit fence time, else (for a real attempt) its approval time.
+        Map<UUID, AnchorChoice> anchors = new HashMap<>();
+        db.query("""
+                select p.application_id, p.id as plan_id, p.status,
+                       (select min(st.created_at) from automation_steps st
+                         where st.plan_id = p.id
+                           and (st.step_key = 'pre-submit-attempting' or coalesce(st.result->>'phase', '') = 'PRE_SUBMIT_ATTEMPTING')) as fence_at,
+                       (select min(al.created_at) from audit_logs al
+                         where al.entity_type = 'AUTOMATION_PLAN' and al.entity_id = p.id
+                           and al.action in ('GREENHOUSE_SUBMIT_APPROVED', 'ASHBY_SUBMIT_APPROVED', 'WORKDAY_SUBMIT_APPROVED',
+                                             'UNIVERSAL_SUBMIT_APPROVED')) as approved_at
+                from automation_plans p join applications a on a.id = p.application_id and a.profile_id = p.profile_id
+                where a.profile_id = ?""" + appFilter, (ResultSet rs) -> {
+            Instant fence = instant(rs, "fence_at");
+            Instant approved = instant(rs, "approved_at");
+            String status = rs.getString("status");
+            SubmissionAnchor anchor = fence != null
+                    ? new SubmissionAnchor(fence, TimePrecision.EXACT, AnchorSource.PRE_SUBMIT_ATTEMPT)
+                    : approved != null && ("SUBMITTED".equals(status) || "RECONCILIATION_REQUIRED".equals(status))
+                    ? new SubmissionAnchor(approved, TimePrecision.EXACT, AnchorSource.SUBMIT_APPROVAL)
+                    : SubmissionAnchor.none();
+            if (!anchor.present()) return;
+            UUID applicationId = (UUID) rs.getObject("application_id");
+            AnchorChoice current = anchors.get(applicationId);
+            if (current == null || anchor.earliest(current.anchor()) == anchor) {
+                anchors.put(applicationId, new AnchorChoice(anchor, (UUID) rs.getObject("plan_id")));
+            }
+        }, args);
+
+        // Confirmation references Robin recorded for the owner's applications (worker provenance only).
+        Map<UUID, Set<String>> ownReferences = new HashMap<>();
+        if (receiptTablesPresent) {
+            db.query("""
+                    select e.application_id, e.employer_confirmation_id from submission_evidence e
+                    join applications a on a.id = e.application_id and a.profile_id = e.profile_id
+                    where e.profile_id = ? and e.employer_confirmation_id is not null
+                      and e.worker_principal = 'worker' and e.recorded_via = ?
+                    """, (ResultSet rs) -> {
+                UUID owner = (UUID) rs.getObject("application_id");
+                SubmissionReferencePolicy.normalize(rs.getString("employer_confirmation_id")).ifPresent(ref ->
+                        ownReferences.computeIfAbsent(owner, k -> new LinkedHashSet<>()).add(ref));
+            }, profileId, SubmissionEvidenceRepository.RECORDED_VIA_WORKER_COMPLETE);
+        }
+        Map<UUID, Set<String>> foreign = new HashMap<>();
+        for (UUID applicationId : apps.keySet()) {
+            Set<String> others = new LinkedHashSet<>();
+            ownReferences.forEach((app, refs) -> {
+                if (!app.equals(applicationId)) others.addAll(refs);
+            });
+            others.removeAll(ownReferences.getOrDefault(applicationId, Set.of()));
+            foreign.put(applicationId, others);
         }
 
         Map<UUID, List<StatusChange>> changes = new HashMap<>();
         Map<UUID, List<CandidateReport>> reports = new HashMap<>();
         db.query("""
                 select ev.id, ev.application_id, ev.type, ev.payload->>'from' as from_status, ev.payload->>'to' as to_status,
-                       ev.payload->>'kind' as kind, ev.payload->>'occurredOn' as occurred_on, ev.classification, ev.occurred_at
+                       ev.payload->>'kind' as kind, ev.payload->>'occurredOn' as occurred_on, ev.classification, ev.occurred_at,
+                       ev.payload->>'event_key' as status_event_key
                 from application_events ev join applications a on a.id = ev.application_id
                 where a.profile_id = ?""" + appFilter + "\n" + """
                   and ev.type in ('STATUS_CHANGED', 'CANDIDATE_REPORT')
                 order by ev.occurred_at, ev.id
                 """, (ResultSet rs) -> {
             UUID applicationId = (UUID) rs.getObject("application_id");
+            String statusEventKey = rs.getString("status_event_key");
+            if ("STATUS_CHANGED".equals(rs.getString("type")) && statusEventKey != null && statusEventKey.startsWith("automation.")) {
+                // Robin's own mirror of its real submission onto the pre-8.3 status (AutomationController
+                // #markApplicationSubmitted). The V038 trigger labels every non-email status change as the
+                // candidate's, which this is not; Robin's submission is represented by its plan and evidence.
+                return;
+            }
             if ("STATUS_CHANGED".equals(rs.getString("type"))) {
                 changes.computeIfAbsent(applicationId, k -> new ArrayList<>()).add(new StatusChange(
                         (UUID) rs.getObject("id"), rs.getString("from_status"), rs.getString("to_status"),
@@ -503,7 +775,67 @@ public class TrackRepository {
         }, onlyApplicationId == null ? new Object[]{profileId}
                 : new Object[]{profileId, onlyApplicationId, candidateFilter(onlyApplicationId)});
 
-        return new SnapshotParts(apps, preparation, plans, changes, reports, receipts, messages);
+        return new SnapshotParts(apps, preparation, plans, changes, reports, receipts, messages, submissions, anchors,
+                disqualified, foreign);
+    }
+
+    /**
+     * Robin's own submission record for one SUBMITTED plan: the worker evidence, whether it is a clean
+     * browser observation, and whether its confirmation reference can be trusted for comparison.
+     */
+    private SubmissionFacts submissionFacts(UUID profileId, UUID applicationId, UUID planId, UUID jobId,
+                                            String targetUrl, boolean sandboxVerified, Set<String> disqualified) {
+        BrowserObservationReader.Observation observation;
+        try {
+            observation = observationReader.read(profileId, applicationId, planId, jobId, targetUrl);
+        } catch (RuntimeException e) {
+            return null;
+        }
+        SubmissionEvidenceRepository.StoredEvidence e = observation.evidence();
+        if (e == null) return null;
+        boolean intact = observation.decryptedPayload() != null
+                && "worker".equals(e.workerPrincipal())
+                && SubmissionEvidenceRepository.RECORDED_VIA_WORKER_COMPLETE.equals(e.recordedVia());
+        UniversalSubmissionEvidence.Parsed parsed = observation.parsed();
+        boolean v2Intact = parsed == null || !parsed.isV2()
+                || parsed.digest() == UniversalSubmissionEvidence.DigestStatus.VALID;
+        String reference = SubmissionReferencePolicy.normalize(e.employerConfirmationId()).orElse(null);
+        boolean trusted = intact && v2Intact && reference != null && !disqualified.contains(reference);
+        boolean observed = observation.assessment() != null && observation.assessment().clean()
+                && "UNIVERSAL".equalsIgnoreCase(e.atsPlatform());
+        List<String> withoutProof = new ArrayList<>();
+        if (observed && parsed != null && parsed.isV2()) {
+            // A document the plan prepared that the accepted submission request did not visibly carry:
+            // attached but unconfirmed, or never attached (rejected by the form, or not attempted).
+            for (String kind : List.of("cv", "coverLetter")) {
+                UniversalSubmissionEvidence.Document d = parsed.documents().get(kind);
+                if (d == null) continue;
+                boolean attachedUnconfirmed = "ATTACHED_NOT_CONFIRMED".equals(d.uploadVerification());
+                boolean preparedNotAttached = "NOT_ATTACHED".equals(d.uploadVerification())
+                        && ("REJECTED".equals(d.formAttachment()) || "NOT_ATTEMPTED".equals(d.formAttachment()));
+                if (attachedUnconfirmed || preparedNotAttached) withoutProof.add(kind);
+            }
+        }
+        return new SubmissionFacts(planId, e.id(), e.rawEvidenceSha256(), e.atsPlatform(), e.employerConfirmationId(),
+                trusted, e.recordedAt(), observed, sandboxVerified,
+                parsed == null ? "UNREADABLE" : parsed.kind().name(), withoutProof,
+                observation.assessment() == null ? null : observation.assessment().code());
+    }
+
+    private static final java.util.regex.Pattern POSTING_PATH = java.util.regex.Pattern.compile(
+            "/(?:jobs?|positions?|openings?|roles?|apply)/([A-Za-z0-9._-]{3,128})(?:/|$)", java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    /** The posting identifier in a job URL's path (e.g. /jobs/4471), which is never a confirmation reference. */
+    static String postingIdOf(String url) {
+        if (url == null) return null;
+        try {
+            String path = java.net.URI.create(url.strip()).getPath();
+            if (path == null) return null;
+            java.util.regex.Matcher m = POSTING_PATH.matcher(path);
+            return m.find() ? m.group(1) : null;
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     // ── timeline ─────────────────────────────────────────────────────────

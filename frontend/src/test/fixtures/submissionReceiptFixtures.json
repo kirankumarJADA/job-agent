@@ -99,7 +99,8 @@
         "isLatest": true
       }
     ],
-    "verificationLevel": "SANDBOX_VERIFIED"
+    "verificationLevel": "SANDBOX_VERIFIED",
+    "browserEvidence": null
   },
   "reconciliation": {
     "receiptId": "66666666-6666-7666-8666-666666666661",
@@ -198,7 +199,8 @@
         "isLatest": true
       }
     ],
-    "verificationLevel": "ATTEMPT_RECORDED"
+    "verificationLevel": "ATTEMPT_RECORDED",
+    "browserEvidence": null
   },
   "submittedUnverified": {
     "receiptId": "66666666-6666-7666-8666-666666666662",
@@ -292,7 +294,8 @@
         "isLatest": true
       }
     ],
-    "verificationLevel": "ATTEMPT_RECORDED"
+    "verificationLevel": "ATTEMPT_RECORDED",
+    "browserEvidence": null
   },
   "failed": {
     "receiptId": "66666666-6666-7666-8666-666666666663",
@@ -386,7 +389,8 @@
         "isLatest": true
       }
     ],
-    "verificationLevel": "FAILED"
+    "verificationLevel": "FAILED",
+    "browserEvidence": null
   },
   "empty": {
     "receiptId": null,
@@ -439,7 +443,8 @@
       "code": null
     },
     "attemptHistory": [],
-    "verificationLevel": "NOT_ATTEMPTED"
+    "verificationLevel": "NOT_ATTEMPTED",
+    "browserEvidence": null
   },
   "browserObserved": {
     "receiptId": "66666666-6666-7666-8666-666666666664",
@@ -516,6 +521,34 @@
         "isLatest": true
       }
     ],
-    "verificationLevel": "BROWSER_OBSERVED"
+    "verificationLevel": "BROWSER_OBSERVED",
+    "browserEvidence": {
+      "schemaVersion": "robin-submission-evidence-v1",
+      "schemaKind": "V1",
+      "browserObserved": true,
+      "assessment": "BROWSER_OBSERVED_LEGACY_SCHEMA",
+      "assessmentReason": "Browser observed the submission (evidence recorded before schema v2).",
+      "redirectChain": [],
+      "finalOrigin": null,
+      "documents": [
+        {
+          "kind": "cv",
+          "uploadVerification": "NOT_RECORDED",
+          "label": "Upload proof for the CV was not recorded for this attempt.",
+          "attachedSha256": null,
+          "bytesObserved": false
+        },
+        {
+          "kind": "coverLetter",
+          "uploadVerification": "NOT_RECORDED",
+          "label": "Upload proof for the cover letter was not recorded for this attempt.",
+          "attachedSha256": null,
+          "bytesObserved": false
+        }
+      ],
+      "observedAt": null,
+      "identifierSource": null,
+      "employerVerification": "NOT_VERIFIED_BY_BROWSER"
+    }
   }
 }

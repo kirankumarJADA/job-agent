@@ -4,8 +4,10 @@ import type {
   TrackApplicationRef,
   TrackBasis,
   TrackEventClassification,
+  TrackReceipt,
   TrackReviewItem,
   TrackStage,
+  TrackSubmissionLevel,
   TrackSubmissionState,
   TrackTimePrecision,
   TrackVerification,
@@ -200,10 +202,12 @@ export function submissionTone(state: TrackSubmissionState | undefined): PillTon
 }
 
 /** Short wording for the list view, where only the submission state is known. */
-export function submissionSummary(state: TrackSubmissionState | undefined): string {
+export function submissionSummary(state: TrackSubmissionState | undefined, sandbox = false): string {
   switch (state) {
     case 'CONFIRMED':
-      return 'Submission confirmed by verified employer evidence';
+      // A sandbox receipt is verified, but it is a synthetic test environment, never a live employer.
+      return sandbox ? 'Submission confirmed by a sandbox receipt — not a live employer'
+        : 'Submission confirmed by verified employer evidence';
     case 'UNVERIFIED':
       return 'Submission not verified';
     case 'CONFLICTING':
@@ -421,3 +425,81 @@ export const TrackReviewCard: React.FC<{
     </article>
   );
 };
+
+/**
+ * Stage 3I Phase 2: where the submission state comes from. Only an authenticated employer
+ * acknowledgement is employer verification; a browser observation, a sandbox receipt and the
+ * candidate's own report are each named for what they are.
+ */
+export function submissionLevelLabel(level: TrackSubmissionLevel | null | undefined): string | null {
+  switch (level) {
+    case 'EMPLOYER_EMAIL_VERIFIED':
+      return 'Employer acknowledgement verified';
+    case 'SANDBOX_VERIFIED':
+      return 'Sandbox receipt verified';
+    case 'BROWSER_OBSERVED':
+      return 'Browser-observed — employer has not verified';
+    case 'ATTEMPT_RECORDED':
+      return 'Attempt recorded — outcome not confirmed';
+    case 'CANDIDATE_REPORTED':
+      return 'Reported by you';
+    case 'EMPLOYER_EMAIL_UNVERIFIED':
+      return 'Employer email — sender not verified';
+    case 'CONFLICTING':
+      return 'Conflicting evidence';
+    case 'NOT_ATTEMPTED':
+      return 'Not submitted';
+    default:
+      return null;
+  }
+}
+
+export function submissionLevelTone(level: TrackSubmissionLevel | null | undefined): PillTone {
+  switch (level) {
+    case 'EMPLOYER_EMAIL_VERIFIED':
+      return 'emerald';
+    case 'SANDBOX_VERIFIED':
+      return 'sky';
+    case 'CONFLICTING':
+      return 'red';
+    case 'BROWSER_OBSERVED':
+    case 'ATTEMPT_RECORDED':
+    case 'CANDIDATE_REPORTED':
+    case 'EMPLOYER_EMAIL_UNVERIFIED':
+      return 'amber';
+    default:
+      return 'slate';
+  }
+}
+
+/** Where a receipt's time came from. */
+export function evidenceTimeSourceLabel(source: TrackReceipt['evidenceAtSource']): string | null {
+  switch (source) {
+    case 'PROVIDER_RECEIPT':
+      return 'time recorded by your mail provider';
+    case 'CANDIDATE_SUPPLIED':
+      return 'time you entered';
+    case 'NONE':
+      return 'arrival time unknown';
+    default:
+      return null;
+  }
+}
+
+/**
+ * A receipt whose durable link records a contradiction with the submission: its pill must never
+ * read as a verified success, whatever the sender authentication says, until the candidate decides.
+ */
+export function receiptLinkIssue(receipt: TrackReceipt): string | null {
+  const link = receipt.link;
+  if (!link || link.decision === 'CANDIDATE_CONFIRMED' || link.decision === 'CANDIDATE_REJECTED') return null;
+  if (receipt.candidateReview) return null;
+  if (link.referenceConsistency === 'CONFLICTING') {
+    return `Quotes a different confirmation reference from the one observed at submission${
+      link.submissionReference ? ` (${link.submissionReference})` : ''
+    }`;
+  }
+  if (link.temporalStatus === 'BEFORE_SUBMISSION') return 'Arrived before this application was submitted';
+  if (link.temporalStatus === 'FUTURE_DATED') return 'Dated in the future — impossible';
+  return null;
+}

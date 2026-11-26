@@ -197,4 +197,40 @@ describe('SubmissionReceiptModal', () => {
     expect(screen.queryByText('Confirmed Submission Proof')).toBeNull();
     expect(screen.queryByText('Unconfirmed Submission — Reconciliation Required')).toBeNull();
   });
+
+  it('shows upload proof without ever claiming a document was received, for historical and v2 evidence', async () => {
+    // The shared contract fixture: v1 evidence, so upload proof was never recorded.
+    mockedApiFetch.mockResolvedValueOnce(BROWSER_OBSERVED_RECEIPT);
+    render(<SubmissionReceiptModal isOpen={true} onClose={vi.fn()} applicationId="22222222-2222-7222-8222-222222222222" />);
+    expect((await screen.findByTestId('upload-proof-cv')).textContent).toContain('Upload proof not recorded');
+    expect(screen.getByTestId('browser-evidence').textContent).toContain('Browser-observed — not employer verified');
+    cleanup();
+
+    const v2: SubmissionReceipt = {
+      ...BROWSER_OBSERVED_RECEIPT,
+      browserEvidence: {
+        schemaVersion: 'robin-submission-evidence-v2', schemaKind: 'V2', browserObserved: true,
+        assessment: 'BROWSER_OBSERVED_V2',
+        assessmentReason: 'Browser observed the submission; evidence v2 integrity, correlation and host policy checks passed.',
+        redirectChain: [{ host: 'careers.acme.example', status: 303 }, { host: 'careers.acme.example', status: 200 }],
+        finalOrigin: 'https://careers.acme.example',
+        documents: [
+          { kind: 'cv', uploadVerification: 'ATTACHED_NOT_CONFIRMED', label: 'CV was attached to the form, but Robin could not confirm it was included when the form was submitted.', attachedSha256: 'b'.repeat(64), bytesObserved: false },
+          { kind: 'coverLetter', uploadVerification: 'FILE_PART_OBSERVED', label: 'Cover letter was attached and included in the submitted form; a browser cannot confirm the employer received the file itself.', attachedSha256: 'c'.repeat(64), bytesObserved: false },
+        ],
+        observedAt: '2026-11-26T10:00:00.000Z', identifierSource: 'RESPONSE_JSON', employerVerification: 'NOT_VERIFIED_BY_BROWSER',
+      },
+    };
+    mockedApiFetch.mockResolvedValueOnce(v2);
+    render(<SubmissionReceiptModal isOpen={true} onClose={vi.fn()} applicationId="22222222-2222-7222-8222-222222222222" />);
+    const cv = await screen.findByTestId('upload-proof-cv');
+    expect(cv.textContent).toContain('Attached — inclusion not confirmed');
+    expect(cv.innerHTML).not.toContain('emerald');
+    const cl = screen.getByTestId('upload-proof-coverLetter');
+    expect(cl.textContent).toContain('Included in the submitted form');
+    expect(cl.textContent).toContain('cannot confirm the employer received the file');
+    expect(cl.innerHTML).not.toContain('emerald');
+    expect(screen.getByTestId('browser-evidence').textContent).toContain('careers.acme.example (303) → careers.acme.example (200)');
+    expect(screen.queryByText(/uploaded and confirmed/i)).toBeNull();
+  });
 });

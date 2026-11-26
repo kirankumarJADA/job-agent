@@ -180,7 +180,7 @@ public class EmailIntelligenceService {
                                String subject, String body, Instant received, UUID applicationId) {
         Objects.requireNonNull(ownerProfileId, "ownerProfileId is required to ingest an email");
         return process(ownerProfileId, messageId, null, from, to, subject, body, received, applicationId,
-                Channel.CANDIDATE_FORWARDED, null, null, List.of());
+                Channel.CANDIDATE_FORWARDED, null, null, List.of(), null);
     }
 
     /** The authenticated mailbox-connector boundary (see {@link ConnectorMessage}). */
@@ -191,7 +191,7 @@ public class EmailIntelligenceService {
         return process(ownerProfileId, message.messageId(), message.threadId(), message.from(), message.to(), message.subject(),
                 message.body(), message.receivedAt(), null, Channel.MAILBOX_CONNECTOR,
                 message.authentication() == null ? SenderAuthentication.none() : message.authentication(),
-                message.mailboxAddress(), message.threadReferences());
+                message.mailboxAddress(), message.threadReferences(), message.providerId());
     }
 
     /**
@@ -224,7 +224,7 @@ public class EmailIntelligenceService {
     private IngestResult process(UUID ownerProfileId, String messageId, String threadId, String from, String to, String subject,
                                  String body, Instant received, UUID assertedApplicationId, Channel channel,
                                  SenderAuthentication authentication, String mailboxAddress,
-                                 List<String> threadReferences) {
+                                 List<String> threadReferences, String providerId) {
         boolean receivedTimeKnown = received != null;
         Instant receivedAt = received == null ? Instant.now() : received;
         if (assertedApplicationId != null && track.application(ownerProfileId, assertedApplicationId).isEmpty()) {
@@ -299,7 +299,8 @@ public class EmailIntelligenceService {
         String receiptVerification = null;
         if (linkedApplication != null) {
             MessageFacts facts = new MessageFacts(emailId, messageId, contentFingerprint, from, channel, receivedAt,
-                    receivedTimeKnown, classification.explicitReceipt(), quotedReference, authentication, delivered);
+                    receivedTimeKnown, classification.explicitReceipt(), quotedReference, authentication, delivered,
+                    channel == Channel.MAILBOX_CONNECTOR ? providerId : null);
             evidence.recordMessage(ownerProfileId, linkedApplication, facts, category,
                     association.strength() == com.personal.jobagent.track.TrackVocabulary.MatchStrength.CANDIDATE);
             if (classification.explicitReceipt() || category == EmailCategory.APPLICATION_ACKNOWLEDGEMENT) {

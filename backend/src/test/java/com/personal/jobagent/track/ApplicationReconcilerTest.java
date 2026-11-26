@@ -144,8 +144,11 @@ class ApplicationReconcilerTest {
         TrackState state = reconcile(s);
         assertThat(state.status()).isEqualTo(Stage.APPLIED);
         assertThat(state.basis()).isEqualTo(Basis.VERIFIED);
-        assertThat(state.label()).isEqualTo("Applied — verified");
+        // A verified Robin receipt is a V069 sandbox receipt: it stays visibly sandbox-tagged.
+        assertThat(state.label()).isEqualTo("Applied — verified (sandbox)");
         assertThat(state.submission().state()).isEqualTo(SubmissionState.CONFIRMED);
+        assertThat(state.submission().sandbox()).isTrue();
+        assertThat(state.submission().verificationLevel()).isEqualTo("SANDBOX_VERIFIED");
         assertThat(state.robinSubmitted()).isTrue();
         assertThat(state.robinSubmissionNote()).contains("Robin submitted this application and confirmed it with platform evidence");
         assertThat(state.reason()).contains("Robin submitted this application and confirmed it with platform evidence");

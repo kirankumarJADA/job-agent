@@ -2,7 +2,7 @@
 
 Each entry records evidence and status. Severity: **P0** user-facing truthfulness/safety defect; **P1** blocks a core promise or phase exit; **P2** genuine but not a current phase blocker.
 
-**Updated 2026-11-17** after PR #11 merged (`199e051`); appended **2026-11-26** with Stage 3G preparation, Stage 3H receipt architecture audit findings, Stage 3I Phase 0 security remediation, and Stage 3I Phase 1 Cloudflare `message.headers` trust-boundary hardening + multi-channel receipt architecture on `integration/wave-3`. Dated production observations below are historical evidence, not a statement of current production state.
+**Updated 2026-11-17** after PR #11 merged (`199e051`); appended **2026-11-26** with Stage 3G preparation, Stage 3H receipt architecture audit findings, Stage 3I Phase 0 security remediation, Stage 3I Phase 1 Cloudflare `message.headers` trust-boundary hardening + multi-channel receipt architecture, and Stage 3I Phase 2 durable receipt linking & reconciliation (V071) on `integration/wave-3`. Dated production observations below are historical evidence, not a statement of current production state.
 
 ---
 
@@ -23,9 +23,9 @@ Each entry records evidence and status. Severity: **P0** user-facing truthfulnes
 
 ---
 
-## P1 — Universal receipt verification & evidence trust architecture (Stage 3H → Stage 3I Phase 0–1, 2026-11-26) — **PARTIALLY REMEDIATED (Gate 0A–0F + Phase 1 architecture complete; Phases 2–4 code & `V071+` implementation still open)**
+## P1 — Universal receipt verification & evidence trust architecture (Stage 3H → Stage 3I Phase 0–2, 2026-11-26) — **PARTIALLY REMEDIATED (Phase 0–1 complete; Phase 2 durable linking, reconciliation, conflict, temporal and evidence v2 IMPLEMENTED ON `integration/wave-3`, NOT MERGED; Phases 3–4 and live validation open)**
 
-**Evidence:** `docs/STAGE_3H_UNIVERSAL_RECEIPT_VERIFICATION_ARCHITECTURE_AUDIT.md`, `docs/STAGE_3I_PHASE_0_RECEIPT_TRUST_SECURITY_REMEDIATION.md`, `docs/STAGE_3I_PHASE_1_MULTI_CHANNEL_RECEIPT_ARCHITECTURE.md`.
+**Evidence:** `docs/STAGE_3H_UNIVERSAL_RECEIPT_VERIFICATION_ARCHITECTURE_AUDIT.md`, `docs/STAGE_3I_PHASE_0_RECEIPT_TRUST_SECURITY_REMEDIATION.md`, `docs/STAGE_3I_PHASE_1_MULTI_CHANNEL_RECEIPT_ARCHITECTURE.md`, `docs/STAGE_3I_PHASE_2_DURABLE_RECEIPT_LINKING_IMPLEMENTATION.md`.
 
 **Gate 0B–0F Remediations Implemented ON `integration/wave-3`:**
 - **Approval attestation mismatch:** `JdbcReceiptTrustStore.STRICT_APPROVAL_SQL` now includes `'UNIVERSAL_SUBMIT_APPROVED'` while keeping `'UNIVERSAL'` excluded from `track/receipt/ReceiptVerificationPolicy.ALLOWED_ATS_PLATFORMS`.
@@ -37,8 +37,27 @@ Each entry records evidence and status. Severity: **P0** user-facing truthfulnes
 **Stage 3I Phase 1 Architecture Completed (`docs/STAGE_3I_PHASE_1_MULTI_CHANNEL_RECEIPT_ARCHITECTURE.md`):**
 - Formalised the 5-level evidence trust model (`ATTEMPT_RECORDED`, `BROWSER_OBSERVED`, `EMPLOYER_EMAIL_VERIFIED`, `SANDBOX_VERIFIED`, `EMPLOYER_STATUS_RECONCILED`), unified 7-channel ingestion contract, deterministic correlation + `TrackVocabulary`-reusing reconciliation state machine, additive `V071+` schema proposal (`V001`–`V070` untouched), and 15-scenario adversarial test plan.
 
-**Still open (Stage 3I Phases 2–4):**
-- Phase 2+ code implementation: advancing `ApplicationReconciler` past `Stage.APPLIED` for `SUBMITTED` plans when verified `C1` / reconciled `Level D` evidence exists, browser-vs-email `employer_confirmation_id` conflict checks (`SUBMISSION_REFERENCE_CONFLICT`), temporal plausibility checks, additive `V071+` verification linking migration, plus future Outlook/IMAP/webhook adapters (`ExternalMailboxProviders.Outlook`/`Imap` remain fail-closed stubs; no employer webhook endpoint exists).
+**Stage 3I Phase 2 Implemented ON `integration/wave-3` (`docs/STAGE_3I_PHASE_2_DURABLE_RECEIPT_LINKING_IMPLEMENTATION.md`):**
+- **V071 `application_receipt_links`:** additive, append-only correlation decisions linking each employer receipt to its application and, when Robin submitted it, to the plan and `submission_evidence` row; both original confirmation references, channel, provider, receipt fingerprint, evidence digest, evidence time + source, submission anchor + source and skew allowance are stored. One current row per receipt (unique root + unique supersede); isolation trigger rejects cross-profile/cross-application rows; UPDATE and direct DELETE refused; fail-closed schema precheck; historical receipts backfilled `V071_BACKFILL` / `NOT_ASSESSED` only. `V001`–`V070` byte-identical; V069 `submission_receipts` unchanged and still sandbox-only.
+- **Reconciler progression (`track-reconcile-v2`):** Robin's own submission is now an ordinary signal, so a verified C1 acknowledgement advances a SUBMITTED application to ACKNOWLEDGED and confirmed Level D evidence advances it further; rejection/withdrawal end progress without erasing the submission record; conflicts take priority (NEEDS_REVIEW); results are order-independent (inputs sorted, total tie-break). Level B stays `Applied — not verified` with no mandatory review item; sandbox receipts are labelled `(sandbox)`.
+- **`SUBMISSION_REFERENCE_CONFLICT`:** a VERIFIED acknowledgement whose reference differs from intact, worker-recorded browser evidence (or matches another application's) needs review and is never counted as verified; candidate confirm/reject resolves it through the existing receipt review and appends a superseding link row.
+- **Temporal policy (`track-temporal-policy-v1`, `track-receipt-policy-v2`):** acknowledgements are checked against the PRE_SUBMIT_ATTEMPTING fence time (else the strict submit-approval time, else the candidate's reported submission date) with a 5-minute skew; earlier → UNVERIFIED + `RECEIPT_TEMPORAL_CONFLICT`; future beyond skew → REJECTED; no provider-assigned time → never VERIFIED.
+- **Universal evidence `robin-submission-evidence-v2`:** correlation, redirect chain (host + status), final origin, identifier source, per-document upload proof (`FILE_PART_OBSERVED` / `ATTACHED_NOT_CONFIRMED` / `NOT_ATTACHED` / `NO_FIELD`), personal-data redaction and a canonical self-digest re-derived by the backend (`CanonicalJson.java`, cross-language contract fixture); off-origin redirect hops rejected by the worker and the server; v1 evidence still accepted.
+
+**Still open (Stage 3I Phases 3–4 and Phase 2 residuals):**
+- Future Outlook/IMAP/webhook adapters (`ExternalMailboxProviders.Outlook`/`Imap` remain fail-closed stubs; no employer webhook endpoint exists); `WEBHOOK_CONNECTOR` channel not added.
+- A browser cannot observe multipart file bytes (Chromium omits them even with route interception), so document upload proof tops out at `FILE_PART_OBSERVED`; files uploaded by a separate request on an earlier page are reported `ATTACHED_NOT_CONFIRMED`, never as sent.
+- Applications Robin never attempted and the candidate gave no submission date have no temporal anchor (`NO_SUBMISSION_ANCHOR`): only the future-dated rule applies.
+- `UNIVERSAL` remains excluded from trusted receipt policy (no Level C2 for Universal); C1 depends on mailbox connectors whose live delivery is unverified (see the P0 and Stage 3G entries).
+- Receipts recorded before V071 keep `policy_version = track-receipt-policy-v1`; ones verified without a provider time are now shown as not verified at reconcile time.
+
+---
+
+## P2 — Robin's own submission mirror was read as a candidate report — **FIXED AT READ TIME ON `integration/wave-3` (Stage 3I Phase 2, 2026-11-26)**
+
+**Evidence:** `AutomationController#markApplicationSubmitted` mirrors a real submission onto the pre-8.3 application status (`STATUS_CHANGED`, actor `worker`, `payload.event_key = automation.real_submit[.start]:<planId>`). The V038 `application_events_guard` trigger classifies every non-email `STATUS_CHANGED` row as `CANDIDATE_REPORTED`. Before Phase 2 the reconciler returned early for SUBMITTED plans, hiding it; once Robin's submission became an ordinary signal, a browser-observed submission read `Applied — reported by you` (found by `ReceiptReconciliationIT`).
+
+**Fix:** `TrackRepository#snapshotParts` ignores `STATUS_CHANGED` rows whose `event_key` starts with `automation.` (Robin's submission is represented by its plan and evidence). Historical rows are not rewritten and V038 is unchanged; the trigger still mislabels these rows for any other reader of `application_events.classification`.
 
 ---
 

@@ -1,8 +1,11 @@
 package com.personal.jobagent.track;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.personal.jobagent.track.receipt.BrowserObservationReader;
+import com.personal.jobagent.track.receipt.BrowserObservationReader.Observation;
 import com.personal.jobagent.track.receipt.InvalidReceiptException;
 import com.personal.jobagent.track.receipt.JdbcReceiptTrustStore;
+import com.personal.jobagent.track.receipt.UniversalSubmissionEvidence;
 import com.personal.jobagent.track.receipt.ReceiptCaptureService;
 import com.personal.jobagent.track.receipt.ReceiptCaptureService.CaptureReceiptCommand;
 import com.personal.jobagent.track.receipt.ReceiptStore.StoredReceipt;
@@ -52,20 +55,29 @@ public class ApplicationReceiptService {
     private final ObjectMapper json;
     private final ReceiptCaptureService receiptCaptureService;
     private final SubmissionEvidenceRepository evidenceRepository;
+    private final BrowserObservationReader observationReader;
 
     @Autowired
     public ApplicationReceiptService(JdbcTemplate db, ObjectMapper json,
                                      @Autowired(required = false) ReceiptCaptureService receiptCaptureService,
-                                     @Autowired(required = false) SubmissionEvidenceRepository evidenceRepository) {
+                                     @Autowired(required = false) SubmissionEvidenceRepository evidenceRepository,
+                                     @Autowired(required = false) BrowserObservationReader observationReader) {
         this.db = db;
         this.json = json;
         this.receiptCaptureService = receiptCaptureService;
         this.evidenceRepository = evidenceRepository;
+        this.observationReader = observationReader != null ? observationReader
+                : evidenceRepository != null ? new BrowserObservationReader(db, json, evidenceRepository) : null;
+    }
+
+    public ApplicationReceiptService(JdbcTemplate db, ObjectMapper json, ReceiptCaptureService receiptCaptureService,
+                                     SubmissionEvidenceRepository evidenceRepository) {
+        this(db, json, receiptCaptureService, evidenceRepository, null);
     }
 
     /** Without the capture service and evidence store, no submission can ever be shown as confirmed. */
     public ApplicationReceiptService(JdbcTemplate db, ObjectMapper json) {
-        this(db, json, null, null);
+        this(db, json, null, null, null);
     }
 
     public record DocumentReceipt(
@@ -157,8 +169,25 @@ public class ApplicationReceiptService {
             ReconciliationDetails reconciliation,
             FailureDetails failure,
             List<AttemptSummary> attemptHistory,
-            String verificationLevel
+            String verificationLevel,
+            BrowserEvidenceView browserEvidence
     ) {
+        /** Backward-compatible 25-arg constructor: no browser evidence section. */
+        public SubmissionReceipt(
+                UUID receiptId, UUID applicationId, UUID jobId, String jobTitle, String company,
+                String applicationUrl, String atsKind, int attemptNumber, boolean isLatest,
+                String idempotencyKey, String status, boolean submitted, Instant submittedAt,
+                Instant createdAt, Instant updatedAt, AuthorizationRecord authorization,
+                IdentityReceipt submittedIdentity, List<AnswerReceipt> submittedAnswers,
+                DocumentReceipt cv, DocumentReceipt coverLetter, ConfirmationEvidence confirmation,
+                ReconciliationDetails reconciliation, FailureDetails failure, List<AttemptSummary> attemptHistory,
+                String verificationLevel) {
+            this(receiptId, applicationId, jobId, jobTitle, company, applicationUrl, atsKind, attemptNumber,
+                    isLatest, idempotencyKey, status, submitted, submittedAt, createdAt, updatedAt,
+                    authorization, submittedIdentity, submittedAnswers, cv, coverLetter, confirmation,
+                    reconciliation, failure, attemptHistory, verificationLevel, null);
+        }
+
         /** Backward-compatible 24-arg constructor deriving verificationLevel conservatively. */
         public SubmissionReceipt(
                 UUID receiptId, UUID applicationId, UUID jobId, String jobTitle, String company,
@@ -189,6 +218,32 @@ public class ApplicationReceiptService {
             return "NOT_ATTEMPTED";
         }
     }
+
+    /**
+     * Stage 3I Phase 2: what the browser evidence of a Universal attempt shows, for display. Never a
+     * claim of employer verification: {@code employerVerification} is always NOT_VERIFIED_BY_BROWSER.
+     */
+    public record BrowserEvidenceView(
+            String schemaVersion,
+            String schemaKind,
+            boolean browserObserved,
+            String assessment,
+            String assessmentReason,
+            List<Map<String, Object>> redirectChain,
+            String finalOrigin,
+            List<DocumentUploadView> documents,
+            String observedAt,
+            String identifierSource,
+            String employerVerification
+    ) {}
+
+    /**
+     * Upload proof for one document. {@code uploadVerification} is FILE_PART_OBSERVED (the attached
+     * artifact's file part was in the accepted submission request; its bytes cannot be observed by a
+     * browser), ATTACHED_NOT_CONFIRMED, NOT_ATTACHED, NO_FIELD, or NOT_RECORDED (evidence before v2).
+     */
+    public record DocumentUploadView(String kind, String uploadVerification, String label, String attachedSha256,
+                                     boolean bytesObserved) {}
 
     private record AppHeader(UUID applicationId, UUID jobId, String jobTitle, String company, String applicationUrl,
                              String status, UUID cvVersionId, Instant createdAt) {}
@@ -402,7 +457,8 @@ public class ApplicationReceiptService {
                 reconciliation,
                 failure,
                 summaries,
-                verificationLevel
+                verificationLevel,
+                confirmationOutcome.browserEvidence()
         );
     }
 
@@ -437,7 +493,8 @@ public class ApplicationReceiptService {
                 new ReconciliationDetails(false, null, null),
                 new FailureDetails(false, null, null),
                 List.of(),
-                "NOT_ATTEMPTED"
+                "NOT_ATTEMPTED",
+                null
         );
     }
 
@@ -660,7 +717,12 @@ public class ApplicationReceiptService {
      * failure all yield {@code confirmed=false}. Observed signals are reported
      * exactly as recorded and are never synthesised.
      */
-    private record ConfirmationOutcome(ConfirmationEvidence evidence, boolean cleanBrowserObserved) {}
+    private record ConfirmationOutcome(ConfirmationEvidence evidence, boolean cleanBrowserObserved,
+                                       BrowserEvidenceView browserEvidence) {
+        ConfirmationOutcome(ConfirmationEvidence evidence, boolean cleanBrowserObserved) {
+            this(evidence, cleanBrowserObserved, null);
+        }
+    }
 
     private static String resolveVerificationLevel(String status, boolean submitted, ConfirmationEvidence confirmation,
                                                    boolean cleanBrowserObserved, FailureDetails failure) {
@@ -782,7 +844,7 @@ public class ApplicationReceiptService {
     private ConfirmationOutcome evaluateUniversalObservation(UUID profileId, AppHeader app, PlanRow plan,
                                                              AuthorizationRecord auth, ReportedConfirmation reported,
                                                              String reportedId, List<String> reportedSignals) {
-        if (evidenceRepository == null) {
+        if (evidenceRepository == null || observationReader == null) {
             return new ConfirmationOutcome(unverified(reportedId, reportedSignals,
                     "submission evidence storage is unavailable, so browser observation cannot be verified."), false);
         }
@@ -790,34 +852,22 @@ public class ApplicationReceiptService {
             return new ConfirmationOutcome(unverified(reportedId, reportedSignals,
                     "explicit candidate submission approval attestation is missing."), false);
         }
-        StoredEvidence evidence;
-        String rawEvidence;
+        Observation observation;
         try {
-            evidence = evidenceRepository.findForPlan(profileId, app.applicationId, plan.id).orElse(null);
-            if (evidence == null) {
-                return new ConfirmationOutcome(unverified(reportedId, reportedSignals,
-                        "no evidence was recorded by the authenticated worker for this attempt."), false);
-            }
-            rawEvidence = evidenceRepository.decryptRawEvidence(evidence).orElse(null);
+            observation = observationReader.read(profileId, app.applicationId, plan.id, app.jobId,
+                    plan.targetUrl != null ? plan.targetUrl : app.applicationUrl, true);
         } catch (RuntimeException e) {
             log.warn("Stored evidence for UNIVERSAL plan {} could not be read: {}", plan.id, e.getMessage());
             return new ConfirmationOutcome(unverified(reportedId, reportedSignals,
                     "the stored evidence could not be decrypted or failed its integrity check."), false);
         }
-        if (!"STORED_ENCRYPTED".equals(evidence.rawEvidenceStatus()) || rawEvidence == null || rawEvidence.isBlank()) {
-            return new ConfirmationOutcome(unverified(reportedId, evidence.observedSignals(),
-                    "no raw DOM/screenshot evidence was stored for this attempt (" + evidence.rawEvidenceStatus() + ")."),
-                    false);
-        }
-        if (!"worker".equals(evidence.workerPrincipal())
-                || !SubmissionEvidenceRepository.RECORDED_VIA_WORKER_COMPLETE.equals(evidence.recordedVia())
-                || !"UNIVERSAL".equalsIgnoreCase(evidence.atsPlatform())) {
-            return new ConfirmationOutcome(unverified(reportedId, evidence.observedSignals(),
-                    "evidence provenance did not match an authenticated worker completion."), false);
-        }
-        if (evidence.observedSignals() == null || evidence.observedSignals().isEmpty()) {
-            return new ConfirmationOutcome(unverified(reportedId, reportedSignals,
-                    "no browser confirmation signals were recorded for this submission."), false);
+        StoredEvidence evidence = observation.evidence();
+        BrowserEvidenceView view = browserEvidenceView(observation);
+        if (!observation.assessment().clean()) {
+            List<String> signals = evidence == null || "NO_SIGNALS".equals(observation.assessment().code())
+                    || "EVIDENCE_INTEGRITY_FAILED".equals(observation.assessment().code())
+                    ? reportedSignals : evidence.observedSignals();
+            return new ConfirmationOutcome(unverified(reportedId, signals, observation.assessment().message()), false, view);
         }
         String obsId = redactSensitive(evidence.employerConfirmationId() != null
                 ? evidence.employerConfirmationId()
@@ -827,7 +877,62 @@ public class ApplicationReceiptService {
                 : "Browser observed submission on employer form. Employer receipt has not yet been independently verified.";
         return new ConfirmationOutcome(
                 new ConfirmationEvidence(false, obsId, evidence.observedSignals(), redactSensitive(summary)),
-                true);
+                true, view);
+    }
+
+    /** The display view of a Universal attempt's browser evidence; never a claim of employer verification. */
+    private static BrowserEvidenceView browserEvidenceView(Observation observation) {
+        if (observation == null || observation.evidence() == null) return null;
+        UniversalSubmissionEvidence.Parsed parsed = observation.parsed();
+        boolean v2 = parsed != null && parsed.isV2();
+        List<Map<String, Object>> hops = new ArrayList<>();
+        List<DocumentUploadView> documents = new ArrayList<>();
+        if (v2) {
+            for (UniversalSubmissionEvidence.Hop hop : parsed.redirectChain()) {
+                Map<String, Object> h = new LinkedHashMap<>();
+                h.put("host", hop.host());
+                h.put("status", hop.status());
+                hops.add(h);
+            }
+            for (String kind : List.of("cv", "coverLetter")) {
+                UniversalSubmissionEvidence.Document d = parsed.documents().get(kind);
+                String state = d == null || d.uploadVerification() == null ? "NOT_RECORDED" : d.uploadVerification();
+                documents.add(new DocumentUploadView(kind, state, uploadLabel(kind, state),
+                        "FILE_PART_OBSERVED".equals(state) || "ATTACHED_NOT_CONFIRMED".equals(state)
+                                ? d.artifactSha256() : null,
+                        false));
+            }
+        } else {
+            for (String kind : List.of("cv", "coverLetter")) {
+                documents.add(new DocumentUploadView(kind, "NOT_RECORDED", uploadLabel(kind, "NOT_RECORDED"), null, false));
+            }
+        }
+        return new BrowserEvidenceView(
+                parsed == null ? null : parsed.schemaVersion(),
+                parsed == null ? "UNREADABLE" : parsed.kind().name(),
+                observation.assessment().clean(),
+                observation.assessment().code(),
+                redactSensitive(observation.assessment().message()),
+                List.copyOf(hops),
+                v2 ? parsed.finalOrigin() : null,
+                List.copyOf(documents),
+                v2 ? parsed.observedAt() : null,
+                v2 ? parsed.identifierSource() : null,
+                "NOT_VERIFIED_BY_BROWSER");
+    }
+
+    private static String uploadLabel(String kind, String state) {
+        String doc = "cv".equals(kind) ? "CV" : "Cover letter";
+        String noun = "cv".equals(kind) ? "CV" : "cover letter";
+        return switch (state) {
+            case "FILE_PART_OBSERVED" -> doc + " was attached and included in the submitted form; a browser cannot "
+                    + "confirm the employer received the file itself.";
+            case "ATTACHED_NOT_CONFIRMED" -> doc + " was attached to the form, but Robin could not confirm it was "
+                    + "included when the form was submitted.";
+            case "NOT_ATTACHED" -> doc + " was not attached to the form.";
+            case "NO_FIELD" -> "The form had no field for a " + noun + ".";
+            default -> "Upload proof for the " + noun + " was not recorded for this attempt.";
+        };
     }
 
     private static ConfirmationEvidence unverified(String reportedId, List<String> signals, String why) {
