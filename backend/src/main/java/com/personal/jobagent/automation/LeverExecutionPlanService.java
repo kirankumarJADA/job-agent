@@ -166,12 +166,12 @@ public class LeverExecutionPlanService {
 
         List<LeverFieldMapper.Answer> storedAnswers = db.query("""
                 select id, question_text, answer_text, status, human_confirmed from application_answers
-                where application_id = ? and profile_id = ? and job_id = ?
-                order by created_at, id
+                where profile_id = ? and job_id = ? and (application_id = ? or application_id is null)
+                order by case when application_id = ? then 0 else 1 end, created_at, id
                 """, (rs, row) -> new LeverFieldMapper.Answer(
                 (UUID) rs.getObject("id"), rs.getString("question_text"),
                 rs.getString("answer_text"), rs.getString("status"), rs.getBoolean("human_confirmed")),
-                applicationId, profileId, jobId);
+                profileId, jobId, applicationId, applicationId);
 
         List<Map<String, Object>> fieldRows = new ArrayList<>();
         List<Map<String, Object>> requiredGaps = new ArrayList<>();

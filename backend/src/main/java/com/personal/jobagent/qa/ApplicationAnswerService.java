@@ -57,11 +57,9 @@ public class ApplicationAnswerService {
         String questionType = classifyQuestion(qLower);
 
         // Ambiguity or sensitive legal checks
-        if (qLower.contains("visa sponsorship required") || qLower.contains("require visa") || qLower.contains("legally authorized to work")) {
-            // Check profile
-            var profileOpt = profileRepository.findByUserId(profileId);
-            // Needs explicit confirmation if unknown
-        }
+        boolean sensitiveLegal = isSensitiveLegalQuestion(qLower);
+        boolean protectedDemographic = isProtectedDemographicQuestion(qLower);
+        var profileRecord = profileRepository.findById(profileId);
 
         StringBuilder profileContext = new StringBuilder();
         profileContext.append("Verified Skills: ");
@@ -119,7 +117,6 @@ public class ApplicationAnswerService {
         // experience, degrees, certifications, work authorisation, clearance)
         // also apply to answers. Year checks above are kept as they were; the
         // shared report's date findings are not duplicated.
-        var profileRecord = profileRepository.findById(profileId);
         com.personal.jobagent.documents.DocumentFactValidator.Report factReport =
                 new com.personal.jobagent.documents.DocumentFactValidator().validate(rawAnswer,
                         new com.personal.jobagent.documents.DocumentFactValidator.CandidateFacts(skills, experiences,
@@ -139,7 +136,8 @@ public class ApplicationAnswerService {
         if (!issues.isEmpty()) {
             status = "HARD_STOP";
             confidence = BigDecimal.valueOf(0.20);
-        } else if (qLower.contains("salary") || qLower.contains("compensation")) {
+        } else if (sensitiveLegal || protectedDemographic
+                || qLower.contains("salary") || qLower.contains("compensation")) {
             status = "NEEDS_USER_INPUT";
             confidence = BigDecimal.valueOf(0.50);
         }
@@ -150,6 +148,12 @@ public class ApplicationAnswerService {
         validationNotes.put("fact_validation", factReport.toMap());
         validationNotes.put("verified_experiences_count", experiences.size());
         validationNotes.put("verified_skills_count", skills.size());
+        if (sensitiveLegal) {
+            validationNotes.put("sensitive_legal_check", true);
+        }
+        if (protectedDemographic) {
+            validationNotes.put("protected_question", true);
+        }
 
         UUID id = answerRepository.insert(profileId, jobId, applicationId, questionText, questionType, rawAnswer, confidence, status, validationNotes);
         ApplicationAnswerRecord record = answerRepository.findById(id).orElseThrow();
@@ -201,5 +205,30 @@ public class ApplicationAnswerService {
             return "SALARY_QUESTION";
         }
         return "GENERAL_OPEN_ENDED";
+    }
+
+    private static boolean isSensitiveLegalQuestion(String qLower) {
+        return qLower.contains("visa sponsorship")
+                || qLower.contains("require visa")
+                || qLower.contains("sponsorship")
+                || qLower.contains("legally authorized")
+                || qLower.contains("authorised to work")
+                || qLower.contains("authorized to work")
+                || qLower.contains("work authorization")
+                || qLower.contains("work authorisation")
+                || qLower.contains("right to work")
+                || qLower.contains("work permit")
+                || qLower.contains("security clearance");
+    }
+
+    private static boolean isProtectedDemographicQuestion(String qLower) {
+        return qLower.contains("gender")
+                || qLower.contains("transgender")
+                || qLower.contains("sexual orientation")
+                || qLower.contains("disability")
+                || qLower.contains("neurodivergent")
+                || qLower.contains("veteran")
+                || qLower.contains("race")
+                || qLower.contains("ethnic");
     }
 }

@@ -81,6 +81,65 @@ public class ApplicationAnswerRepository {
                 rowMapper(), jobId, profileId);
     }
 
+    /**
+     * Scoped answers visible for one application: application-specific rows come first,
+     * followed by job-level answers ({@code application_id is null}).
+     */
+    public List<ApplicationAnswerRecord> findByJobAndProfileScoped(UUID profileId, UUID jobId, UUID applicationId) {
+        return jdbcTemplate.query("""
+                select * from application_answers
+                where profile_id = ? and job_id = ? and (application_id = ? or application_id is null)
+                order by case when application_id = ? then 0 else 1 end, created_at desc, id
+                """, rowMapper(), profileId, jobId, applicationId, applicationId);
+    }
+
+    /**
+     * Previously confirmed, candidate-validated answers across jobs that were marked reusable
+     * in {@code validation_notes->>'reusable' = 'true'}. Excludes essay/company-specific types.
+     */
+    public List<ApplicationAnswerRecord> findReusableConfirmedAnswers(UUID profileId) {
+        return jdbcTemplate.query("""
+                select * from application_answers
+                where profile_id = ?
+                  and status = 'ANSWERED'
+                  and human_confirmed = true
+                  and answer_origin in ('CANDIDATE_CONFIRMED', 'CANDIDATE_EDITED')
+                  and coalesce(validation_notes->>'reusable', 'false') = 'true'
+                  and question_type not in ('WHY_COMPANY', 'WHY_ROLE')
+                order by updated_at desc, id
+                """, rowMapper(), profileId);
+    }
+
+    /**
+     * Idempotently persists a discovered mandatory form question into {@code application_answers}
+     * with {@code NEEDS_USER_INPUT} unless a candidate-confirmed answer already exists for that
+     * question on this application/job. Preserves V036's {@code answer_origin} check constraint.
+     */
+    public UUID upsertUniversalDiscoveredQuestion(UUID profileId,
+                                                  UUID jobId,
+                                                  UUID applicationId,
+                                                  String questionKey,
+                                                  String questionText,
+                                                  String htmlType,
+                                                  Map<String, Object> validationNotes) {
+        String normalizedText = questionText == null ? "" : questionText.trim().toLowerCase().replaceAll("\\s+", " ");
+        List<ApplicationAnswerRecord> existing = findByJobAndProfileScoped(profileId, jobId, applicationId);
+        for (ApplicationAnswerRecord row : existing) {
+            String rowNormalized = row.questionText() == null ? ""
+                    : row.questionText().trim().toLowerCase().replaceAll("\\s+", " ");
+            Object existingKey = row.validationNotes() == null ? null : row.validationNotes().get("questionKey");
+            boolean sameQuestion = (!normalizedText.isEmpty() && normalizedText.equals(rowNormalized))
+                    || (questionKey != null && !questionKey.isBlank() && questionKey.equals(String.valueOf(existingKey)));
+            if (sameQuestion) {
+                return row.id();
+            }
+        }
+        String questionType = "select".equalsIgnoreCase(htmlType) || "radio".equalsIgnoreCase(htmlType)
+                || "checkbox".equalsIgnoreCase(htmlType) ? "STRUCTURED_FIELD" : "UNIVERSAL_DISCOVERED";
+        return insert(profileId, jobId, applicationId, questionText, questionType, "",
+                new BigDecimal("0.00"), "NEEDS_USER_INPUT", validationNotes);
+    }
+
     public UUID insert(UUID profileId, UUID jobId, UUID applicationId,
                        String questionText, String questionType, String answerText,
                        BigDecimal confidence, String status, Map<String, Object> validationNotes) {

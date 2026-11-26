@@ -125,4 +125,39 @@ class ApplicationAnswerServiceTest {
 
         assertThat(result.outcome()).isEqualTo("NEEDS_USER_INPUT");
     }
+
+    @Test
+    void flagsNeedsUserInputOnSensitiveWorkAuthQuestionUsingProfileIdLookup() {
+        UUID profileId = UuidV7.generate();
+        UUID jobId = UuidV7.generate();
+        UUID answerId = UuidV7.generate();
+
+        JobRecord mockJob = new JobRecord(
+                jobId, UuidV7.generate(), "ext-2", UuidV7.generate(),
+                "Acme Ltd", "Backend Engineer", "London, UK", "London", "UK",
+                "HYBRID", "FULL_TIME", "MID", BigDecimal.valueOf(70000), BigDecimal.valueOf(85000),
+                "GBP", "Backend systems.",
+                List.of("Java"), "https://acme.example/jobs/2",
+                "https://acme.example/jobs/2", Instant.now(), "DISCOVERED"
+        );
+        when(jobRepository.findById(jobId)).thenReturn(Optional.of(mockJob));
+        when(profileRepository.findById(profileId)).thenReturn(Optional.of(new ProfileRecord(
+                profileId, UuidV7.generate(), "Backend Engineer", "+447700900000", "London",
+                Map.of("uk_right_to_work", true), Map.of(), null, Map.of(), 1L, "READY")));
+        when(answerRepository.insert(eq(profileId), eq(jobId), any(), anyString(), anyString(), anyString(), any(), anyString(), anyMap()))
+                .thenReturn(answerId);
+        LlmCompletion completion = new LlmCompletion("Yes, authorized.", new LlmCompletion.TokenUsage(10, 10), 50, LlmCompletion.FinishReason.STOP);
+        when(modelRouter.execute(eq(TaskType.APPLICATION_QA), any(), any(Duration.class)))
+                .thenReturn(new ModelRouter.ExecutionResult(completion, new RoutingTrace(TaskType.APPLICATION_QA, "simulated", "PRIMARY", List.of())));
+        when(answerRepository.findById(answerId)).thenReturn(Optional.of(new ApplicationAnswerRecord(
+                answerId, profileId, jobId, null, "Are you legally authorized to work?", "GENERAL_OPEN_ENDED",
+                "Yes, authorized.", BigDecimal.valueOf(0.50), "NEEDS_USER_INPUT", Map.of("sensitive_legal_check", true),
+                Instant.now(), Instant.now())));
+
+        ApplicationAnswerService.AnswerResult result = answerService.draftAnswer(profileId, jobId, null, "Are you legally authorized to work?");
+
+        assertThat(result.outcome()).isEqualTo("NEEDS_USER_INPUT");
+        Mockito.verify(profileRepository, Mockito.atLeastOnce()).findById(profileId);
+        Mockito.verify(profileRepository, Mockito.never()).findByUserId(profileId);
+    }
 }
