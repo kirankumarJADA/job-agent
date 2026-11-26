@@ -275,6 +275,9 @@ public class SubmissionCompletionService {
             return false;
         }
         String type = String.valueOf(last.get("type"));
-        return "REAL_SUBMIT_CLICK".equals(type) || "ASHBY_SUBMIT_CLICK".equals(type) || "WORKDAY_SUBMIT_CLICK".equals(type);
+        return "REAL_SUBMIT_CLICK".equals(type)
+                || "ASHBY_SUBMIT_CLICK".equals(type)
+                || "WORKDAY_SUBMIT_CLICK".equals(type)
+                || "UNIVERSAL_SUBMIT_CLICK".equals(type);
     }
 }

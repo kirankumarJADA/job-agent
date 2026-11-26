@@ -8,6 +8,7 @@ import com.personal.jobagent.automation.ExecutionPackageBlockedException;
 import com.personal.jobagent.automation.GreenhouseExecutionPlanService;
 import com.personal.jobagent.automation.InspectionPlanService;
 import com.personal.jobagent.automation.LeverExecutionPlanService;
+import com.personal.jobagent.automation.UniversalBrowserPlanService;
 import com.personal.jobagent.automation.WorkdayExecutionPlanService;
 import com.personal.jobagent.automation.ZohoRecruitExecutionPlanService;
 import com.personal.jobagent.common.UuidV7;
@@ -17,6 +18,8 @@ import com.personal.jobagent.mailbox.RegistrationIdentityService;
 import com.personal.jobagent.security.OwnerContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -49,6 +52,8 @@ public class ApplyController {
     private final WorkdayExecutionPlanService workdayPlans;
     private final AshbyExecutionPlanService ashbyPlans;
     private final InspectionPlanService inspectionPlans;
+    private final UniversalBrowserPlanService universalPlans;
+    private final boolean universalEnabled;
     private final JobRepository jobs;
     private final AuditLogWriter audit;
 
@@ -57,6 +62,18 @@ public class ApplyController {
                            LeverExecutionPlanService leverPlans, WorkdayExecutionPlanService workdayPlans,
                            AshbyExecutionPlanService ashbyPlans,
                            InspectionPlanService inspectionPlans, JobRepository jobs, AuditLogWriter audit) {
+        this(ownerContext, readiness, greenhousePlans, zohoRecruitPlans, leverPlans, workdayPlans, ashbyPlans,
+                inspectionPlans, jobs, audit, null, true);
+    }
+
+    @Autowired
+    public ApplyController(OwnerContext ownerContext, ApplyReadinessService readiness,
+                           GreenhouseExecutionPlanService greenhousePlans, ZohoRecruitExecutionPlanService zohoRecruitPlans,
+                           LeverExecutionPlanService leverPlans, WorkdayExecutionPlanService workdayPlans,
+                           AshbyExecutionPlanService ashbyPlans,
+                           InspectionPlanService inspectionPlans, JobRepository jobs, AuditLogWriter audit,
+                           @Autowired(required = false) UniversalBrowserPlanService universalPlans,
+                           @Value("${app.automation.universal-enabled:true}") boolean universalEnabled) {
         this.ownerContext = ownerContext;
         this.readiness = readiness;
         this.greenhousePlans = greenhousePlans;
@@ -65,6 +82,8 @@ public class ApplyController {
         this.workdayPlans = workdayPlans;
         this.ashbyPlans = ashbyPlans;
         this.inspectionPlans = inspectionPlans;
+        this.universalPlans = universalPlans;
+        this.universalEnabled = universalEnabled;
         this.jobs = jobs;
         this.audit = audit;
     }
@@ -93,7 +112,8 @@ public class ApplyController {
      * blocker, and a refusal names the blockers instead of a generic error.
      */
     @PostMapping("/applications/{id}/package")
-    public ResponseEntity<?> createPackage(@PathVariable UUID id) {
+    public ResponseEntity<?> createPackage(@PathVariable UUID id,
+                                           @RequestParam(name = "planType", required = false) String requestedPlanType) {
         UUID profileId = ownerContext.profileIdOrNull();
         if (profileId == null) return ResponseEntity.badRequest().body(Map.of("error", "a profile is required"));
         Map<String, Object> state;
@@ -123,7 +143,10 @@ public class ApplyController {
                 ((Map<?, ?>) state.get("application")).get("applicationUrl"));
         try {
             String jobApplicationUrl = jobs.findById(jobId).map(JobRecord::applicationUrl).orElse(null);
-            var planId = jobApplicationUrl != null && greenhousePlans.handles(jobApplicationUrl)
+            boolean forceInspection = "INSPECTION".equalsIgnoreCase(requestedPlanType);
+            var planId = forceInspection
+                    ? inspectionPlans.createInspectionPlan(profileId, id, jobId)
+                    : jobApplicationUrl != null && greenhousePlans.handles(jobApplicationUrl)
                     ? greenhousePlans.createExecutionPlan(profileId, id, jobId)
                     : jobApplicationUrl != null && zohoRecruitPlans.handles(jobApplicationUrl)
                     ? zohoRecruitPlans.createExecutionPlan(profileId, id, jobId)
@@ -133,6 +156,8 @@ public class ApplyController {
                     ? workdayPlans.createExecutionPlan(profileId, id, jobId)
                     : jobApplicationUrl != null && ashbyPlans.handles(jobApplicationUrl)
                     ? ashbyPlans.createExecutionPlan(profileId, id, jobId)
+                    : universalEnabled && universalPlans != null && jobApplicationUrl != null
+                    ? universalPlans.createExecutionPlan(profileId, id, jobId)
                     : inspectionPlans.createInspectionPlan(profileId, id, jobId);
             if (planId.isEmpty()) {
                 return ResponseEntity.status(409).body(Map.of(

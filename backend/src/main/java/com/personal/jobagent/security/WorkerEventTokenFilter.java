@@ -46,7 +46,7 @@ public class WorkerEventTokenFilter extends OncePerRequestFilter {
 
     private static final Pattern WORKER_PLAN_EXECUTION_PATH = Pattern.compile(
             "^/api/v1/automation/plans/[0-9a-fA-F-]{36}/"
-                    + "(claim|heartbeat|steps|complete)$"
+                    + "(claim|heartbeat|steps|discovered-questions|complete)$"
     );
 
     private static final Pattern WORKER_PLAN_READ_PATH = Pattern.compile(

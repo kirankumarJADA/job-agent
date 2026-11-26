@@ -149,6 +149,8 @@ app:
   # an authenticated browser session exactly as before. When set, POSTs to
   # /api/v1/automation/events must present `Authorization: Bearer <token>`.
   worker-event-token: ${WORKER_EVENT_TOKEN:}
+  automation:
+    universal-enabled: ${APP_AUTOMATION_UNIVERSAL_ENABLED:true}
   # ── Authentication ────────────────────────────────────────────────
   # Firebase Authentication (signup / sign-in / password reset).
   #

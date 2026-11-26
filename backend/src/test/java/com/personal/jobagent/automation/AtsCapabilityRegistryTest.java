@@ -136,4 +136,14 @@ class AtsCapabilityRegistryTest {
             assertThat(row.recoveryAndDuplicatePrevention()).as(row.kind()).isEqualTo(AtsCapabilityLevel.FULL);
         }
     }
+
+    @Test
+    void universalEngineReportsFormFillAvailableWithFixtureOnlyPartialSubmission() {
+        var universal = AtsCapabilityRegistry.byPlanType("UNIVERSAL");
+        assertThat(universal.kind()).isEqualTo("UNIVERSAL");
+        assertThat(universal.formInspection()).isEqualTo(AtsCapabilityLevel.FULL);
+        assertThat(universal.documentAttachment()).isEqualTo(AtsCapabilityLevel.FULL);
+        assertThat(universal.finalSubmission()).isEqualTo(AtsCapabilityLevel.PARTIAL);
+        assertThat(universal.summary()).isEqualTo(AtsCapabilitySummary.FORM_FILL_AVAILABLE);
+    }
 }

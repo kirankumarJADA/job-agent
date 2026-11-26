@@ -173,12 +173,21 @@ public final class AtsCapabilityRegistry {
             List.of(),
             FULL, FULL, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, FULL,
             "Every other platform Robin recognises on the discovery side (iCIMS, Workable, SmartRecruiters, a company's own "
-                    + "career page, and the rest of the 30-platform manifest) falls here: Robin resolves the real application "
-                    + "URL and still prepares a tailored CV, cover letter and answers for it, but has no dedicated "
-                    + "execution-plan service, so the employer's own form is never inspected, filled or submitted — the "
-                    + "candidate finishes and submits it themselves.");
+                    + "career page, and the rest of the 30-platform manifest) falls here: when universal execution is disabled "
+                    + "or an explicit INSPECTION plan is requested, Robin prepares a tailored CV, cover letter and answers "
+                    + "without touching the employer's form.");
 
-    private static final List<AtsCapabilities> ALL = List.of(GREENHOUSE, LEVER, ZOHO_RECRUIT, WORKDAY, ASHBY, GENERIC);
+    private static final AtsCapabilities UNIVERSAL = new AtsCapabilities(
+            "UNIVERSAL", "Universal browser engine",
+            List.of(),
+            FULL, FULL, FULL, NONE, PARTIAL, PARTIAL, PARTIAL, FULL, PARTIAL, PARTIAL, PARTIAL, FULL,
+            "Stage 3B live-DOM multi-step browser engine verified end to end against controlled local Playwright/HTTP "
+                    + "employer fixtures and PostgreSQL 16 integration tests. Uses SSRF-guarded navigation, ephemeral DOM control "
+                    + "tagging, verified candidate facts, human-confirmed answers, durable phase checkpoints, candidate pause/resume, "
+                    + "explicit approval-gated submission, and encrypted submission_evidence capture. No live third-party employer "
+                    + "submissions are performed in tests, and ordinary sites stay distinct from V069 sandbox-verified receipts.");
+
+    private static final List<AtsCapabilities> ALL = List.of(GREENHOUSE, LEVER, ZOHO_RECRUIT, WORKDAY, ASHBY, UNIVERSAL, GENERIC);
 
     public static List<AtsCapabilities> all() {
         return ALL;

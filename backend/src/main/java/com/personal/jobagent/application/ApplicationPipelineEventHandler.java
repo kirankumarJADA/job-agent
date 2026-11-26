@@ -18,6 +18,8 @@ import com.personal.jobagent.qa.ApplicationAnswerService;
 import com.personal.jobagent.resume.ResumeAtsIntelligenceService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -78,6 +80,8 @@ public class ApplicationPipelineEventHandler implements EventHandler {
     private final ApplicationDecisionService decisionService;
     private final com.personal.jobagent.audit.AuditLogWriter audit;
     private final com.personal.jobagent.common.QuotaService quotaService;
+    private final com.personal.jobagent.automation.UniversalBrowserPlanService universalPlanService;
+    private final boolean universalEnabled;
 
     public ApplicationPipelineEventHandler(ApplicationPipelineService pipeline,
                                            InspectionPlanService inspectionPlanService,
@@ -97,6 +101,32 @@ public class ApplicationPipelineEventHandler implements EventHandler {
                                            ApplicationDecisionService decisionService,
                                            com.personal.jobagent.audit.AuditLogWriter audit,
                                            com.personal.jobagent.common.QuotaService quotaService) {
+        this(pipeline, inspectionPlanService, greenhousePlanService, zohoRecruitPlanService, leverPlanService,
+                workdayPlanService, ashbyPlanService, resumeService, coverLetterService, answerService, jobRepository,
+                notifications, db, json, metrics, decisionService, audit, quotaService, null, false);
+    }
+
+    @Autowired
+    public ApplicationPipelineEventHandler(ApplicationPipelineService pipeline,
+                                           InspectionPlanService inspectionPlanService,
+                                           GreenhouseExecutionPlanService greenhousePlanService,
+                                           com.personal.jobagent.automation.ZohoRecruitExecutionPlanService zohoRecruitPlanService,
+                                           com.personal.jobagent.automation.LeverExecutionPlanService leverPlanService,
+                                           com.personal.jobagent.automation.WorkdayExecutionPlanService workdayPlanService,
+                                           com.personal.jobagent.automation.AshbyExecutionPlanService ashbyPlanService,
+                                           ResumeAtsIntelligenceService resumeService,
+                                           CoverLetterService coverLetterService,
+                                           ApplicationAnswerService answerService,
+                                           JobRepository jobRepository,
+                                           NotificationService notifications,
+                                           JdbcTemplate db,
+                                           ObjectMapper json,
+                                           AutomationMetrics metrics,
+                                           ApplicationDecisionService decisionService,
+                                           com.personal.jobagent.audit.AuditLogWriter audit,
+                                           com.personal.jobagent.common.QuotaService quotaService,
+                                           @Autowired(required = false) com.personal.jobagent.automation.UniversalBrowserPlanService universalPlanService,
+                                           @Value("${app.automation.universal-enabled:true}") boolean universalEnabled) {
         this.pipeline = pipeline;
         this.inspectionPlanService = inspectionPlanService;
         this.greenhousePlanService = greenhousePlanService;
@@ -115,6 +145,8 @@ public class ApplicationPipelineEventHandler implements EventHandler {
         this.decisionService = decisionService;
         this.audit = audit;
         this.quotaService = quotaService;
+        this.universalPlanService = universalPlanService;
+        this.universalEnabled = universalEnabled;
     }
 
     @Override public String consumerName() { return CONSUMER_NAME; }
@@ -379,6 +411,13 @@ public class ApplicationPipelineEventHandler implements EventHandler {
                                 record(applicationId, "ASHBY_PLAN_CREATED",
                                         Map.of("plan_id", planId.toString()));
                                 log.info("Ashby plan {} queued for application {}", planId, applicationId);
+                            });
+                } else if (universalEnabled && universalPlanService != null && universalPlanService.handles(applicationUrl)) {
+                    universalPlanService.createExecutionPlan(profileId, applicationId, jobId)
+                            .ifPresent(planId -> {
+                                record(applicationId, "UNIVERSAL_PLAN_CREATED",
+                                        Map.of("plan_id", planId.toString()));
+                                log.info("Universal plan {} queued for application {}", planId, applicationId);
                             });
                 } else {
                     inspectionPlanService.createInspectionPlan(profileId, applicationId, jobId)

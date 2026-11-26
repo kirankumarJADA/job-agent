@@ -55,7 +55,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * so the suite is deterministic and never touches the internet; the mocked
  * router throwing proves the failed-preparation path.
  */
-@SpringBootTest(properties = {"spring.flyway.placeholders.remove_seed_dev_account=false", "app.discovery.scheduler-enabled=false"})
+@SpringBootTest(properties = {"spring.flyway.placeholders.remove_seed_dev_account=false",
+        "app.discovery.scheduler-enabled=false", "app.automation.universal-enabled=false"})
 @AutoConfigureMockMvc
 @Testcontainers
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)

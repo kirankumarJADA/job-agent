@@ -83,7 +83,7 @@ public final class TrackTimelineMapper {
         return switch (kind) {
             case "APPLICATION_CREATED" -> new Neutral("APPLICATION_CREATED", "Application record created", "ROBIN");
             case "PREPARATION" -> preparation(payload);
-            case "GREENHOUSE_PLAN_CREATED", "ASHBY_PLAN_CREATED", "INSPECTION_PLAN_CREATED" -> new Neutral("FORM_PLAN_PREPARED",
+            case "GREENHOUSE_PLAN_CREATED", "ASHBY_PLAN_CREATED", "INSPECTION_PLAN_CREATED", "UNIVERSAL_PLAN_CREATED" -> new Neutral("FORM_PLAN_PREPARED",
                     "Form-filling plan prepared — nothing is sent to the employer", "ROBIN");
             case "EXECUTION_PACKAGE_DEFERRED" -> new Neutral("PACKAGE_DEFERRED",
                     "Package deferred until your documents are reviewed", "ROBIN");

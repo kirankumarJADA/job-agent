@@ -370,6 +370,109 @@ public class AutomationPlanRepository {
     }
 
     /**
+     * Stage 3B: atomic transition queuing {@code UNIVERSAL_SUBMIT_CLICK} on an
+     * explicitly approved UNIVERSAL plan. Refuses if any submit step or prior
+     * {@code pre-submit-attempting} checkpoint already exists.
+     */
+    @Transactional
+    public boolean prepareUniversalSubmission(UUID id) {
+        var plan = findById(id).orElse(null);
+        if (plan == null || !"READY_TO_SUBMIT".equals(plan.status()) || !plan.submitApproved()) {
+            return false;
+        }
+        if (hasPreSubmitAttemptCheckpoint(id)) {
+            return false;
+        }
+        Map<String, Object> stored = plan.plan() == null ? Map.of() : plan.plan();
+        if (!"UNIVERSAL".equals(stored.get("planType"))) {
+            return false;
+        }
+        List<Object> currentSteps = stored.get("steps") instanceof List<?> s ? List.copyOf(s) : List.of();
+        for (Object o : currentSteps) {
+            if (o instanceof Map<?, ?> step) {
+                Object type = step.get("type");
+                if ("UNIVERSAL_SUBMIT_CLICK".equals(type) || "REAL_SUBMIT_CLICK".equals(type) || "MOCK_SUBMIT".equals(type)) {
+                    return false;
+                }
+            }
+        }
+        List<Object> newSteps = new java.util.ArrayList<>(currentSteps);
+        newSteps.add(Map.of(
+                "id", "universal-submit-click",
+                "type", "UNIVERSAL_SUBMIT_CLICK",
+                "policy", "AUTO",
+                "params", Map.of("selector", "[data-robin-submit]", "phase", UniversalExecutionPhase.PRE_SUBMIT_ATTEMPTING.name())));
+        Map<String, Object> updated = new java.util.LinkedHashMap<>(stored);
+        updated.put("steps", newSteps);
+        try {
+            return db.update("""
+                    update automation_plans set plan=?::jsonb, status='PREPARED', updated_at=now()
+                    where id=? and status='READY_TO_SUBMIT' and submit_approved=true
+                      and not """ + "\n" + SUBMIT_STEP_EXISTS_SQL,
+                    json.writeValueAsString(updated), id) == 1;
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to persist Universal submission step", e);
+        }
+    }
+
+    /**
+     * Stage 3B: atomically resumes a paused UNIVERSAL plan after the candidate
+     * resolves discovered blockers and calls {@code /resume}. Refuses if
+     * submit-approved or if any submit attempt exists.
+     */
+    @Transactional
+    public boolean resumeUniversalPlan(UUID id, Map<String, Object> updatedPlan) {
+        if (id == null || updatedPlan == null || hasPreSubmitAttemptCheckpoint(id)) {
+            return false;
+        }
+        try {
+            return db.update("""
+                    update automation_plans
+                    set plan=?::jsonb, status='PREPARED', result='[]'::jsonb, heartbeat_at=null, updated_at=now()
+                    where id=? and status='AWAITING_APPROVAL' and submit_approved=false
+                      and not """ + "\n" + SUBMIT_STEP_EXISTS_SQL,
+                    json.writeValueAsString(updatedPlan), id) == 1;
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to persist resumed Universal plan", e);
+        }
+    }
+
+    /**
+     * Reads durable {@code automation_steps} checkpoints for a plan in step order.
+     */
+    public List<Map<String, Object>> findSteps(UUID planId) {
+        if (planId == null) return List.of();
+        return db.query("""
+                select step_key, step_index, status, result::text as result_json, screenshot_ref, created_at, updated_at
+                from automation_steps
+                where plan_id = ?
+                order by step_index, created_at, id
+                """, (rs, rowNum) -> {
+            Map<String, Object> row = new java.util.LinkedHashMap<>();
+            row.put("stepKey", rs.getString("step_key"));
+            row.put("stepIndex", rs.getInt("step_index"));
+            row.put("status", rs.getString("status"));
+            row.put("result", readMap(rs.getString("result_json")));
+            row.put("screenshotRef", rs.getString("screenshot_ref"));
+            row.put("createdAt", rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").toInstant().toString() : null);
+            row.put("updatedAt", rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toInstant().toString() : null);
+            return row;
+        }, planId);
+    }
+
+    /** True once a synchronous {@code PRE_SUBMIT_ATTEMPTING} checkpoint was persisted for this plan. */
+    public boolean hasPreSubmitAttemptCheckpoint(UUID planId) {
+        if (planId == null) return false;
+        Integer n = db.queryForObject("""
+                select count(*) from automation_steps
+                where plan_id = ?
+                  and (step_key = 'pre-submit-attempting'
+                       or coalesce(result->>'phase', '') = 'PRE_SUBMIT_ATTEMPTING')
+                """, Integer.class, planId);
+        return n != null && n > 0;
+    }
+
+    /**
      * Phase 4: the one, narrowly-scoped transition to {@code SUBMITTED}.
      * Reachable only from {@code RUNNING} (the second, post-approval worker
      * pass started by {@link #prepareRealSubmission}'s own {@code PREPARED}
@@ -431,8 +534,21 @@ public class AutomationPlanRepository {
     public int invalidateApproval(UUID applicationId) {
         if (applicationId == null) return 0;
         return db.update("""
-                update automation_plans set submit_approved = false, status = 'AWAITING_APPROVAL', updated_at = now()
-                where application_id = ? and status = 'READY_TO_SUBMIT' and submit_approved = true
+                update automation_plans
+                set submit_approved = false,
+                    status = 'AWAITING_APPROVAL',
+                    plan = case
+                        when jsonb_typeof(plan->'steps') = 'array' then
+                            jsonb_set(plan, '{steps}',
+                                coalesce((
+                                    select jsonb_agg(s order by ord)
+                                    from jsonb_array_elements(plan->'steps') with ordinality as t(s, ord)
+                                    where s->>'type' not in ('REAL_SUBMIT_CLICK', 'ASHBY_SUBMIT_CLICK', 'WORKDAY_SUBMIT_CLICK', 'UNIVERSAL_SUBMIT_CLICK', 'MOCK_SUBMIT')
+                                ), '[]'::jsonb))
+                        else plan
+                    end,
+                    updated_at = now()
+                where application_id = ? and submit_approved = true and status in ('READY_TO_SUBMIT', 'PREPARED')
                 """, applicationId);
     }
 
@@ -444,7 +560,7 @@ public class AutomationPlanRepository {
                 from jsonb_array_elements(
                     case when jsonb_typeof(plan->'steps') = 'array' then plan->'steps' else '[]'::jsonb end
                 ) s
-                where s->>'type' in ('REAL_SUBMIT_CLICK', 'ASHBY_SUBMIT_CLICK', 'WORKDAY_SUBMIT_CLICK', 'MOCK_SUBMIT')
+                where s->>'type' in ('REAL_SUBMIT_CLICK', 'ASHBY_SUBMIT_CLICK', 'WORKDAY_SUBMIT_CLICK', 'UNIVERSAL_SUBMIT_CLICK', 'MOCK_SUBMIT')
             )""";
 
     private static final String STALE_SUBMIT_RECONCILIATION_JSON =
