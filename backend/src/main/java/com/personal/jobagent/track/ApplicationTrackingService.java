@@ -144,7 +144,7 @@ public class ApplicationTrackingService {
             if (managedMailboxes == null) return false;
             ManagedMailboxService.Status status = managedMailboxes.status(profileId);
             if (status == null || status.readiness() != ManagedMailboxService.Readiness.ACTIVE
-                    || !status.usableForAutomatedVerification()) {
+                    || !status.usableForRegistration()) {
                 return false;
             }
             if (status.domain() == null || status.domain().isBlank()) {

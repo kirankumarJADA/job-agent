@@ -242,9 +242,9 @@ public class ManagedMailRetentionJob {
                 with target as (
                     select id from emails
                     where classification = 'VERIFICATION_CODE'
-                      and created_at < ?
+                      and ingested_at < ?
                       and (body_retained = true or (subject is not null and subject <> '[Verification email — subject redacted]'))
-                    order by created_at asc
+                    order by ingested_at asc
                     limit ?
                     for update skip locked
                 )

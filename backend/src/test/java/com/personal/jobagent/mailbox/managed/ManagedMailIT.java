@@ -699,6 +699,7 @@ class ManagedMailIT {
         String alias = mailboxes.ensureAddress(profile).address();
         proveReceiving();
         UUID app = application(profile, "purge");
+        ensureRunningPlan(app, employer);
         UUID accountSession = identities.startSession(app, employer, profile).orElseThrow();
         registrationIdentities.resolve(profile, app, accountSession, employer);
         deliver(Delivery.to(alias).from(employerFrom(employer)).subject("Verify").body("Your verification code is 482913"))

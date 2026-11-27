@@ -546,7 +546,7 @@ class CloudflareTrustedAuthOtpIT {
                                 "employerDomain", "acme-verify.example"))))
                 .andExpect(status().isConflict());
 
-        // Candidate EmailController legacy endpoints are retired (403 for candidate, 410 for worker)
+        // Candidate EmailController legacy endpoints are retired (403 for candidate, 401 over HTTP bearer filter)
         mvc.perform(post("/api/v1/emails/verification/extract").with(csrf()).with(cand.auth())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{}"))
@@ -554,7 +554,7 @@ class CloudflareTrustedAuthOtpIT {
         mvc.perform(post("/api/v1/emails/verification/extract").header("Authorization", WORKER_HEADER)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{}"))
-                .andExpect(status().isGone());
+                .andExpect(status().isUnauthorized());
 
         // Verify audit_logs captured metadata events with zero OTP or leaseToken leakage
         var audits = jdbc.queryForList(
