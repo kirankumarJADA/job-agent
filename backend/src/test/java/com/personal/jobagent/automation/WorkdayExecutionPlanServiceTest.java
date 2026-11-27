@@ -276,7 +276,7 @@ class WorkdayExecutionPlanServiceTest {
         when(credentials.exists(PROFILE, "nvidia.wd5.myworkdayjobs.com")).thenReturn(false);
         when(identityService.startSession(APPLICATION, "nvidia.wd5.myworkdayjobs.com", PROFILE))
                 .thenReturn(Optional.of(sessionId));
-        when(registrationIdentities.resolve(PROFILE, APPLICATION, sessionId, "nvidia.wd5.myworkdayjobs.com"))
+        when(registrationIdentities.prepareForAccountCreation(PROFILE, APPLICATION, sessionId, "nvidia.wd5.myworkdayjobs.com"))
                 .thenReturn(new RegistrationIdentityService.RegistrationIdentity(
                         UUID.randomUUID(), "already@registered.example", "nvidia.wd5.myworkdayjobs.com",
                         "managed", true));
@@ -296,7 +296,7 @@ class WorkdayExecutionPlanServiceTest {
         when(credentials.exists(PROFILE, "nvidia.wd5.myworkdayjobs.com")).thenReturn(false);
         when(identityService.startSession(APPLICATION, "nvidia.wd5.myworkdayjobs.com", PROFILE))
                 .thenReturn(Optional.of(sessionId));
-        when(registrationIdentities.resolve(PROFILE, APPLICATION, sessionId, "nvidia.wd5.myworkdayjobs.com"))
+        when(registrationIdentities.prepareForAccountCreation(PROFILE, APPLICATION, sessionId, "nvidia.wd5.myworkdayjobs.com"))
                 .thenReturn(new RegistrationIdentityService.RegistrationIdentity(
                         UUID.randomUUID(), "candidate@managed.robinapp.example", "nvidia.wd5.myworkdayjobs.com",
                         "managed", false));
@@ -343,7 +343,7 @@ class WorkdayExecutionPlanServiceTest {
         when(credentials.exists(PROFILE, "nvidia.wd5.myworkdayjobs.com")).thenReturn(false);
         when(db.queryForList(contains("from account_sessions where id"), eq(String.class), eq(sessionId), eq(PROFILE)))
                 .thenReturn(List.of("SIGNUP"));
-        when(registrationIdentities.resolve(PROFILE, APPLICATION, sessionId, "nvidia.wd5.myworkdayjobs.com"))
+        when(registrationIdentities.prepareForAccountCreation(PROFILE, APPLICATION, sessionId, "nvidia.wd5.myworkdayjobs.com"))
                 .thenReturn(new RegistrationIdentityService.RegistrationIdentity(
                         UUID.randomUUID(), "candidate@managed.robinapp.example", "nvidia.wd5.myworkdayjobs.com",
                         "managed", false));

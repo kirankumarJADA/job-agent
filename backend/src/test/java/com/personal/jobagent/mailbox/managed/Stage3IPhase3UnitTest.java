@@ -203,7 +203,7 @@ class Stage3IPhase3UnitTest {
         UUID profileId = UUID.randomUUID();
         UUID addrId = UUID.randomUUID();
         ManagedMailboxService mailboxes = mock(ManagedMailboxService.class);
-        when(mailboxes.usableAddress(profileId)).thenReturn(Optional.of(
+        when(mailboxes.usableAddressForAutomatedVerification(profileId)).thenReturn(Optional.of(
                 new ManagedMailboxService.ManagedAddress(addrId, profileId, "abc123", "mail.example.com", "ACTIVE")));
 
         ManagedMessageContent content = new ManagedMessageContent(CIPHER, JSON);
@@ -489,13 +489,21 @@ class Stage3IPhase3UnitTest {
         ManagedMailRetentionJob job = new ManagedMailRetentionJob(db, settings);
 
         when(db.update(anyString(), any(), anyInt())).thenReturn(0);
-        when(db.update(anyString(), any(), any(), any(), anyInt())).thenReturn(1);
+        when(db.update(anyString(), any(), anyInt(), any())).thenReturn(0);
+        when(db.update(contains("set content_encrypted = null"), any(), any(), any(), anyInt(), any(), any(), any(), any()))
+                .thenReturn(1);
 
         ManagedMailRetentionJob.Result res = job.purge(Instant.now());
         assertThat(res.contentErased()).isEqualTo(1);
-        verify(db).update(contains("update mailbox_verifications"), any(Timestamp.class), anyInt());
-        verify(db).update(contains("reservation_expires_at is null or reservation_expires_at <= ?"),
-                any(Timestamp.class), any(Timestamp.class), any(Timestamp.class), anyInt());
+        verify(db).update(contains("update mailbox_verifications"), any(Timestamp.class), anyInt(), any(Timestamp.class));
+        verify(db).update(contains("set content_encrypted = null"),
+                any(Timestamp.class), any(Timestamp.class), any(Timestamp.class), anyInt(),
+                any(Timestamp.class), any(Timestamp.class), any(Timestamp.class), any(Timestamp.class));
+        verify(db).update(contains("delete from managed_inbound_messages"),
+                any(Timestamp.class), any(Timestamp.class), any(Timestamp.class), anyInt(),
+                any(Timestamp.class), any(Timestamp.class), any(Timestamp.class));
+        verify(db).update(contains("delete from mailbox_verifications"), any(Timestamp.class), anyInt(), any(Timestamp.class));
+        verify(db).update(contains("update emails"), any(Timestamp.class), anyInt());
     }
 
     private static Map<String, Object> row(UUID id, String providerId, String recipient, String senderDomain,

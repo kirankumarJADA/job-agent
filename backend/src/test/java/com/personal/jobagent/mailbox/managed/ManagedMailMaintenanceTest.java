@@ -57,9 +57,9 @@ class ManagedMailMaintenanceTest {
 
         ManagedMailRetentionJob.Result result = job.purge(Instant.now());
 
-        // Verify that the 2 lease-expiration updates and 3 cleanup queries were executed
+        // Verify the bounded lease-expiration, content-erase, metadata-delete, token-delete and email-scrub queries
         var invocations = mockingDetails(db).getInvocations().stream().toList();
-        assertThat(invocations).hasSize(5);
+        assertThat(invocations).hasSize(7);
 
         List<String> executedSql = invocations.stream()
                 .map(inv -> inv.getArgument(0, String.class))
@@ -69,6 +69,8 @@ class ManagedMailMaintenanceTest {
         assertThat(executedSql.get(2)).contains("update managed_inbound_messages");
         assertThat(executedSql.get(3)).contains("delete from managed_inbound_messages");
         assertThat(executedSql.get(4)).contains("delete from managed_mail_webhook_tokens");
+        assertThat(executedSql.get(5)).contains("delete from mailbox_verifications");
+        assertThat(executedSql.get(6)).contains("update emails");
         assertThat(result.total()).isEqualTo(0); // unmocked db.update returns default 0
     }
 

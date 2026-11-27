@@ -34,6 +34,9 @@ const verificationReleaseUrl = process.env.WORKER_VERIFICATION_RELEASE_URL
   || (verificationResolveUrl && /\/resolve\/?$/.test(verificationResolveUrl)
     ? verificationResolveUrl.replace(/\/resolve\/?$/, '/release') : null);
 const registrationIdentityUrl = process.env.WORKER_REGISTRATION_IDENTITY_URL;
+const registrationIdentityConfirmEnvUrl = process.env.WORKER_REGISTRATION_IDENTITY_CONFIRM_URL
+  || (registrationIdentityUrl && /\/registration-identity\/?$/.test(registrationIdentityUrl)
+    ? registrationIdentityUrl.replace(/\/registration-identity\/?$/, '/registration-identity/confirm') : null);
 const employerCredentialUrl = process.env.WORKER_EMPLOYER_CREDENTIAL_URL;
 const completeUrl = process.env.WORKER_COMPLETE_URL;
 
@@ -52,6 +55,9 @@ const verificationConfirmer = verificationConfirmUrl
       const response = await fetchWithRetry(verificationConfirmUrl, { method: 'POST',
         headers: { ...authHeaders(), 'content-type': 'application/json' },
         body: JSON.stringify(body) });
+      if (response.status === 409) {
+        return { conflict: true, status: 409 };
+      }
       if (!response.ok) throw new Error(`VERIFICATION_CONFIRM_FAILED:${response.status}`);
       return response.json();
     }
@@ -73,6 +79,15 @@ const identityResolver = registrationIdentityUrl
         body: JSON.stringify(body) });
       if (!response.ok) throw new Error(`REGISTRATION_IDENTITY_FAILED:${response.status}`);
       return response.json();
+    }
+  : null;
+const identityConfirmer = registrationIdentityConfirmEnvUrl
+  ? async (body) => {
+      const response = await fetchWithRetry(registrationIdentityConfirmEnvUrl, { method: 'POST',
+        headers: { ...authHeaders(), 'content-type': 'application/json' },
+        body: JSON.stringify(body) });
+      if (!response.ok) throw new Error(`REGISTRATION_IDENTITY_CONFIRM_FAILED:${response.status}`);
+      return response.json().catch(() => ({ ok: true }));
     }
   : null;
 // Phase 8.5 continuation: this candidate's saved portal password for one
@@ -636,6 +651,7 @@ export async function executePollCycle({
   verificationConfirmerFn = verificationConfirmer,
   verificationReleaserFn = verificationReleaser,
   identityResolverFn = identityResolver,
+  identityConfirmerFn = identityConfirmer,
   credentialResolverFn = credentialResolver,
   deadLetterRegistry = defaultDeadLetterRegistry,
   maxCrashLimit = MAX_PLAN_CRASHES,
@@ -753,6 +769,10 @@ export async function executePollCycle({
       ? (pId, body) => reportDiscoveredQuestions(pId, body, { pollUrl, authHeadersFn })
       : null);
 
+    const activeIdentityConfirmer = identityConfirmerFn ?? (pollUrl && /\/plans\/claim-next\/?$/.test(pollUrl)
+      ? (body) => defaultIdentityConfirmer(body, { pollUrl, authHeadersFn })
+      : null);
+
     const runnerInstance = runner ?? new BrowserWorker({
       statePath: statePathVal,
       artifactDir: artifactDirVal,
@@ -761,6 +781,7 @@ export async function executePollCycle({
       verificationConfirmer: verificationConfirmerFn,
       verificationReleaser: verificationReleaserFn,
       identityResolver: identityResolverFn,
+      identityConfirmer: activeIdentityConfirmer,
       credentialResolver: credentialResolverFn,
       stepsReporter: activeStepsReporter,
       discoveredQuestionsReporter: activeQuestionsReporter,
@@ -1066,6 +1087,23 @@ export async function executePollCycle({
 /**
  * Creates a poll handler with error recovery and logging to safely execute poll cycles.
  */
+export function registrationIdentityConfirmUrl(pollUrl) {
+  const apiRoot = pollUrl.replace(/\/plans\/claim-next\/?$/, '');
+  if (apiRoot === pollUrl) throw new Error('INVALID_WORKER_POLL_URL');
+  return `${apiRoot}/mailbox-verification/registration-identity/confirm`;
+}
+
+async function defaultIdentityConfirmer(body, { pollUrl, authHeadersFn }) {
+  return fetch(registrationIdentityConfirmUrl(pollUrl), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(authHeadersFn ? authHeadersFn() : {}) },
+    body: JSON.stringify(body),
+  }).then(async (res) => {
+    if (!res.ok) throw new Error(`REGISTRATION_IDENTITY_CONFIRM_FAILED:${res.status}`);
+    return res.json().catch(() => ({ ok: true }));
+  });
+}
+
 export function createPollHandler({
   pollUrl,
   apiCallFn = apiCall,
@@ -1081,6 +1119,7 @@ export function createPollHandler({
   verificationConfirmerFn = verificationConfirmer,
   verificationReleaserFn = verificationReleaser,
   identityResolverFn = identityResolver,
+  identityConfirmerFn = null,
   credentialResolverFn = credentialResolver,
   deadLetterRegistry = defaultDeadLetterRegistry,
   maxCrashLimit = MAX_PLAN_CRASHES,
@@ -1105,6 +1144,7 @@ export function createPollHandler({
         verificationConfirmerFn,
         verificationReleaserFn,
         identityResolverFn,
+        identityConfirmerFn,
         credentialResolverFn,
         deadLetterRegistry,
         maxCrashLimit,
@@ -1119,6 +1159,24 @@ export function createPollHandler({
   };
 }
 
+export function isValidSessionKey(rawKey) {
+  if (!rawKey) return false;
+  try {
+    return Buffer.from(String(rawKey).trim(), 'base64').length === 32;
+  } catch {
+    return false;
+  }
+}
+
+export function assertWorkerSessionKeyConfigured({
+  env = process.env,
+  sessionKeyValue = sessionKey,
+} = {}) {
+  if (isValidSessionKey(sessionKeyValue)) return true;
+  if (env?.ROBIN_ALLOW_EPHEMERAL_WORKER_SESSION === '1') return false;
+  throw new Error('ROBIN_WORKER_SESSION_KEY must be set to a base64-encoded 32-byte key in worker runtime');
+}
+
 // Robin x Tsenta hardening: guards the entire dispatch below so this module
 // can be safely `import`ed (e.g. by worker.test.js, to unit-test
 // `materializeArtifacts`/`zohoRecruitPackageNeedsMaterialization` directly)
@@ -1127,6 +1185,12 @@ export function createPollHandler({
 // same distinction CommonJS's `require.main === module` draws.
 const isMainModule = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
 if (isMainModule) {
+try {
+  assertWorkerSessionKeyConfigured({ env: process.env, sessionKeyValue: sessionKey });
+} catch (error) {
+  console.error(JSON.stringify({ type: 'WORKER_STARTUP_REFUSED', error: redactSecrets(error?.message ?? error) }));
+  process.exit(1);
+}
 // Stage 3F: remove legacy plaintext session files and expired/unreadable vault entries left by a crash.
 try {
   const swept = new SessionVault({ artifactDir, key: sessionKey }).sweep();
@@ -1138,7 +1202,7 @@ if (planFile) {
   const plan = JSON.parse(fs.readFileSync(path.resolve(planFile), 'utf8'));
   const worker = new BrowserWorker({
     statePath, artifactDir, eventSink, verificationResolver, verificationConfirmer, verificationReleaser,
-    identityResolver, credentialResolver, sessionKey,
+    identityResolver, identityConfirmer, credentialResolver, sessionKey,
   });
   runtime.runner = worker;
   worker.execute(plan, { approve, headless: true })
@@ -1161,6 +1225,7 @@ if (planFile) {
     verificationConfirmerFn: verificationConfirmer,
     verificationReleaserFn: verificationReleaser,
     identityResolverFn: identityResolver,
+    identityConfirmerFn: identityConfirmer,
     credentialResolverFn: credentialResolver,
     deadLetterRegistry: defaultDeadLetterRegistry,
   });

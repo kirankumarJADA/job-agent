@@ -19,7 +19,7 @@
  * resumed run needs is re-filled by the plan's own steps.
  */
 
-const SENSITIVE_PARAM_PATTERN = /password|passwd|pwd|token|secret|otp|credential|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|private[_-]?key|client[_-]?secret|session|xsrf|csrf|auth(?:orization)?|^(?:code|key|magic|email|username)$|magic[-_]?(?:code|key|link|token)|(?:verify|verification)[-_]?code/i;
+const SENSITIVE_PARAM_PATTERN = /password|passwd|pwd|passcode|token|lease[_-]?token|secret|otp|pin|credential|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|private[_-]?key|client[_-]?secret|session|xsrf|csrf|auth(?:orization)?|^(?:code|key|magic|email|username|sig|signature|jwt|sid|nonce|ticket|verifier)$|magic[-_]?(?:code|key|link|token)|(?:verify|verification|activation|auth|access|reset|confirm|invite|security|login|otp)[-_]?(?:code|key|token)|(?:^|[_-])(?:sig|signature|jwt|sid|pin|nonce|ticket|verifier|lease_?token)$/i;
 
 /**
  * Returns a version of `rawUrl` safe to persist or log: query-parameter and
@@ -58,18 +58,9 @@ export function sanitizeUrl(rawUrl) {
   return url.toString();
 }
 
-/**
- * Redacts `name=value`-shaped secrets out of free-text (typically an error
- * message that may itself embed a URL or a raw query string). Matching is
- * intentionally conservative toward over-redaction rather than under-redaction:
- * a key name alone (no `=value`) is still redacted for the original, narrower
- * set of names this already covered before this change (password/otp/token/
- * cookie/secret) to preserve exact prior behaviour; the newly added names
- * (credential, api key, session, auth) require an explicit `=value` so
- * ordinary words like "author" or "session expired" are not flagged as a
- * leak with nothing actually sensitive attached.
- */
-export function redactSecrets(text) {
+const SENSITIVE_KEY_NAME = /^(?:password|passwd|pwd|passcode|token|lease[_-]?token|secret|otp|pin|credential|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|private[_-]?key|client[_-]?secret|session(?:_id)?|xsrf|csrf|auth(?:orization)?|sig|signature|jwt|sid|nonce|ticket|verifier|magic|verification[_-]?code|activation[_-]?code|cookie)$/i;
+
+function scrubString(text) {
   const str = String(text ?? '');
   return str
     .replace(/\b(https?:\/\/)([^/\s:@"']+:[^/\s@"']+)@/gi, '$1[REDACTED]@')
@@ -78,17 +69,59 @@ export function redactSecrets(text) {
       '$1: [REDACTED]'
     )
     .replace(/\bauthorization\s*:\s*(?:bearer|basic|token|apikey)\s+[A-Za-z0-9._~+/=-]+/gi, 'Authorization: [REDACTED]')
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{6,}/gi, 'Bearer [REDACTED]')
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{6,}/gi, '$1 [REDACTED]')
     .replace(
-      /"([A-Za-z0-9_-]*(?:password|passwd|pwd|otp|token|cookie|secret|api[_-]?key|apikey|credential|session_id|xsrf|csrf|auth(?:orization)?)[A-Za-z0-9_-]*)"\s*:\s*"(?:[^"\\]|\\.)*"/gi,
+      /"([A-Za-z0-9_-]*(?:password|passwd|pwd|passcode|otp|pin|token|lease[_-]?token|cookie|secret|api[_-]?key|apikey|credential|session_id|xsrf|csrf|sig|signature|jwt|sid|nonce|ticket|verifier|verification[_-]?code|activation[_-]?code|auth(?:orization)?)[A-Za-z0-9_-]*)"\s*:\s*"(?:[^"\\]|\\.)*"/gi,
       '"$1": "[REDACTED]"'
     )
     .replace(
-      /\b([A-Za-z0-9_-]*(?:password|passwd|pwd|otp|token|cookie|secret|api[_-]?key|apikey|credential|session(?:_id)?|xsrf|csrf|auth(?:orization)?)|code|key|magic|email|username)=([^\s,;&"'<>]+)/gi,
+      /"([A-Za-z0-9_-]*(?:password|passwd|pwd|passcode|otp|pin|token|lease[_-]?token|secret|api[_-]?key|apikey|credential|sig|signature|jwt|sid|nonce|ticket|verifier|code|verification[_-]?code|activation[_-]?code)[A-Za-z0-9_-]*)"\s*:\s*(?:\d{1,12}|true|false)/gi,
+      '"$1": "[REDACTED]"'
+    )
+    .replace(
+      /\b([A-Za-z0-9_-]*(?:password|passwd|pwd|passcode|otp|pin|token|lease[_-]?token|cookie|secret|api[_-]?key|apikey|credential|session(?:_id)?|xsrf|csrf|sig|signature|jwt|sid|nonce|ticket|verifier|verification[_-]?code|activation[_-]?code|auth(?:orization)?)|code|key|magic|email|username)=([^\s,;&"'<>)\]}]+)/gi,
       '$1=[REDACTED]'
     )
     .replace(
-      /\b([A-Za-z0-9_-]*(?:api[_-]?key|apikey|secret|token|credential|password|passwd|pwd|session_id|otp))\s*:\s*(?:\\"(?:[^"\\\r\n]|\\.)*\\"|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s,;"'<>]+)/gi,
+      /\b([A-Za-z0-9_-]*(?:api[_-]?key|apikey|secret|token|lease[_-]?token|credential|password|passwd|pwd|passcode|session_id|otp|pin|jwt|sid|sig|signature|nonce|ticket|verifier))\s*:\s*(?:\\"(?:[^"\\\r\n]|\\.)*\\"|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|\d+|[^\s,;"'<>]+)/gi,
       '$1: [REDACTED]'
     );
+}
+
+function redactRecursive(value, seen) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') return scrubString(value);
+  if (typeof value !== 'object') return value;
+  if (seen.has(value)) return '[Circular]';
+  seen.add(value);
+  if (value instanceof Error) {
+    const out = { name: value.name, message: scrubString(value.message) };
+    if (value.reason !== undefined) out.reason = scrubString(value.reason);
+    if (value.stack) out.stack = scrubString(value.stack);
+    return out;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactRecursive(item, seen));
+  }
+  const copy = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (SENSITIVE_KEY_NAME.test(k)) {
+      copy[k] = '[REDACTED]';
+    } else {
+      copy[k] = redactRecursive(v, seen);
+    }
+  }
+  return copy;
+}
+
+/**
+ * Redacts secrets out of free-text, Errors, or structured event objects.
+ * Non-string values (objects / Error / Arrays) return deep-cloned redacted
+ * structures so caller objects are never mutated.
+ */
+export function redactSecrets(input) {
+  if (input === null || input === undefined) return '';
+  if (typeof input === 'string') return scrubString(input);
+  if (typeof input === 'object') return redactRecursive(input, new WeakSet());
+  return scrubString(String(input));
 }

@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { canonicalJson } from './receipt.js';
-import { sanitizeUrl } from './secret_redaction.js';
+import { redactSecrets, sanitizeUrl } from './secret_redaction.js';
 import {
   MAX_RESPONSE_SNIPPET_CHARS,
   extractGenuineConfirmationId,
@@ -292,7 +292,7 @@ export function classifyUniversalSubmitOutcome({
       category: serverRejected?.status >= 400 && !(domState.validationErrors?.length > 0)
         ? UniversalSubmitCategory.SUBMISSION_REJECTED
         : UniversalSubmitCategory.VALIDATION_ERROR,
-      evidence: `Employer rejected submission: ${String(errText).slice(0, 200)}`,
+      evidence: `Employer rejected submission: ${redactSecrets(String(errText)).slice(0, 200)}`,
       signals: ['UNIVERSAL_SUBMISSION_VALIDATION_OR_4XX'],
     };
   }

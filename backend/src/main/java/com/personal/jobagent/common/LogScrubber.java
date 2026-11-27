@@ -16,15 +16,30 @@ import java.util.regex.Pattern;
 public final class LogScrubber {
 
     private static final List<Pattern> SENSITIVE_PATTERNS = List.of(
-            Pattern.compile("(?i)(\"?password\"?\\s*[:=]\\s*\")[^\"]*(\")"),
-            Pattern.compile("(?i)(\"?otp\"?\\s*[:=]\\s*\")[^\"]*(\")"),
-            Pattern.compile("(?i)(\"?api[_-]?key\"?\\s*[:=]\\s*\")[^\"]*(\")"),
-            Pattern.compile("(?i)(\"?authorization\"?\\s*[:=]\\s*\")[^\"]*(\")"),
-            Pattern.compile("(?i)(\"?token\"?\\s*[:=]\\s*\")[^\"]*(\")"),
-            Pattern.compile("(?i)(\"?secret\"?\\s*[:=]\\s*\")[^\"]*(\")")
+            // URL userinfo credentials: https://user:pass@host -> https://***REDACTED***@host
+            Pattern.compile("(?i)(https?://)[^/@\\s]+:[^/@\\s]+@"),
+            // Quoted JSON / config key-value pairs
+            Pattern.compile("(?i)(\"?(?:password|passwd|pwd|passcode|otp|pin|api[_-]?key|authorization|token|lease[_-]?token|secret|credential|signature|sig|jwt|sid|cookie|verification[_-]?code|activation[_-]?code|magic|nonce|ticket|verifier)\"?\\s*[:=]\\s*\")((?:\\\\.|[^\"])*)(\")"),
+            // Unquoted JSON numeric / boolean / bare values
+            Pattern.compile("(?i)(\"(?:password|passwd|pwd|passcode|otp|pin|api[_-]?key|authorization|token|lease[_-]?token|secret|credential|signature|sig|jwt|sid|code|verification[_-]?code|activation[_-]?code|magic|nonce|ticket|verifier)\"\\s*:\\s*)(?:[0-9]{1,12}|true|false)([\\s,}\\]])"),
+            // Header lines: Authorization / Cookie / Set-Cookie
+            Pattern.compile("(?im)(^(?:authorization|cookie|set-cookie)\\s*[:=]\\s*)([^\\r\\n]+)"),
+            Pattern.compile("(?i)\\b(authorization\\s*[:=]\\s*(?:bearer|basic|token)\\s+)[A-Za-z0-9._~+/=-]+"),
+            // Bearer / Basic tokens anywhere
+            Pattern.compile("(?i)\\b(Bearer|Basic)\\s+[A-Za-z0-9._~+/=-]{6,}"),
+            // Query parameters & unquoted key=value secrets
+            Pattern.compile("(?i)((?:^|[?&\\s,;])(?:password|passwd|pwd|passcode|otp|pin|api[_-]?key|authorization|token|lease[_-]?token|secret|credential|signature|sig|jwt|sid|cookie|code|verification[_-]?code|activation[_-]?code|auth[_-]?code|access[_-]?key|magic|nonce|ticket|verifier|key)=)([^&\\s\"'`;),<>\\]}{]+)")
     );
 
-    private static final String REDACTED = "$1***REDACTED***$2";
+    private static final String[] REPLACEMENTS = {
+            "$1***REDACTED***@",
+            "$1***REDACTED***$3",
+            "$1\"***REDACTED***\"$2",
+            "$1***REDACTED***",
+            "$1***REDACTED***",
+            "$1 ***REDACTED***",
+            "$1***REDACTED***"
+    };
 
     private LogScrubber() {
     }
@@ -34,8 +49,8 @@ public final class LogScrubber {
             return null;
         }
         String result = raw;
-        for (Pattern pattern : SENSITIVE_PATTERNS) {
-            result = pattern.matcher(result).replaceAll(REDACTED);
+        for (int i = 0; i < SENSITIVE_PATTERNS.size(); i++) {
+            result = SENSITIVE_PATTERNS.get(i).matcher(result).replaceAll(REPLACEMENTS[i]);
         }
         return result;
     }

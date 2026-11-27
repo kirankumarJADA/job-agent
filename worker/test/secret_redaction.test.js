@@ -112,3 +112,32 @@ test('redacts quoted Cookie/Set-Cookie values and quoted apikey/token headers cl
   assert.ok(!redactedJson.includes('inner-cookie-42'));
   assert.equal(typeof JSON.parse(redactedJson).error, 'string');
 });
+
+test('Stage 3I Phase 5: redacts numeric JSON OTPs, new token/sig/activation params, and Error/object trees without mutating inputs', () => {
+  const numericJson = '{"otp": 482913, "pin": 9012, "code": 771122, "ok": true}';
+  const scrubbedJson = redactSecrets(numericJson);
+  for (const leak of ['482913', '9012', '771122']) {
+    assert.ok(!scrubbedJson.includes(leak), `numeric JSON secret ${leak} must be redacted`);
+  }
+  const parsed = JSON.parse(scrubbedJson);
+  assert.equal(parsed.ok, true);
+
+  const kv = 'https://app.example/verify?activation_code=act-999&lease_token=lt-123&sig=deadbeef&jwt=eyJ.a.b&nonce=n-8&ticket=t-7&verifier=v-6';
+  const scrubbedKv = redactSecrets(kv);
+  for (const leak of ['act-999', 'lt-123', 'deadbeef', 'eyJ.a.b', 'n-8', 't-7', 'v-6']) {
+    assert.ok(!scrubbedKv.includes(leak), `query param secret ${leak} must be redacted`);
+  }
+
+  const origErr = new Error('OTP failed for otp=654321&leaseToken=tok-xyz');
+  const scrubbedErr = redactSecrets(origErr);
+  assert.ok(!String(scrubbedErr).includes('654321'));
+  assert.ok(!String(scrubbedErr).includes('tok-xyz'));
+  assert.match(origErr.message, /654321/, 'must not mutate original Error');
+
+  const obj = { nested: { activationCode: 'a1', leaseToken: 'tok-999', otp: 123456, safe: 'ok' } };
+  const scrubbedObj = redactSecrets(obj);
+  assert.equal(obj.nested.leaseToken, 'tok-999', 'must not mutate input object');
+  assert.equal(scrubbedObj.nested.safe, 'ok');
+  assert.ok(!JSON.stringify(scrubbedObj).includes('tok-999'));
+  assert.ok(!JSON.stringify(scrubbedObj).includes('123456'));
+});

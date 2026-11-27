@@ -19,8 +19,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class RegistrationIdentityServiceFailSafeTest {
@@ -125,6 +128,7 @@ class RegistrationIdentityServiceFailSafeTest {
         ManagedMailboxService.ManagedAddress candidateAddress = new ManagedMailboxService.ManagedAddress(
                 UUID.randomUUID(), PROFILE_ID, "robin+cand123456789012", "mail.aplivenosi.com", "ACTIVE");
         when(mailboxes.findAddress(PROFILE_ID)).thenReturn(Optional.of(candidateAddress));
+        when(mailboxes.ensureAddress(PROFILE_ID)).thenReturn(candidateAddress);
         when(mailboxes.readiness()).thenReturn(ManagedMailboxService.Readiness.ACTIVE);
         when(db.queryForList(anyString(), eq(PROFILE_ID), anyString())).thenReturn(Collections.emptyList());
 
@@ -145,5 +149,62 @@ class RegistrationIdentityServiceFailSafeTest {
                 PROFILE_ID, "https://jobs.ashbyhq.com/acme/1", PERSONAL_EMAIL);
 
         assertThat(email).isEqualTo(PERSONAL_EMAIL);
+        verify(db, never()).update(contains("insert into applicant_identities"), any(Object[].class));
+    }
+
+    @Test
+    @DisplayName("prepareForAccountCreation keeps newly created identity PENDING and confirmRegistration promotes to ACTIVE")
+    void prepareCreatesPendingAndConfirmPromotesToActive() {
+        ManagedMailboxService.ManagedAddress candidateAddress = new ManagedMailboxService.ManagedAddress(
+                UUID.randomUUID(), PROFILE_ID, "robin+cand123456789012", "mail.aplivenosi.com", "ACTIVE");
+        when(mailboxes.findAddress(PROFILE_ID)).thenReturn(Optional.of(candidateAddress));
+        when(mailboxes.ensureAddress(PROFILE_ID)).thenReturn(candidateAddress);
+        when(mailboxes.readiness()).thenReturn(ManagedMailboxService.Readiness.ACTIVE);
+        when(db.queryForList(contains("from applicant_identities"), eq(PROFILE_ID), eq("acme.example")))
+                .thenReturn(Collections.emptyList())
+                .thenReturn(List.of(Map.of(
+                        "id", UUID.randomUUID(),
+                        "applicant_email", MANAGED_EMAIL,
+                        "account_status", "PENDING",
+                        "provider", "ROBIN_MANAGED"
+                )));
+        UUID sessionId = UUID.randomUUID();
+        UUID appId = UUID.randomUUID();
+        when(db.queryForList(contains("from account_sessions"), eq(sessionId), eq(PROFILE_ID)))
+                .thenReturn(List.of(Map.of("application_id", appId, "expected_domain", "acme.example")));
+        when(db.update(contains("insert into applicant_identities"), any(Object[].class))).thenReturn(1);
+        when(db.update(contains("set account_status = 'ACTIVE'"), eq(PROFILE_ID), eq("acme.example"))).thenReturn(1);
+
+        RegistrationIdentityService.RegistrationIdentity prepared =
+                service.prepareForAccountCreation(PROFILE_ID, appId, sessionId, "acme.example");
+        assertThat(prepared.email()).isEqualTo(MANAGED_EMAIL);
+        assertThat(prepared.existing()).isFalse();
+        verify(db).update(contains("'PENDING'"), any(Object[].class));
+
+        // While still PENDING, a second resolve/prepare never claims existing=true
+        RegistrationIdentityService.RegistrationIdentity rePrepared =
+                service.prepareForAccountCreation(PROFILE_ID, appId, sessionId, "acme.example");
+        assertThat(rePrepared.existing()).isFalse();
+
+        // Explicit confirmation promotes PENDING -> ACTIVE (SQL restricts to account_status = 'PENDING')
+        assertThat(service.confirmRegistration(PROFILE_ID, "acme.example")).isTrue();
+        verify(db).update(contains("and account_status = 'PENDING'"), eq(PROFILE_ID), eq("acme.example"));
+    }
+
+    @Test
+    @DisplayName("resolve fails closed when applicant identity is DISABLED")
+    void resolveFailsClosedWhenIdentityDisabled() {
+        UUID appId = UUID.randomUUID();
+        when(db.queryForList(contains("from applicant_identities"), eq(PROFILE_ID), eq("acme.example")))
+                .thenReturn(List.of(Map.of(
+                        "id", UUID.randomUUID(),
+                        "applicant_email", MANAGED_EMAIL,
+                        "account_status", "DISABLED",
+                        "provider", "ROBIN_MANAGED"
+                )));
+
+        assertThatThrownBy(() -> service.resolve(PROFILE_ID, appId, null, "acme.example"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("disabled");
     }
 }

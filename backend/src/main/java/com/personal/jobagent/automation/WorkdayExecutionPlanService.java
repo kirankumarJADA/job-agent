@@ -410,7 +410,7 @@ public class WorkdayExecutionPlanService {
                         .orElseThrow(() -> new IllegalStateException("Could not start an account session"));
 
         RegistrationIdentityService.RegistrationIdentity identity =
-                registrationIdentities.resolve(profileId, applicationId, sessionId, employerDomain);
+                registrationIdentities.prepareForAccountCreation(profileId, applicationId, sessionId, employerDomain);
         if (identity.existing()) {
             throw new AccountCreationRefusedException("IDENTITY_ALREADY_REGISTERED",
                     "An employer account for this domain is already registered with " + identity.email()

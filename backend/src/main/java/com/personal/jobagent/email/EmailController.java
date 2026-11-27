@@ -83,22 +83,31 @@ public class EmailController {
         }
     }
 
+    /**
+     * Retired candidate endpoint: OTP extraction and resolution is strictly an
+     * automated worker flow served via {@code /api/v1/mailbox-verification/*}.
+     * Authenticated candidate sessions must never access raw verification codes.
+     */
     @PostMapping("/verification/extract")
-    public Map<String, Object> extract(@RequestBody VerifyRequest r) {
-        return service.extractVerification(ownerContext.profileIdOrNull(), r.emailId(), r.sessionId(), r.expectedDomain())
-                .orElse(Map.of("accepted", false));
+    public ResponseEntity<?> extract(@RequestBody(required = false) VerifyRequest r, HttpServletRequest request) {
+        if (!ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(ApiError.of(403, "Forbidden",
+                    "Verification code extraction is restricted to the automation worker.",
+                    request.getRequestURI(), correlationId()));
+        }
+        return ResponseEntity.status(HttpStatus.GONE).body(ApiError.of(410, "Gone",
+                "Use /api/v1/mailbox-verification/resolve instead.", request.getRequestURI(), correlationId()));
     }
 
     @PostMapping("/verification/{id}/resolve")
     public ResponseEntity<?> resolve(@PathVariable UUID id, HttpServletRequest request) {
-        try {
-            return ResponseEntity.ok(Map.of("accepted", true, "value", service.resolve(ownerContext.profileIdOrNull(), id)));
-        } catch (IllegalStateException e) {
-            // Same shape for "not yours", "expired" and "already used" — a caller
-            // learns only that the code is not available.
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ApiError.of(404, "Not Found",
-                    "verification unavailable", request.getRequestURI(), correlationId()));
+        if (!ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(ApiError.of(403, "Forbidden",
+                    "Verification code resolution is restricted to the automation worker.",
+                    request.getRequestURI(), correlationId()));
         }
+        return ResponseEntity.status(HttpStatus.GONE).body(ApiError.of(410, "Gone",
+                "Use /api/v1/mailbox-verification/resolve instead.", request.getRequestURI(), correlationId()));
     }
 
     private static boolean isBlank(String value) {

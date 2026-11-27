@@ -203,12 +203,15 @@ public class ManagedInboundService {
             EmailIntelligenceService intel = emailIntelligence.getIfAvailable();
             if (intel != null) {
                 try {
+                    String safeForwardSubject = shouldRedactForwardedSubject(message)
+                            ? redactedSubject(message.subject())
+                            : message.subject();
                     EmailIntelligenceService.ConnectorMessage connectorMessage = new EmailIntelligenceService.ConnectorMessage(
                             message.providerId(),
                             message.messageId(),
                             message.fromAddress(),
                             message.envelopeRecipient(),
-                            message.subject(),
+                            safeForwardSubject,
                             message.text(),
                             signedAt != null ? signedAt : now,
                             message.envelopeRecipient(),
@@ -224,6 +227,13 @@ public class ManagedInboundService {
         }
 
         return outcome;
+    }
+
+    private static boolean shouldRedactForwardedSubject(InboundMailMessage message) {
+        String subject = message.subject();
+        if (subject == null || subject.isBlank()) return false;
+        var ext = VerificationContentExtractor.extract(subject, message.text(), message.links(), "example.com");
+        return ext.code() != null;
     }
 
     /**

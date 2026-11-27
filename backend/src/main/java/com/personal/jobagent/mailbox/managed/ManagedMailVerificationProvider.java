@@ -57,7 +57,7 @@ public class ManagedMailVerificationProvider implements MailboxVerificationProvi
 
     @Override
     public boolean connected(UUID ownerProfileId) {
-        return mailboxes.usableAddress(ownerProfileId).isPresent();
+        return mailboxes.usableAddressForAutomatedVerification(ownerProfileId).isPresent();
     }
 
     @Override
@@ -71,7 +71,7 @@ public class ManagedMailVerificationProvider implements MailboxVerificationProvi
     @Override
     public Optional<VerificationHit> findVerification(UUID ownerProfileId, String employerDomain,
                                                       String mailboxAddress, Instant after) {
-        Optional<ManagedMailboxService.ManagedAddress> usable = mailboxes.usableAddress(ownerProfileId);
+        Optional<ManagedMailboxService.ManagedAddress> usable = mailboxes.usableAddressForAutomatedVerification(ownerProfileId);
         if (usable.isEmpty()) return Optional.empty();
         ManagedMailboxService.ManagedAddress address = usable.get();
         if (mailboxAddress != null && !mailboxAddress.isBlank()
@@ -160,7 +160,7 @@ public class ManagedMailVerificationProvider implements MailboxVerificationProvi
     public Optional<VerificationHit> readReservedVerification(UUID ownerProfileId, String employerDomain,
                                                             String mailboxAddress, UUID messageId) {
         if (ownerProfileId == null || messageId == null) return Optional.empty();
-        Optional<ManagedMailboxService.ManagedAddress> usable = mailboxes.usableAddress(ownerProfileId);
+        Optional<ManagedMailboxService.ManagedAddress> usable = mailboxes.usableAddressForAutomatedVerification(ownerProfileId);
         if (usable.isEmpty()) return Optional.empty();
         ManagedMailboxService.ManagedAddress address = usable.get();
         if (mailboxAddress != null && !mailboxAddress.isBlank()

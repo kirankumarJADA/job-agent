@@ -40,6 +40,9 @@ public class JobDiscoveryService {
     @Autowired(required = false)
     private SchedulerDatabaseGuard databaseGuard;
 
+    @Autowired(required = false)
+    private org.springframework.transaction.PlatformTransactionManager transactionManager;
+
     @Autowired
     public JobDiscoveryService(JdbcTemplate jdbcTemplate,
                                OutboxWriter outboxWriter,
@@ -469,9 +472,30 @@ public class JobDiscoveryService {
      * <p>Only one sweep runs at a time. A second concurrent sweep (another instance) returns immediately instead
      * of queueing behind the first. The whole sweep is one transaction: any failure rolls back every step.
      */
-    @Transactional(isolation = Isolation.READ_COMMITTED)
     @Scheduled(cron = "0 0 * * * *") // hourly scheduled refresh for source health and stale jobs
     public void scheduledDiscoveryMaintenance() {
+        if (!maintenanceEnabled || maintenanceMode.isMaintenanceMode()
+                || (databaseGuard != null && !databaseGuard.isReady())) {
+            return;
+        }
+        try {
+            if (transactionManager != null) {
+                var template = new org.springframework.transaction.support.TransactionTemplate(transactionManager);
+                template.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_READ_COMMITTED);
+                template.executeWithoutResult(status -> executeDiscoveryMaintenance());
+            } else {
+                executeDiscoveryMaintenance();
+            }
+        } catch (RuntimeException e) {
+            if (databaseGuard != null && !databaseGuard.isReady()) {
+                log.debug("Suppressing discovery maintenance error during shutdown: {}", e.getClass().getSimpleName());
+                return;
+            }
+            throw e;
+        }
+    }
+
+    private void executeDiscoveryMaintenance() {
         if (!maintenanceEnabled || maintenanceMode.isMaintenanceMode()
                 || (databaseGuard != null && !databaseGuard.isReady())) {
             return;

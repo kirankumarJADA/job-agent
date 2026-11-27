@@ -44,6 +44,7 @@ public class WorkerEventTokenFilter extends OncePerRequestFilter {
     private static final String MAILBOX_VERIFICATION_CONFIRM_PATH = "/api/v1/mailbox-verification/confirm";
     private static final String MAILBOX_VERIFICATION_RELEASE_PATH = "/api/v1/mailbox-verification/release";
     private static final String REGISTRATION_IDENTITY_PATH = "/api/v1/mailbox-verification/registration-identity";
+    private static final String REGISTRATION_IDENTITY_CONFIRM_PATH = "/api/v1/mailbox-verification/registration-identity/confirm";
     private static final String EMPLOYER_CREDENTIALS_RESOLVE_PATH = "/api/v1/employer-credentials/resolve";
 
     private static final Pattern WORKER_PLAN_EXECUTION_PATH = Pattern.compile(
@@ -124,6 +125,7 @@ public class WorkerEventTokenFilter extends OncePerRequestFilter {
                 || MAILBOX_VERIFICATION_CONFIRM_PATH.equals(path)
                 || MAILBOX_VERIFICATION_RELEASE_PATH.equals(path)
                 || REGISTRATION_IDENTITY_PATH.equals(path)
+                || REGISTRATION_IDENTITY_CONFIRM_PATH.equals(path)
                 || EMPLOYER_CREDENTIALS_RESOLVE_PATH.equals(path);
     }
 

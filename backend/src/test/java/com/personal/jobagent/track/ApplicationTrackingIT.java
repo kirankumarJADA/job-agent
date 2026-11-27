@@ -697,6 +697,7 @@ class ApplicationTrackingIT {
     void mailboxVerificationResolveRequiresWorkerTokenAndRefusesSourceReplay() throws Exception {
         UUID app = application(seedJob("mailbox-verify", "Verification Co", "Backend Engineer",
                 greenhouseUrl("mailbox-verify", 8151), null));
+        seedRunningPlan(app, "https://verification.fixture.example/jobs/1");
         JsonNode source = ingestHttp(Map.of("messageId", "verify-" + UUID.randomUUID(),
                 "from", "security@verification.fixture.example", "to", "dev@example.local",
                 "subject", "Your verification code", "body", "Use 482913 to verify your account"));
@@ -745,6 +746,7 @@ class ApplicationTrackingIT {
     void mailboxVerificationMissReturns404ForManualPause() throws Exception {
         UUID app = application(seedJob("mailbox-miss", "Verification Co", "Platform Engineer",
                 greenhouseUrl("mailbox-miss", 8152), null));
+        seedRunningPlan(app, "https://verification.fixture.example/jobs/2");
         Mockito.when(mailboxVerificationProvider.findVerification(Mockito.eq(devProfile),
                 Mockito.eq("verification.fixture.example"), Mockito.isNull(), Mockito.any(Instant.class)))
                 .thenReturn(Optional.empty());
@@ -939,6 +941,14 @@ class ApplicationTrackingIT {
                     UuidV7.generate(), app, "{\"step\":\"" + step + "\",\"status\":\"OK\"}");
         }
         return app;
+    }
+
+    private void seedRunningPlan(UUID appId, String targetUrl) {
+        jdbc.update("""
+                insert into automation_plans (id, profile_id, application_id, target_url, status, idempotency_key, plan)
+                select ?, profile_id, id, ?, 'RUNNING', ?, '{"planType":"UNIVERSAL","steps":[]}'::jsonb
+                from applications where id = ?
+                """, UuidV7.generate(), targetUrl, "it-track-" + UUID.randomUUID(), appId);
     }
 
     private JsonNode ingestHttp(Map<String, Object> body) throws Exception {

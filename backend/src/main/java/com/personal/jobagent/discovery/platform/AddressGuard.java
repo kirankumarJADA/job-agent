@@ -40,6 +40,14 @@ public class AddressGuard {
 
     /** @throws UnsafeAddressException when the URI must not be fetched */
     public void check(URI uri) {
+        checkAndResolve(uri);
+    }
+
+    /**
+     * Validates URL safety, resolves DNS once, checks every returned IP is
+     * public, and returns the validated addresses for transport-level pinning.
+     */
+    public java.util.List<InetAddress> checkAndResolve(URI uri) {
         if (uri == null) throw new UnsafeAddressException("missing URL");
         String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
         if (!scheme.equals("https")) throw new UnsafeAddressException("only https URLs are fetched");
@@ -67,6 +75,7 @@ public class AddressGuard {
                 throw new UnsafeAddressException("host resolves to a non-public address");
             }
         }
+        return java.util.List.of(addresses);
     }
 
     static boolean isPublic(InetAddress address) {

@@ -167,6 +167,14 @@ class CloudflareTrustedAuthOtpIT {
         return identityService.startSession(appId, employerDomain, profileId).orElseThrow();
     }
 
+    private void seedRunningPlan(UUID appId, String targetUrl) {
+        jdbc.update("""
+                insert into automation_plans (id, profile_id, application_id, target_url, status, idempotency_key, plan)
+                select ?, profile_id, id, ?, 'RUNNING', ?, '{"planType":"UNIVERSAL","steps":[]}'::jsonb
+                from applications where id = ?
+                """, UuidV7.generate(), targetUrl, "it-cf-" + UUID.randomUUID(), appId);
+    }
+
     private MvcResult deliverCloudflare(String recipient, String from, String subject, String text,
                                         String dkimDomain, String authServId, boolean authTrusted,
                                         Instant timestamp) throws Exception {
@@ -237,6 +245,7 @@ class CloudflareTrustedAuthOtpIT {
                 "unrelated-sender.example", "mx.cloudflare.net", true, base.plusSeconds(10)).getResponse().getStatus()).isEqualTo(200);
 
         UUID app1 = createApp(cand.profileId(), "https://acme-verify.example/jobs/1");
+        seedRunningPlan(app1, "https://acme-verify.example/jobs/1");
         UUID sess1 = startSession(cand.profileId(), app1, "acme-verify.example");
         jdbc.update("update account_sessions set created_at = now() - interval '4 minutes' where id = ?", sess1);
         mvc.perform(post("/api/v1/mailbox-verification/registration-identity").header("Authorization", WORKER_HEADER)
@@ -306,6 +315,7 @@ class CloudflareTrustedAuthOtpIT {
                 app1);
 
         UUID app2 = createApp(cand.profileId(), "https://acme-verify.example/jobs/2");
+        seedRunningPlan(app2, "https://acme-verify.example/jobs/2");
         UUID sess2 = startSession(cand.profileId(), app2, "acme-verify.example");
         jdbc.update("update account_sessions set created_at = now() - interval '4 minutes' where id = ?", sess2);
         mvc.perform(post("/api/v1/mailbox-verification/registration-identity").header("Authorization", WORKER_HEADER)
@@ -426,6 +436,135 @@ class CloudflareTrustedAuthOtpIT {
         assertThatThrownBy(() -> registrationIdentities.resolve(
                 disabledCand.profileId(), disabledApp, disabledSess, "acme-verify.example"))
                 .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void stage3iPhase5_signupConfirmationAndSecurityBoundariesEndToEnd() throws Exception {
+        Candidate cand = createCandidate("cand-p5-lifecycle@personal.example", true);
+        assertThat(deliverCloudflare(cand.managedAddress(), "Security <security@acme-verify.example>",
+                "Welcome", "Active mailbox test",
+                "acme-verify.example", "mx.cloudflare.net", true, Instant.now()).getResponse().getStatus()).isEqualTo(200);
+
+        UUID app = createApp(cand.profileId(), "https://acme-verify.example/jobs/p5");
+        seedReadyCvForApplication(cand.profileId(), app, "p5-lifecycle");
+
+        MvcResult authRes = mvc.perform(post("/api/v1/apply/applications/{id}/universal-account", app)
+                        .with(csrf()).with(cand.auth())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"acceptTerms\":true}"))
+                .andExpect(status().isOk()).andReturn();
+        UUID planId = UUID.fromString(json(authRes).get("planId").asText());
+        UUID sessId = UUID.fromString(json(authRes).get("sessionId").asText());
+
+        // Before worker claims the plan (status = PREPARED), worker identity/resolve endpoints reject with 409
+        mvc.perform(post("/api/v1/mailbox-verification/registration-identity").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of(
+                                "applicationId", app.toString(),
+                                "sessionId", sessId.toString(),
+                                "employerDomain", "acme-verify.example"))))
+                .andExpect(status().isConflict());
+
+        // Worker claims the plan -> status = RUNNING
+        mvc.perform(post("/api/v1/automation/plans/{id}/claim", planId).header("Authorization", WORKER_HEADER))
+                .andExpect(status().isOk());
+
+        // 1. /registration-identity creates PENDING identity (existing=false) until signup confirmation
+        String regBody = json.writeValueAsString(Map.of(
+                "applicationId", app.toString(),
+                "sessionId", sessId.toString(),
+                "employerDomain", "acme-verify.example"));
+        JsonNode reg1 = json(mvc.perform(post("/api/v1/mailbox-verification/registration-identity")
+                        .header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON).content(regBody))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(reg1.get("existing").asBoolean()).isFalse();
+        assertThat(jdbc.queryForObject(
+                "select account_status from applicant_identities where profile_id = ? and domain = 'acme-verify.example'",
+                String.class, cand.profileId())).isEqualTo("PENDING");
+
+        // Second call while still PENDING never reports existing=true
+        JsonNode reg2 = json(mvc.perform(post("/api/v1/mailbox-verification/registration-identity")
+                        .header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON).content(regBody))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(reg2.get("existing").asBoolean()).isFalse();
+
+        // 2. Explicit signup confirmation promotes PENDING -> ACTIVE; subsequent calls report existing=true
+        JsonNode confReg = json(mvc.perform(post("/api/v1/mailbox-verification/registration-identity/confirm")
+                        .header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON).content(regBody))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(confReg.get("promoted").asBoolean()).isTrue();
+        assertThat(jdbc.queryForObject(
+                "select account_status from applicant_identities where profile_id = ? and domain = 'acme-verify.example'",
+                String.class, cand.profileId())).isEqualTo("ACTIVE");
+
+        JsonNode reg3 = json(mvc.perform(post("/api/v1/mailbox-verification/registration-identity")
+                        .header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON).content(regBody))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(reg3.get("existing").asBoolean()).isTrue();
+
+        // 3. Domain binding refusal (403) + OTP lease + expired release refusal (409)
+        mvc.perform(post("/api/v1/mailbox-verification/resolve").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of(
+                                "applicationId", app.toString(),
+                                "sessionId", sessId.toString(),
+                                "employerDomain", "evil-domain.example"))))
+                .andExpect(status().isForbidden());
+
+        String otpCode = "814925";
+        assertThat(deliverCloudflare(cand.managedAddress(), "Security <security@acme-verify.example>",
+                "Verification code", "Your verification code is " + otpCode,
+                "mail.acme-verify.example", "mx.cloudflare.net", true, Instant.now()).getResponse().getStatus()).isEqualTo(200);
+
+        JsonNode lease = json(mvc.perform(post("/api/v1/mailbox-verification/resolve").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON).content(regBody))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(lease.get("otp").asText()).isEqualTo(otpCode);
+        String verId = lease.get("verificationId").asText();
+        String tok = lease.get("leaseToken").asText();
+
+        // Expire the lease in DB -> /release returns 409 and never leaks leaseToken in audit_logs
+        jdbc.update("update mailbox_verifications set reserved_until = now() - interval '1 minute' where id = ?::uuid", verId);
+        mvc.perform(post("/api/v1/mailbox-verification/release").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of(
+                                "applicationId", app.toString(),
+                                "verificationId", verId,
+                                "leaseToken", tok,
+                                "reason", "EXPIRED"))))
+                .andExpect(status().isConflict());
+
+        // Closing the session rejects omitting sessionId on /resolve with 409 (no null-session bypass)
+        jdbc.update("update account_sessions set state = 'HARD_STOP' where id = ?", sessId);
+        mvc.perform(post("/api/v1/mailbox-verification/resolve").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of(
+                                "applicationId", app.toString(),
+                                "employerDomain", "acme-verify.example"))))
+                .andExpect(status().isConflict());
+
+        // Candidate EmailController legacy endpoints are retired (403 for candidate, 410 for worker)
+        mvc.perform(post("/api/v1/emails/verification/extract").with(csrf()).with(cand.auth())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/api/v1/emails/verification/extract").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isGone());
+
+        // Verify audit_logs captured metadata events with zero OTP or leaseToken leakage
+        var audits = jdbc.queryForList(
+                "select action, after_state::text as after_state from audit_logs where entity_id = ?", app);
+        assertThat(audits).isNotEmpty();
+        assertThat(audits.stream().map(a -> String.valueOf(a.get("action"))).toList())
+                .contains("REGISTRATION_IDENTITY_CONFIRMED", "MAILBOX_VERIFICATION_LEASE_ACQUIRED", "MAILBOX_VERIFICATION_RELEASE_REJECTED");
+        for (var entry : audits) {
+            assertThat(String.valueOf(entry.get("after_state"))).doesNotContain(otpCode).doesNotContain(tok);
+        }
     }
 
     private void seedReadyCvForApplication(UUID profileId, UUID appId, String tag) throws Exception {

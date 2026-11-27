@@ -4,6 +4,8 @@ import com.zaxxer.hikari.HikariDataSource;
 import jakarta.annotation.PreDestroy;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
 import org.springframework.context.ApplicationListener;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.context.event.ContextClosedEvent;
@@ -22,9 +24,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * polling in a healthy running application.
  */
 @Component
-public class SchedulerDatabaseGuard implements SmartLifecycle, ApplicationListener<ContextClosedEvent>, DisposableBean {
+public class SchedulerDatabaseGuard implements SmartLifecycle, ApplicationListener<ContextClosedEvent>, ApplicationContextAware, DisposableBean {
 
     private final AtomicBoolean active = new AtomicBoolean(true);
+    private volatile ApplicationContext applicationContext;
 
     @Autowired(required = false)
     private DataSource dataSource;
@@ -34,6 +37,11 @@ public class SchedulerDatabaseGuard implements SmartLifecycle, ApplicationListen
 
     public SchedulerDatabaseGuard(DataSource dataSource) {
         this.dataSource = dataSource;
+    }
+
+    @Override
+    public void setApplicationContext(ApplicationContext applicationContext) {
+        this.applicationContext = applicationContext;
     }
 
     /** True only when the Spring context is running and its connection pool has not closed. */
@@ -55,7 +63,9 @@ public class SchedulerDatabaseGuard implements SmartLifecycle, ApplicationListen
 
     @Override
     public void onApplicationEvent(ContextClosedEvent event) {
-        deactivate();
+        if (event != null && (this.applicationContext == null || event.getApplicationContext() == this.applicationContext)) {
+            deactivate();
+        }
     }
 
     @PreDestroy

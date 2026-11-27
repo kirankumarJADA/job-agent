@@ -116,7 +116,8 @@ public class RegistrationIdentityService {
         }
 
         Optional<Map<String, Object>> existing = identity(ownerProfileId, domain);
-        boolean alreadyRegistered = existing.isPresent();
+        boolean alreadyRegistered = existing.isPresent()
+                && "ACTIVE".equals(existing.get().get("account_status"));
         if (existing.isEmpty()) {
             ManagedMailboxService.Readiness readiness = mailboxes.readiness();
             if (readiness != ManagedMailboxService.Readiness.ACTIVE) {
@@ -124,18 +125,21 @@ public class RegistrationIdentityService {
             }
             ManagedMailboxService.ManagedAddress address = mailboxes.ensureAddress(ownerProfileId);
             if (address == null || !address.active()) throw new ManagedMailboxNotReadyException("ADDRESS_DISABLED");
-            int inserted = db.update("""
-                    insert into applicant_identities (id, profile_id, applicant_email, provider, domain)
-                    values (?, ?, ?, 'ROBIN_MANAGED', ?)
+            db.update("""
+                    insert into applicant_identities (id, profile_id, applicant_email, provider, domain, account_status)
+                    values (?, ?, ?, 'ROBIN_MANAGED', ?, 'PENDING')
                     on conflict (profile_id, domain) do nothing
                     """, UuidV7.generate(), ownerProfileId, address.address(), domain);
-            alreadyRegistered = (inserted == 0);
             existing = identity(ownerProfileId, domain);
+            alreadyRegistered = existing.isPresent()
+                    && "ACTIVE".equals(existing.get().get("account_status"));
         }
         Map<String, Object> row = existing.orElseThrow();
-        if (!"ACTIVE".equals(row.get("account_status"))) {
+        String status = String.valueOf(row.get("account_status"));
+        if (!"ACTIVE".equals(status) && !"PENDING".equals(status)) {
             throw new IllegalStateException("The employer identity for this domain is disabled");
         }
+        alreadyRegistered = "ACTIVE".equals(status);
         if ("ROBIN_MANAGED".equals(row.get("provider"))) {
             ManagedMailboxService.Readiness currentReadiness = mailboxes.readiness();
             if (currentReadiness != null && currentReadiness != ManagedMailboxService.Readiness.ACTIVE) {
@@ -214,7 +218,7 @@ public class RegistrationIdentityService {
                 String provider = String.valueOf(idRow.get("provider"));
                 String accountStatus = String.valueOf(idRow.get("account_status"));
                 if ("ROBIN_MANAGED".equals(provider)) {
-                    if (!"ACTIVE".equals(accountStatus)) {
+                    if (!"ACTIVE".equals(accountStatus) && !"PENDING".equals(accountStatus)) {
                         throw new ManagedMailboxNotReadyException("IDENTITY_DISABLED");
                     }
                     ManagedMailboxService.Readiness readiness = mailboxes.readiness();
@@ -231,7 +235,7 @@ public class RegistrationIdentityService {
                     }
                     throw new ManagedMailboxNotReadyException("IDENTITY_EMAIL_MISSING");
                 }
-                if (!"ACTIVE".equals(accountStatus)) {
+                if (!"ACTIVE".equals(accountStatus) && !"PENDING".equals(accountStatus)) {
                     throw new IllegalStateException("The employer identity for this domain is disabled");
                 }
                 Object registered = idRow.get("applicant_email");
@@ -253,13 +257,6 @@ public class RegistrationIdentityService {
                 throw new ManagedMailboxNotReadyException("ADDRESS_DISABLED");
             }
             String managedEmail = address.address().toLowerCase(java.util.Locale.ROOT).trim();
-            if (domain != null) {
-                db.update("""
-                        insert into applicant_identities (id, profile_id, applicant_email, provider, domain)
-                        values (?, ?, ?, 'ROBIN_MANAGED', ?)
-                        on conflict (profile_id, domain) do nothing
-                        """, UuidV7.generate(), profileId, managedEmail, domain);
-            }
             return managedEmail;
         }
 
@@ -276,16 +273,40 @@ public class RegistrationIdentityService {
                 throw new ManagedMailboxNotReadyException("ADDRESS_DISABLED");
             }
             String managedEmail = address.address().toLowerCase(java.util.Locale.ROOT).trim();
-            if (domain != null) {
-                db.update("""
-                        insert into applicant_identities (id, profile_id, applicant_email, provider, domain)
-                        values (?, ?, ?, 'ROBIN_MANAGED', ?)
-                        on conflict (profile_id, domain) do nothing
-                        """, UuidV7.generate(), profileId, managedEmail, domain);
-            }
             return managedEmail;
         }
         return personalEmail;
+    }
+
+    /**
+     * Prepares an employer registration identity when authorizing account creation, without
+     * marking an uncreated account as already registered. Fails with {@code existing = true}
+     * only when a confirmed ACTIVE identity already exists for this profile and domain.
+     */
+    public RegistrationIdentity prepareForAccountCreation(UUID ownerProfileId, UUID applicationId,
+                                                        UUID sessionId, String rawEmployerDomain) {
+        return resolve(ownerProfileId, applicationId, sessionId, rawEmployerDomain);
+    }
+
+    /**
+     * Promotes a PENDING employer registration identity to ACTIVE after real signup submission
+     * or verification confirmation, without ever re-enabling a DISABLED identity.
+     */
+    public boolean confirmRegistration(UUID ownerProfileId, String rawEmployerDomain) {
+        if (ownerProfileId == null || rawEmployerDomain == null || rawEmployerDomain.isBlank()) {
+            return false;
+        }
+        String domain = MailAddresses.employerDomain(rawEmployerDomain).orElse(null);
+        if (domain == null) {
+            return false;
+        }
+        int updated = db.update("""
+                update applicant_identities
+                set account_status = 'ACTIVE',
+                    updated_at = now()
+                where profile_id = ? and domain = ? and account_status = 'PENDING'
+                """, ownerProfileId, domain);
+        return updated > 0;
     }
 
     public static String domainOf(String url) {

@@ -104,11 +104,10 @@ export class StateStore {
   }
 
   /**
-   * Phase 8.5 / Stage 3I Phase 3: persists employer account metadata for recovery.
-   * When SessionVault is enabled, the email address itself stays in the encrypted
-   * vault and only non-secret mailbox routing metadata hits worker-state.json.
+   * Phase 8.5 / Stage 3I Phase 3 & 5: persists non-secret employer account metadata for recovery.
+   * The raw registration email stays encrypted in SessionVault unless explicit dev/test mode opts in.
    */
-  identity(planId, value, { vaultEnabled = false } = {}) {
+  identity(planId, value, { vaultEnabled = false, allowPlaintextEmail = false } = {}) {
     const plan = this.state.plans[planId];
     if (!plan) return;
     if (!value) {
@@ -118,7 +117,11 @@ export class StateStore {
         mailbox: value.mailbox ?? null,
         existing: Boolean(value.existing),
       };
-      if (!vaultEnabled && value.email) {
+      if (value.signupSucceeded !== undefined) {
+        safe.signupSucceeded = Boolean(value.signupSucceeded);
+        plan.universalSignupSucceeded = Boolean(value.signupSucceeded);
+      }
+      if (!vaultEnabled && allowPlaintextEmail && value.email) {
         safe.email = value.email;
       }
       plan.identity = safe;
@@ -150,6 +153,9 @@ export class StateStore {
     plan.pauseReason = reason;
     if (extra?.currentUrl) {
       plan.lastUrl = sanitizeUrl(extra.currentUrl);
+    }
+    if (extra?.signupSucceeded !== undefined) {
+      plan.universalSignupSucceeded = Boolean(extra.signupSucceeded);
     }
     this.#save();
   }

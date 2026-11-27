@@ -4,11 +4,14 @@ import com.personal.jobagent.common.SchedulerDatabaseGuard;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.ApplicationContext;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.TestContext;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Testcontainers;
+
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.doReturn;
@@ -48,13 +51,20 @@ class TestcontainersContextCleanupListenerTest {
         ObjectProvider<SchedulerDatabaseGuard> guardProvider = mock(ObjectProvider.class);
         @SuppressWarnings("unchecked")
         ObjectProvider<ThreadPoolTaskScheduler> schedulerProvider = mock(ObjectProvider.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<ThreadPoolTaskExecutor> executorProvider = mock(ObjectProvider.class);
+        when(guardProvider.stream()).thenAnswer(inv -> Stream.of(guard));
+        when(schedulerProvider.stream()).thenAnswer(inv -> Stream.empty());
+        when(executorProvider.stream()).thenAnswer(inv -> Stream.empty());
         when(appCtx.getBeanProvider(SchedulerDatabaseGuard.class)).thenReturn(guardProvider);
         when(appCtx.getBeanProvider(ThreadPoolTaskScheduler.class)).thenReturn(schedulerProvider);
+        when(appCtx.getBeanProvider(ThreadPoolTaskExecutor.class)).thenReturn(executorProvider);
         doReturn(AnnotatedContainerTest.class).when(containerCtx).getTestClass();
         when(containerCtx.hasApplicationContext()).thenReturn(true);
         when(containerCtx.getApplicationContext()).thenReturn(appCtx);
 
         listener.afterTestClass(containerCtx);
+        assertThat(guard.isReady()).isFalse();
         verify(containerCtx).markApplicationContextDirty(DirtiesContext.HierarchyMode.EXHAUSTIVE);
     }
 }

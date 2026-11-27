@@ -135,7 +135,7 @@ export class HumanInputRequiredError extends Error {
 export class BrowserWorker {
   constructor({ statePath, artifactDir, eventSink = () => {}, verificationResolver = null,
                 verificationConfirmer = null, verificationReleaser = null,
-                identityResolver = null, credentialResolver = null,
+                identityResolver = null, identityConfirmer = null, credentialResolver = null,
                 stepsReporter = null, discoveredQuestionsReporter = null,
                 onPageCreated = null, chromium: customChromium = null, localTestNetwork = false,
                 sessionKey = null } = {}) {
@@ -148,6 +148,8 @@ export class BrowserWorker {
     this.verificationReleaser = verificationReleaser;
     /** Phase 8.5: asks the backend which address to register an employer account with. */
     this.identityResolver = identityResolver;
+    /** Stage 3I Phase 5: promotes a pending registration identity after real signup succeeds. */
+    this.identityConfirmer = identityConfirmer;
     /** Phase 8.5 continuation: asks the backend (EmployerCredentialService) for
      * this candidate's saved portal password for one employer domain. */
     this.credentialResolver = credentialResolver;
@@ -447,28 +449,40 @@ export class BrowserWorker {
             stepExtra.universalPaused = Boolean(this.lastUniversalResult.pausedForInput);
             stepExtra.completedPages = this.lastUniversalResult.completedPages ?? [];
             stepExtra.universalResult = this.lastUniversalResult;
+            if (this.lastUniversalResult.signupSucceeded) {
+              stepExtra.signupSucceeded = true;
+            }
           }
           if (step.type === StepType.UNIVERSAL_SUBMIT_CLICK && this.lastUniversalSubmitResult) {
             stepExtra.submitResult = this.lastUniversalSubmitResult;
           }
-          this.store.markStep(plan.planId, step.id, 'COMPLETED', stepExtra);
           if (step.id === 'account-verify-otp-submit') {
             if (values.verification?.verificationId && values.verification?.leaseToken && this.verificationConfirmer) {
-              await this.verificationConfirmer({
+              const confirmRes = await this.verificationConfirmer({
                 applicationId: plan.correlation.applicationId,
-                sessionId: plan.correlation.sessionId ?? null,
+                sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? plan.package?.sessionId ?? null,
                 verificationId: values.verification.verificationId,
                 leaseToken: values.verification.leaseToken,
               });
+              if (confirmRes?.conflict) {
+                this.#emit(plan, {
+                  type: 'MAILBOX_VERIFICATION_CONFIRM_CONFLICT',
+                  stepId: step.id,
+                  verificationId: values.verification.verificationId,
+                });
+              }
             }
             values.verification = null;
             this.store.verification(plan.planId, null);
           }
+          // Stage 3I Phase 5 (P2-6): persist SessionVault state BEFORE recording STEP_COMPLETED / completion.
+          if (this.sessionVault.enabled) {
+            this.sessionVault.save(applicationId, await context.storageState());
+          }
+          this.store.markStep(plan.planId, step.id, 'COMPLETED', stepExtra);
           this.#emit(plan, { type: 'STEP_COMPLETED', stepId: step.id, stepType: step.type });
           const businessEvent = this.#businessEvent(step.id);
           if (businessEvent) this.#emit(plan, { type: businessEvent });
-          // Stage 3F: only ever the encrypted vault (no-op when disabled), never plaintext.
-          if (this.sessionVault.enabled) this.sessionVault.save(applicationId, await context.storageState());
           if (failAfterStep === step.id) {
             // Simulate a process crash after durable commit. Do not convert
             // the already-completed step into FAILED; restart must skip it.
@@ -502,6 +516,10 @@ export class BrowserWorker {
       // verification, discovered questions) until final submit or terminal error.
       keepSession = plan.planType === 'UNIVERSAL'
         && plan.steps.at(-1)?.type !== StepType.UNIVERSAL_SUBMIT_CLICK;
+      if (keepSession && this.sessionVault.enabled) {
+        const storageState = await context.storageState();
+        this.sessionVault.save(applicationId, storageState);
+      }
       this.store.complete(plan.planId);
       this.#emit(plan, { type: 'WORKER_COMPLETED', planId: plan.planId });
       return { status: 'COMPLETED', state: this.store.get(plan.planId), submitResult: this.lastSubmitResult ?? null,
@@ -515,9 +533,30 @@ export class BrowserWorker {
       if (!(error instanceof ApprovalRequiredError) && !(error instanceof HardStopError) && !String(error.message).startsWith('SIMULATED_WORKER_CRASH')) {
         this.store.fail(plan.planId, this.#safeError(error));
       }
+      if (!String(error?.message).startsWith('SIMULATED_WORKER_CRASH')
+          && values?.verification?.verificationId && values?.verification?.leaseToken
+          && this.verificationReleaser) {
+        try {
+          await this.verificationReleaser({
+            applicationId,
+            sessionId: plan.correlation?.sessionId ?? plan.package?.sessionId ?? null,
+            verificationId: values.verification.verificationId,
+            leaseToken: values.verification.leaseToken,
+            reason: error instanceof ApprovalRequiredError ? String(error.reason || 'PAUSED') : 'STEP_FAILED',
+          });
+          values.verification = null;
+          this.store.verification(plan.planId, null);
+        } catch { /* lease release on unwind is best effort */ }
+      }
       // The session survives only an approval pause (the same plan resumes) or a
       // crash; completion, failure, hard stops, handoffs and shutdown delete it.
       keepSession = error instanceof ApprovalRequiredError || String(error?.message).startsWith('SIMULATED_WORKER_CRASH');
+      if (keepSession && this.sessionVault.enabled && context) {
+        try {
+          const storageState = await context.storageState();
+          this.sessionVault.save(applicationId, storageState);
+        } catch { /* context might already be closed on crash */ }
+      }
       throw error;
     } finally {
       try {
@@ -715,7 +754,10 @@ export class BrowserWorker {
           pauseForHuman('REGISTRATION_IDENTITY_INVALID');
         }
         values.identity = { email, mailbox: identity.mailbox ?? null, existing: Boolean(identity.existing) };
-        this.store.identity(plan.planId, values.identity, { vaultEnabled: this.sessionVault.enabled });
+        this.store.identity(plan.planId, values.identity, {
+          vaultEnabled: this.sessionVault.enabled,
+          allowPlaintextEmail: this.localTestNetwork || Boolean(plan.package?.allowLocalTestHosts),
+        });
         if (this.sessionVault.enabled) this.sessionVault.saveIdentity(plan.correlation.applicationId, values.identity);
         // The address itself is never put in an event: it routes the candidate's mail.
         this.#emit(plan, { type: 'REGISTRATION_IDENTITY_RESOLVED', stepId: step.id, mailbox: values.identity.mailbox });
@@ -804,34 +846,68 @@ export class BrowserWorker {
           if (resolution.verificationId && resolution.leaseToken && this.verificationReleaser) {
             await this.verificationReleaser({
               applicationId: plan.correlation.applicationId,
+              sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? plan.package?.sessionId ?? null,
               verificationId: resolution.verificationId,
               leaseToken: resolution.leaseToken,
               reason: 'VERIFICATION_LINK_REJECTED',
             }).catch(() => {});
           }
+          values.verification = null;
+          this.store.verification(plan.planId, null);
           pauseForHuman('VERIFICATION_LINK_REJECTED');
         }
+        let linkResponse = null;
         try {
-          await this.#retry(() => page.goto(link.href, { waitUntil: 'domcontentloaded' }));
+          linkResponse = await this.#retry(() => page.goto(link.href, { waitUntil: 'domcontentloaded' }));
           await this.#assertSafePage(page);
         } catch (navErr) {
           if (resolution.verificationId && resolution.leaseToken && this.verificationReleaser) {
             await this.verificationReleaser({
               applicationId: plan.correlation.applicationId,
+              sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? plan.package?.sessionId ?? null,
               verificationId: resolution.verificationId,
               leaseToken: resolution.leaseToken,
               reason: 'VERIFICATION_LINK_NAVIGATION_FAILED',
             }).catch(() => {});
           }
+          values.verification = null;
+          this.store.verification(plan.planId, null);
           throw navErr;
         }
+        const finalLinkUrl = new URL(page.url());
+        const linkStatus = linkResponse?.status?.() ?? 200;
+        const linkBody = (await page.locator('body').innerText().catch(() => '')).toLowerCase();
+        const linkRejected = finalLinkUrl.origin !== current.origin
+          || linkStatus >= 400
+          || /\b(?:expired|invalid)\s+(?:verification\s+)?(?:link|token|code)\b/i.test(linkBody);
+        if (linkRejected) {
+          if (resolution.verificationId && resolution.leaseToken && this.verificationReleaser) {
+            await this.verificationReleaser({
+              applicationId: plan.correlation.applicationId,
+              sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? plan.package?.sessionId ?? null,
+              verificationId: resolution.verificationId,
+              leaseToken: resolution.leaseToken,
+              reason: 'VERIFICATION_LINK_FAILED',
+            }).catch(() => {});
+          }
+          values.verification = null;
+          this.store.verification(plan.planId, null);
+          pauseForHuman(finalLinkUrl.origin !== current.origin ? 'VERIFICATION_LINK_REJECTED' : 'VERIFICATION_LINK_FAILED');
+        }
         if (resolution.verificationId && resolution.leaseToken && this.verificationConfirmer) {
-          await this.verificationConfirmer({
+          const confirmRes = await this.verificationConfirmer({
             applicationId: plan.correlation.applicationId,
-            sessionId: plan.correlation.sessionId ?? null,
+            sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? plan.package?.sessionId ?? null,
             verificationId: resolution.verificationId,
             leaseToken: resolution.leaseToken,
           });
+          if (confirmRes?.conflict) {
+            this.#emit(plan, {
+              type: 'MAILBOX_VERIFICATION_CONFIRM_CONFLICT',
+              stepId: step.id,
+              verificationId: resolution.verificationId,
+            });
+          }
         }
         values.verification = null;
         this.store.verification(plan.planId, null);
@@ -2627,8 +2703,8 @@ export class BrowserWorker {
     });
   }
 
-  #pauseUniversal(plan, stepId, reason, currentUrl = null) {
-    this.store.pause(plan.planId, reason, currentUrl ? { currentUrl } : {});
+  #pauseUniversal(plan, stepId, reason, currentUrl = null, extra = {}) {
+    this.store.pause(plan.planId, reason, { ...(extra ?? {}), ...(currentUrl ? { currentUrl } : {}) });
     this.#emit(plan, { type: reason, stepId });
     throw new ApprovalRequiredError(stepId, reason);
   }
@@ -2636,6 +2712,7 @@ export class BrowserWorker {
   async #runUniversalApply(page, plan, step, values = {}) {
     const pkg = plan.package ?? {};
     const prior = this.store.step(plan.planId, step.id);
+    const planState = this.store.get(plan.planId);
     const completedPages = new Set(prior?.completedPages ?? []);
     if (Array.isArray(plan.completedSteps)) {
       for (const s of plan.completedSteps) {
@@ -2648,11 +2725,38 @@ export class BrowserWorker {
     let resumeUploadState = 'NO_FIELD';
     let coverLetterUploadState = 'NO_FIELD';
     let loginSucceeded = Boolean(prior?.loginSucceeded);
-    let signupSucceeded = Boolean(prior?.universalResult?.signupSucceeded ?? prior?.signupSucceeded);
+    let signupSucceeded = Boolean(
+      prior?.universalResult?.signupSucceeded
+      ?? prior?.signupSucceeded
+      ?? planState?.universalSignupSucceeded
+      ?? planState?.identity?.signupSucceeded
+      ?? values.identity?.signupSucceeded
+    );
     let emailVerified = Boolean(prior?.universalResult?.emailVerified ?? prior?.emailVerified);
     const maxPages = 6;
     const maxAuthSteps = 6;
     const maxRevealPassesPerPage = 4;
+
+    const persistUniversalIdentity = (identityValue) => {
+      if (!identityValue) return;
+      values.identity = { ...identityValue, signupSucceeded };
+      this.store.identity(plan.planId, values.identity, {
+        vaultEnabled: this.sessionVault.enabled,
+        allowPlaintextEmail: this.localTestNetwork || Boolean(pkg.allowLocalTestHosts),
+      });
+      if (this.sessionVault.enabled) this.sessionVault.saveIdentity(plan.correlation.applicationId, values.identity);
+    };
+
+    const pauseUniversalApply = (reason, extra = {}) => {
+      if (values.identity) persistUniversalIdentity(values.identity);
+      let safeUrl = null;
+      try {
+        safeUrl = page.url();
+      } catch {
+        safeUrl = null;
+      }
+      this.#pauseUniversal(plan, step.id, reason, safeUrl, { signupSucceeded, ...extra });
+    };
 
     const recordUnsupported = (inspected, planned) => {
       for (const hostTag of inspected.closedShadowHosts ?? []) {
@@ -2683,7 +2787,7 @@ export class BrowserWorker {
 
     const resolveUniversalIdentity = async () => {
       if (values.identity?.email) return values.identity;
-      if (!this.identityResolver) this.#pauseUniversal(plan, step.id, 'REGISTRATION_IDENTITY_UNAVAILABLE');
+      if (!this.identityResolver) pauseUniversalApply('REGISTRATION_IDENTITY_UNAVAILABLE');
       const employerDomain = currentEmployerDomain();
       let identity;
       try {
@@ -2693,16 +2797,14 @@ export class BrowserWorker {
           sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? pkg.sessionId ?? null,
         });
       } catch (error) {
-        this.#pauseUniversal(plan, step.id, String(error?.message ?? '').endsWith(':409')
+        pauseUniversalApply(String(error?.message ?? '').endsWith(':409')
           ? 'MANAGED_MAILBOX_NOT_READY' : 'REGISTRATION_IDENTITY_UNAVAILABLE');
       }
       const email = String(identity?.email ?? '').trim().toLowerCase();
       if (!/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(email)) {
-        this.#pauseUniversal(plan, step.id, 'REGISTRATION_IDENTITY_INVALID');
+        pauseUniversalApply('REGISTRATION_IDENTITY_INVALID');
       }
-      values.identity = { email, mailbox: identity?.mailbox ?? null, existing: Boolean(identity?.existing) };
-      this.store.identity(plan.planId, values.identity, { vaultEnabled: this.sessionVault.enabled });
-      if (this.sessionVault.enabled) this.sessionVault.saveIdentity(plan.correlation.applicationId, values.identity);
+      persistUniversalIdentity({ email, mailbox: identity?.mailbox ?? null, existing: Boolean(identity?.existing) });
       this.#emit(plan, { type: 'REGISTRATION_IDENTITY_RESOLVED', stepId: step.id, mailbox: values.identity.mailbox });
       return values.identity;
     };
@@ -2733,8 +2835,8 @@ export class BrowserWorker {
         authSteps += 1;
         if (authSteps > maxAuthSteps) throw new HardStopError('UNIVERSAL_AUTH_STEP_LIMIT_EXCEEDED', { stepId: step.id });
         const ev = inspected.emailVerification ?? {};
-        if (ev.ambiguous) this.#pauseUniversal(plan, step.id, 'UNIVERSAL_EMAIL_VERIFICATION_REQUIRED', page.url());
-        if (!this.verificationResolver) this.#pauseUniversal(plan, step.id, 'UNIVERSAL_EMAIL_VERIFICATION_REQUIRED', page.url());
+        if (ev.ambiguous) pauseUniversalApply('UNIVERSAL_EMAIL_VERIFICATION_REQUIRED');
+        if (!this.verificationResolver) pauseUniversalApply('UNIVERSAL_EMAIL_VERIFICATION_REQUIRED');
         const employerDomain = currentEmployerDomain();
         let resolution;
         try {
@@ -2745,15 +2847,16 @@ export class BrowserWorker {
             mailboxAddress: values.identity?.email ?? plan.correlation?.mailboxAddress ?? pkg.profileFacts?.email ?? null,
           });
         } catch {
-          this.#pauseUniversal(plan, step.id, 'UNIVERSAL_EMAIL_VERIFICATION_REQUIRED', page.url());
+          pauseUniversalApply('UNIVERSAL_EMAIL_VERIFICATION_REQUIRED');
         }
         if (!resolution || (!resolution.otp && !resolution.link)) {
-          this.#pauseUniversal(plan, step.id, 'UNIVERSAL_EMAIL_VERIFICATION_REQUIRED', page.url());
+          pauseUniversalApply('UNIVERSAL_EMAIL_VERIFICATION_REQUIRED');
         }
         const releaseLease = async (reason) => {
           if (resolution.verificationId && resolution.leaseToken && this.verificationReleaser) {
             await this.verificationReleaser({
               applicationId: plan.correlation.applicationId,
+              sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? pkg.sessionId ?? null,
               verificationId: resolution.verificationId,
               leaseToken: resolution.leaseToken,
               reason,
@@ -2764,12 +2867,19 @@ export class BrowserWorker {
         };
         const confirmLease = async () => {
           if (resolution.verificationId && resolution.leaseToken && this.verificationConfirmer) {
-            await this.verificationConfirmer({
+            const confirmRes = await this.verificationConfirmer({
               applicationId: plan.correlation.applicationId,
               sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? pkg.sessionId ?? null,
               verificationId: resolution.verificationId,
               leaseToken: resolution.leaseToken,
             });
+            if (confirmRes?.conflict) {
+              this.#emit(plan, {
+                type: 'MAILBOX_VERIFICATION_CONFIRM_CONFLICT',
+                stepId: step.id,
+                verificationId: resolution.verificationId,
+              });
+            }
           }
           values.verification = null;
           this.store.verification(plan.planId, null);
@@ -2779,7 +2889,7 @@ export class BrowserWorker {
           const otp = String(resolution.otp).trim();
           if (!/^\d{4,8}$/.test(otp) || !ev.hasOtpInput || !ev.verified) {
             await releaseLease('OTP_INPUT_UNAVAILABLE');
-            this.#pauseUniversal(plan, step.id, 'UNIVERSAL_EMAIL_VERIFICATION_REQUIRED');
+            pauseUniversalApply('UNIVERSAL_EMAIL_VERIFICATION_REQUIRED');
           }
           values.verification = {
             otp,
@@ -2809,7 +2919,7 @@ export class BrowserWorker {
           if (postOtpSec.mfaPresent) throw new HardStopError('UNIVERSAL_MFA_REQUIRED', { stepId: step.id });
           if (postOtpSec.emailVerificationPresent || /invalid|incorrect|expired|wrong\s*code/.test(errsText)) {
             await releaseLease('OTP_REJECTED');
-            this.#pauseUniversal(plan, step.id, 'UNIVERSAL_EMAIL_VERIFICATION_FAILED');
+            pauseUniversalApply('UNIVERSAL_EMAIL_VERIFICATION_FAILED');
           }
           await confirmLease();
           emailVerified = true;
@@ -2822,7 +2932,7 @@ export class BrowserWorker {
           link = new URL(resolution.link);
         } catch {
           await releaseLease('VERIFICATION_LINK_REJECTED');
-          this.#pauseUniversal(plan, step.id, 'VERIFICATION_LINK_REJECTED');
+          pauseUniversalApply('VERIFICATION_LINK_REJECTED');
         }
         const current = new URL(page.url());
         const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(current.hostname);
@@ -2830,19 +2940,38 @@ export class BrowserWorker {
           || (loopback && Boolean(pkg.allowLocalTestHosts) && current.protocol === 'http:' && link.protocol === 'http:');
         if (!safeProtocol || link.origin !== current.origin || link.username || link.password) {
           await releaseLease('VERIFICATION_LINK_REJECTED');
-          this.#pauseUniversal(plan, step.id, 'VERIFICATION_LINK_REJECTED');
+          pauseUniversalApply('VERIFICATION_LINK_REJECTED');
         }
-        await this.#retry(() => page.goto(link.href, { waitUntil: 'domcontentloaded' }));
-        await page.waitForTimeout(150);
-        this.#assertUniversalIdentity(page, plan);
+        let linkNavResponse = null;
+        try {
+          linkNavResponse = await this.#retry(() => page.goto(link.href, { waitUntil: 'domcontentloaded' }));
+          await page.waitForTimeout(150);
+          this.#assertUniversalIdentity(page, plan);
+        } catch (navError) {
+          await releaseLease('VERIFICATION_LINK_NAVIGATION_FAILED');
+          if (navError instanceof HardStopError || navError instanceof ApprovalRequiredError) throw navError;
+          pauseUniversalApply('VERIFICATION_LINK_REJECTED');
+        }
+        const finalLinkOrigin = (() => {
+          try {
+            return new URL(page.url()).origin;
+          } catch {
+            return '';
+          }
+        })();
+        if (finalLinkOrigin !== current.origin) {
+          await releaseLease('VERIFICATION_LINK_REDIRECTED');
+          pauseUniversalApply('VERIFICATION_LINK_REJECTED');
+        }
+        const navStatus = linkNavResponse?.status?.() ?? 200;
         const postLink = await inspectLiveFormDom(page);
         const postLinkSec = postLink.securitySignals ?? {};
         const postLinkBody = (await page.locator('body').innerText().catch(() => '')).toLowerCase();
         if (postLinkSec.captchaPresent) throw new HardStopError('BLOCKED_ANTI_BOT', { stepId: step.id });
         if (postLinkSec.mfaPresent) throw new HardStopError('UNIVERSAL_MFA_REQUIRED', { stepId: step.id });
-        if (postLinkSec.emailVerificationPresent || /expired|invalid\s*(?:verification\s*)?(?:link|token)/i.test(postLinkBody)) {
+        if (navStatus >= 400 || postLinkSec.emailVerificationPresent || /expired|invalid\s*(?:verification\s*)?(?:link|token)/i.test(postLinkBody)) {
           await releaseLease('VERIFICATION_LINK_FAILED');
-          this.#pauseUniversal(plan, step.id, 'UNIVERSAL_EMAIL_VERIFICATION_FAILED');
+          pauseUniversalApply('UNIVERSAL_EMAIL_VERIFICATION_FAILED');
         }
         await confirmLease();
         emailVerified = true;
@@ -2863,7 +2992,7 @@ export class BrowserWorker {
             this.#assertUniversalIdentity(page, plan);
             continue;
           }
-          this.#pauseUniversal(plan, step.id, 'UNIVERSAL_ACCOUNT_CREATION_AUTHORIZATION_REQUIRED', page.url());
+          pauseUniversalApply('UNIVERSAL_ACCOUNT_CREATION_AUTHORIZATION_REQUIRED');
         }
         if (!inspected.signupControls?.verified || inspected.signupControls?.ambiguous) {
           throw new HardStopError('UNIVERSAL_SIGNUP_SELECTOR_UNVERIFIED', { stepId: step.id });
@@ -2877,9 +3006,9 @@ export class BrowserWorker {
             this.#assertUniversalIdentity(page, plan);
             continue;
           }
-          this.#pauseUniversal(plan, step.id, 'UNIVERSAL_ACCOUNT_ALREADY_EXISTS');
+          pauseUniversalApply('UNIVERSAL_ACCOUNT_ALREADY_EXISTS');
         }
-        if (!this.credentialResolver) this.#pauseUniversal(plan, step.id, 'UNIVERSAL_CREDENTIAL_REQUIRED');
+        if (!this.credentialResolver) pauseUniversalApply('UNIVERSAL_CREDENTIAL_REQUIRED');
         const employerDomain = currentEmployerDomain();
         let credential;
         try {
@@ -2889,10 +3018,10 @@ export class BrowserWorker {
             planId: plan.planId,
           });
         } catch {
-          this.#pauseUniversal(plan, step.id, 'UNIVERSAL_CREDENTIAL_REQUIRED');
+          pauseUniversalApply('UNIVERSAL_CREDENTIAL_REQUIRED');
         }
         const password = String(credential?.password ?? '');
-        if (!password) this.#pauseUniversal(plan, step.id, 'UNIVERSAL_CREDENTIAL_REQUIRED');
+        if (!password) pauseUniversalApply('UNIVERSAL_CREDENTIAL_REQUIRED');
 
         await page.locator('[data-robin-signup-role="email"]').fill(identity.email);
         await page.locator('[data-robin-signup-role="password"]').fill(password);
@@ -2914,10 +3043,18 @@ export class BrowserWorker {
         await page.waitForTimeout(200);
         this.#assertUniversalIdentity(page, plan);
         signupSucceeded = true;
-        this.#emit(plan, { type: 'UNIVERSAL_SIGNUP_SUBMITTED', stepId: step.id });
+        persistUniversalIdentity(values.identity ?? identity);
         if (this.sessionVault.enabled) {
           this.sessionVault.save(plan.correlation.applicationId, await page.context().storageState());
         }
+        if (this.identityConfirmer) {
+          await this.identityConfirmer({
+            applicationId: plan.correlation.applicationId,
+            employerDomain,
+            sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? pkg.sessionId ?? null,
+          }).catch(() => {});
+        }
+        this.#emit(plan, { type: 'UNIVERSAL_SIGNUP_SUBMITTED', stepId: step.id });
         continue;
       }
 
@@ -3314,7 +3451,7 @@ export class BrowserWorker {
   }
 
   #safeError(error) {
-    return error instanceof VerificationError ? error.message : redactSecrets(error?.message ?? error);
+    return redactSecrets(error?.message ?? error);
   }
 
   #emit(plan, event) {

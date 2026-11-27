@@ -1,7 +1,17 @@
 package com.personal.jobagent.discovery.platform;
 
+import javax.net.ssl.SSLContext;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Proxy;
+import java.net.ProxySelector;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -9,6 +19,7 @@ import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
@@ -55,6 +66,13 @@ public class SafeHttpClient {
             this.header = header;
             this.allowedFragments = allowedFragments;
         }
+    }
+
+    /** Pinning-aware transport: production connects strictly to AddressGuard-validated IPs. */
+    public interface PinnedTransport extends Transport {
+        RawResponse exchangePinned(String method, URI uri, List<InetAddress> pinnedAddresses,
+                                   Map<String, String> headers, byte[] body,
+                                   Duration timeout, int maxBytes) throws IOException;
     }
 
     /** Low-level exchange seam: production uses the JDK client; tests replay fixtures. */
@@ -164,12 +182,18 @@ public class SafeHttpClient {
         URI current = uri;
         for (int hop = 0; hop <= 3; hop++) {
             checkDeadline("before redirect hop " + hop);
+            List<InetAddress> pinned;
             try {
-                guard.check(current);
+                if (overridesLegacyCheck(guard.getClass())) {
+                    guard.check(current);
+                    pinned = resolveOverrideGuard(guard, current);
+                } else {
+                    pinned = guard.checkAndResolve(current);
+                }
             } catch (AddressGuard.UnsafeAddressException e) {
                 throw new FetchException(FailureCategory.UNSAFE_ADDRESS, e.getMessage(), 0);
             }
-            RawResponse response = withRetries(method, current, body, accept);
+            RawResponse response = withRetries(method, current, pinned, body, accept);
             checkDeadline("after request attempt for " + current);
             int status = response.status();
             if (status >= 300 && status < 400 && response.header("Location").isPresent()) {
@@ -224,7 +248,30 @@ public class SafeHttpClient {
         return new String(response.body(), charset);
     }
 
-    private RawResponse withRetries(String method, URI uri, String body, Accept accept) {
+    private static boolean overridesLegacyCheck(Class<?> guardClass) {
+        for (Class<?> c = guardClass; c != null && c != AddressGuard.class; c = c.getSuperclass()) {
+            try {
+                c.getDeclaredMethod("check", URI.class);
+                return true;
+            } catch (NoSuchMethodException ignored) {
+            }
+        }
+        return false;
+    }
+
+    private static List<InetAddress> resolveOverrideGuard(AddressGuard guard, URI uri) {
+        try {
+            List<InetAddress> viaMethod = guard.checkAndResolve(uri);
+            if (viaMethod != null && !viaMethod.isEmpty()) {
+                return viaMethod;
+            }
+        } catch (AddressGuard.UnsafeAddressException ignored) {
+            // Custom subclass overrode check(URI) only (e.g., loopback test guard); do not fail closed on checkAndResolve.
+        }
+        return List.of();
+    }
+
+    private RawResponse withRetries(String method, URI uri, List<InetAddress> pinnedAddresses, String body, Accept accept) {
         FetchException last = null;
         for (int attempt = 1; attempt <= Math.max(1, settings.maxAttempts()); attempt++) {
             checkDeadline("before request attempt " + attempt);
@@ -252,8 +299,14 @@ public class SafeHttpClient {
                 headers.put("User-Agent", USER_AGENT);
                 headers.put("Accept", accept.header);
                 if (body != null) headers.put("Content-Type", "application/json");
-                response = transport.exchange(method, uri, headers,
-                        body == null ? null : body.getBytes(StandardCharsets.UTF_8), attemptTimeout, settings.maxBytes());
+                byte[] bodyBytes = body == null ? null : body.getBytes(StandardCharsets.UTF_8);
+                if (transport instanceof PinnedTransport pinnedTransport
+                        && pinnedAddresses != null && !pinnedAddresses.isEmpty()) {
+                    response = pinnedTransport.exchangePinned(method, uri, pinnedAddresses,
+                            headers, bodyBytes, attemptTimeout, settings.maxBytes());
+                } else {
+                    response = transport.exchange(method, uri, headers, bodyBytes, attemptTimeout, settings.maxBytes());
+                }
             } catch (HttpTimeoutException e) {
                 last = new FetchException(FailureCategory.TIMEOUT, "timed out", 0);
                 if (deadlineNanos != null && System.nanoTime() >= deadlineNanos) {
@@ -359,22 +412,88 @@ public class SafeHttpClient {
         }
     }
 
-    /** JDK transport: never follows redirects itself and stops reading at the size cap. */
-    static final class JdkTransport implements Transport {
+    /**
+     * JDK transport: never follows redirects itself, stops reading at the size cap,
+     * and when given AddressGuard-validated IPs, routes through an ephemeral loopback
+     * tunnel so JDK HttpClient performs full TLS/SAN/SNI verification while connecting
+     * strictly to the validated IP(s) with zero second DNS resolution.
+     */
+    static final class JdkTransport implements PinnedTransport {
         private static final ScheduledExecutorService WATCHDOG = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "safe-http-body-watchdog");
             t.setDaemon(true);
             return t;
         });
 
-        private final HttpClient client = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
-                .followRedirects(HttpClient.Redirect.NEVER)
-                .build();
+        private static final ThreadLocal<InetSocketAddress> PINNED_PROXY = new ThreadLocal<>();
+
+        private final HttpClient directClient;
+        private final HttpClient pinnedClient;
+
+        JdkTransport() {
+            this(defaultSslContext());
+        }
+
+        JdkTransport(SSLContext sslContext) {
+            this.directClient = HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofSeconds(10))
+                    .followRedirects(HttpClient.Redirect.NEVER)
+                    .sslContext(sslContext)
+                    .build();
+            this.pinnedClient = HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofSeconds(10))
+                    .followRedirects(HttpClient.Redirect.NEVER)
+                    .sslContext(sslContext)
+                    .proxy(new ProxySelector() {
+                        @Override
+                        public List<Proxy> select(URI uri) {
+                            InetSocketAddress tunnel = PINNED_PROXY.get();
+                            return tunnel == null ? List.of(Proxy.NO_PROXY)
+                                    : List.of(new Proxy(Proxy.Type.HTTP, tunnel));
+                        }
+
+                        @Override
+                        public void connectFailed(URI uri, SocketAddress sa, IOException ioe) {
+                        }
+                    })
+                    .build();
+        }
+
+        private static SSLContext defaultSslContext() {
+            try {
+                return SSLContext.getDefault();
+            } catch (NoSuchAlgorithmException e) {
+                throw new IllegalStateException("Default SSLContext unavailable", e);
+            }
+        }
 
         @Override
         public RawResponse exchange(String method, URI uri, Map<String, String> headers, byte[] body,
                                     Duration timeout, int maxBytes) throws IOException {
+            return executeRequest(directClient, method, uri, headers, body, timeout, maxBytes);
+        }
+
+        @Override
+        public RawResponse exchangePinned(String method, URI uri, List<InetAddress> pinnedAddresses,
+                                          Map<String, String> headers, byte[] body,
+                                          Duration timeout, int maxBytes) throws IOException {
+            if (pinnedAddresses == null || pinnedAddresses.isEmpty()) {
+                return exchange(method, uri, headers, body, timeout, maxBytes);
+            }
+            int targetPort = uri.getPort() != -1 ? uri.getPort()
+                    : ("https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80);
+            try (PinnedTunnel tunnel = PinnedTunnel.open(uri.getHost(), targetPort, pinnedAddresses, timeout)) {
+                PINNED_PROXY.set(tunnel.localAddress());
+                try {
+                    return executeRequest(pinnedClient, method, uri, headers, body, timeout, maxBytes);
+                } finally {
+                    PINNED_PROXY.remove();
+                }
+            }
+        }
+
+        private RawResponse executeRequest(HttpClient client, String method, URI uri, Map<String, String> headers,
+                                           byte[] body, Duration timeout, int maxBytes) throws IOException {
             long deadlineNanos = (timeout != null)
                     ? System.nanoTime() + timeout.toNanos()
                     : Long.MAX_VALUE;
@@ -445,6 +564,206 @@ public class SafeHttpClient {
             Map<String, String> flat = new java.util.LinkedHashMap<>();
             response.headers().map().forEach((k, v) -> { if (!v.isEmpty()) flat.put(k, v.get(0)); });
             return new RawResponse(response.statusCode(), flat, bytes, truncated);
+        }
+
+        private static final class PinnedTunnel implements AutoCloseable {
+            private final ServerSocket server;
+            private final String expectedHost;
+            private final int expectedPort;
+            private final List<InetAddress> pinnedAddresses;
+            private final int connectTimeoutMs;
+            private final List<Socket> activeSockets = new CopyOnWriteArrayList<>();
+            private final AtomicBoolean closed = new AtomicBoolean(false);
+
+            private PinnedTunnel(ServerSocket server, String expectedHost, int expectedPort,
+                                 List<InetAddress> pinnedAddresses, Duration timeout) {
+                this.server = server;
+                this.expectedHost = expectedHost == null ? "" : expectedHost.toLowerCase(Locale.ROOT);
+                this.expectedPort = expectedPort;
+                this.pinnedAddresses = pinnedAddresses;
+                long ms = timeout == null ? 10_000L : Math.max(500L, Math.min(timeout.toMillis(), 10_000L));
+                this.connectTimeoutMs = (int) ms;
+            }
+
+            static PinnedTunnel open(String expectedHost, int expectedPort,
+                                     List<InetAddress> pinnedAddresses, Duration timeout) throws IOException {
+                ServerSocket ss = new ServerSocket(0, 8, InetAddress.getLoopbackAddress());
+                PinnedTunnel tunnel = new PinnedTunnel(ss, expectedHost, expectedPort, pinnedAddresses, timeout);
+                Thread.ofVirtual().name("safe-http-pinned-tunnel").start(tunnel::acceptLoop);
+                return tunnel;
+            }
+
+            InetSocketAddress localAddress() {
+                return new InetSocketAddress(InetAddress.getLoopbackAddress(), server.getLocalPort());
+            }
+
+            private void acceptLoop() {
+                while (!closed.get()) {
+                    try {
+                        Socket clientSocket = server.accept();
+                        activeSockets.add(clientSocket);
+                        Thread.ofVirtual().name("safe-http-pinned-conn").start(() -> handleClient(clientSocket));
+                    } catch (IOException ignored) {
+                        if (closed.get()) return;
+                    }
+                }
+            }
+
+            private void handleClient(Socket clientSocket) {
+                Socket upstream = null;
+                try {
+                    clientSocket.setTcpNoDelay(true);
+                    InputStream clientIn = clientSocket.getInputStream();
+                    OutputStream clientOut = clientSocket.getOutputStream();
+                    String headerBlock = readHeaders(clientIn);
+                    if (headerBlock == null) return;
+                    int eol = headerBlock.indexOf("\r\n");
+                    String requestLine = eol >= 0 ? headerBlock.substring(0, eol) : headerBlock;
+                    String[] parts = requestLine.split(" ");
+                    if (parts.length < 3) return;
+                    String method = parts[0];
+                    String target = parts[1];
+
+                    if ("CONNECT".equalsIgnoreCase(method)) {
+                        if (!matchesAuthority(target)) {
+                            clientOut.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+                            clientOut.flush();
+                            return;
+                        }
+                        upstream = connectPinned();
+                        activeSockets.add(upstream);
+                        clientOut.write("HTTP/1.1 200 Connection Established\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+                        clientOut.flush();
+                        relay(clientIn, upstream.getOutputStream(), upstream.getInputStream(), clientOut);
+                    } else {
+                        URI reqUri = URI.create(target);
+                        int reqPort = reqUri.getPort() != -1 ? reqUri.getPort()
+                                : ("https".equalsIgnoreCase(reqUri.getScheme()) ? 443 : 80);
+                        String reqHost = reqUri.getHost() == null ? "" : reqUri.getHost().toLowerCase(Locale.ROOT);
+                        if (!expectedHost.equals(reqHost) || reqPort != expectedPort) {
+                            clientOut.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+                            clientOut.flush();
+                            return;
+                        }
+                        upstream = connectPinned();
+                        activeSockets.add(upstream);
+                        String path = (reqUri.getRawPath() == null || reqUri.getRawPath().isEmpty() ? "/" : reqUri.getRawPath())
+                                + (reqUri.getRawQuery() != null ? "?" + reqUri.getRawQuery() : "");
+                        String rewritten = rewriteHttpProxyHeaders(method, path, eol >= 0 ? headerBlock.substring(eol + 2) : "");
+                        OutputStream upOut = upstream.getOutputStream();
+                        upOut.write(rewritten.getBytes(StandardCharsets.ISO_8859_1));
+                        upOut.flush();
+                        relay(clientIn, upOut, upstream.getInputStream(), clientOut);
+                    }
+                } catch (IOException ignored) {
+                } finally {
+                    closeQuietly(upstream);
+                    closeQuietly(clientSocket);
+                }
+            }
+
+            private boolean matchesAuthority(String authority) {
+                int colon = authority.lastIndexOf(':');
+                if (colon <= 0) return false;
+                String h = authority.substring(0, colon).toLowerCase(Locale.ROOT);
+                if (h.startsWith("[") && h.endsWith("]")) {
+                    h = h.substring(1, h.length() - 1);
+                }
+                int p;
+                try {
+                    p = Integer.parseInt(authority.substring(colon + 1));
+                } catch (NumberFormatException e) {
+                    return false;
+                }
+                return expectedHost.equals(h) && expectedPort == p;
+            }
+
+            private String rewriteHttpProxyHeaders(String method, String path, String restHeaders) {
+                StringBuilder sb = new StringBuilder();
+                sb.append(method).append(' ').append(path).append(" HTTP/1.1\r\n");
+                for (String line : restHeaders.split("\r\n")) {
+                    if (line.isEmpty()) continue;
+                    String lower = line.toLowerCase(Locale.ROOT);
+                    if (lower.startsWith("proxy-")) continue;
+                    sb.append(line).append("\r\n");
+                }
+                sb.append("Connection: close\r\n\r\n");
+                return sb.toString();
+            }
+
+            private Socket connectPinned() throws IOException {
+                IOException last = null;
+                for (InetAddress addr : pinnedAddresses) {
+                    Socket s = new Socket();
+                    try {
+                        s.setTcpNoDelay(true);
+                        s.connect(new InetSocketAddress(addr, expectedPort), connectTimeoutMs);
+                        return s;
+                    } catch (IOException e) {
+                        closeQuietly(s);
+                        last = e;
+                    }
+                }
+                throw last == null ? new IOException("No pinned addresses") : last;
+            }
+
+            private static String readHeaders(InputStream in) throws IOException {
+                ByteArrayOutputStream buf = new ByteArrayOutputStream(512);
+                int prev3 = -1, prev2 = -1, prev1 = -1;
+                while (buf.size() < 16_384) {
+                    int b = in.read();
+                    if (b < 0) return null;
+                    buf.write(b);
+                    if (prev3 == '\r' && prev2 == '\n' && prev1 == '\r' && b == '\n') {
+                        return buf.toString(StandardCharsets.ISO_8859_1);
+                    }
+                    prev3 = prev2;
+                    prev2 = prev1;
+                    prev1 = b;
+                }
+                return null;
+            }
+
+            private static void relay(InputStream cIn, OutputStream uOut, InputStream uIn, OutputStream cOut) {
+                Thread up = Thread.ofVirtual().start(() -> pipe(cIn, uOut));
+                pipe(uIn, cOut);
+                try {
+                    up.join(200L);
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+
+            private static void pipe(InputStream in, OutputStream out) {
+                byte[] buf = new byte[8192];
+                try {
+                    int n;
+                    while ((n = in.read(buf)) >= 0) {
+                        out.write(buf, 0, n);
+                        out.flush();
+                    }
+                } catch (IOException ignored) {
+                }
+            }
+
+            private static void closeQuietly(Socket s) {
+                if (s != null) {
+                    try {
+                        s.close();
+                    } catch (IOException ignored) {}
+                }
+            }
+
+            @Override
+            public void close() {
+                if (!closed.compareAndSet(false, true)) return;
+                try {
+                    server.close();
+                } catch (IOException ignored) {}
+                for (Socket s : activeSockets) {
+                    closeQuietly(s);
+                }
+            }
         }
     }
 }

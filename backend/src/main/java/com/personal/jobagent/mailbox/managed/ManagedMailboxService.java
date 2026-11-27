@@ -260,6 +260,15 @@ public class ManagedMailboxService {
                 """, domain, providerId, time, time);
     }
 
+    /** Returns the active managed address only when trusted automated verification is also configured. */
+    public Optional<ManagedAddress> usableAddressForAutomatedVerification(UUID profileId) {
+        Status current = status(profileId);
+        if (current == null || !current.usableForAutomatedVerification() || current.address() == null) {
+            return Optional.empty();
+        }
+        return Optional.of(current.address());
+    }
+
     public Optional<DomainEvidence> domainEvidence(String domain) {
         return domainEvidence(domain, settings.providerId());
     }
