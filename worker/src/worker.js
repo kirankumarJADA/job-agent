@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { BrowserWorker } from './browser_worker.js';
+import { BrowserWorker, ApprovalRequiredError } from './browser_worker.js';
 import { StepType } from './plan.js';
 import { computePlanOutcome } from './outcome.js';
 import { initiateHandoff, isHandoffEligibleError } from './handoff.js';
@@ -27,6 +27,12 @@ const pollUrl = process.env.WORKER_POLL_URL;
 const pollIntervalMs = parseInt(process.env.WORKER_POLL_INTERVAL_MS || '10000', 10);
 const heartbeatUrl = process.env.WORKER_HEARTBEAT_URL;
 const verificationResolveUrl = process.env.WORKER_VERIFICATION_URL;
+const verificationConfirmUrl = process.env.WORKER_VERIFICATION_CONFIRM_URL
+  || (verificationResolveUrl && /\/resolve\/?$/.test(verificationResolveUrl)
+    ? verificationResolveUrl.replace(/\/resolve\/?$/, '/confirm') : null);
+const verificationReleaseUrl = process.env.WORKER_VERIFICATION_RELEASE_URL
+  || (verificationResolveUrl && /\/resolve\/?$/.test(verificationResolveUrl)
+    ? verificationResolveUrl.replace(/\/resolve\/?$/, '/release') : null);
 const registrationIdentityUrl = process.env.WORKER_REGISTRATION_IDENTITY_URL;
 const employerCredentialUrl = process.env.WORKER_EMPLOYER_CREDENTIAL_URL;
 const completeUrl = process.env.WORKER_COMPLETE_URL;
@@ -38,6 +44,24 @@ const verificationResolver = verificationResolveUrl
         headers: { ...authHeaders(), 'content-type': 'application/json' },
         body: JSON.stringify(body) });
       if (!response.ok) throw new Error(`VERIFICATION_RESOLVE_FAILED:${response.status}`);
+      return response.json();
+    }
+  : null;
+const verificationConfirmer = verificationConfirmUrl
+  ? async (body) => {
+      const response = await fetchWithRetry(verificationConfirmUrl, { method: 'POST',
+        headers: { ...authHeaders(), 'content-type': 'application/json' },
+        body: JSON.stringify(body) });
+      if (!response.ok) throw new Error(`VERIFICATION_CONFIRM_FAILED:${response.status}`);
+      return response.json();
+    }
+  : null;
+const verificationReleaser = verificationReleaseUrl
+  ? async (body) => {
+      const response = await fetch(verificationReleaseUrl, { method: 'POST',
+        headers: { ...authHeaders(), 'content-type': 'application/json' },
+        body: JSON.stringify(body) });
+      if (!response.ok) throw new Error(`VERIFICATION_RELEASE_FAILED:${response.status}`);
       return response.json();
     }
   : null;
@@ -549,10 +573,24 @@ function planFromClaim(planId, claimed) {
     targetUrl: stored.targetUrl ?? claimed.targetUrl,
     steps: stored.steps ?? [],
     safetyContract: stored.safetyContract,
+    credentialSaved: stored.credentialSaved === true,
+    accountCreationAttempted: stored.accountCreationAttempted === true,
+    accountCreationAuthorized: Boolean(stored.accountCreationAuthorized ?? stored.package?.accountCreationAuthorized),
+    employerDomain: stored.employerDomain ?? stored.correlation?.employerDomain ?? stored.package?.employerDomain ?? null,
     fields: stored.fields ?? [],
     requiredGaps: stored.requiredGaps ?? [],
     completedSteps: claimed.completedSteps ?? stored.completedSteps ?? [],
   };
+}
+
+function readPausedReasonFromState(statePathVal, planId) {
+  if (!statePathVal || !planId) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(statePathVal, 'utf8'));
+    return parsed?.plans?.[planId]?.pauseReason ?? null;
+  } catch {
+    return null;
+  }
 }
 
 async function reportPlanStep(planId, body, { pollUrl, authHeadersFn }) {
@@ -595,6 +633,8 @@ export async function executePollCycle({
   artifactDirVal = artifactDir,
   eventSinkFn = eventSink,
   verificationResolverFn = verificationResolver,
+  verificationConfirmerFn = verificationConfirmer,
+  verificationReleaserFn = verificationReleaser,
   identityResolverFn = identityResolver,
   credentialResolverFn = credentialResolver,
   deadLetterRegistry = defaultDeadLetterRegistry,
@@ -718,6 +758,8 @@ export async function executePollCycle({
       artifactDir: artifactDirVal,
       eventSink: passEventSink,
       verificationResolver: verificationResolverFn,
+      verificationConfirmer: verificationConfirmerFn,
+      verificationReleaser: verificationReleaserFn,
       identityResolver: identityResolverFn,
       credentialResolver: credentialResolverFn,
       stepsReporter: activeStepsReporter,
@@ -912,6 +954,44 @@ export async function executePollCycle({
         await reportOutcomeFn(planId, 'BLOCKED_ANTI_BOT', safeOriginalErr, errorResult).catch(() => {});
         return { status: 'HANDOFF_FAILED', planId, error: safeHandoffErr };
       }
+    } else if (error instanceof ApprovalRequiredError || error?.name === 'ApprovalRequiredError') {
+      const pauseReason = redactSecrets(
+        error?.reason || readPausedReasonFromState(statePathVal, planId) || error?.stepId || 'APPROVAL_REQUIRED'
+      );
+      const safePauseMsg = redactSecrets(error?.message ?? error);
+      if (planId) {
+        deadLetterRegistry.clear(planId);
+      }
+      console.log(JSON.stringify({
+        type: 'PLAN_PAUSED_FOR_HUMAN',
+        planId,
+        reason: pauseReason,
+      }));
+      const pauseResult = [{
+        type: 'PLAN_ERROR',
+        outcome: 'HUMAN_REQUIRED',
+        reason: pauseReason,
+        message: safePauseMsg,
+        stepId: error?.stepId ?? null,
+      }];
+      if (planId) {
+        await passEventSink({
+          type: 'HUMAN_REVIEW_REQUIRED',
+          planId,
+          jobId: plan?.correlation?.jobId ?? '',
+          applicationId: plan?.correlation?.applicationId ?? '',
+          pauseReason,
+          stepId: error?.stepId ?? null,
+        }).catch(() => {});
+        await reportOutcomeFn(planId, 'HUMAN_REQUIRED', `${pauseReason}: ${safePauseMsg}`, pauseResult).catch(() => {});
+      }
+      return {
+        status: 'HUMAN_REQUIRED',
+        planId,
+        outcome: 'HUMAN_REQUIRED',
+        reason: pauseReason,
+        detail: safePauseMsg,
+      };
     } else {
       let isDead = false;
       const safeErrorMsg = redactSecrets(error?.message ?? error);
@@ -998,6 +1078,8 @@ export function createPollHandler({
   artifactDirVal = artifactDir,
   eventSinkFn = eventSink,
   verificationResolverFn = verificationResolver,
+  verificationConfirmerFn = verificationConfirmer,
+  verificationReleaserFn = verificationReleaser,
   identityResolverFn = identityResolver,
   credentialResolverFn = credentialResolver,
   deadLetterRegistry = defaultDeadLetterRegistry,
@@ -1020,6 +1102,8 @@ export function createPollHandler({
         artifactDirVal,
         eventSinkFn,
         verificationResolverFn,
+        verificationConfirmerFn,
+        verificationReleaserFn,
         identityResolverFn,
         credentialResolverFn,
         deadLetterRegistry,
@@ -1052,7 +1136,10 @@ try {
 }
 if (planFile) {
   const plan = JSON.parse(fs.readFileSync(path.resolve(planFile), 'utf8'));
-  const worker = new BrowserWorker({ statePath, artifactDir, eventSink, verificationResolver, identityResolver, credentialResolver, sessionKey });
+  const worker = new BrowserWorker({
+    statePath, artifactDir, eventSink, verificationResolver, verificationConfirmer, verificationReleaser,
+    identityResolver, credentialResolver, sessionKey,
+  });
   runtime.runner = worker;
   worker.execute(plan, { approve, headless: true })
     .then((result) => process.stdout.write(`${JSON.stringify({ type: 'WORKER_RESULT', status: result.status })}\n`))
@@ -1071,6 +1158,8 @@ if (planFile) {
     artifactDirVal: artifactDir,
     eventSinkFn: eventSink,
     verificationResolverFn: verificationResolver,
+    verificationConfirmerFn: verificationConfirmer,
+    verificationReleaserFn: verificationReleaser,
     identityResolverFn: identityResolver,
     credentialResolverFn: credentialResolver,
     deadLetterRegistry: defaultDeadLetterRegistry,

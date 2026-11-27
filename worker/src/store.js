@@ -87,14 +87,42 @@ export class StateStore {
 
   verification(planId, value) {
     const plan = this.state.plans[planId];
-    plan.verification = value;
+    if (!plan) return;
+    if (!value) {
+      plan.verification = null;
+    } else {
+      // Never persist raw OTP codes, verification URLs or lease tokens to worker-state.json.
+      const safe = { ...value };
+      delete safe.otp;
+      delete safe.link;
+      delete safe.leaseToken;
+      delete safe.password;
+      delete safe.username;
+      plan.verification = safe;
+    }
     this.#save();
   }
 
-  /** Phase 8.5: the employer account identity (address and mailbox kind) for this plan. */
-  identity(planId, value) {
+  /**
+   * Phase 8.5 / Stage 3I Phase 3: persists employer account metadata for recovery.
+   * When SessionVault is enabled, the email address itself stays in the encrypted
+   * vault and only non-secret mailbox routing metadata hits worker-state.json.
+   */
+  identity(planId, value, { vaultEnabled = false } = {}) {
     const plan = this.state.plans[planId];
-    plan.identity = value;
+    if (!plan) return;
+    if (!value) {
+      plan.identity = null;
+    } else {
+      const safe = {
+        mailbox: value.mailbox ?? null,
+        existing: Boolean(value.existing),
+      };
+      if (!vaultEnabled && value.email) {
+        safe.email = value.email;
+      }
+      plan.identity = safe;
+    }
     this.#save();
   }
 
@@ -116,10 +144,13 @@ export class StateStore {
     this.#save();
   }
 
-  pause(planId, reason) {
+  pause(planId, reason, extra = {}) {
     const plan = this.state.plans[planId];
     plan.status = 'PAUSED';
     plan.pauseReason = reason;
+    if (extra?.currentUrl) {
+      plan.lastUrl = sanitizeUrl(extra.currentUrl);
+    }
     this.#save();
   }
 

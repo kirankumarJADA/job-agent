@@ -59,11 +59,36 @@ public class ManagedMailboxService {
 
     /** Owner-facing status. {@code address} is the owner's alias under the configured domain, if reserved. */
     public record Status(Readiness readiness, String domain, ManagedAddress address, DomainEvidence evidence,
-                         List<String> missing) {
+                         List<String> missing, String senderAuthenticationReadiness,
+                         String employerVerificationReadiness, List<String> verificationMissing) {
+
+        public Status(Readiness readiness, String domain, ManagedAddress address, DomainEvidence evidence,
+                      List<String> missing) {
+            this(readiness, domain, address, evidence, missing,
+                    defaultSenderAuth(readiness), defaultEmployerVerification(readiness), List.of());
+        }
+
+        /** Transport readiness mirrors {@link #readiness()} for backward compatibility. */
+        public Readiness transportReadiness() {
+            return readiness;
+        }
 
         /** True only when this owner's address may be given to an employer. */
         public boolean usableForRegistration() {
             return readiness == Readiness.ACTIVE && address != null && address.active();
+        }
+
+        /** True only when automated OTP/link extraction may trust inbound messages for this address. */
+        public boolean usableForAutomatedVerification() {
+            return usableForRegistration() && "ACTIVE".equals(employerVerificationReadiness);
+        }
+
+        private static String defaultSenderAuth(Readiness readiness) {
+            return readiness == Readiness.NOT_CONFIGURED ? "UNCONFIGURED" : "CONFIGURED";
+        }
+
+        private static String defaultEmployerVerification(Readiness readiness) {
+            return readiness == null ? "NOT_CONFIGURED" : readiness.name();
         }
     }
 
@@ -88,13 +113,36 @@ public class ManagedMailboxService {
     /** Status for one owner. Never creates anything. */
     public Status status(UUID profileId) {
         List<String> missing = settings.missing();
+        List<String> verificationMissing = settings.verificationMissing();
         if (!missing.isEmpty()) {
-            return new Status(Readiness.NOT_CONFIGURED, settings.domain(), null, null, missing);
+            return new Status(Readiness.NOT_CONFIGURED, settings.domain(), null, null, missing,
+                    "UNCONFIGURED", "NOT_CONFIGURED", verificationMissing);
         }
-        Optional<DomainEvidence> evidence = domainEvidence(settings.domain());
+        Optional<DomainEvidence> evidence = domainEvidence(settings.domain(), settings.providerId());
         ManagedAddress address = profileId == null ? null : findAddress(profileId).orElse(null);
         Readiness readiness = evidence.isPresent() ? Readiness.ACTIVE : Readiness.PENDING_RECEIVING_VERIFICATION;
-        return new Status(readiness, settings.domain(), address, evidence.orElse(null), List.of());
+        String senderAuth;
+        String employerVerification;
+        if (ManagedMailSettings.PROVIDER_CLOUDFLARE.equals(settings.providerId())) {
+            if (settings.cloudflareTrustedAuthServIds().isEmpty()) {
+                senderAuth = "UNCONFIGURED";
+                employerVerification = evidence.isPresent()
+                        ? "TRUSTED_AUTHSERV_REQUIRED"
+                        : Readiness.PENDING_RECEIVING_VERIFICATION.name();
+            } else {
+                boolean trustedObserved = evidence.isPresent()
+                        && hasTrustedDelivery(settings.domain(), settings.providerId());
+                senderAuth = trustedObserved ? "VERIFIED" : "CONFIGURED";
+                employerVerification = evidence.isPresent()
+                        ? "ACTIVE"
+                        : Readiness.PENDING_RECEIVING_VERIFICATION.name();
+            }
+        } else {
+            senderAuth = evidence.isPresent() ? "PROVIDER_SIGNED" : "CONFIGURED";
+            employerVerification = readiness.name();
+        }
+        return new Status(readiness, settings.domain(), address, evidence.orElse(null), List.of(),
+                senderAuth, employerVerification, verificationMissing);
     }
 
     public Readiness readiness() {
@@ -189,26 +237,69 @@ public class ManagedMailboxService {
 
     /**
      * Records that a provider-signed delivery for {@code domain} was accepted:
-     * the receiving-verification evidence {@link #status} relies on.
+     * the receiving-verification evidence {@link #status} relies on. Scoped to
+     * the active provider so Mailgun evidence never satisfies Cloudflare readiness.
      */
     public void recordSignedDelivery(String domain, String providerId, Instant at) {
         Timestamp time = Timestamp.from(at);
         db.update("""
                 insert into managed_mail_domains (domain, provider_id, receiving_verified_at, last_inbound_at)
                 values (?, ?, ?, ?)
-                on conflict (domain) do update set last_inbound_at = greatest(managed_mail_domains.last_inbound_at,
-                                                                             excluded.last_inbound_at)
+                on conflict (domain) do update set
+                    provider_id = excluded.provider_id,
+                    receiving_verified_at = case
+                        when managed_mail_domains.provider_id = excluded.provider_id
+                        then managed_mail_domains.receiving_verified_at
+                        else excluded.receiving_verified_at
+                    end,
+                    last_inbound_at = case
+                        when managed_mail_domains.provider_id = excluded.provider_id
+                        then greatest(managed_mail_domains.last_inbound_at, excluded.last_inbound_at)
+                        else excluded.last_inbound_at
+                    end
                 """, domain, providerId, time, time);
     }
 
     public Optional<DomainEvidence> domainEvidence(String domain) {
-        if (domain == null || domain.isEmpty()) return Optional.empty();
-        List<Map<String, Object>> rows = db.queryForList(
-                "select receiving_verified_at, last_inbound_at from managed_mail_domains where domain = ?", domain);
+        return domainEvidence(domain, settings.providerId());
+    }
+
+    public Optional<DomainEvidence> domainEvidence(String domain, String providerId) {
+        if (domain == null || domain.isEmpty() || providerId == null || providerId.isEmpty()) return Optional.empty();
+        List<Map<String, Object>> rows = db.queryForList("""
+                        select receiving_verified_at, last_inbound_at from managed_mail_domains
+                        where domain = ? and provider_id = ?
+                        """, domain, providerId);
         if (rows.isEmpty()) return Optional.empty();
         Map<String, Object> row = rows.get(0);
         return Optional.of(new DomainEvidence(((Timestamp) row.get("receiving_verified_at")).toInstant(),
                 ((Timestamp) row.get("last_inbound_at")).toInstant()));
+    }
+
+    /** True when {@code envelopeRecipient} routes to {@code address} (exact or {@code prefix+<alias>} subaddress). */
+    public boolean matchesAddress(ManagedAddress address, String envelopeRecipient) {
+        if (address == null || envelopeRecipient == null || envelopeRecipient.isBlank()) return false;
+        Optional<String> parsed = MailAddresses.bareAddress(envelopeRecipient);
+        if (parsed.isEmpty()) parsed = MailAddresses.singleMailbox(envelopeRecipient);
+        if (parsed.isEmpty()) return false;
+        String recipientDomain = MailAddresses.domainOf(parsed.get());
+        if (!address.domain().equals(recipientDomain)) return false;
+        String recipLocal = MailAddresses.localPartOf(parsed.get());
+        if (recipLocal == null) return false;
+        if (address.localPart().equals(recipLocal)) return true;
+        int plus = recipLocal.indexOf('+');
+        return plus > 0 && plus < recipLocal.length() - 1
+                && address.localPart().equals(recipLocal.substring(plus + 1));
+    }
+
+    private boolean hasTrustedDelivery(String domain, String providerId) {
+        return !db.queryForList("""
+                        select 1 from managed_inbound_messages m
+                        join managed_mail_addresses a on a.id = m.address_id
+                        where a.domain = ? and m.provider_id = ?
+                          and m.auth_trusted = true and m.authentication_failed = false
+                        limit 1
+                        """, domain, providerId).isEmpty();
     }
 
     public String newLocalPart() {

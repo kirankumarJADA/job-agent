@@ -248,7 +248,12 @@ public class EmailIntelligenceService {
                 assertedApplicationId, category, threadApplications(ownerProfileId, threadId, threadReferences));
         String contentFingerprint = TrackText.sha256(TrackText.lower(from) + "|" + TrackText.lower(subject) + "|"
                 + (receivedTimeKnown ? receivedAt.getEpochSecond() : "unknown") + "|" + TrackText.sha256(body));
-        boolean retainBody = category == EmailCategory.VERIFICATION_CODE;
+        boolean managedMailConnector = channel == Channel.MAILBOX_CONNECTOR
+                && providerId != null
+                && ("cloudflare".equalsIgnoreCase(providerId)
+                        || "mailgun".equalsIgnoreCase(providerId)
+                        || "managed".equalsIgnoreCase(providerId));
+        boolean retainBody = category == EmailCategory.VERIFICATION_CODE && !managedMailConnector;
         UUID linkedApplication = association.established() ? association.applicationId() : null;
         boolean delivered = channel == Channel.MAILBOX_CONNECTOR && mailboxAddress != null
                 && Objects.equals(TrackText.addressOf(to), TrackText.addressOf(mailboxAddress));

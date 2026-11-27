@@ -120,20 +120,31 @@ public class RegistrationIdentityService {
         if (existing.isEmpty()) {
             ManagedMailboxService.Readiness readiness = mailboxes.readiness();
             if (readiness != ManagedMailboxService.Readiness.ACTIVE) {
-                throw new ManagedMailboxNotReadyException(readiness.name());
+                throw new ManagedMailboxNotReadyException(readiness == null ? "NOT_CONFIGURED" : readiness.name());
             }
             ManagedMailboxService.ManagedAddress address = mailboxes.ensureAddress(ownerProfileId);
-            if (!address.active()) throw new ManagedMailboxNotReadyException("ADDRESS_DISABLED");
-            db.update("""
+            if (address == null || !address.active()) throw new ManagedMailboxNotReadyException("ADDRESS_DISABLED");
+            int inserted = db.update("""
                     insert into applicant_identities (id, profile_id, applicant_email, provider, domain)
                     values (?, ?, ?, 'ROBIN_MANAGED', ?)
                     on conflict (profile_id, domain) do nothing
                     """, UuidV7.generate(), ownerProfileId, address.address(), domain);
+            alreadyRegistered = (inserted == 0);
             existing = identity(ownerProfileId, domain);
         }
         Map<String, Object> row = existing.orElseThrow();
         if (!"ACTIVE".equals(row.get("account_status"))) {
             throw new IllegalStateException("The employer identity for this domain is disabled");
+        }
+        if ("ROBIN_MANAGED".equals(row.get("provider"))) {
+            ManagedMailboxService.Readiness currentReadiness = mailboxes.readiness();
+            if (currentReadiness != null && currentReadiness != ManagedMailboxService.Readiness.ACTIVE) {
+                throw new ManagedMailboxNotReadyException(currentReadiness.name());
+            }
+            Optional<ManagedMailboxService.ManagedAddress> currentAddress = mailboxes.findAddress(ownerProfileId);
+            if (currentAddress.isPresent() && !currentAddress.get().active()) {
+                throw new ManagedMailboxNotReadyException("ADDRESS_DISABLED");
+            }
         }
         UUID identityId = (UUID) row.get("id");
         String email = String.valueOf(row.get("applicant_email")).toLowerCase(java.util.Locale.ROOT);
@@ -206,19 +217,26 @@ public class RegistrationIdentityService {
                     if (!"ACTIVE".equals(accountStatus)) {
                         throw new ManagedMailboxNotReadyException("IDENTITY_DISABLED");
                     }
-                    if (mailboxes.readiness() != ManagedMailboxService.Readiness.ACTIVE) {
-                        throw new ManagedMailboxNotReadyException(mailboxes.readiness().name());
+                    ManagedMailboxService.Readiness readiness = mailboxes.readiness();
+                    if (readiness != ManagedMailboxService.Readiness.ACTIVE) {
+                        throw new ManagedMailboxNotReadyException(readiness == null ? "NOT_CONFIGURED" : readiness.name());
+                    }
+                    Optional<ManagedMailboxService.ManagedAddress> currentAddress = mailboxes.findAddress(profileId);
+                    if (currentAddress.isPresent() && !currentAddress.get().active()) {
+                        throw new ManagedMailboxNotReadyException("ADDRESS_DISABLED");
                     }
                     Object registered = idRow.get("applicant_email");
                     if (registered != null && !String.valueOf(registered).isBlank()) {
                         return String.valueOf(registered).toLowerCase(java.util.Locale.ROOT).trim();
                     }
+                    throw new ManagedMailboxNotReadyException("IDENTITY_EMAIL_MISSING");
                 }
-                if ("ACTIVE".equals(accountStatus)) {
-                    Object registered = idRow.get("applicant_email");
-                    if (registered != null && !String.valueOf(registered).isBlank()) {
-                        return String.valueOf(registered).toLowerCase(java.util.Locale.ROOT).trim();
-                    }
+                if (!"ACTIVE".equals(accountStatus)) {
+                    throw new IllegalStateException("The employer identity for this domain is disabled");
+                }
+                Object registered = idRow.get("applicant_email");
+                if (registered != null && !String.valueOf(registered).isBlank()) {
+                    return String.valueOf(registered).toLowerCase(java.util.Locale.ROOT).trim();
                 }
             }
         }
@@ -246,21 +264,26 @@ public class RegistrationIdentityService {
         }
 
         if (mailboxes.readiness() == ManagedMailboxService.Readiness.ACTIVE) {
+            ManagedMailboxService.ManagedAddress address;
             try {
-                ManagedMailboxService.ManagedAddress address = mailboxes.ensureAddress(profileId);
-                if (address != null && address.active()) {
-                    String managedEmail = address.address().toLowerCase(java.util.Locale.ROOT).trim();
-                    if (domain != null) {
-                        db.update("""
-                                insert into applicant_identities (id, profile_id, applicant_email, provider, domain)
-                                values (?, ?, ?, 'ROBIN_MANAGED', ?)
-                                on conflict (profile_id, domain) do nothing
-                                """, UuidV7.generate(), profileId, managedEmail, domain);
-                    }
-                    return managedEmail;
-                }
-            } catch (Exception ignored) {
+                address = mailboxes.ensureAddress(profileId);
+            } catch (ManagedMailboxNotReadyException e) {
+                throw e;
+            } catch (RuntimeException e) {
+                throw new ManagedMailboxNotReadyException("ADDRESS_UNAVAILABLE");
             }
+            if (address == null || !address.active()) {
+                throw new ManagedMailboxNotReadyException("ADDRESS_DISABLED");
+            }
+            String managedEmail = address.address().toLowerCase(java.util.Locale.ROOT).trim();
+            if (domain != null) {
+                db.update("""
+                        insert into applicant_identities (id, profile_id, applicant_email, provider, domain)
+                        values (?, ?, ?, 'ROBIN_MANAGED', ?)
+                        on conflict (profile_id, domain) do nothing
+                        """, UuidV7.generate(), profileId, managedEmail, domain);
+            }
+            return managedEmail;
         }
         return personalEmail;
     }

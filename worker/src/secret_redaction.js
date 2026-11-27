@@ -19,7 +19,7 @@
  * resumed run needs is re-filled by the plan's own steps.
  */
 
-const SENSITIVE_PARAM_PATTERN = /password|passwd|pwd|token|secret|otp|credential|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|private[_-]?key|client[_-]?secret|session|xsrf|csrf|auth(?:orization)?/i;
+const SENSITIVE_PARAM_PATTERN = /password|passwd|pwd|token|secret|otp|credential|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|private[_-]?key|client[_-]?secret|session|xsrf|csrf|auth(?:orization)?|^(?:code|key|magic|email|username)$|magic[-_]?(?:code|key|link|token)|(?:verify|verification)[-_]?code/i;
 
 /**
  * Returns a version of `rawUrl` safe to persist or log: query-parameter and
@@ -84,7 +84,7 @@ export function redactSecrets(text) {
       '"$1": "[REDACTED]"'
     )
     .replace(
-      /\b([A-Za-z0-9_-]*(?:password|passwd|pwd|otp|token|cookie|secret|api[_-]?key|apikey|credential|session(?:_id)?|xsrf|csrf|auth(?:orization)?))=([^\s,;&"'<>]+)/gi,
+      /\b([A-Za-z0-9_-]*(?:password|passwd|pwd|otp|token|cookie|secret|api[_-]?key|apikey|credential|session(?:_id)?|xsrf|csrf|auth(?:orization)?)|code|key|magic|email|username)=([^\s,;&"'<>]+)/gi,
       '$1=[REDACTED]'
     )
     .replace(

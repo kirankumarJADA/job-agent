@@ -317,15 +317,20 @@ class ManagedMailIT {
                 .body("Hi,\n\nYour verification code is 482913. It expires in 10 minutes.\n\n© 2026 Employer")
                 .messageId("<verify-1@careers.employer-it.example>")).andExpect(status().isOk());
 
-        // 3. The worker resolves it: no mailbox address needed, the session says which mailbox.
+        // 3. The worker resolves it into a bounded lease: no mailbox address needed, the session says which mailbox.
         JsonNode resolved = resolve(app, accountSession, employer, null, 200);
         assertThat(resolved.get("otp").asText()).isEqualTo("482913");
         assertThat(resolved.get("provider").asText()).isEqualTo("managed");
+        String verificationId = resolved.get("verificationId").asText();
+        String leaseToken = resolved.get("leaseToken").asText();
+        assertThat(verificationId).isNotBlank();
+        assertThat(leaseToken).isNotBlank();
+        assertThat(resolved.get("leaseExpiresAt").asText()).isNotBlank();
         assertThat(sessionState(accountSession)).isEqualTo("VERIFY_EMAIL");
 
-        // One-time: recorded without the code, content erased, never released again.
+        // While RESERVED: same-app/session replay recovers idempotently, cross-app cannot steal it, and content remains held until /confirm.
         Map<String, Object> audit = jdbc.queryForMap("""
-                select provider_id, source_managed_message_id, source_email_id, otp_value_ref, link_url, account_session_id
+                select provider_id, source_managed_message_id, source_email_id, otp_value_ref, link_url, account_session_id, status, reserved_until
                 from mailbox_verifications where application_id = ?""", app);
         assertThat(audit.get("provider_id")).isEqualTo("managed");
         assertThat(audit.get("source_managed_message_id")).isNotNull();
@@ -333,12 +338,50 @@ class ManagedMailIT {
         assertThat(audit.get("otp_value_ref")).isNull();
         assertThat(audit.get("link_url")).isNull();
         assertThat(audit.get("account_session_id")).isEqualTo(accountSession);
+        assertThat(audit.get("status")).isEqualTo("RESERVED");
+        assertThat(audit.get("reserved_until")).isNotNull();
+
+        Map<String, Object> reservedSource = jdbc.queryForMap(
+                "select consumed_at, content_encrypted, content_purged_at, reserved_for_application_id from managed_inbound_messages where id = ?",
+                audit.get("source_managed_message_id"));
+        assertThat(reservedSource.get("consumed_at")).isNull();
+        assertThat(reservedSource.get("content_encrypted")).isNotNull();
+        assertThat(reservedSource.get("content_purged_at")).isNull();
+        assertThat(reservedSource.get("reserved_for_application_id")).isEqualTo(app);
+
+        JsonNode replayed = resolve(app, accountSession, employer, null, 200);
+        assertThat(replayed.get("verificationId").asText()).isEqualTo(verificationId);
+        assertThat(replayed.get("otp").asText()).isEqualTo("482913");
+
+        UUID otherApp = application(devProfile, "concurrent-other");
+        UUID otherSession = accountSession(otherApp, employer);
+        registrationIdentity(otherApp, otherSession, employer);
+        resolve(otherApp, otherSession, employer, null, 404);
+
+        // 4. Confirming the lease consumes it permanently, erases content_encrypted, and blocks future resolves.
+        String confirmBody = json.writeValueAsString(Map.of(
+                "applicationId", app.toString(),
+                "sessionId", accountSession.toString(),
+                "verificationId", verificationId,
+                "leaseToken", leaseToken));
+        JsonNode confirmed = json(mvc.perform(post("/api/v1/mailbox-verification/confirm").header("Authorization", WORKER)
+                        .contentType(MediaType.APPLICATION_JSON).content(confirmBody))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(confirmed.get("status").asText()).isEqualTo("CONSUMED");
+        // Confirm is idempotent once already consumed.
+        mvc.perform(post("/api/v1/mailbox-verification/confirm").header("Authorization", WORKER)
+                        .contentType(MediaType.APPLICATION_JSON).content(confirmBody))
+                .andExpect(status().isOk());
+
+        assertThat(jdbc.queryForObject("select status from mailbox_verifications where application_id = ?", String.class, app))
+                .isEqualTo("CONSUMED");
         Map<String, Object> source = jdbc.queryForMap(
-                "select consumed_at, content_encrypted, content_purged_at from managed_inbound_messages where id = ?",
+                "select consumed_at, content_encrypted, content_purged_at, reserved_for_application_id from managed_inbound_messages where id = ?",
                 audit.get("source_managed_message_id"));
         assertThat(source.get("consumed_at")).isNotNull();
         assertThat(source.get("content_encrypted")).isNull();
         assertThat(source.get("content_purged_at")).isNotNull();
+        assertThat(source.get("reserved_for_application_id")).isNull();
         resolve(app, accountSession, employer, null, 404);
 
         // 4. Login: the same identity, now an existing account.

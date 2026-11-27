@@ -154,4 +154,41 @@ class BrowserObservationPolicyTest {
         assertThat(assess(notWorker, true, true, payload).code()).isEqualTo("PROVENANCE_MISMATCH");
         assertThat(assess(null, true, true, payload).code()).isEqualTo("NO_EVIDENCE");
     }
+
+    @Test
+    void attemptCorrelationRequiresNonNullMatchingPlanApplicationAndJobIds() {
+        var validV2 = assess(v2(r -> {}));
+        assertThat(validV2.clean()).isTrue();
+        assertThat(validV2.parsed().kind()).isEqualTo(Kind.V2);
+
+        String missingPlan = v2(r -> ((ObjectNode) r.get("attemptCorrelation")).remove("planId"));
+        assertThat(assess(missingPlan).clean()).isFalse();
+        assertThat(assess(missingPlan).code()).isEqualTo("CORRELATION_MISMATCH");
+
+        String missingApp = v2(r -> ((ObjectNode) r.get("attemptCorrelation")).remove("applicationId"));
+        assertThat(assess(missingApp).clean()).isFalse();
+        assertThat(assess(missingApp).code()).isEqualTo("CORRELATION_MISMATCH");
+
+        String missingJob = v2(r -> ((ObjectNode) r.get("attemptCorrelation")).remove("jobId"));
+        assertThat(assess(missingJob).clean()).isFalse();
+        assertThat(assess(missingJob).code()).isEqualTo("CORRELATION_MISMATCH");
+
+        UUID otherId = UUID.fromString("00000000-0000-7000-8000-000000000099");
+        String mismatchedPlan = v2(r -> ((ObjectNode) r.get("attemptCorrelation")).put("planId", otherId.toString()));
+        assertThat(assess(mismatchedPlan).clean()).isFalse();
+        assertThat(assess(mismatchedPlan).code()).isEqualTo("CORRELATION_MISMATCH");
+
+        String mismatchedApp = v2(r -> ((ObjectNode) r.get("attemptCorrelation")).put("applicationId", otherId.toString()));
+        assertThat(assess(mismatchedApp).clean()).isFalse();
+        assertThat(assess(mismatchedApp).code()).isEqualTo("CORRELATION_MISMATCH");
+
+        String mismatchedJob = v2(r -> ((ObjectNode) r.get("attemptCorrelation")).put("jobId", otherId.toString()));
+        assertThat(assess(mismatchedJob).clean()).isFalse();
+        assertThat(assess(mismatchedJob).code()).isEqualTo("CORRELATION_MISMATCH");
+
+        var legacyV1 = assess("{\"atsPlatform\":\"UNIVERSAL\",\"schemaVersion\":\"robin-submission-evidence-v1\"}");
+        assertThat(legacyV1.clean()).isTrue();
+        assertThat(legacyV1.code()).isEqualTo("BROWSER_OBSERVED_LEGACY_SCHEMA");
+        assertThat(legacyV1.parsed().kind()).isEqualTo(Kind.V1);
+    }
 }

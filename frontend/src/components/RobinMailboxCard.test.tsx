@@ -68,4 +68,48 @@ describe('RobinMailboxCard', () => {
     expect(await screen.findByText('Service unavailable')).toBeTruthy();
     expect(screen.queryByText('Active')).toBeNull();
   });
+
+  it('shows warning instead of automated-OTP green claim when Cloudflare transport is active but sender auth is unconfigured', async () => {
+    serve({
+      readiness: 'ACTIVE',
+      transportReadiness: 'ACTIVE',
+      senderAuthenticationReadiness: 'UNCONFIGURED',
+      employerVerificationReadiness: 'TRUSTED_AUTHSERV_REQUIRED',
+      provider: 'cloudflare',
+      domain: 'mail.robin.example',
+      address: `robin+${ADDRESS}`,
+      addressStatus: 'ACTIVE',
+      usableForRegistration: true,
+      usableForAutomatedVerification: false,
+      trustedAuthServConfigured: false,
+      verificationMissing: ['APP_MANAGED_MAIL_CLOUDFLARE_TRUSTED_AUTHSERV_IDS'],
+    });
+    render(<RobinMailboxCard />);
+    expect(await screen.findByText('Verification paused')).toBeTruthy();
+    expect(screen.getByText(/automated OTP and verification-link reading is disabled/i)).toBeTruthy();
+    expect(screen.getByText(/APP_MANAGED_MAIL_CLOUDFLARE_TRUSTED_AUTHSERV_IDS/)).toBeTruthy();
+    expect(screen.queryByText(/Robin reads their verification codes from it/)).toBeNull();
+  });
+
+  it('shows full verification readiness when Cloudflare sender authentication is configured and active', async () => {
+    serve({
+      readiness: 'ACTIVE',
+      transportReadiness: 'ACTIVE',
+      senderAuthenticationReadiness: 'VERIFIED',
+      employerVerificationReadiness: 'ACTIVE',
+      provider: 'cloudflare',
+      domain: 'mail.robin.example',
+      address: `robin+${ADDRESS}`,
+      addressStatus: 'ACTIVE',
+      usableForRegistration: true,
+      usableForAutomatedVerification: true,
+      trustedAuthServConfigured: true,
+      verificationMissing: [],
+    });
+    render(<RobinMailboxCard />);
+    expect(await screen.findByText('Active')).toBeTruthy();
+    expect(screen.getByText(/Verification:\s*/)).toBeTruthy();
+    expect(screen.getByText(/Robin reads their verification codes from it/)).toBeTruthy();
+    expect(screen.queryByText('Verification paused')).toBeNull();
+  });
 });

@@ -676,37 +676,178 @@ export async function inspectLiveFormDom(page) {
     const captchaPresent = document.querySelectorAll(
       'iframe[src*="captcha" i], iframe[src*="hcaptcha" i], iframe[src*="turnstile" i], [data-sitekey], .g-recaptcha, .h-captcha, .cf-turnstile'
     ).length > 0 || /verify you are human|complete the captcha|cloudflare turnstile/.test(bodyText);
-    const mfaPresent = /two-factor|one-time\s*(code|passcode)|authenticator code|enter\s*(the\s*)?(otp|verification code)/i.test(bodyText);
+
     const passwordInputs = Array.from(document.querySelectorAll('input[type="password"]')).filter((el) => isElementVisible(el));
-    const loginWallPresent = passwordInputs.length > 0
-      || /sign in to continue|log in to apply|please log in before applying/i.test(bodyText);
+    const authenticatorMfaPresent = /two-factor|2fa|authenticator\s*(?:app|code)|google\s*authenticator|authy|totp|security\s*key|sms\s*(?:code|otp|verification)|verification\s*code\s*(?:on|from)\s*(?:your\s*)?(?:phone|authenticator)/i.test(bodyText);
+    const emailContextHint = /e-?mail|inbox|sent\s*(?:a|you\s*a|to)\s*(?:.*?)(?:code|link|otp)|verify\s*(?:your\s*)?e-?mail|confirm\s*(?:your\s*)?e-?mail|check\s*(?:your\s*)?e-?mail/i.test(bodyText);
+
+    let emailVerification = { present: false, verified: false, ambiguous: false, hasOtpInput: false, waitingForLinkOnly: false };
+    let emailOtpVerified = false;
+    if (passwordInputs.length === 0 && !authenticatorMfaPresent) {
+      const otpInputCandidates = Array.from(document.querySelectorAll('input'))
+        .filter((el) => {
+          const type = (el.type || 'text').toLowerCase();
+          if (!['text', 'number', 'tel', ''].includes(type)) return false;
+          if (!isElementVisible(el) || hasTrapMarkers(el)) return false;
+          const ac = (el.getAttribute('autocomplete') || '').toLowerCase();
+          const sig = `${ac} ${el.name || ''} ${el.id || ''} ${el.placeholder || ''} ${el.getAttribute('aria-label') || ''} ${resolveLabel(document, el)}`.toLowerCase();
+          return ac === 'one-time-code' || /\b(?:otp|one[- ]time[-_\s]?code|verification[-_\s]?code|verify[-_\s]?code|email[-_\s]?code|passcode|pin)\b/.test(sig);
+        });
+      if (otpInputCandidates.length === 1) {
+        const otpInput = otpInputCandidates[0];
+        const otpForm = otpInput.closest('form') || otpInput.parentElement?.closest('div, section, main') || document.body;
+        const otpSubmits = Array.from(otpForm.querySelectorAll('button[type="submit"], input[type="submit"], button'))
+          .filter((btn) => isElementVisible(btn) && !btn.disabled)
+          .filter((btn) => {
+            const txt = clean(btn.tagName === 'INPUT' ? btn.value : btn.textContent);
+            if (/resend|send\s*again|back|cancel|change\s*email/i.test(txt)) return false;
+            return btn.getAttribute('type') === 'submit' || /^(verify|confirm|continue|submit|activate|next)(\s|$)/i.test(txt);
+          });
+        if (otpSubmits.length === 1 && (emailContextHint || /otp|verification|one-time-code|email/i.test(`${otpInput.name || ''} ${otpInput.id || ''} ${resolveLabel(document, otpInput)}`))) {
+          otpInput.setAttribute('data-robin-email-otp-role', 'input');
+          otpSubmits[0].setAttribute('data-robin-email-otp-role', 'submit');
+          emailOtpVerified = true;
+          emailVerification = { present: true, verified: true, ambiguous: false, hasOtpInput: true, waitingForLinkOnly: false };
+        } else {
+          emailVerification = { present: true, verified: false, ambiguous: true, hasOtpInput: true, waitingForLinkOnly: false };
+        }
+      } else if (otpInputCandidates.length > 1) {
+        emailVerification = { present: true, verified: false, ambiguous: true, hasOtpInput: true, waitingForLinkOnly: false };
+      } else if (emailContextHint && /verify|confirm|activate/i.test(bodyText)) {
+        emailVerification = { present: true, verified: true, ambiguous: false, hasOtpInput: false, waitingForLinkOnly: true };
+      }
+    }
+
+    const genericMfaPrompt = /one-time\s*(code|passcode)|enter\s*(the\s*)?(otp|verification\s*code)/i.test(bodyText);
+    const mfaPresent = authenticatorMfaPresent || (genericMfaPrompt && !emailContextHint && !emailOtpVerified);
 
     let loginControls = null;
-    if (passwordInputs.length === 1) {
-      const pw = passwordInputs[0];
-      const loginForm = pw.closest('form') || pw.parentElement?.closest('div, section, main') || document.body;
-      const candidateUsers = Array.from(loginForm.querySelectorAll('input[type="email"], input[type="text"], input:not([type])'))
-        .filter((el) => el !== pw && isElementVisible(el) && !hasTrapMarkers(el))
-        .filter((el) => {
-          const sig = `${el.type || ''} ${el.autocomplete || ''} ${el.name || ''} ${el.id || ''} ${el.placeholder || ''} ${resolveLabel(document, el)}`.toLowerCase();
-          return /email|user|login|account|username/.test(sig);
-        });
-      const candidateSubmits = Array.from(loginForm.querySelectorAll('button[type="submit"], input[type="submit"], button'))
-        .filter((btn) => isElementVisible(btn) && !btn.disabled)
-        .filter((btn) => {
-          const text = clean(btn.tagName === 'INPUT' ? btn.value : btn.textContent);
-          return btn.getAttribute('type') === 'submit' || /^(sign\s*in|log\s*in|continue|next)$/i.test(text);
-        });
-      if (candidateUsers.length === 1 && candidateSubmits.length === 1) {
-        candidateUsers[0].setAttribute('data-robin-login-role', 'username');
-        pw.setAttribute('data-robin-login-role', 'password');
-        candidateSubmits[0].setAttribute('data-robin-login-role', 'submit');
-        loginControls = { verified: true, ambiguous: false };
+    let signupControls = null;
+    let loginWallPresent = false;
+    let signupWallPresent = false;
+
+    if (passwordInputs.length >= 1 && passwordInputs.length <= 2) {
+      const pw0 = passwordInputs[0];
+      const authForm = pw0.closest('form') || pw0.parentElement?.closest('div, section, main') || document.body;
+      const allPwInSameForm = passwordInputs.every((pw) => authForm.contains(pw));
+      const candidateUsers = allPwInSameForm
+        ? Array.from(authForm.querySelectorAll('input[type="email"], input[type="text"], input:not([type])'))
+            .filter((el) => !passwordInputs.includes(el) && isElementVisible(el) && !hasTrapMarkers(el))
+            .filter((el) => {
+              const sig = `${el.type || ''} ${el.autocomplete || ''} ${el.name || ''} ${el.id || ''} ${el.placeholder || ''} ${resolveLabel(document, el)}`.toLowerCase();
+              return /email|user|login|account|username/.test(sig);
+            })
+        : [];
+      const allButtonsInForm = allPwInSameForm
+        ? Array.from(authForm.querySelectorAll('button[type="submit"], input[type="submit"], button'))
+            .filter((btn) => isElementVisible(btn) && !btn.disabled)
+        : [];
+      const signupButtons = allButtonsInForm.filter((btn) => {
+        const text = clean(btn.tagName === 'INPUT' ? btn.value : btn.textContent);
+        return /\b(?:sign\s*up|create\s*(?:an?\s*)?account|register|get\s*started|join)\b/i.test(text)
+          && !/\b(?:sign\s*in|log\s*in)\b/i.test(text);
+      });
+      const loginSubmits = allButtonsInForm.filter((btn) => {
+        const text = clean(btn.tagName === 'INPUT' ? btn.value : btn.textContent);
+        return btn.getAttribute('type') === 'submit' || /^(sign\s*in|log\s*in|continue|next)$/i.test(text);
+      });
+      const headingText = clean(Array.from(authForm.querySelectorAll('h1, h2, h3, h4, legend')).map((h) => h.textContent).join(' ')).toLowerCase();
+      const formHeadingIsSignup = /\b(?:create\s*(?:an?\s*)?account|sign\s*up|register|create\s*profile)\b/i.test(headingText)
+        && !/\b(?:sign\s*in|log\s*in)\b/i.test(headingText);
+      const formHasConfirmPw = passwordInputs.length === 2 && passwordInputs.some((pw) => {
+        const sig = `${pw.name || ''} ${pw.id || ''} ${pw.placeholder || ''} ${pw.getAttribute('aria-label') || ''} ${resolveLabel(document, pw)}`.toLowerCase();
+        return /confirm|re-?enter|retype|repeat|verify/.test(sig);
+      });
+      const signupSubmits = signupButtons.length === 1
+        ? signupButtons
+        : ((formHeadingIsSignup || formHasConfirmPw) ? loginSubmits : []);
+
+      const isSignupForm = allPwInSameForm && candidateUsers.length === 1 && signupSubmits.length === 1
+        && (signupButtons.length === 1 || formHeadingIsSignup || formHasConfirmPw);
+
+      if (isSignupForm) {
+        const emailInput = candidateUsers[0];
+        let primaryPw = pw0;
+        let confirmPw = null;
+        if (passwordInputs.length === 2) {
+          const idxConfirm = passwordInputs.findIndex((pw) => /confirm|re-?enter|retype|repeat|verify/.test(
+            `${pw.name || ''} ${pw.id || ''} ${pw.placeholder || ''} ${pw.getAttribute('aria-label') || ''} ${resolveLabel(document, pw)}`.toLowerCase()
+          ));
+          if (idxConfirm === 0) {
+            confirmPw = passwordInputs[0];
+            primaryPw = passwordInputs[1];
+          } else {
+            primaryPw = passwordInputs[0];
+            confirmPw = passwordInputs[1];
+          }
+          confirmPw.setAttribute('data-robin-signup-role', 'confirm-password');
+        }
+        emailInput.setAttribute('data-robin-signup-role', 'email');
+        primaryPw.setAttribute('data-robin-signup-role', 'password');
+        signupSubmits[0].setAttribute('data-robin-signup-role', 'submit');
+
+        const extraNameInputs = Array.from(authForm.querySelectorAll('input[type="text"], input:not([type])'))
+          .filter((el) => el !== emailInput && isElementVisible(el) && !hasTrapMarkers(el));
+        let hasFullName = false;
+        let hasFirstName = false;
+        let hasLastName = false;
+        for (const el of extraNameInputs) {
+          const sig = `${el.name || ''} ${el.id || ''} ${el.placeholder || ''} ${resolveLabel(document, el)}`.toLowerCase();
+          if (/first\s*name|given\s*name/.test(sig) && !hasFirstName) {
+            el.setAttribute('data-robin-signup-role', 'first-name');
+            hasFirstName = true;
+          } else if (/last\s*name|family\s*name|surname/.test(sig) && !hasLastName) {
+            el.setAttribute('data-robin-signup-role', 'last-name');
+            hasLastName = true;
+          } else if (/full\s*name|your\s*name|\bname\b/.test(sig) && !/company|user/.test(sig) && !hasFullName) {
+            el.setAttribute('data-robin-signup-role', 'full-name');
+            hasFullName = true;
+          }
+        }
+        signupControls = {
+          verified: true,
+          ambiguous: false,
+          hasConfirmPassword: Boolean(confirmPw),
+          hasFullName,
+          hasFirstName,
+          hasLastName,
+        };
+        signupWallPresent = true;
+      } else if (passwordInputs.length === 1) {
+        loginWallPresent = true;
+        if (candidateUsers.length === 1 && loginSubmits.length === 1) {
+          candidateUsers[0].setAttribute('data-robin-login-role', 'username');
+          pw0.setAttribute('data-robin-login-role', 'password');
+          loginSubmits[0].setAttribute('data-robin-login-role', 'submit');
+          loginControls = { verified: true, ambiguous: false };
+        } else {
+          loginControls = { verified: false, ambiguous: true };
+        }
       } else {
+        loginWallPresent = true;
         loginControls = { verified: false, ambiguous: true };
       }
-    } else if (passwordInputs.length > 1 || loginWallPresent) {
+    } else if (passwordInputs.length > 2) {
+      loginWallPresent = true;
       loginControls = { verified: false, ambiguous: true };
+    } else if (/sign in to continue|log in to apply|please log in before applying/i.test(bodyText)) {
+      loginWallPresent = true;
+      loginControls = { verified: false, ambiguous: true };
+    }
+
+    let authSwitchSignupSelector = null;
+    let authSwitchLoginSelector = null;
+    for (const el of Array.from(document.querySelectorAll('a, button, [role="button"]'))) {
+      if (!isElementVisible(el) || hasTrapMarkers(el)) continue;
+      if (el.getAttribute('data-robin-login-role') || el.getAttribute('data-robin-signup-role')) continue;
+      const txt = clean(el.textContent);
+      if (!authSwitchSignupSelector && /^(create\s*(an?\s*)?account|sign\s*up|register|don'?t\s*have\s*an\s*account\??\s*sign\s*up)$/i.test(txt)) {
+        el.setAttribute('data-robin-auth-switch', 'signup');
+        authSwitchSignupSelector = '[data-robin-auth-switch="signup"]';
+      } else if (!authSwitchLoginSelector && /^(sign\s*in|log\s*in|already\s*have\s*an\s*account\??\s*(?:sign|log)\s*in)$/i.test(txt)) {
+        el.setAttribute('data-robin-auth-switch', 'login');
+        authSwitchLoginSelector = '[data-robin-auth-switch="login"]';
+      }
     }
 
     const activeStepEl = document.querySelector('[data-step], [aria-current="step"], .step-indicator');
@@ -723,9 +864,19 @@ export async function inspectLiveFormDom(page) {
       nextButton,
       submitButton,
       loginControls,
+      signupControls,
+      emailVerification,
+      authSwitchSignupSelector,
+      authSwitchLoginSelector,
       validationErrors: Array.from(new Set(allErrors)),
       stepHint: stepText,
-      securitySignals: { captchaPresent, mfaPresent, loginWallPresent },
+      securitySignals: {
+        captchaPresent,
+        mfaPresent,
+        loginWallPresent,
+        signupWallPresent,
+        emailVerificationPresent: emailVerification.present,
+      },
     };
   });
 }

@@ -185,6 +185,8 @@ export function computePlanOutcome(plan, runResult) {
         closedShadowHosts: univ.closedShadowHosts ?? [],
         validationErrors: univ.validationErrors ?? [],
         loginSucceeded: Boolean(univ.loginSucceeded),
+        signupSucceeded: Boolean(univ.signupSucceeded),
+        emailVerified: Boolean(univ.emailVerified),
       }],
     };
   }

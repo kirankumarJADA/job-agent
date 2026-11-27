@@ -170,14 +170,20 @@ public class ManagedInboundService {
         String encrypted = keepContent ? content.encrypt(message) : null;
         ReceiptVerificationPolicy.SenderAuthentication trustedAuth = buildSenderAuthentication(providerId, message);
         String persistedDkimResult = persistableDkimResult(providerId, message, trustedAuth);
+        boolean authTrusted = isCloudflareAuthTrusted(providerId, message, trustedAuth);
+        String persistedDkimDomain = (authTrusted && "pass".equalsIgnoreCase(trustedAuth.dkim()))
+                ? trustedAuth.dkimDomain() : null;
+        String persistedDmarcResult = trustedAuth.dmarc();
+        String persistedAuthServId = message.authServId();
 
         int stored = db.update("""
                         insert into managed_inbound_messages
                             (id, profile_id, address_id, provider_id, message_id_sha256, content_sha256,
                              envelope_recipient, envelope_sender, from_address, sender_domain, subject_redacted,
                              content_encrypted, content_purged_at, spf_result, dkim_result, spam_flagged,
-                             authentication_failed, signed_at, received_at)
-                        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             authentication_failed, signed_at, received_at,
+                             dkim_domain, dmarc_result, auth_serv_id, auth_trusted)
+                        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         on conflict do nothing
                         """,
                 UuidV7.generate(), owner.profileId(), owner.id(), providerId,
@@ -186,7 +192,8 @@ public class ManagedInboundService {
                 message.fromAddress(), message.senderDomain(), redactedSubject(message.subject()),
                 encrypted, encrypted == null ? Timestamp.from(now) : null,
                 message.spfResult(), persistedDkimResult, message.spamFlagged(), message.authenticationFailed(),
-                Timestamp.from(signedAt), Timestamp.from(now));
+                Timestamp.from(signedAt), Timestamp.from(now),
+                persistedDkimDomain, persistedDmarcResult, persistedAuthServId, authTrusted);
         Outcome outcome = stored == 1 ? Outcome.STORED : Outcome.DUPLICATE_MESSAGE;
         // Identifiers only: never the alias, subject, body, code or token.
         log.info("Managed inbound delivery accepted: outcome={} address={} contentKept={}", outcome, owner.id(),
@@ -271,6 +278,20 @@ public class ManagedInboundService {
         String dkimDomain = hasVerifiedDkimDomain ? message.dkimDomain() : null;
         return new ReceiptVerificationPolicy.SenderAuthentication(
                 dkim, dkimDomain, message.spfResult(), message.dmarcResult());
+    }
+
+    private boolean isCloudflareAuthTrusted(String providerId, InboundMailMessage message,
+                                            ReceiptVerificationPolicy.SenderAuthentication trustedAuth) {
+        if (!(ManagedMailSettings.PROVIDER_CLOUDFLARE.equals(providerId)
+                || ManagedMailSettings.PROVIDER_CLOUDFLARE.equals(message.providerId()))) {
+            return false;
+        }
+        if (message.authConflict() || message.authenticationFailed() || message.authServId() == null) {
+            return false;
+        }
+        boolean trustedReceiver = settings.cloudflareTrustedAuthServIds()
+                .contains(message.authServId().toLowerCase(Locale.ROOT));
+        return trustedReceiver && "pass".equalsIgnoreCase(trustedAuth.dkim()) && trustedAuth.dkimDomain() != null;
     }
 
     private static String persistableDkimResult(String providerId, InboundMailMessage message,

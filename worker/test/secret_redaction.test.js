@@ -4,11 +4,15 @@ import { sanitizeUrl, redactSecrets } from '../src/secret_redaction.js';
 
 // ── sanitizeUrl ──────────────────────────────────────────────────────────
 
-test('redacts a password submitted via a GET form query string', () => {
-  const result = sanitizeUrl('https://mockemployer.test/verify?email=c%40x.test&password=hunter2');
+test('redacts a password and private email submitted via a GET form query string', () => {
+  const result = sanitizeUrl('https://mockemployer.test/verify?email=c%40x.test&password=hunter2&code=998877&key=k1&magic=m2');
   assert.ok(!result.includes('hunter2'), 'the raw password must not survive');
+  assert.ok(!result.includes('c%40x.test') && !result.includes('c@x.test'), 'the email must be redacted');
+  assert.ok(!result.includes('998877'), 'verification code param must be redacted');
+  assert.ok(!result.includes('k1'), 'key param must be redacted');
+  assert.ok(!result.includes('m2'), 'magic param must be redacted');
   assert.match(result, /password=%5BREDACTED%5D|password=\[REDACTED\]/);
-  assert.match(result, /email=c%40x\.test/, 'non-sensitive params are preserved verbatim');
+  assert.match(result, /email=%5BREDACTED%5D|email=\[REDACTED\]/);
 });
 
 test('redacts every sensitive parameter name, case-insensitively, leaving the rest alone', () => {

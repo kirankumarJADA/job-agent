@@ -535,6 +535,21 @@ public class WorkdayExecutionPlanService {
 
         var hit = mailbox.findVerification(profileId, employerDomain, registeredEmail, after);
         if (hit.isEmpty()) {
+            List<Map<String, Object>> leasedOrConsumed = db.queryForList("""
+                    select provider_id, created_at
+                    from mailbox_verifications
+                    where application_id = ?
+                      and (account_session_id is null or account_session_id = ?)
+                      and (status = 'CONSUMED' or (status = 'RESERVED' and reserved_until > now()))
+                    order by created_at desc
+                    limit 1
+                    """, applicationId, sessionId);
+            if (!leasedOrConsumed.isEmpty()) {
+                Map<String, Object> existingRow = leasedOrConsumed.get(0);
+                return new VerificationStatus("VERIFICATION_MESSAGE_MATCHED",
+                        String.valueOf(existingRow.get("provider_id")),
+                        ((Timestamp) existingRow.get("created_at")).toInstant(), null);
+            }
             return new VerificationStatus("VERIFICATION_MESSAGE_PENDING", null, null,
                     "No verification message has been found yet in the registered mailbox.");
         }

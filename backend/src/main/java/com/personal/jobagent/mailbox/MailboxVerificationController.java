@@ -3,8 +3,10 @@ package com.personal.jobagent.mailbox;
 import com.personal.jobagent.common.ApiError;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.mailbox.managed.MailAddresses;
+import com.personal.jobagent.mailbox.managed.ManagedMailVerificationProvider;
 import com.personal.jobagent.security.OwnerContext;
 import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.ResponseEntity;
@@ -17,13 +19,20 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.Base64;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -53,11 +62,14 @@ import java.util.UUID;
 public class MailboxVerificationController {
 
     private final MailboxVerificationProvider provider;
+    private final ManagedMailVerificationProvider managedProvider;
     private final RegistrationIdentityService registrationIdentities;
     private final OwnerContext ownerContext;
     private final JdbcTemplate db;
     private final TransactionTemplate transactions;
     private final int windowMinutes;
+    private final int leaseSeconds;
+    private final SecureRandom random = new SecureRandom();
 
     public MailboxVerificationController(MailboxVerificationProvider provider,
                                          RegistrationIdentityService registrationIdentities,
@@ -65,18 +77,37 @@ public class MailboxVerificationController {
                                          JdbcTemplate db,
                                          PlatformTransactionManager transactionManager,
                                          @Value("${app.mailbox-verification.window-minutes:30}") int windowMinutes) {
+        this(provider, registrationIdentities, ownerContext, db, transactionManager,
+                provider instanceof ManagedMailVerificationProvider m ? m : null, windowMinutes, 180);
+    }
+
+    @Autowired
+    public MailboxVerificationController(MailboxVerificationProvider provider,
+                                         RegistrationIdentityService registrationIdentities,
+                                         OwnerContext ownerContext,
+                                         JdbcTemplate db,
+                                         PlatformTransactionManager transactionManager,
+                                         @Autowired(required = false) ManagedMailVerificationProvider managedProvider,
+                                         @Value("${app.mailbox-verification.window-minutes:30}") int windowMinutes,
+                                         @Value("${app.mailbox-verification.lease-seconds:180}") int leaseSeconds) {
         this.provider = provider;
+        this.managedProvider = managedProvider != null ? managedProvider
+                : (provider instanceof ManagedMailVerificationProvider m ? m : null);
         this.registrationIdentities = registrationIdentities;
         this.ownerContext = ownerContext;
         this.db = db;
         this.transactions = new TransactionTemplate(transactionManager);
         this.windowMinutes = Math.max(1, Math.min(windowMinutes, 24 * 60));
+        this.leaseSeconds = Math.max(30, Math.min(leaseSeconds, 900));
     }
 
     public record ResolveRequest(UUID applicationId, UUID sessionId,
                                  String employerDomain, String mailboxAddress) {}
 
     public record IdentityRequest(UUID applicationId, UUID sessionId, String employerDomain) {}
+
+    public record LeaseActionRequest(UUID applicationId, UUID sessionId,
+                                     UUID verificationId, String leaseToken, String reason) {}
 
     /** Owner probe: can Robin read a verification mailbox for this profile (managed or Gmail)? */
     @GetMapping("/connected")
@@ -181,46 +212,323 @@ public class MailboxVerificationController {
             accountSessionId = r.sessionId();
         }
 
-        var hit = provider.findVerification(ownerProfileId, employerDomain, mailboxAddress, after);
+        final UUID finalSessionId = accountSessionId;
+        final String finalMailboxAddress = mailboxAddress;
+        final Instant finalAfter = after;
+
+        // First attempt idempotent crash recovery of an active lease already held by this exact application/session.
+        try {
+            ResponseEntity<?> recovered = transactions.execute(status -> {
+                Instant tsInstant = Instant.now();
+                Timestamp tsNow = Timestamp.from(tsInstant);
+                expireOverdueLeases(tsNow);
+                List<Map<String, Object>> existingLeases = db.queryForList("""
+                        select id, employer_domain, provider_id, source_email_id, source_managed_message_id
+                        from mailbox_verifications
+                        where application_id = ?
+                          and account_session_id is not distinct from ?::uuid
+                          and status = 'RESERVED'
+                          and reserved_until > ?
+                        order by created_at desc
+                        limit 1
+                        for update
+                        """, r.applicationId(), finalSessionId, tsNow);
+                if (existingLeases.isEmpty()) return null;
+
+                Map<String, Object> lease = existingLeases.get(0);
+                if (!employerDomain.equals(lease.get("employer_domain"))) {
+                    return error(409, "Conflict", "The verification lease is for another employer domain", request);
+                }
+                UUID verificationId = (UUID) lease.get("id");
+                UUID sourceManagedId = (UUID) lease.get("source_managed_message_id");
+                UUID sourceEmailId = (UUID) lease.get("source_email_id");
+
+                Optional<MailboxVerificationProvider.VerificationHit> hit = Optional.empty();
+                if (sourceManagedId != null && managedProvider != null) {
+                    hit = managedProvider.readReservedVerification(
+                            ownerProfileId, employerDomain, finalMailboxAddress, sourceManagedId);
+                } else {
+                    Optional<MailboxVerificationProvider.VerificationHit> found = provider.findVerification(
+                            ownerProfileId, employerDomain, finalMailboxAddress, finalAfter);
+                    if (found.isPresent() && (sourceEmailId == null || sourceEmailId.equals(found.get().sourceEmailId()))) {
+                        hit = found;
+                    }
+                }
+                if (hit.isEmpty() || (!hit.get().hasOtp() && !hit.get().hasLink())) {
+                    db.update("update mailbox_verifications set status = 'EXPIRED', reserved_until = null where id = ?",
+                            verificationId);
+                    if (sourceManagedId != null && managedProvider != null) {
+                        managedProvider.releaseManagedMessage(ownerProfileId, sourceManagedId, r.applicationId());
+                    }
+                    return null;
+                }
+                String leaseToken = generateLeaseToken();
+                Instant expiresAt = Instant.now().plusSeconds(leaseSeconds);
+                String tokenSha = sha256Hex(leaseToken);
+                if (sourceManagedId != null && managedProvider != null) {
+                    if (!managedProvider.refreshManagedLease(ownerProfileId, sourceManagedId, r.applicationId(),
+                            expiresAt, tokenSha)) {
+                        return null;
+                    }
+                }
+                db.update("""
+                        update mailbox_verifications
+                        set reserved_until = ?, reservation_token_sha256 = ?
+                        where id = ? and application_id = ? and status = 'RESERVED'
+                        """, Timestamp.from(expiresAt), tokenSha, verificationId, r.applicationId());
+                return ResponseEntity.ok(leaseResponseBody(hit.get(), verificationId, leaseToken, expiresAt));
+            });
+            if (recovered != null) {
+                return recovered;
+            }
+        } catch (RuntimeException e) {
+            return error(404, "Not Found", "No unambiguous verification message found in the registered mailbox. "
+                    + "The workflow is paused for manual verification.", request);
+        }
+
+        // No active own lease: look for a fresh unconsumed, unleased message (outside TX so remote syncs hold no lock).
+        var hit = provider.findVerification(ownerProfileId, employerDomain, finalMailboxAddress, finalAfter);
         if (hit.isEmpty() || (!hit.get().hasOtp() && !hit.get().hasLink())) {
             return error(404, "Not Found", "No unambiguous verification message found in the registered mailbox. "
                     + "The workflow is paused for manual verification.", request);
         }
         var hitValue = hit.get();
-        UUID sessionForAudit = accountSessionId;
-        // Audit before releasing a one-time credential; never store OTPs or token-bearing links.
-        // The audit row and the provider's retirement of the source message commit together.
+        String leaseToken = generateLeaseToken();
+        String tokenSha = sha256Hex(leaseToken);
+        UUID verificationId = UuidV7.generate();
+        Instant expiresAt = Instant.now().plusSeconds(leaseSeconds);
+
         try {
-            transactions.executeWithoutResult(status -> {
+            Boolean acquired = transactions.execute(status -> {
+                Instant tsInstant = Instant.now();
+                Timestamp tsNow = Timestamp.from(tsInstant);
+                expireOverdueLeases(tsNow);
+                if (hitValue.sourceEmailId() != null) {
+                    Integer activeOrUsed = db.queryForObject("""
+                            select count(*) from mailbox_verifications
+                            where source_email_id = ? and status in ('RESERVED', 'CONSUMED')
+                            """, Integer.class, hitValue.sourceEmailId());
+                    if (activeOrUsed != null && activeOrUsed > 0) {
+                        return Boolean.FALSE;
+                    }
+                }
+                if (hitValue.sourceManagedMessageId() != null && managedProvider != null) {
+                    if (!managedProvider.tryReserveManagedMessage(ownerProfileId, hitValue.sourceManagedMessageId(),
+                            r.applicationId(), finalSessionId, expiresAt, tokenSha)) {
+                        return Boolean.FALSE;
+                    }
+                }
                 db.update("""
                         insert into mailbox_verifications
                             (id, application_id, account_session_id, employer_domain, provider_id,
-                             source_email_id, source_managed_message_id, created_at)
-                        values (?, ?, ?, ?, ?, ?, ?, ?)
+                             source_email_id, source_managed_message_id, status, reserved_until,
+                             reservation_token_sha256, created_at)
+                        values (?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?)
                         """,
-                        UuidV7.generate(), r.applicationId(), sessionForAudit, employerDomain,
+                        verificationId, r.applicationId(), finalSessionId, employerDomain,
                         hitValue.providerId(), hitValue.sourceEmailId(), hitValue.sourceManagedMessageId(),
-                        Timestamp.from(Instant.now()));
-                provider.markResolved(ownerProfileId, hitValue);
-                if (sessionForAudit != null) {
-                    // The code or link is on its way to the employer form: the session is verifying.
+                        Timestamp.from(expiresAt), tokenSha, tsNow);
+                if (finalSessionId != null) {
                     db.update("""
                             update account_sessions set state = 'VERIFY_EMAIL', updated_at = now()
                             where id = ? and owner_profile_id = ?
                               and state in ('SIGNUP', 'WAITING_FOR_EMAIL', 'OTP_REQUIRED')
-                            """, sessionForAudit, ownerProfileId);
+                            """, finalSessionId, ownerProfileId);
                 }
+                return Boolean.TRUE;
             });
+            if (!Boolean.TRUE.equals(acquired)) {
+                return error(404, "Not Found", "This verification message is currently leased or resolved; "
+                        + "request a fresh code or pause for manual verification.", request);
+            }
         } catch (DuplicateKeyException alreadyResolved) {
             return error(404, "Not Found", "This verification message was already resolved; request a fresh code "
                     + "or pause for manual verification.", request);
         }
+        return ResponseEntity.ok(leaseResponseBody(hitValue, verificationId, leaseToken, expiresAt));
+    }
+
+    /**
+     * Worker confirmation after the verification code or link has genuinely succeeded in the browser:
+     * transitions the bounded lease to CONSUMED and erases managed encrypted content permanently.
+     */
+    @PostMapping("/confirm")
+    public ResponseEntity<?> confirm(@RequestBody LeaseActionRequest r, HttpServletRequest request) {
+        if (!ownerContext.isWorkerRequest()) return forbidden(request);
+        if (r == null || r.applicationId() == null || r.verificationId() == null
+                || r.leaseToken() == null || r.leaseToken().isBlank()) {
+            return error(400, "Bad Request", "applicationId, verificationId and leaseToken are required", request);
+        }
+        UUID ownerProfileId = ownerContext.ownerOfApplication(r.applicationId()).orElse(null);
+        if (ownerProfileId == null) return error(404, "Not Found", "No such application", request);
+        String suppliedSha = sha256Hex(r.leaseToken().trim());
+
+        ResponseEntity<?> result = transactions.execute(status -> {
+            List<Map<String, Object>> rows = db.queryForList("""
+                    select id, account_session_id, provider_id, source_email_id, source_managed_message_id,
+                           status, reserved_until, reservation_token_sha256
+                    from mailbox_verifications
+                    where id = ? and application_id = ?
+                    for update
+                    """, r.verificationId(), r.applicationId());
+            if (rows.isEmpty()) {
+                return error(404, "Not Found", "No such verification lease", request);
+            }
+            Map<String, Object> row = rows.get(0);
+            UUID sessionBound = (UUID) row.get("account_session_id");
+            if (r.sessionId() != null && sessionBound != null && !r.sessionId().equals(sessionBound)) {
+                return error(409, "Conflict", "The verification lease belongs to another session", request);
+            }
+            String expectedSha = row.get("reservation_token_sha256") == null
+                    ? null : String.valueOf(row.get("reservation_token_sha256"));
+            if (!constantTimeHexEquals(expectedSha, suppliedSha)) {
+                return error(409, "Conflict", "Invalid verification lease token", request);
+            }
+            String currentStatus = String.valueOf(row.get("status"));
+            if ("CONSUMED".equals(currentStatus)) {
+                return ResponseEntity.ok(Map.of(
+                        "status", "CONSUMED",
+                        "verificationId", r.verificationId().toString(),
+                        "alreadyConfirmed", true));
+            }
+            Timestamp reservedUntilTs = (Timestamp) row.get("reserved_until");
+            Instant now = Instant.now();
+            if (!"RESERVED".equals(currentStatus)
+                    || (reservedUntilTs != null && !reservedUntilTs.toInstant().isAfter(now))) {
+                UUID sourceManagedId = (UUID) row.get("source_managed_message_id");
+                if ("RESERVED".equals(currentStatus)) {
+                    db.update("update mailbox_verifications set status = 'EXPIRED', reserved_until = null where id = ?",
+                            r.verificationId());
+                    if (sourceManagedId != null && managedProvider != null) {
+                        managedProvider.releaseManagedMessage(ownerProfileId, sourceManagedId, r.applicationId());
+                    }
+                }
+                return error(409, "Conflict", "Verification lease is expired or no longer active", request);
+            }
+
+            UUID sourceManagedId = (UUID) row.get("source_managed_message_id");
+            UUID sourceEmailId = (UUID) row.get("source_email_id");
+            String providerId = String.valueOf(row.get("provider_id"));
+            db.update("""
+                    update mailbox_verifications
+                    set status = 'CONSUMED', consumed_at = now(), reserved_until = null
+                    where id = ? and application_id = ? and status = 'RESERVED'
+                    """, r.verificationId(), r.applicationId());
+            provider.markResolved(ownerProfileId, new MailboxVerificationProvider.VerificationHit(
+                    providerId,
+                    sourceManagedId != null ? sourceManagedId.toString() : String.valueOf(sourceEmailId),
+                    sourceEmailId, null, null, null, sourceManagedId));
+            return ResponseEntity.ok(Map.of(
+                    "status", "CONSUMED",
+                    "verificationId", r.verificationId().toString()));
+        });
+        return result != null ? result : error(500, "Internal Server Error", "Confirmation failed", request);
+    }
+
+    /**
+     * Releases an unused verification lease (e.g. OTP rejected or navigation aborted before use)
+     * without burning or deleting the still-encrypted inbound message.
+     */
+    @PostMapping("/release")
+    public ResponseEntity<?> release(@RequestBody LeaseActionRequest r, HttpServletRequest request) {
+        if (!ownerContext.isWorkerRequest()) return forbidden(request);
+        if (r == null || r.applicationId() == null || r.verificationId() == null
+                || r.leaseToken() == null || r.leaseToken().isBlank()) {
+            return error(400, "Bad Request", "applicationId, verificationId and leaseToken are required", request);
+        }
+        UUID ownerProfileId = ownerContext.ownerOfApplication(r.applicationId()).orElse(null);
+        if (ownerProfileId == null) return error(404, "Not Found", "No such application", request);
+        String suppliedSha = sha256Hex(r.leaseToken().trim());
+
+        ResponseEntity<?> result = transactions.execute(status -> {
+            List<Map<String, Object>> rows = db.queryForList("""
+                    select id, source_managed_message_id, status, reservation_token_sha256
+                    from mailbox_verifications
+                    where id = ? and application_id = ?
+                    for update
+                    """, r.verificationId(), r.applicationId());
+            if (rows.isEmpty()) {
+                return error(404, "Not Found", "No such verification lease", request);
+            }
+            Map<String, Object> row = rows.get(0);
+            String expectedSha = row.get("reservation_token_sha256") == null
+                    ? null : String.valueOf(row.get("reservation_token_sha256"));
+            if (!constantTimeHexEquals(expectedSha, suppliedSha)) {
+                return error(409, "Conflict", "Invalid verification lease token", request);
+            }
+            String currentStatus = String.valueOf(row.get("status"));
+            if ("RELEASED".equals(currentStatus)) {
+                return ResponseEntity.ok(Map.of("status", "RELEASED", "verificationId", r.verificationId().toString()));
+            }
+            if (!"RESERVED".equals(currentStatus)) {
+                return error(409, "Conflict", "Verification lease can no longer be released (" + currentStatus + ")", request);
+            }
+            db.update("""
+                    update mailbox_verifications
+                    set status = 'RELEASED', reserved_until = null
+                    where id = ? and application_id = ? and status = 'RESERVED'
+                    """, r.verificationId(), r.applicationId());
+            UUID sourceManagedId = (UUID) row.get("source_managed_message_id");
+            if (sourceManagedId != null && managedProvider != null) {
+                managedProvider.releaseManagedMessage(ownerProfileId, sourceManagedId, r.applicationId());
+            }
+            return ResponseEntity.ok(Map.of(
+                    "status", "RELEASED",
+                    "verificationId", r.verificationId().toString()));
+        });
+        return result != null ? result : error(500, "Internal Server Error", "Release failed", request);
+    }
+
+    private void expireOverdueLeases(Timestamp tsNow) {
+        db.update("""
+                update mailbox_verifications
+                set status = 'EXPIRED', reserved_until = null
+                where status = 'RESERVED' and reserved_until <= ?
+                """, tsNow);
+        db.update("""
+                update managed_inbound_messages
+                set reserved_for_application_id = null,
+                    reserved_for_session_id = null,
+                    reserved_at = null,
+                    reservation_expires_at = null,
+                    reservation_token_sha256 = null
+                where consumed_at is null and reserved_at is not null and reservation_expires_at <= ?
+                """, tsNow);
+    }
+
+    private Map<String, Object> leaseResponseBody(MailboxVerificationProvider.VerificationHit hitValue,
+                                                    UUID verificationId, String leaseToken, Instant expiresAt) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("provider", hitValue.providerId());
         body.put("otp", hitValue.hasOtp() ? hitValue.otp() : "");
         body.put("link", hitValue.hasLink() ? hitValue.link() : "");
         body.put("receivedAt", hitValue.receivedAt() == null ? "" : hitValue.receivedAt().toString());
-        return ResponseEntity.ok(body);
+        body.put("verificationId", verificationId.toString());
+        body.put("leaseToken", leaseToken);
+        body.put("leaseExpiresAt", expiresAt.toString());
+        return body;
+    }
+
+    private String generateLeaseToken() {
+        byte[] raw = new byte[32];
+        random.nextBytes(raw);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
+    }
+
+    private static String sha256Hex(String value) {
+        try {
+            return HexFormat.of().formatHex(
+                    MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
+    }
+
+    private static boolean constantTimeHexEquals(String expected, String actual) {
+        if (expected == null || actual == null) return false;
+        return MessageDigest.isEqual(
+                expected.getBytes(StandardCharsets.UTF_8),
+                actual.getBytes(StandardCharsets.UTF_8));
     }
 
     private ResponseEntity<?> forbidden(HttpServletRequest request) {

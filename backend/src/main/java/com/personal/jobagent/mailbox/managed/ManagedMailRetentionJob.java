@@ -76,13 +76,40 @@ public class ManagedMailRetentionJob {
         if (maintenanceMode.isMaintenanceMode()) {
             return new Result(0, 0, 0);
         }
+        Timestamp tsNow = Timestamp.from(now);
+        db.update("""
+                update mailbox_verifications
+                set status = 'EXPIRED'
+                where id in (select id from mailbox_verifications
+                             where status = 'RESERVED' and reserved_until <= ?
+                             limit ?)
+                """, tsNow, BATCH);
+        db.update("""
+                update managed_inbound_messages
+                set reserved_for_application_id = null,
+                    reserved_for_session_id = null,
+                    reserved_at = null,
+                    reservation_expires_at = null,
+                    reservation_token_sha256 = null
+                where id in (select id from managed_inbound_messages
+                             where consumed_at is null and reserved_at is not null and reservation_expires_at <= ?
+                             limit ?)
+                """, tsNow, BATCH);
         int erased = db.update("""
                 update managed_inbound_messages
-                set content_encrypted = null, content_purged_at = ?
+                set content_encrypted = null,
+                    content_purged_at = ?,
+                    reserved_for_application_id = null,
+                    reserved_for_session_id = null,
+                    reserved_at = null,
+                    reservation_expires_at = null,
+                    reservation_token_sha256 = null
                 where id in (select id from managed_inbound_messages
-                             where content_encrypted is not null and received_at < ?
+                             where content_encrypted is not null
+                               and received_at < ?
+                               and (reservation_expires_at is null or reservation_expires_at <= ?)
                              limit ?)
-                """, Timestamp.from(now), Timestamp.from(now.minus(settings.contentRetention())), BATCH);
+                """, tsNow, Timestamp.from(now.minus(settings.contentRetention())), tsNow, BATCH);
         int deleted = db.update("""
                 delete from managed_inbound_messages
                 where id in (select id from managed_inbound_messages where received_at < ? limit ?)

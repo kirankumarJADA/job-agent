@@ -28,6 +28,7 @@ public class ManagedMailSettings {
     public static final String PROVIDER_CLOUDFLARE = "cloudflare";
 
     private static final String DOMAIN_PATTERN = "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$";
+    private static final String ADDRESS_PREFIX_PATTERN = "^[a-z][a-z0-9+_-]{0,47}$";
 
     private final String domain;
     private final String provider;
@@ -178,7 +179,19 @@ public class ManagedMailSettings {
         } else if (PROVIDER_CLOUDFLARE.equals(provider)) {
             if (cloudflareWebhookSecret.isEmpty()) missing.add("CLOUDFLARE_EMAIL_WORKER_SECRET");
         }
+        if (!addressPrefix.isEmpty() && !addressPrefix.matches(ADDRESS_PREFIX_PATTERN)) {
+            missing.add("APP_MANAGED_MAIL_ADDRESS_PREFIX");
+        }
         if (cipher == null || !cipher.configured()) missing.add("APP_SECRETS_KEY");
         return List.copyOf(missing);
+    }
+
+    /** Settings missing for automated sender-authenticated OTP/link verification (never exposes secret values). */
+    public List<String> verificationMissing() {
+        List<String> items = new ArrayList<>();
+        if (PROVIDER_CLOUDFLARE.equals(provider) && cloudflareTrustedAuthServIds.isEmpty()) {
+            items.add("APP_MANAGED_MAIL_CLOUDFLARE_TRUSTED_AUTHSERV_IDS");
+        }
+        return List.copyOf(items);
     }
 }

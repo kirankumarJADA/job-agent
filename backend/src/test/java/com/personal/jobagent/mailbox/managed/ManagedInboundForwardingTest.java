@@ -85,7 +85,8 @@ class ManagedInboundForwardingTest {
         ));
         when(content.encrypt(any())).thenReturn("encrypted-bytes");
         when(db.update(contains("insert into managed_inbound_messages"), any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(1);
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any())).thenReturn(1);
 
         var outcome = service.accept(parsed, "token-1", Instant.now(), "sha-payload");
 
@@ -123,7 +124,8 @@ class ManagedInboundForwardingTest {
         ));
         when(content.encrypt(any())).thenReturn("encrypted-bytes");
         when(db.update(contains("insert into managed_inbound_messages"), any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(1);
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any())).thenReturn(1);
 
         InboundMailMessage untrustedReceiver = new InboundMailMessage(
                 ManagedMailSettings.PROVIDER_CLOUDFLARE, to, "bounce@unrelated.example",
@@ -168,7 +170,8 @@ class ManagedInboundForwardingTest {
                 new ManagedMailboxService.ManagedAddress(ADDRESS_ID, PROFILE_ID, "alias123", DOMAIN, "ACTIVE")
         ));
         when(db.update(contains("insert into managed_inbound_messages"), any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(1);
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any())).thenReturn(1);
 
         var outcome = service.accept(parsed, "token-2", Instant.now(), "sha-payload");
 
@@ -188,7 +191,8 @@ class ManagedInboundForwardingTest {
         when(content.encrypt(any())).thenReturn("encrypted-bytes");
         // stored returns 0 (duplicate message)
         when(db.update(contains("insert into managed_inbound_messages"), any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(0);
+                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any())).thenReturn(0);
 
         var outcome = service.accept(parsed, "token-3", Instant.now(), "sha-payload");
 

@@ -716,7 +716,26 @@ class ApplicationTrackingIT {
                 .contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isOk()).andReturn();
         JsonNode response = json.readTree(result.getResponse().getContentAsString(StandardCharsets.UTF_8));
         assertThat(response.get("otp").asText()).isEqualTo("482913");
+        String verificationId = response.get("verificationId").asText();
+        String leaseToken = response.get("leaseToken").asText();
+        assertThat(verificationId).isNotBlank();
+        assertThat(leaseToken).isNotBlank();
         assertThat(count("select count(*) from mailbox_verifications where source_email_id = ?", emailId)).isEqualTo(1);
+        // Crash recovery replay for the same application returns the active RESERVED lease idempotently.
+        MvcResult replay = mvc.perform(post("/api/v1/mailbox-verification/resolve")
+                .header("Authorization", "Bearer phase85-test-token")
+                .contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isOk()).andReturn();
+        assertThat(json.readTree(replay.getResponse().getContentAsString(StandardCharsets.UTF_8)).get("verificationId").asText())
+                .isEqualTo(verificationId);
+        // Once confirmed by the worker, the lease transitions to CONSUMED and future resolves return 404.
+        String confirmBody = json.writeValueAsString(Map.of(
+                "applicationId", app.toString(),
+                "verificationId", verificationId,
+                "leaseToken", leaseToken));
+        mvc.perform(post("/api/v1/mailbox-verification/confirm")
+                .header("Authorization", "Bearer phase85-test-token")
+                .contentType(MediaType.APPLICATION_JSON).content(confirmBody))
+                .andExpect(status().isOk());
         mvc.perform(post("/api/v1/mailbox-verification/resolve").header("Authorization", "Bearer phase85-test-token")
                 .contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isNotFound());
     }

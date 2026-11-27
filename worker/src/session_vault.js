@@ -71,17 +71,36 @@ export class SessionVault {
 
   /** Returns a decrypted storageState object, or undefined (and deletes anything unusable). */
   load(applicationId) {
-    this.removeLegacy(applicationId);
+    return this.loadJson(applicationId, 'session', SESSION_FILE, true);
+  }
+
+  /** Encrypts and atomically writes storageState. No-op when the vault is disabled. */
+  save(applicationId, state) {
+    return this.saveJson(applicationId, 'session', SESSION_FILE, state);
+  }
+
+  /** Encrypts and stores per-application employer registration identity when the vault is enabled. */
+  saveIdentity(applicationId, identity) {
+    return this.saveJson(applicationId, 'identity', 'identity.enc', identity);
+  }
+
+  /** Loads per-application employer registration identity from the encrypted vault. */
+  loadIdentity(applicationId) {
+    return this.loadJson(applicationId, 'identity', 'identity.enc', false);
+  }
+
+  loadJson(applicationId, kind, fileName, removeLegacySession = false) {
+    if (removeLegacySession) this.removeLegacy(applicationId);
     const dir = this.dirFor(applicationId);
     if (!this.enabled || !dir) return undefined;
-    const file = path.join(dir, SESSION_FILE);
+    const file = path.join(dir, fileName);
     if (!fs.existsSync(file)) return undefined;
     try {
       const envelope = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (envelope?.v !== 1 || typeof envelope.savedAt !== 'number') throw new Error('bad envelope');
       if (this.now() - envelope.savedAt > this.ttlMs || envelope.savedAt > this.now() + 60_000) throw new Error('expired');
       const decipher = crypto.createDecipheriv('aes-256-gcm', this.key, Buffer.from(envelope.iv, 'base64'));
-      decipher.setAAD(Buffer.from(`robin-session:${applicationId}:${envelope.savedAt}`));
+      decipher.setAAD(Buffer.from(`robin-${kind}:${applicationId}:${envelope.savedAt}`));
       decipher.setAuthTag(Buffer.from(envelope.tag, 'base64'));
       const plain = Buffer.concat([decipher.update(Buffer.from(envelope.ct, 'base64')), decipher.final()]);
       return JSON.parse(plain.toString('utf8'));
@@ -91,20 +110,19 @@ export class SessionVault {
     }
   }
 
-  /** Encrypts and atomically writes storageState. No-op when the vault is disabled. */
-  save(applicationId, state) {
+  saveJson(applicationId, kind, fileName, payload) {
     const dir = this.dirFor(applicationId);
-    if (!this.enabled || !dir || !state) return false;
+    if (!this.enabled || !dir || !payload) return false;
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     try { fs.chmodSync(dir, 0o700); } catch { /* best effort on platforms without POSIX modes */ }
     const savedAt = this.now();
     const iv = crypto.randomBytes(12);
     const cipher = crypto.createCipheriv('aes-256-gcm', this.key, iv);
-    cipher.setAAD(Buffer.from(`robin-session:${applicationId}:${savedAt}`));
-    const ct = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(state), 'utf8')), cipher.final()]);
+    cipher.setAAD(Buffer.from(`robin-${kind}:${applicationId}:${savedAt}`));
+    const ct = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(payload), 'utf8')), cipher.final()]);
     const envelope = JSON.stringify({ v: 1, savedAt, iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'),
       ct: ct.toString('base64') });
-    const file = path.join(dir, SESSION_FILE);
+    const file = path.join(dir, fileName);
     const tmp = `${file}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
     fs.writeFileSync(tmp, envelope, { mode: 0o600 });
     fs.renameSync(tmp, file);

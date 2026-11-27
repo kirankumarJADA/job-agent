@@ -1,0 +1,407 @@
+package com.personal.jobagent.mailbox.managed;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.personal.jobagent.application.ApplicationPipelineService;
+import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.discovery.platform.AddressGuard;
+import com.personal.jobagent.identity.IdentityService;
+import com.personal.jobagent.mailbox.RegistrationIdentityService;
+import com.personal.jobagent.profile.ProfileRepository;
+import com.personal.jobagent.security.AppUserDetails;
+import com.personal.jobagent.security.UserRecord;
+import com.personal.jobagent.track.TrackText;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Primary;
+import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.test.web.servlet.request.RequestPostProcessor;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+/**
+ * Stage 3I Phase 3 Integration Test on PostgreSQL 16 (Flyway V001-V072) + MockMvc:
+ *
+ * - Separated transport vs senderAuthentication vs employerVerification readiness
+ * - Cloudflare OTP/link resolution fail-closed on untrusted auth and fail-open on trusted DKIM-aligned mail
+ * - Bounded verification lease lifecycle (/resolve -> /release, expired lease reclamation, /confirm consumption & erasure)
+ * - Managed Mail VERIFICATION_CODE non-retention in emails.body_text
+ * - Cross-provider domain isolation (mailgun vs cloudflare)
+ * - IdentityService ROBIN_MANAGED email protection and RegistrationIdentityService disabled-identity fail-closed checks
+ * - POST /api/v1/apply/applications/{id}/universal-account authorization flow and refusal gates
+ */
+@SpringBootTest(properties = {
+        "spring.flyway.placeholders.remove_seed_dev_account=false",
+        "app.discovery.scheduler-enabled=false",
+        "app.rate-limit.enabled=false",
+        "app.events.dispatch-interval-ms=3600000",
+        "app.worker-event-token=" + CloudflareTrustedAuthOtpIT.WORKER_TOKEN,
+        "app.managed-mail.domain=" + CloudflareTrustedAuthOtpIT.DOMAIN,
+        "app.managed-mail.provider=cloudflare",
+        "app.managed-mail.address-prefix=robin+",
+        "app.managed-mail.cloudflare.webhook-secret=" + CloudflareTrustedAuthOtpIT.SECRET,
+        "app.managed-mail.cloudflare.max-age-seconds=900",
+        "app.managed-mail.cloudflare.trusted-authserv-ids=mx.cloudflare.net",
+        "app.managed-mail.retention-sweep-initial-delay-ms=3600000",
+        "app.automation.universal-enabled=true",
+        "app.secrets.encryption-key=6M5mXo2C0eP1Ztq0QzZ0n7cYk1o0r8sB3m6Gq9v2T8U="
+})
+@AutoConfigureMockMvc
+@Testcontainers
+class CloudflareTrustedAuthOtpIT {
+
+    static final String DOMAIN = "mail.aplivenosi.com";
+    static final String SECRET = "cf-trusted-otp-webhook-secret-999999999";
+    static final String WORKER_TOKEN = "cf-trusted-otp-worker-token";
+    static final String WORKER_HEADER = "Bearer " + WORKER_TOKEN;
+    static final String INBOUND = "/api/v1/managed-mail/inbound/cloudflare";
+    private static final UUID FIXTURE_SOURCE = UUID.fromString("00000000-0000-7000-8000-00000000cf72");
+
+    @TestConfiguration
+    static class OfflineAddressGuardConfig {
+        @Bean
+        @Primary
+        AddressGuard trustedOtpAddressGuard() {
+            return new AddressGuard(host -> {
+                if ("acme-verify.example".equalsIgnoreCase(host) || "careers.acme-verify.example".equalsIgnoreCase(host)) {
+                    return new InetAddress[]{InetAddress.getByName("93.184.216.34")};
+                }
+                throw new UnknownHostException(host);
+            });
+        }
+    }
+
+    @Container
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
+
+    @DynamicPropertySource
+    static void props(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", postgres::getJdbcUrl);
+        registry.add("spring.datasource.username", postgres::getUsername);
+        registry.add("spring.datasource.password", postgres::getPassword);
+    }
+
+    @Autowired private MockMvc mvc;
+    @Autowired private JdbcTemplate jdbc;
+    @Autowired private ObjectMapper json;
+    @Autowired private ProfileRepository profiles;
+    @Autowired private ApplicationPipelineService pipeline;
+    @Autowired private IdentityService identityService;
+    @Autowired private RegistrationIdentityService registrationIdentities;
+
+    @BeforeEach
+    void setUp() {
+        jdbc.update("""
+                insert into job_sources (id, kind, org_identifier, display_name, capabilities, policy)
+                values (?, 'GREENHOUSE', 'cf-trusted-otp-fixture', 'CF Trusted OTP Fixture', '{}', 'DISCOVERY_ONLY')
+                on conflict (kind, org_identifier) do nothing
+                """, FIXTURE_SOURCE);
+        jdbc.update("delete from mailbox_verifications");
+        jdbc.update("delete from automation_step_events");
+        jdbc.update("delete from automation_plans");
+        jdbc.update("delete from email_application_links");
+        jdbc.update("delete from emails");
+        jdbc.update("delete from account_sessions");
+        jdbc.update("delete from applicant_identities");
+        jdbc.update("delete from employer_credentials");
+        jdbc.update("delete from managed_inbound_messages");
+        jdbc.update("delete from managed_mail_addresses");
+        jdbc.update("delete from managed_mail_domains");
+        jdbc.update("delete from managed_mail_webhook_tokens");
+    }
+
+    private record Candidate(UUID userId, UUID profileId, RequestPostProcessor auth, String managedAddress) {}
+
+    private Candidate createCandidate(String email, boolean reserveAddress) throws Exception {
+        UUID userId = UuidV7.generate();
+        jdbc.update("insert into users (id, email, password_hash, display_name, auth_provider) values (?, ?, null, ?, 'FIREBASE')",
+                userId, email, "Candidate " + email);
+        UUID profileId = profiles.createProfile(userId, null, null, null, null, null, null, null);
+        AppUserDetails principal = new AppUserDetails(new UserRecord(userId, email, null, "Candidate", null, "FIREBASE"));
+        RequestPostProcessor auth = authentication(new UsernamePasswordAuthenticationToken(principal, null, principal.getAuthorities()));
+        String addr = null;
+        if (reserveAddress) {
+            MvcResult res = mvc.perform(post("/api/v1/managed-mail/address").with(csrf()).with(auth))
+                    .andExpect(status().isOk()).andReturn();
+            addr = json(res).get("address").asText();
+        }
+        return new Candidate(userId, profileId, auth, addr);
+    }
+
+    private UUID createApp(UUID profileId, String url) {
+        UUID jobId = UuidV7.generate();
+        String externalId = "cf-otp-job-" + jobId;
+        jdbc.update("""
+                insert into jobs (id, source_id, external_id, dedup_key, company_name_raw, title,
+                                  description_text, skills_extracted, status, content_hash, application_url, canonical_url)
+                values (?, ?, ?, ?, 'Acme Verify', 'Backend Engineer', 'Build reliable systems', '{}', 'SCORED', ?, ?, ?)
+                """, jobId, FIXTURE_SOURCE, externalId, "dedup-" + externalId, "hash-" + externalId, url, url);
+        return pipeline.createApplicationFromMatch(profileId, jobId).applicationId();
+    }
+
+    private UUID startSession(UUID profileId, UUID appId, String employerDomain) {
+        return identityService.startSession(appId, employerDomain, profileId).orElseThrow();
+    }
+
+    private MvcResult deliverCloudflare(String recipient, String from, String subject, String text,
+                                        String dkimDomain, String authServId, boolean authTrusted,
+                                        Instant timestamp) throws Exception {
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("envelopeRecipient", recipient);
+        map.put("envelopeSender", "bounces@acme-verify.example");
+        map.put("from", from);
+        map.put("to", recipient);
+        map.put("subject", subject);
+        map.put("text", text);
+        map.put("messageId", "<msg-" + UUID.randomUUID() + "@acme-verify.example>");
+        map.put("date", "Thu, 26 Nov 2026 12:00:00 +0000");
+        map.put("spf", "pass");
+        map.put("dkim", "pass");
+        map.put("dmarc", "pass");
+        if (dkimDomain != null) map.put("dkimDomain", dkimDomain);
+        if (authServId != null) map.put("authServId", authServId);
+        map.put("authTrusted", authTrusted);
+        String body = json.writeValueAsString(map);
+
+        String ts = String.valueOf(timestamp.getEpochSecond());
+        String token = "tok-" + UUID.randomUUID();
+        String sig = CloudflareSignatureVerifier.hmacHex(SECRET, ts + "." + token + "." + TrackText.sha256(body));
+        return mvc.perform(post(INBOUND)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body)
+                        .header("X-Robin-Timestamp", ts)
+                        .header("X-Robin-Token", token)
+                        .header("X-Robin-Signature", sig))
+                .andReturn();
+    }
+
+    private JsonNode json(MvcResult res) throws Exception {
+        return json.readTree(res.getResponse().getContentAsString(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void cloudflareTrustedOtpFailClosedUntrustedReleaseExpiryConfirmNonRetentionAndProviderIsolation() throws Exception {
+        Candidate cand = createCandidate("cand-cf-otp@personal.example", true);
+
+        // 0. Cross-provider isolation: Mailgun domain row does not make Cloudflare transport ACTIVE
+        jdbc.update("""
+                insert into managed_mail_domains (domain, provider_id, receiving_verified_at, last_inbound_at)
+                values (?, 'mailgun', now(), now()) on conflict (domain) do nothing
+                """, DOMAIN);
+        JsonNode preStatus = json(mvc.perform(get("/api/v1/managed-mail/address").with(cand.auth()))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(preStatus.get("readiness").asText()).isEqualTo("PENDING_RECEIVING_VERIFICATION");
+
+        // 1. Untrusted Cloudflare delivery activates transport, creates message, but fails closed for OTP resolution
+        Instant base = Instant.now().minusSeconds(120);
+        assertThat(deliverCloudflare(cand.managedAddress(), "Security <security@acme-verify.example>",
+                "Untrusted OTP", "Your verification code is 112233",
+                "acme-verify.example", "mx.cloudflare.net", false, base).getResponse().getStatus()).isEqualTo(200);
+
+        JsonNode activeStatus = json(mvc.perform(get("/api/v1/managed-mail/address").with(cand.auth()))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(activeStatus.get("readiness").asText()).isEqualTo("ACTIVE");
+        assertThat(activeStatus.get("transportReadiness").asText()).isEqualTo("ACTIVE");
+        assertThat(activeStatus.get("senderAuthenticationReadiness").asText()).isEqualTo("CONFIGURED");
+        assertThat(activeStatus.get("employerVerificationReadiness").asText()).isEqualTo("ACTIVE");
+        assertThat(activeStatus.get("usableForAutomatedVerification").asBoolean()).isTrue();
+        assertThat(activeStatus.get("trustedAuthServConfigured").asBoolean()).isTrue();
+
+        // Also deliver an authTrusted=true message with UNALIGNED dkimDomain -> must fail closed too
+        assertThat(deliverCloudflare(cand.managedAddress(), "Security <security@acme-verify.example>",
+                "Unaligned DKIM", "Your verification code is 445566",
+                "unrelated-sender.example", "mx.cloudflare.net", true, base.plusSeconds(10)).getResponse().getStatus()).isEqualTo(200);
+
+        UUID app1 = createApp(cand.profileId(), "https://acme-verify.example/jobs/1");
+        UUID sess1 = startSession(cand.profileId(), app1, "acme-verify.example");
+        mvc.perform(post("/api/v1/mailbox-verification/registration-identity").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of(
+                                "applicationId", app1.toString(),
+                                "sessionId", sess1.toString(),
+                                "employerDomain", "acme-verify.example"))))
+                .andExpect(status().isOk());
+
+        // Both untrusted & unaligned OTPs are rejected (404)
+        String resolveBody1 = json.writeValueAsString(Map.of(
+                "applicationId", app1.toString(),
+                "sessionId", sess1.toString(),
+                "employerDomain", "acme-verify.example"));
+        mvc.perform(post("/api/v1/mailbox-verification/resolve").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON).content(resolveBody1))
+                .andExpect(status().isNotFound());
+
+        // 2. Trusted + DKIM-aligned Cloudflare OTP resolves cleanly and retains NO body text in emails table
+        assertThat(deliverCloudflare(cand.managedAddress(), "Security <security@acme-verify.example>",
+                "Verification code", "Your verification code is 739204",
+                "mail.acme-verify.example", "mx.cloudflare.net", true, Instant.now()).getResponse().getStatus()).isEqualTo(200);
+
+        Map<String, Object> emailRow = jdbc.queryForMap(
+                "select body_text, body_retained, classification from emails where subject = 'Verification code' and profile_id = ?",
+                cand.profileId());
+        assertThat(emailRow.get("classification")).isEqualTo("VERIFICATION_CODE");
+        assertThat(emailRow.get("body_text")).isEqualTo("");
+        assertThat(emailRow.get("body_retained")).isEqualTo(false);
+
+        JsonNode lease1 = json(mvc.perform(post("/api/v1/mailbox-verification/resolve").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON).content(resolveBody1))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(lease1.get("otp").asText()).isEqualTo("739204");
+        String vid1 = lease1.get("verificationId").asText();
+        String tok1 = lease1.get("leaseToken").asText();
+
+        // 3. Releasing lease preserves content_encrypted and makes OTP resolvable again
+        mvc.perform(post("/api/v1/mailbox-verification/release").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of(
+                                "applicationId", app1.toString(),
+                                "sessionId", sess1.toString(),
+                                "verificationId", vid1,
+                                "leaseToken", tok1,
+                                "reason", "TEST_RELEASE"))))
+                .andExpect(status().isOk());
+        assertThat(jdbc.queryForObject("select status from mailbox_verifications where id = ?::uuid", String.class, vid1))
+                .isEqualTo("RELEASED");
+
+        JsonNode lease2 = json(mvc.perform(post("/api/v1/mailbox-verification/resolve").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON).content(resolveBody1))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(lease2.get("otp").asText()).isEqualTo("739204");
+        String vid2 = lease2.get("verificationId").asText();
+        String tok2 = lease2.get("leaseToken").asText();
+
+        // 4. Simulate worker crash expiring lease -> app2 can reclaim and confirm it
+        jdbc.update("update mailbox_verifications set reserved_until = now() - interval '2 minutes' where id = ?::uuid", vid2);
+        jdbc.update("update managed_inbound_messages set reservation_expires_at = now() - interval '2 minutes' where reserved_for_application_id = ?",
+                app1);
+
+        UUID app2 = createApp(cand.profileId(), "https://acme-verify.example/jobs/2");
+        UUID sess2 = startSession(cand.profileId(), app2, "acme-verify.example");
+        JsonNode lease3 = json(mvc.perform(post("/api/v1/mailbox-verification/resolve").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of(
+                                "applicationId", app2.toString(),
+                                "sessionId", sess2.toString(),
+                                "employerDomain", "acme-verify.example"))))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(lease3.get("otp").asText()).isEqualTo("739204");
+        assertThat(jdbc.queryForObject("select status from mailbox_verifications where id = ?::uuid", String.class, vid2))
+                .isEqualTo("EXPIRED");
+
+        // Old expired lease confirm is rejected (409), active lease3 confirm succeeds (200) and erases content
+        mvc.perform(post("/api/v1/mailbox-verification/confirm").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of(
+                                "applicationId", app1.toString(),
+                                "verificationId", vid2,
+                                "leaseToken", tok2))))
+                .andExpect(status().isConflict());
+
+        mvc.perform(post("/api/v1/mailbox-verification/confirm").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of(
+                                "applicationId", app2.toString(),
+                                "sessionId", sess2.toString(),
+                                "verificationId", lease3.get("verificationId").asText(),
+                                "leaseToken", lease3.get("leaseToken").asText()))))
+                .andExpect(status().isOk());
+
+        assertThat(jdbc.queryForObject("select count(*) from managed_inbound_messages where content_encrypted is not null and sender_domain = 'acme-verify.example' and consumed_at is not null", Integer.class))
+                .isZero();
+    }
+
+    @Test
+    void universalAccountAuthorizationAndIdentityProtectionsEndToEnd() throws Exception {
+        Candidate unreadyCand = createCandidate("cand-unready@personal.example", true);
+        UUID unreadyApp = createApp(unreadyCand.profileId(), "https://acme-verify.example/jobs/unready");
+
+        // 1. Terms not accepted -> 409 TERMS_NOT_ACCEPTED
+        mvc.perform(post("/api/v1/apply/applications/{id}/universal-account", unreadyApp)
+                        .with(csrf()).with(unreadyCand.auth())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"acceptTerms\":false}"))
+                .andExpect(status().isConflict());
+
+        // 2. Managed mailbox not yet active -> 409 MANAGED_MAILBOX_NOT_READY
+        MvcResult notReadyRes = mvc.perform(post("/api/v1/apply/applications/{id}/universal-account", unreadyApp)
+                        .with(csrf()).with(unreadyCand.auth())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"acceptTerms\":true}"))
+                .andExpect(status().isConflict()).andReturn();
+        assertThat(json(notReadyRes).get("code").asText()).isEqualTo("MANAGED_MAILBOX_NOT_READY");
+
+        // Activate Cloudflare receiving via signed delivery
+        Candidate readyCand = createCandidate("cand-ready@personal.example", true);
+        assertThat(deliverCloudflare(readyCand.managedAddress(), "Security <security@acme-verify.example>",
+                "Welcome", "Active mailbox test",
+                "acme-verify.example", "mx.cloudflare.net", true, Instant.now()).getResponse().getStatus()).isEqualTo(200);
+
+        UUID readyApp = createApp(readyCand.profileId(), "https://acme-verify.example/jobs/ready");
+        MvcResult authRes = mvc.perform(post("/api/v1/apply/applications/{id}/universal-account", readyApp)
+                        .with(csrf()).with(readyCand.auth())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"acceptTerms\":true}"))
+                .andExpect(status().isOk()).andReturn();
+        JsonNode created = json(authRes);
+        assertThat(created.get("status").asText()).isEqualTo("PREPARED");
+        assertThat(created.get("planId").asText()).isNotBlank();
+        assertThat(created.get("sessionId").asText()).isNotBlank();
+
+        // Plan persisted with explicit accountCreationAuthorized = true and Robin-managed contact email
+        String planJson = jdbc.queryForObject(
+                "select plan::text from automation_plans where id = ?::uuid", String.class, created.get("planId").asText());
+        JsonNode parsedPlan = json.readTree(planJson);
+        assertThat(parsedPlan.get("planType").asText()).isEqualTo("UNIVERSAL");
+        assertThat(parsedPlan.get("package").get("accountCreationAuthorized").asBoolean()).isTrue();
+        assertThat(parsedPlan.get("package").get("candidate").get("email").asText()).isEqualTo(readyCand.managedAddress());
+
+        // Duplicate universal-account request refuses with CREDENTIAL_ALREADY_EXISTS
+        MvcResult dupRes = mvc.perform(post("/api/v1/apply/applications/{id}/universal-account", readyApp)
+                        .with(csrf()).with(readyCand.auth())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"acceptTerms\":true}"))
+                .andExpect(status().isConflict()).andReturn();
+        assertThat(json(dupRes).get("code").asText()).isEqualTo("CREDENTIAL_ALREADY_EXISTS");
+
+        // IdentityService protects ROBIN_MANAGED email against overwrite in real DB
+        assertThatThrownBy(() -> identityService.create(
+                readyCand.profileId(), "hacker@gmail.com", "acme-verify.example", "cred-override"))
+                .isInstanceOf(IllegalStateException.class);
+
+        // Disabled non-managed identity fails closed instead of falling through
+        Candidate disabledCand = createCandidate("cand-disabled@personal.example", true);
+        UUID disabledApp = createApp(disabledCand.profileId(), "https://acme-verify.example/jobs/disabled");
+        UUID disabledSess = startSession(disabledCand.profileId(), disabledApp, "acme-verify.example");
+        jdbc.update("""
+                insert into applicant_identities (id, profile_id, domain, applicant_email, provider, active)
+                values (?, ?, 'acme-verify.example', 'manual@personal.example', 'EXTERNAL', false)
+                """, UuidV7.generate(), disabledCand.profileId());
+        assertThatThrownBy(() -> registrationIdentities.resolve(
+                disabledCand.profileId(), disabledApp, disabledSess, "acme-verify.example"))
+                .isInstanceOf(IllegalStateException.class);
+    }
+}

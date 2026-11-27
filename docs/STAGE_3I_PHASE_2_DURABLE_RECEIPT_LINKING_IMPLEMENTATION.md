@@ -26,7 +26,7 @@ No production database was accessed, nothing was deployed, no employer portal wa
 | 6 E2E tests | 13 production-route Testcontainers tests covering all 18 listed scenarios, plus unit, worker and real-Chromium tests. |
 | 7 Frontend | Verification level, sandbox tag, Robin's submission record with time source, conflicts with both original values, contested receipts never green, upload proof in the receipt. |
 | 8 Discipline | V001–V070 byte-identical; approval, PRE_SUBMIT_ATTEMPTING, SSRF/DNS/proxy, CAPTCHA/MFA and duplicate-submit fences untouched. |
-| 9 Verification | Full local runs on the final code: backend `mvn -B verify` (2,029 unit + 464 integration, 0 failures), worker 394 (0 failures), frontend `tsc -b` + 488 tests + build, cloudflare-email-worker 25 + phase-20 scripts 8. |
+| 9 Verification | Local Windows checks on the final code: backend Surefire unit 2,029 (0 failures, 6 skipped), worker 394 (393 passed, 1 POSIX skip), frontend `tsc -b` + 489 tests + build, cloudflare-email-worker 25 + phase-20 scripts 8; PostgreSQL 16 Testcontainers ITs verified on GitHub Actions Ubuntu CI run `45889637790` (Failsafe 464 run, 0 failures, 7 skipped). |
 
 ---
 
@@ -236,12 +236,12 @@ No production database, deployment, employer contact or real submission. No V001
 
 ## 10. Gate 9 — Verification
 
-All commands are the CI job commands (`.github/workflows/ci.yml`), run locally on the final tree (Windows, Java 21.0.12, Maven 3.9.16, Node 22, Docker for Testcontainers).
+All commands are the CI job commands (`.github/workflows/ci.yml`): local Windows host (Java 21.0.12, Maven 3.9.16, Node 22; Surefire unit, Worker, Frontend, and Cloudflare) plus GitHub Actions `ubuntu-latest` CI run `45889637790` (Docker / Testcontainers PostgreSQL 16 Failsafe ITs).
 
 | Suite | Command | Result |
 | :--- | :--- | :--- |
-| Backend unit (Surefire) | `mvn -B verify` (backend) | **2,029 run, 0 failures, 0 errors, 6 skipped** |
-| Backend integration (Failsafe, Testcontainers PostgreSQL 16) | same run | **464 run, 0 failures, 0 errors, 7 skipped** — `BUILD SUCCESS` |
+| Backend unit (Surefire, local Windows) | `mvn -B test` (backend) | **2,029 run, 0 failures, 0 errors, 6 skipped** |
+| Backend integration (Failsafe, GitHub Actions Ubuntu `45889637790`) | `mvn -B verify` (backend CI) | **464 run, 0 failures, 0 errors, 7 skipped** — `BUILD SUCCESS` |
 | … of which Phase 2 migration | `ReceiptLinkMigrationIT` | 7 / 7 |
 | … of which Phase 2 end-to-end | `ReceiptReconciliationIT` | 14 / 14 |
 | … new Phase 2 unit classes | `ApplicationReconcilerProgressionTest` 19, `ReceiptTemporalPolicyTest` 9, `SubmissionReferencePolicyTest` 7, `BrowserObservationPolicyTest` 6, `SubmissionEvidenceV2ContractTest` 3, `ReceiptVerificationPolicyTest` +1 | 45 / 45 |

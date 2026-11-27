@@ -2,7 +2,10 @@ package com.personal.jobagent.automation;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.discovery.platform.AddressGuard;
+import com.personal.jobagent.identity.EmployerCredentialService;
+import com.personal.jobagent.identity.IdentityService;
 import com.personal.jobagent.mailbox.RegistrationIdentityService;
+import com.personal.jobagent.mailbox.managed.MailAddresses;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -15,12 +18,15 @@ import java.net.InetAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -55,14 +61,32 @@ public class UniversalBrowserPlanService {
         public static UrlValidationResult rejected(String reason) { return new UrlValidationResult(false, reason); }
     }
 
+    public static class AccountCreationRefusedException extends RuntimeException {
+        private final String reason;
+
+        public AccountCreationRefusedException(String reason, String message) {
+            super(message);
+            this.reason = reason;
+        }
+
+        public String reason() {
+            return reason;
+        }
+    }
+
+    public record AccountCreationResult(UUID planId, UUID sessionId, boolean reusedExisting) {}
+
     private final AutomationPlanRepository plans;
     private final ApplyDocumentSelector documentSelector;
     private final com.personal.jobagent.qa.ApplicationAnswerRepository answerRepository;
     private final RegistrationIdentityService registrationIdentities;
+    private final EmployerCredentialService credentials;
+    private final IdentityService identityService;
     private final AddressGuard addressGuard;
     private final JdbcTemplate db;
     private final ObjectMapper json;
     private final boolean allowLocalTestHosts;
+    private final SecureRandom random = new SecureRandom();
 
     @Autowired
     public UniversalBrowserPlanService(AutomationPlanRepository plans,
@@ -72,11 +96,15 @@ public class UniversalBrowserPlanService {
                                        @Autowired(required = false) AddressGuard addressGuard,
                                        JdbcTemplate db,
                                        ObjectMapper json,
-                                       @Value("${app.sandbox.allow-local-test-hosts:false}") boolean allowLocalTestHosts) {
+                                       @Value("${app.sandbox.allow-local-test-hosts:false}") boolean allowLocalTestHosts,
+                                       @Autowired(required = false) EmployerCredentialService credentials,
+                                       @Autowired(required = false) IdentityService identityService) {
         this.plans = plans;
         this.documentSelector = documentSelector;
         this.answerRepository = answerRepository;
         this.registrationIdentities = registrationIdentities;
+        this.credentials = credentials;
+        this.identityService = identityService;
         this.addressGuard = addressGuard != null ? addressGuard : new AddressGuard();
         this.db = db;
         this.json = json;
@@ -89,8 +117,20 @@ public class UniversalBrowserPlanService {
                                        RegistrationIdentityService registrationIdentities,
                                        AddressGuard addressGuard,
                                        JdbcTemplate db,
+                                       ObjectMapper json,
+                                       boolean allowLocalTestHosts) {
+        this(plans, documentSelector, answerRepository, registrationIdentities, addressGuard,
+                db, json, allowLocalTestHosts, null, null);
+    }
+
+    public UniversalBrowserPlanService(AutomationPlanRepository plans,
+                                       ApplyDocumentSelector documentSelector,
+                                       com.personal.jobagent.qa.ApplicationAnswerRepository answerRepository,
+                                       RegistrationIdentityService registrationIdentities,
+                                       AddressGuard addressGuard,
+                                       JdbcTemplate db,
                                        ObjectMapper json) {
-        this(plans, documentSelector, answerRepository, registrationIdentities, addressGuard, db, json, false);
+        this(plans, documentSelector, answerRepository, registrationIdentities, addressGuard, db, json, false, null, null);
     }
 
     public boolean handles(String applicationUrl) {
@@ -157,7 +197,7 @@ public class UniversalBrowserPlanService {
         if (applicationUrl == null) {
             return Optional.empty();
         }
-        return buildPlan(profileId, applicationId, jobId, applicationUrl, "universal:" + applicationId, true);
+        return buildPlan(profileId, applicationId, jobId, applicationUrl, "universal:" + applicationId, true, false);
     }
 
     @Transactional
@@ -169,7 +209,87 @@ public class UniversalBrowserPlanService {
         if (applicationUrl == null) {
             return Optional.empty();
         }
-        return buildPlan(profileId, applicationId, jobId, applicationUrl, "universal-retry:" + supersededPlanId, false);
+        return buildPlan(profileId, applicationId, jobId, applicationUrl, "universal-retry:" + supersededPlanId, false, false);
+    }
+
+    /**
+     * Explicit, candidate-authorized creation of a new Universal employer account
+     * using the candidate's Robin-managed email and a freshly generated random password.
+     * Refuses if terms were not explicitly accepted, a credential already exists, or the
+     * managed mailbox is not ready.
+     */
+    @Transactional
+    public AccountCreationResult authorizeAccountCreation(UUID profileId, UUID applicationId, UUID jobId,
+                                                          boolean acceptTerms) {
+        if (profileId == null || applicationId == null || jobId == null) {
+            throw new IllegalArgumentException("profile, application, and job correlation are required");
+        }
+        if (!acceptTerms) {
+            throw new AccountCreationRefusedException("TERMS_NOT_ACCEPTED",
+                    "Creating an employer account requires explicit candidate authorization");
+        }
+        Map<String, Object> app = db.queryForMap("""
+                select a.id, a.account_session_id, j.application_url
+                from applications a join jobs j on j.id = a.job_id
+                where a.id = ? and a.profile_id = ? and a.job_id = ?
+                """, applicationId, profileId, jobId);
+        String applicationUrl = (String) app.get("application_url");
+        if (!handles(applicationUrl)) {
+            throw new AccountCreationRefusedException("NOT_A_UNIVERSAL_APPLICATION",
+                    "This application is not handled by the Universal browser engine");
+        }
+        String employerDomain = employerDomainOf(applicationUrl);
+        if (employerDomain == null) {
+            throw new AccountCreationRefusedException("EMPLOYER_DOMAIN_INVALID",
+                    "No valid employer domain could be determined for this application");
+        }
+        if (hasSavedCredential(profileId, applicationUrl)) {
+            throw new AccountCreationRefusedException("CREDENTIAL_ALREADY_EXISTS",
+                    "A saved employer credential already exists for " + employerDomain + "; sign in instead of creating a duplicate account");
+        }
+        if (credentials == null || identityService == null || registrationIdentities == null) {
+            throw new IllegalStateException("Universal account provisioning services are unavailable");
+        }
+
+        UUID existingSessionId = (UUID) app.get("account_session_id");
+        UUID sessionId = existingSessionId != null && isOpenSession(profileId, existingSessionId)
+                ? existingSessionId
+                : identityService.startSession(applicationId, employerDomain, profileId)
+                        .orElseThrow(() -> new IllegalStateException("Could not start an account session"));
+
+        RegistrationIdentityService.RegistrationIdentity identity =
+                registrationIdentities.resolve(profileId, applicationId, sessionId, employerDomain);
+        if (identity.existing()) {
+            throw new AccountCreationRefusedException("IDENTITY_ALREADY_REGISTERED",
+                    "An employer account for this domain is already registered with " + identity.email()
+                            + "; sign in instead of creating a duplicate account");
+        }
+
+        String password = generatePassword();
+        credentials.save(profileId, employerDomain, identity.email(), password);
+
+        Optional<AutomationPlanRepository.PlanRow> existingPlan = findLatestUniversalPlan(profileId, applicationId);
+        if (existingPlan.isPresent()) {
+            AutomationPlanRepository.PlanRow row = existingPlan.get();
+            if ("AWAITING_APPROVAL".equals(row.status()) && !row.submitApproved()
+                    && !plans.hasPreSubmitAttemptCheckpoint(row.id())) {
+                List<AutomationPlan.Step> steps = buildUniversalSteps(
+                        profileId, applicationId, applicationUrl, employerDomain, sessionId, true);
+                Map<String, Object> workerPlan = assembleWorkerPlanPayload(
+                        row.id(), profileId, applicationId, jobId, applicationUrl, steps, employerDomain, sessionId, true);
+                if (plans.resumeUniversalPlan(row.id(), workerPlan)) {
+                    log.info("UNIVERSAL account creation authorized and paused plan {} resumed for application {} (sessionId={})",
+                            row.id(), applicationId, sessionId);
+                    return new AccountCreationResult(row.id(), sessionId, true);
+                }
+            }
+        }
+
+        UUID planId = buildPlan(profileId, applicationId, jobId, applicationUrl,
+                "universal:" + applicationId, true, true).orElseThrow();
+        log.info("UNIVERSAL account creation authorized on plan {} for application {} (sessionId={})",
+                planId, applicationId, sessionId);
+        return new AccountCreationResult(planId, sessionId, false);
     }
 
     /**
@@ -186,6 +306,9 @@ public class UniversalBrowserPlanService {
         @SuppressWarnings("unchecked")
         Map<String, Object> correlation = stored.get("correlation") instanceof Map<?, ?> m
                 ? (Map<String, Object>) m : Map.of();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> storedPkg = stored.get("package") instanceof Map<?, ?> m
+                ? (Map<String, Object>) m : Map.of();
         UUID jobId = UUID.fromString(String.valueOf(correlation.get("jobId")));
         UUID applicationId = row.applicationId();
         String targetUrl = row.targetUrl();
@@ -193,13 +316,13 @@ public class UniversalBrowserPlanService {
         if (!urlCheck.allowed() || isDedicatedAtsUrl(targetUrl)) {
             throw new IllegalStateException("UNSAFE_APPLICATION_URL:" + urlCheck.reason());
         }
-        List<AutomationPlan.Step> steps = List.of(
-                new AutomationPlan.Step("navigate-application", "NAVIGATE", "AUTO", Map.of("url", targetUrl)),
-                new AutomationPlan.Step("screenshot-landing", "SCREENSHOT", "AUTO", Map.of()),
-                new AutomationPlan.Step("universal-apply", "UNIVERSAL_APPLY", "AUTO",
-                        Map.of("expectedUrl", targetUrl, "hasSavedCredential", hasSavedCredential(profileId, targetUrl)))
-        );
-        return assembleWorkerPlanPayload(planId, profileId, applicationId, jobId, targetUrl, steps);
+        String employerDomain = employerDomainOf(targetUrl);
+        UUID sessionId = openSessionId(profileId, applicationId).orElse(null);
+        boolean accountCreationAuthorized = Boolean.TRUE.equals(storedPkg.get("accountCreationAuthorized"));
+        List<AutomationPlan.Step> steps = buildUniversalSteps(
+                profileId, applicationId, targetUrl, employerDomain, sessionId, accountCreationAuthorized);
+        return assembleWorkerPlanPayload(planId, profileId, applicationId, jobId, targetUrl, steps,
+                employerDomain, sessionId, accountCreationAuthorized);
     }
 
     public int countUnresolvedAnswers(UUID profileId, UUID jobId, UUID applicationId) {
@@ -210,13 +333,11 @@ public class UniversalBrowserPlanService {
     }
 
     private Optional<UUID> buildPlan(UUID profileId, UUID applicationId, UUID jobId, String applicationUrl,
-                                     String idempotencyKey, boolean allowRequeue) {
-        List<AutomationPlan.Step> steps = List.of(
-                new AutomationPlan.Step("navigate-application", "NAVIGATE", "AUTO", Map.of("url", applicationUrl)),
-                new AutomationPlan.Step("screenshot-landing", "SCREENSHOT", "AUTO", Map.of()),
-                new AutomationPlan.Step("universal-apply", "UNIVERSAL_APPLY", "AUTO",
-                        Map.of("expectedUrl", applicationUrl, "hasSavedCredential", hasSavedCredential(profileId, applicationUrl)))
-        );
+                                     String idempotencyKey, boolean allowRequeue, boolean accountCreationAuthorized) {
+        String employerDomain = employerDomainOf(applicationUrl);
+        UUID sessionId = openSessionId(profileId, applicationId).orElse(null);
+        List<AutomationPlan.Step> steps = buildUniversalSteps(
+                profileId, applicationId, applicationUrl, employerDomain, sessionId, accountCreationAuthorized);
         UUID planId = plans.create(profileId, applicationId, jobId, applicationUrl, idempotencyKey, steps);
         AutomationPlanRepository.PlanRow current = plans.findById(planId).orElseThrow();
         if (allowRequeue && ("FAILED".equals(current.status()) || "BLOCKED_ANTI_BOT".equals(current.status()))) {
@@ -227,7 +348,8 @@ public class UniversalBrowserPlanService {
             return Optional.of(planId);
         }
 
-        Map<String, Object> workerPlan = assembleWorkerPlanPayload(planId, profileId, applicationId, jobId, applicationUrl, steps);
+        Map<String, Object> workerPlan = assembleWorkerPlanPayload(planId, profileId, applicationId, jobId,
+                applicationUrl, steps, employerDomain, sessionId, accountCreationAuthorized);
         try {
             String body = json.writeValueAsString(workerPlan);
             int updated = db.update("""
@@ -246,8 +368,26 @@ public class UniversalBrowserPlanService {
         }
     }
 
+    private List<AutomationPlan.Step> buildUniversalSteps(UUID profileId, UUID applicationId, String targetUrl,
+                                                          String employerDomain, UUID sessionId,
+                                                          boolean accountCreationAuthorized) {
+        Map<String, Object> applyParams = new LinkedHashMap<>();
+        applyParams.put("expectedUrl", targetUrl);
+        applyParams.put("hasSavedCredential", hasSavedCredential(profileId, targetUrl));
+        applyParams.put("accountCreationAuthorized", accountCreationAuthorized);
+        if (employerDomain != null) applyParams.put("employerDomain", employerDomain);
+        if (sessionId != null) applyParams.put("sessionId", sessionId.toString());
+        return List.of(
+                new AutomationPlan.Step("navigate-application", "NAVIGATE", "AUTO", Map.of("url", targetUrl)),
+                new AutomationPlan.Step("screenshot-landing", "SCREENSHOT", "AUTO", Map.of()),
+                new AutomationPlan.Step("universal-apply", "UNIVERSAL_APPLY", "AUTO", Map.copyOf(applyParams))
+        );
+    }
+
     private Map<String, Object> assembleWorkerPlanPayload(UUID planId, UUID profileId, UUID applicationId, UUID jobId,
-                                                          String targetUrl, List<AutomationPlan.Step> steps) {
+                                                          String targetUrl, List<AutomationPlan.Step> steps,
+                                                          String employerDomain, UUID sessionId,
+                                                          boolean accountCreationAuthorized) {
         ApplyDocumentSelector.DocumentSelection selection = documentSelector.select(profileId, jobId, applicationId);
         if (selection.blocked()) {
             throw new ExecutionPackageBlockedException(
@@ -380,11 +520,16 @@ public class UniversalBrowserPlanService {
                 reusable
         );
 
+        boolean hasCredential = hasSavedCredential(profileId, targetUrl);
         Map<String, Object> pkg = new LinkedHashMap<>();
         pkg.put("planId", planId.toString());
         pkg.put("applicationId", applicationId.toString());
         pkg.put("jobId", jobId.toString());
         pkg.put("expectedUrl", targetUrl);
+        if (employerDomain != null) pkg.put("employerDomain", employerDomain);
+        if (sessionId != null) pkg.put("sessionId", sessionId.toString());
+        pkg.put("hasSavedCredential", hasCredential);
+        pkg.put("accountCreationAuthorized", accountCreationAuthorized);
         pkg.put("safetyContract", AutomationPlan.SAFETY_CONTRACT);
         pkg.put("allowLocalTestHosts", allowLocalTestHosts);
         pkg.put("profileFacts", UniversalFieldMapper.buildProfileFactsPayload(snapshot));
@@ -397,10 +542,16 @@ public class UniversalBrowserPlanService {
                 "coverLetterRequirement", selection.coverLetterRequirement().name(),
                 "warnings", selection.warnings()));
 
+        Map<String, Object> correlation = new LinkedHashMap<>();
+        correlation.put("jobId", jobId.toString());
+        correlation.put("applicationId", applicationId.toString());
+        if (employerDomain != null) correlation.put("employerDomain", employerDomain);
+        if (sessionId != null) correlation.put("sessionId", sessionId.toString());
+
         Map<String, Object> workerPlan = new LinkedHashMap<>();
         workerPlan.put("planType", "UNIVERSAL");
         workerPlan.put("version", 1);
-        workerPlan.put("correlation", Map.of("jobId", jobId.toString(), "applicationId", applicationId.toString()));
+        workerPlan.put("correlation", correlation);
         workerPlan.put("targetUrl", targetUrl);
         workerPlan.put("safetyContract", AutomationPlan.SAFETY_CONTRACT);
         workerPlan.put("steps", steps.stream().map(s -> Map.of(
@@ -438,16 +589,73 @@ public class UniversalBrowserPlanService {
 
     private boolean hasSavedCredential(UUID profileId, String applicationUrl) {
         try {
-            String host = URI.create(applicationUrl.trim()).getHost();
-            if (host == null || host.isBlank()) return false;
+            String domain = employerDomainOf(applicationUrl);
+            if (domain == null) return false;
+            if (credentials != null && credentials.exists(profileId, domain)) return true;
             Integer count = db.queryForObject("""
                     select count(*) from employer_credentials
                     where profile_id = ? and employer_domain = ? and status = 'ACTIVE'
-                    """, Integer.class, profileId, host.toLowerCase(Locale.ROOT));
-            return count != null && count > 0;
+                    """, Integer.class, profileId, domain);
+            if (count != null && count > 0) return true;
+            String rawHost = URI.create(applicationUrl.trim()).getHost();
+            if (rawHost != null && !rawHost.equalsIgnoreCase(domain)) {
+                Integer rawCount = db.queryForObject("""
+                        select count(*) from employer_credentials
+                        where profile_id = ? and employer_domain = ? and status = 'ACTIVE'
+                        """, Integer.class, profileId, rawHost.toLowerCase(Locale.ROOT));
+                return rawCount != null && rawCount > 0;
+            }
+            return false;
         } catch (Exception e) {
             return false;
         }
+    }
+
+    static String employerDomainOf(String applicationUrl) {
+        if (applicationUrl == null || applicationUrl.isBlank()) return null;
+        try {
+            String host = URI.create(applicationUrl.trim()).getHost();
+            if (host == null || host.isBlank()) return null;
+            return MailAddresses.employerDomain(host).orElse(host.toLowerCase(Locale.ROOT));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private Optional<UUID> openSessionId(UUID profileId, UUID applicationId) {
+        List<UUID> ids = db.queryForList("""
+                select s.id
+                from applications a
+                join account_sessions s on s.id = a.account_session_id
+                where a.id = ? and a.profile_id = ? and s.owner_profile_id = ?
+                  and s.state not in ('HARD_STOP', 'FAILED', 'COMPLETED')
+                """, UUID.class, applicationId, profileId, profileId);
+        return ids.stream().findFirst();
+    }
+
+    private boolean isOpenSession(UUID profileId, UUID sessionId) {
+        List<String> states = db.queryForList(
+                "select state from account_sessions where id = ? and owner_profile_id = ?",
+                String.class, sessionId, profileId);
+        return !states.isEmpty() && !RegistrationIdentityService.CLOSED_SESSION_STATES.contains(states.get(0));
+    }
+
+    private Optional<AutomationPlanRepository.PlanRow> findLatestUniversalPlan(UUID profileId, UUID applicationId) {
+        List<UUID> ids = db.queryForList("""
+                select id from automation_plans
+                where profile_id = ? and application_id = ?
+                  and coalesce(plan->>'planType', '') = 'UNIVERSAL'
+                order by created_at desc
+                limit 1
+                """, UUID.class, profileId, applicationId);
+        if (ids.isEmpty()) return Optional.empty();
+        return plans.find(profileId, ids.get(0));
+    }
+
+    private String generatePassword() {
+        byte[] raw = new byte[24];
+        random.nextBytes(raw);
+        return "Rb9!" + Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
     }
 
     /**

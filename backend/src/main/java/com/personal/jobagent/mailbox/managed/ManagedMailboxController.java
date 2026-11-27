@@ -99,14 +99,20 @@ public class ManagedMailboxController {
     private Map<String, Object> view(ManagedMailboxService.Status status) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("readiness", status.readiness().name());
+        body.put("transportReadiness", status.transportReadiness().name());
+        body.put("senderAuthenticationReadiness", status.senderAuthenticationReadiness());
+        body.put("employerVerificationReadiness", status.employerVerificationReadiness());
         body.put("provider", mailboxes.settings().providerId());
         body.put("domain", status.domain() == null || status.domain().isEmpty() ? null : status.domain());
         body.put("address", status.address() == null ? null : status.address().address());
         body.put("addressStatus", status.address() == null ? null : status.address().status());
         body.put("usableForRegistration", status.usableForRegistration());
+        body.put("usableForAutomatedVerification", status.usableForAutomatedVerification());
+        body.put("trustedAuthServConfigured", !mailboxes.settings().cloudflareTrustedAuthServIds().isEmpty());
         body.put("receivingVerifiedAt", status.evidence() == null ? null : status.evidence().receivingVerifiedAt().toString());
         body.put("lastInboundAt", status.evidence() == null ? null : status.evidence().lastInboundAt().toString());
         body.put("missing", status.missing());
+        body.put("verificationMissing", status.verificationMissing());
         return body;
     }
 

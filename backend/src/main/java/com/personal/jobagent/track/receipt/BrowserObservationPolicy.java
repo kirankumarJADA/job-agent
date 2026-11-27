@@ -87,9 +87,9 @@ public final class BrowserObservationPolicy {
                 return Assessment.fail("EVIDENCE_DIGEST_MISMATCH",
                         "the browser evidence's own canonical digest does not match its contents.", parsed);
             }
-            if (parsed.planId() == null || parsed.applicationId() == null
+            if (parsed.planId() == null || parsed.applicationId() == null || parsed.jobId() == null
                     || !parsed.planId().equals(in.planId()) || !parsed.applicationId().equals(in.applicationId())
-                    || (parsed.jobId() != null && in.jobId() != null && !parsed.jobId().equals(in.jobId()))) {
+                    || !parsed.jobId().equals(in.jobId())) {
                 return Assessment.fail("CORRELATION_MISMATCH",
                         "the browser evidence names a different attempt, application or job.", parsed);
             }
