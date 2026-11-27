@@ -330,14 +330,47 @@ class Stage3IPhase3UnitTest {
         assertThat(refusedRes.getStatusCode().value()).isEqualTo(409);
         assertThat(refusedRes.getBody().toString()).contains("TERMS_NOT_ACCEPTED");
 
-        // 3. createUniversalAccount succeeds cleanly on acceptTerms=true
+        // 3. createUniversalAccount catches blocked package cleanly as 409 EXECUTION_PACKAGE_BLOCKED
+        org.mockito.Mockito.doThrow(new com.personal.jobagent.automation.ExecutionPackageBlockedException("CV missing",
+                        List.of(Map.of("code", "CV_MISSING", "message", "No CV"))))
+                .when(universal).authorizeAccountCreation(profileId, appId, jobId, true);
+        ResponseEntity<?> blockedAcc = controller.createUniversalAccount(appId, new ApplyController.UniversalAccountRequest(true));
+        assertThat(blockedAcc.getStatusCode().value()).isEqualTo(409);
+        assertThat(blockedAcc.getBody().toString()).contains("EXECUTION_PACKAGE_BLOCKED");
+
+        // 4. createUniversalAccount succeeds cleanly on acceptTerms=true
         UUID planId = UUID.randomUUID();
         UUID sessionId = UUID.randomUUID();
-        when(universal.authorizeAccountCreation(profileId, appId, jobId, true))
-                .thenReturn(new UniversalBrowserPlanService.AccountCreationResult(planId, sessionId, false));
+        org.mockito.Mockito.doReturn(new UniversalBrowserPlanService.AccountCreationResult(planId, sessionId, false))
+                .when(universal).authorizeAccountCreation(profileId, appId, jobId, true);
         ResponseEntity<?> okRes = controller.createUniversalAccount(appId, new ApplyController.UniversalAccountRequest(true));
         assertThat(okRes.getStatusCode().value()).isEqualTo(200);
         assertThat(okRes.getBody().toString()).contains(planId.toString()).contains("PREPARED");
+    }
+
+    @Test
+    void schedulerDatabaseGuardHaltsDuringShutdownAndRestoresOnStartWhileDetectingTestcontainersClasses() {
+        com.zaxxer.hikari.HikariDataSource ds = mock(com.zaxxer.hikari.HikariDataSource.class);
+        when(ds.isClosed()).thenReturn(false);
+        when(ds.isRunning()).thenReturn(true);
+
+        var guard = new com.personal.jobagent.common.SchedulerDatabaseGuard(ds);
+        assertThat(guard.isReady()).isTrue();
+
+        when(ds.isClosed()).thenReturn(true);
+        assertThat(guard.isReady()).isFalse();
+
+        when(ds.isClosed()).thenReturn(false);
+        assertThat(guard.isReady()).isTrue();
+
+        guard.stop();
+        assertThat(guard.isReady()).isFalse();
+        guard.start();
+        assertThat(guard.isReady()).isTrue();
+        guard.destroy();
+        assertThat(guard.isReady()).isFalse();
+
+        assertThat(com.personal.jobagent.config.TestcontainersContextCleanupListener.class).isNotNull();
     }
 
     @Test

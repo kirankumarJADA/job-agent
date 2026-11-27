@@ -1,6 +1,7 @@
 package com.personal.jobagent.mailbox.managed;
 
 import com.personal.jobagent.common.MaintenanceModeService;
+import com.personal.jobagent.common.SchedulerDatabaseGuard;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -35,6 +36,9 @@ public class ManagedMailRetentionJob {
     private final ManagedMailSettings settings;
     private final MaintenanceModeService maintenanceMode;
 
+    @Autowired(required = false)
+    private SchedulerDatabaseGuard databaseGuard;
+
     @Autowired
     public ManagedMailRetentionJob(JdbcTemplate db,
                                    ManagedMailSettings settings,
@@ -51,7 +55,7 @@ public class ManagedMailRetentionJob {
     @Scheduled(fixedDelayString = "${app.managed-mail.retention-sweep-interval-ms:600000}",
             initialDelayString = "${app.managed-mail.retention-sweep-initial-delay-ms:60000}")
     public void sweep() {
-        if (maintenanceMode.isMaintenanceMode()) {
+        if (maintenanceMode.isMaintenanceMode() || (databaseGuard != null && !databaseGuard.isReady())) {
             return;
         }
         try {
@@ -61,6 +65,10 @@ public class ManagedMailRetentionJob {
                         + "and {} webhook token(s)", result.contentErased(), result.messagesDeleted(), result.tokensDeleted());
             }
         } catch (RuntimeException e) {
+            if (databaseGuard != null && !databaseGuard.isReady()) {
+                log.debug("Skipping managed mail retention error during shutdown: {}", e.getClass().getSimpleName());
+                return;
+            }
             log.warn("Managed mail retention sweep failed: {}", e.getClass().getSimpleName());
         }
     }

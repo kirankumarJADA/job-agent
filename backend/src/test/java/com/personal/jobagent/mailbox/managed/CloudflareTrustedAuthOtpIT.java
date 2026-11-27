@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.application.ApplicationPipelineService;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.discovery.platform.AddressGuard;
+import com.personal.jobagent.documents.DocumentFactValidator;
 import com.personal.jobagent.identity.IdentityService;
 import com.personal.jobagent.mailbox.RegistrationIdentityService;
 import com.personal.jobagent.profile.ProfileRepository;
@@ -125,13 +126,8 @@ class CloudflareTrustedAuthOtpIT {
                 on conflict (kind, org_identifier) do nothing
                 """, FIXTURE_SOURCE);
         jdbc.update("delete from mailbox_verifications");
-        jdbc.update("delete from automation_step_events");
-        jdbc.update("delete from automation_plans");
         jdbc.update("delete from email_application_links");
         jdbc.update("delete from emails");
-        jdbc.update("delete from account_sessions");
-        jdbc.update("delete from applicant_identities");
-        jdbc.update("delete from employer_credentials");
         jdbc.update("delete from managed_inbound_messages");
         jdbc.update("delete from managed_mail_addresses");
         jdbc.update("delete from managed_mail_domains");
@@ -242,6 +238,7 @@ class CloudflareTrustedAuthOtpIT {
 
         UUID app1 = createApp(cand.profileId(), "https://acme-verify.example/jobs/1");
         UUID sess1 = startSession(cand.profileId(), app1, "acme-verify.example");
+        jdbc.update("update account_sessions set created_at = now() - interval '4 minutes' where id = ?", sess1);
         mvc.perform(post("/api/v1/mailbox-verification/registration-identity").header("Authorization", WORKER_HEADER)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(Map.of(
@@ -250,7 +247,7 @@ class CloudflareTrustedAuthOtpIT {
                                 "employerDomain", "acme-verify.example"))))
                 .andExpect(status().isOk());
 
-        // Both untrusted & unaligned OTPs are rejected (404)
+        // Both untrusted & unaligned OTPs are inside the session window yet rejected (404)
         String resolveBody1 = json.writeValueAsString(Map.of(
                 "applicationId", app1.toString(),
                 "sessionId", sess1.toString(),
@@ -259,10 +256,15 @@ class CloudflareTrustedAuthOtpIT {
                         .contentType(MediaType.APPLICATION_JSON).content(resolveBody1))
                 .andExpect(status().isNotFound());
 
-        // 2. Trusted + DKIM-aligned Cloudflare OTP resolves cleanly and retains NO body text in emails table
+        // 2. Trusted + DKIM-aligned Cloudflare OTP upgrades senderAuthenticationReadiness to VERIFIED,
+        // resolves cleanly, and retains NO body text in emails table
         assertThat(deliverCloudflare(cand.managedAddress(), "Security <security@acme-verify.example>",
                 "Verification code", "Your verification code is 739204",
                 "mail.acme-verify.example", "mx.cloudflare.net", true, Instant.now()).getResponse().getStatus()).isEqualTo(200);
+
+        JsonNode verifiedStatus = json(mvc.perform(get("/api/v1/managed-mail/address").with(cand.auth()))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(verifiedStatus.get("senderAuthenticationReadiness").asText()).isEqualTo("VERIFIED");
 
         Map<String, Object> emailRow = jdbc.queryForMap(
                 "select body_text, body_retained, classification from emails where subject = 'Verification code' and profile_id = ?",
@@ -305,6 +307,15 @@ class CloudflareTrustedAuthOtpIT {
 
         UUID app2 = createApp(cand.profileId(), "https://acme-verify.example/jobs/2");
         UUID sess2 = startSession(cand.profileId(), app2, "acme-verify.example");
+        jdbc.update("update account_sessions set created_at = now() - interval '4 minutes' where id = ?", sess2);
+        mvc.perform(post("/api/v1/mailbox-verification/registration-identity").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of(
+                                "applicationId", app2.toString(),
+                                "sessionId", sess2.toString(),
+                                "employerDomain", "acme-verify.example"))))
+                .andExpect(status().isOk());
+
         JsonNode lease3 = json(mvc.perform(post("/api/v1/mailbox-verification/resolve").header("Authorization", WORKER_HEADER)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(Map.of(
@@ -363,6 +374,18 @@ class CloudflareTrustedAuthOtpIT {
                 "acme-verify.example", "mx.cloudflare.net", true, Instant.now()).getResponse().getStatus()).isEqualTo(200);
 
         UUID readyApp = createApp(readyCand.profileId(), "https://acme-verify.example/jobs/ready");
+
+        // Missing reviewed CV fails closed with 409 EXECUTION_PACKAGE_BLOCKED without persisting credentials
+        MvcResult blockedRes = mvc.perform(post("/api/v1/apply/applications/{id}/universal-account", readyApp)
+                        .with(csrf()).with(readyCand.auth())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"acceptTerms\":true}"))
+                .andExpect(status().isConflict()).andReturn();
+        assertThat(json(blockedRes).get("code").asText()).isEqualTo("EXECUTION_PACKAGE_BLOCKED");
+        assertThat(jdbc.queryForObject(
+                "select count(*) from employer_credentials where profile_id = ?", Integer.class, readyCand.profileId()))
+                .isZero();
+
+        seedReadyCvForApplication(readyCand.profileId(), readyApp, "cf-ready-cv");
         MvcResult authRes = mvc.perform(post("/api/v1/apply/applications/{id}/universal-account", readyApp)
                         .with(csrf()).with(readyCand.auth())
                         .contentType(MediaType.APPLICATION_JSON).content("{\"acceptTerms\":true}"))
@@ -378,7 +401,7 @@ class CloudflareTrustedAuthOtpIT {
         JsonNode parsedPlan = json.readTree(planJson);
         assertThat(parsedPlan.get("planType").asText()).isEqualTo("UNIVERSAL");
         assertThat(parsedPlan.get("package").get("accountCreationAuthorized").asBoolean()).isTrue();
-        assertThat(parsedPlan.get("package").get("candidate").get("email").asText()).isEqualTo(readyCand.managedAddress());
+        assertThat(parsedPlan.get("package").get("profileFacts").get("email").asText()).isEqualTo(readyCand.managedAddress());
 
         // Duplicate universal-account request refuses with CREDENTIAL_ALREADY_EXISTS
         MvcResult dupRes = mvc.perform(post("/api/v1/apply/applications/{id}/universal-account", readyApp)
@@ -397,11 +420,43 @@ class CloudflareTrustedAuthOtpIT {
         UUID disabledApp = createApp(disabledCand.profileId(), "https://acme-verify.example/jobs/disabled");
         UUID disabledSess = startSession(disabledCand.profileId(), disabledApp, "acme-verify.example");
         jdbc.update("""
-                insert into applicant_identities (id, profile_id, domain, applicant_email, provider, active)
-                values (?, ?, 'acme-verify.example', 'manual@personal.example', 'EXTERNAL', false)
+                insert into applicant_identities (id, profile_id, domain, applicant_email, provider, account_status)
+                values (?, ?, 'acme-verify.example', 'manual@personal.example', 'EXTERNAL', 'DISABLED')
                 """, UuidV7.generate(), disabledCand.profileId());
         assertThatThrownBy(() -> registrationIdentities.resolve(
                 disabledCand.profileId(), disabledApp, disabledSess, "acme-verify.example"))
                 .isInstanceOf(IllegalStateException.class);
+    }
+
+    private void seedReadyCvForApplication(UUID profileId, UUID appId, String tag) throws Exception {
+        UUID jobId = jdbc.queryForObject("select job_id from applications where id = ?", UUID.class, appId);
+        byte[] pdf = ("%PDF-1.4\n%% " + tag + "\n").getBytes(StandardCharsets.UTF_8);
+        String pdfSha = java.util.HexFormat.of().formatHex(
+                java.security.MessageDigest.getInstance("SHA-256").digest(pdf));
+        UUID fileId = UuidV7.generate();
+        UUID cvId = UuidV7.generate();
+        jdbc.update("insert into files(id, object_key, sha256, content_type, byte_size, purpose, content) values(?,?,?,?,?,?,?)",
+                fileId, "cv/" + cvId + ".pdf", pdfSha, "application/pdf", (long) pdf.length, "TAILORED_CV", pdf);
+        jdbc.update("""
+                insert into cv_versions (id, job_id, application_id, profile_id, kind, title, body_markdown,
+                                         claims_validation, approved, profile_revision, profile_snapshot_hash,
+                                         content_sha256, immutable, pdf_file_id, created_at)
+                values (?, ?, ?, ?, 'TAILORED', 'Tailored CV', 'CV text', '{}', false, 1, 'snap', ?, true, ?, now())
+                """, cvId, jobId, appId, profileId, pdfSha, fileId);
+        jdbc.update("update applications set cv_version_id = ? where id = ?", cvId, appId);
+        jdbc.update("""
+                insert into resume_ats_analyses (id, profile_id, job_id, application_id, input_hash, role, domain,
+                    required_skills, preferred_skills, normalized_skills, verified_evidence, gaps, ats_report,
+                    cv_version_id, profile_revision, profile_snapshot_hash)
+                values (?, ?, ?, ?, ?, 'Engineer', 'Tech', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+                        '[]'::jsonb, '[]'::jsonb, ?::jsonb, ?, 1, 'snap')
+                """, UuidV7.generate(), profileId, jobId, appId, "hash-" + cvId,
+                json.writeValueAsString(Map.of("validation", Map.of(
+                        "passed", true, "validator_version", DocumentFactValidator.VERSION))), cvId);
+        jdbc.update("""
+                insert into cv_version_reviews (cv_version_id, profile_id, approved, decided_by, content_sha256)
+                values (?, ?, true, 'owner', ?)
+                on conflict (cv_version_id) do nothing
+                """, cvId, profileId, pdfSha);
     }
 }

@@ -1,6 +1,7 @@
 package com.personal.jobagent.discovery;
 
 import com.personal.jobagent.common.MaintenanceModeService;
+import com.personal.jobagent.common.SchedulerDatabaseGuard;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.discovery.plan.ExecutionFencedException;
 import com.personal.jobagent.discovery.plan.SearchPlanRepository;
@@ -35,6 +36,9 @@ public class JobDiscoveryService {
     private final OutboxWriter outboxWriter;
     private final MaintenanceModeService maintenanceMode;
     private final SearchPlanRepository searchPlanRepository;
+
+    @Autowired(required = false)
+    private SchedulerDatabaseGuard databaseGuard;
 
     @Autowired
     public JobDiscoveryService(JdbcTemplate jdbcTemplate,
@@ -468,7 +472,8 @@ public class JobDiscoveryService {
     @Transactional(isolation = Isolation.READ_COMMITTED)
     @Scheduled(cron = "0 0 * * * *") // hourly scheduled refresh for source health and stale jobs
     public void scheduledDiscoveryMaintenance() {
-        if (!maintenanceEnabled || maintenanceMode.isMaintenanceMode()) {
+        if (!maintenanceEnabled || maintenanceMode.isMaintenanceMode()
+                || (databaseGuard != null && !databaseGuard.isReady())) {
             return;
         }
         Boolean acquired = jdbcTemplate.queryForObject(

@@ -352,18 +352,28 @@ class ManagedMailIT {
         JsonNode replayed = resolve(app, accountSession, employer, null, 200);
         assertThat(replayed.get("verificationId").asText()).isEqualTo(verificationId);
         assertThat(replayed.get("otp").asText()).isEqualTo("482913");
+        String replayedLeaseToken = replayed.get("leaseToken").asText();
 
         UUID otherApp = application(devProfile, "concurrent-other");
         UUID otherSession = accountSession(otherApp, employer);
         registrationIdentity(otherApp, otherSession, employer);
         resolve(otherApp, otherSession, employer, null, 404);
 
-        // 4. Confirming the lease consumes it permanently, erases content_encrypted, and blocks future resolves.
-        String confirmBody = json.writeValueAsString(Map.of(
+        // 4. Stale pre-recovery leaseToken is rejected (409); current replayedLeaseToken consumes permanently.
+        String staleConfirmBody = json.writeValueAsString(Map.of(
                 "applicationId", app.toString(),
                 "sessionId", accountSession.toString(),
                 "verificationId", verificationId,
                 "leaseToken", leaseToken));
+        mvc.perform(post("/api/v1/mailbox-verification/confirm").header("Authorization", WORKER)
+                        .contentType(MediaType.APPLICATION_JSON).content(staleConfirmBody))
+                .andExpect(status().isConflict());
+
+        String confirmBody = json.writeValueAsString(Map.of(
+                "applicationId", app.toString(),
+                "sessionId", accountSession.toString(),
+                "verificationId", verificationId,
+                "leaseToken", replayedLeaseToken));
         JsonNode confirmed = json(mvc.perform(post("/api/v1/mailbox-verification/confirm").header("Authorization", WORKER)
                         .contentType(MediaType.APPLICATION_JSON).content(confirmBody))
                 .andExpect(status().isOk()).andReturn());

@@ -241,6 +241,14 @@ public class ApplyController {
             audit.write(new AuditEntry(ownerContext.actorOr("user"), "UNIVERSAL_ACCOUNT_CREATION_REFUSED",
                     "APPLICATION", id, null, Map.of("reason", refused.reason()), null, UuidV7.generate()));
             return ResponseEntity.status(409).body(Map.of("error", refused.getMessage(), "code", refused.reason()));
+        } catch (ExecutionPackageBlockedException blocked) {
+            audit.write(new AuditEntry(ownerContext.actorOr("user"), "UNIVERSAL_ACCOUNT_CREATION_REFUSED",
+                    "APPLICATION", id, null, Map.of("reason", "EXECUTION_PACKAGE_BLOCKED",
+                            "blockers", blocked.blockers()), null, UuidV7.generate()));
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "the exact document versions for this application cannot be selected",
+                    "code", "EXECUTION_PACKAGE_BLOCKED",
+                    "blockers", blocked.blockers()));
         } catch (RegistrationIdentityService.ManagedMailboxNotReadyException notReady) {
             return ResponseEntity.status(409).body(Map.of(
                     "error", "Robin-managed email is not ready, so no employer account was registered",

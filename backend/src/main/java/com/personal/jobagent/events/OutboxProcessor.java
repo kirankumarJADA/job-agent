@@ -2,6 +2,7 @@ package com.personal.jobagent.events;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.common.MaintenanceModeService;
+import com.personal.jobagent.common.SchedulerDatabaseGuard;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.notifications.NotificationRecord;
 import com.personal.jobagent.notifications.NotificationRepository;
@@ -133,6 +134,9 @@ public class OutboxProcessor {
     private final AtomicBoolean pausedLogged = new AtomicBoolean(false);
     private final AtomicLong loggedWatermark = new AtomicLong(0);
 
+    @Autowired(required = false)
+    private SchedulerDatabaseGuard databaseGuard;
+
     @Autowired
     public OutboxProcessor(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper, EventPublisher eventPublisher,
                            NotificationRepository notificationRepository,
@@ -170,17 +174,28 @@ public class OutboxProcessor {
             logPausedOnce();
             return;
         }
-        // Read first, every round, so an exclusion or a revert applies from the
-        // next round. If it cannot be read, the round fails and nothing is
-        // dispatched: the unfiltered query is never a fallback.
-        long watermark = exclusionWatermark();
-        List<PendingRow> rows = watermark > 0
-                ? jdbcTemplate.query(PENDING_WITH_EXCLUSION_SQL, ROW_MAPPER,
-                        MAX_ATTEMPTS, watermark, BATCH_SIZE, MAX_ATTEMPTS, watermark, BATCH_SIZE, BATCH_SIZE)
-                : jdbcTemplate.query(PENDING_SQL, ROW_MAPPER, MAX_ATTEMPTS, BATCH_SIZE);
+        if (databaseGuard != null && !databaseGuard.isReady()) {
+            return;
+        }
+        try {
+            // Read first, every round, so an exclusion or a revert applies from the
+            // next round. If it cannot be read, the round fails and nothing is
+            // dispatched: the unfiltered query is never a fallback.
+            long watermark = exclusionWatermark();
+            List<PendingRow> rows = watermark > 0
+                    ? jdbcTemplate.query(PENDING_WITH_EXCLUSION_SQL, ROW_MAPPER,
+                            MAX_ATTEMPTS, watermark, BATCH_SIZE, MAX_ATTEMPTS, watermark, BATCH_SIZE, BATCH_SIZE)
+                    : jdbcTemplate.query(PENDING_SQL, ROW_MAPPER, MAX_ATTEMPTS, BATCH_SIZE);
 
-        for (PendingRow row : rows) {
-            dispatchOne(row);
+            for (PendingRow row : rows) {
+                dispatchOne(row);
+            }
+        } catch (RuntimeException e) {
+            if (databaseGuard != null && !databaseGuard.isReady()) {
+                log.debug("Skipping outbox dispatch error during shutdown: {}", e.getClass().getSimpleName());
+                return;
+            }
+            throw e;
         }
     }
 
@@ -208,10 +223,23 @@ public class OutboxProcessor {
             logPausedOnce();
             return;
         }
-        long watermark = exclusionWatermark();
-        List<Map<String, Object>> stuck = watermark > 0
-                ? jdbcTemplate.queryForList(DEAD_LETTER_WITH_EXCLUSION_SQL, MAX_ATTEMPTS, watermark)
-                : jdbcTemplate.queryForList(DEAD_LETTER_SQL, MAX_ATTEMPTS);
+        if (databaseGuard != null && !databaseGuard.isReady()) {
+            return;
+        }
+        long watermark;
+        List<Map<String, Object>> stuck;
+        try {
+            watermark = exclusionWatermark();
+            stuck = watermark > 0
+                    ? jdbcTemplate.queryForList(DEAD_LETTER_WITH_EXCLUSION_SQL, MAX_ATTEMPTS, watermark)
+                    : jdbcTemplate.queryForList(DEAD_LETTER_SQL, MAX_ATTEMPTS);
+        } catch (RuntimeException e) {
+            if (databaseGuard != null && !databaseGuard.isReady()) {
+                log.debug("Skipping outbox DLQ reconcile error during shutdown: {}", e.getClass().getSimpleName());
+                return;
+            }
+            throw e;
+        }
 
         for (Map<String, Object> row : stuck) {
             UUID eventId = (UUID) row.get("id");

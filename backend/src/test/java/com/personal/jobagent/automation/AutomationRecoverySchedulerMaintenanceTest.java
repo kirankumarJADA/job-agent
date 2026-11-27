@@ -55,6 +55,25 @@ class AutomationRecoverySchedulerMaintenanceTest {
     }
 
     @Test
+    @DisplayName("When SchedulerDatabaseGuard is inactive (shutdown/teardown), sweep is skipped; active guard runs normally")
+    void schedulerRespectsDatabaseLifecycleGuardWithoutDisablingProductionRecovery() {
+        MaintenanceModeService maintenanceMode = new MaintenanceModeService(false);
+        AutomationRecoveryScheduler scheduler = new AutomationRecoveryScheduler(plans, 15, metrics, maintenanceMode);
+        com.personal.jobagent.common.SchedulerDatabaseGuard guard = new com.personal.jobagent.common.SchedulerDatabaseGuard();
+        scheduler.setDatabaseGuard(guard);
+
+        guard.deactivate();
+        scheduler.recoverStalePlans();
+        verify(plans, never()).recoverStale(any(Instant.class));
+
+        guard.start();
+        when(plans.recoverStale(any(Instant.class))).thenReturn(2);
+        scheduler.recoverStalePlans();
+        verify(plans, times(1)).recoverStale(any(Instant.class));
+        verify(metrics, times(1)).stalePlansRecovered(2);
+    }
+
+    @Test
     @DisplayName("When maintenance mode is active, manual recovery endpoint returns 503 and zero DB calls")
     void controllerBlocksManualRecoveryWhenMaintenanceActive() {
         MaintenanceModeService maintenanceMode = new MaintenanceModeService(true);
