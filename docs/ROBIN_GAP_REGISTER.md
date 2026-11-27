@@ -12,7 +12,7 @@ Each entry records evidence and status. Severity: **P0** user-facing truthfulnes
 
 - **A1 identity lifecycle and A3 OTP isolation: VERIFIED** by a new test, `CloudflareTrustedAuthOtpIT#stage3iPhase6_…`.
 - **A2 managed-mail retention: VERIFIED after 2 fixes** (`ManagedMailRetentionConcurrencyIT`, 6 tests with real row locks):
-  - a concurrent `/resolve` loser got 404 instead of the active lease;
+  - a concurrent `/resolve` loser got 404 instead of the active lease. This needed two fixes: CI exposed a second interleaving, where the winner commits between the loser's Path A and Path B, which the first fix missed. It is now covered on both paths and proven with a forced interleaving test plus a mutation check;
   - the retention sweep used the JVM clock instead of the database clock.
 - **A4 redaction: VERIFIED after fixes.** Backend `LogScrubber` missed credential headers (`x-api-key`, `x-auth-token`, `proxy-authorization`, CSRF), unquoted `key: value` secrets, numeric `code:` values and bare JWTs; worker `scrubString` missed numeric `code:` values and bare JWTs. `ROBIN_WORKER_SESSION_KEY` fails closed: verified.
 - **A5 (P1-5) SSRF pinning: PROVEN at the socket level** with a JDK hostile-DNS resolver SPI, 0 attacker connections and a positive control (`SafeHttpClientTransportPinningTest`). `AddressGuard` also refused too few address classes: TEST-NET, Teredo and discard prefixes, and NAT64/6to4 addresses embedding a private IPv4. Fixed, with 53 cases.

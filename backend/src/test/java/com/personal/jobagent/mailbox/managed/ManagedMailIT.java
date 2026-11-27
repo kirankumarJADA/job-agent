@@ -111,6 +111,8 @@ class ManagedMailIT {
     @Autowired private ManagedMailboxService mailboxes;
     @Autowired private com.personal.jobagent.identity.IdentityService identities;
     @Autowired private com.personal.jobagent.mailbox.RegistrationIdentityService registrationIdentities;
+    /** Stage 3I Phase 6: real bean, spied only to force one exact interleaving (calls through by default). */
+    @org.springframework.boot.test.mock.mockito.SpyBean private ManagedMailVerificationProvider managedProviderSpy;
 
     private MockHttpSession session;
     private UUID devProfile;
@@ -713,6 +715,59 @@ class ManagedMailIT {
         assertThat(count("select count(*) from applicant_identities where profile_id = ?", profile)).isZero();
         assertThat(count("select count(*) from account_sessions where owner_profile_id = ?", profile)).isZero();
         assertThat(count("select count(*) from mailbox_verifications where application_id = ?", app)).isZero();
+    }
+
+    /**
+     * Stage 3I Phase 6 (found by CI run 46040832715): the losing /resolve of a concurrent pair got 404. Its Path A
+     * saw no lease; the winner then reserved and committed the message; its Path B no longer sees a reserved
+     * message as fresh. This forces exactly that interleaving (no timing luck): during the loser's Path B
+     * read, the winner's complete /resolve runs and commits first.
+     */
+    @Test
+    void stage3iPhase6_aLeaseReservedBetweenPathAAndPathBIsSharedInsteadOfReportedMissing() throws Exception {
+        String employer = "interleave-p6.example";
+        String alias = reserve(session);
+        proveReceiving();
+        UUID app = application(devProfile, "interleave-p6");
+        ensureRunningPlan(app, employer);
+        UUID sess = accountSession(app, employer);
+        registrationIdentity(app, sess, employer);
+        deliver(Delivery.to(alias).from(employerFrom(employer)).subject("Your verification code")
+                .body("Your verification code is 731846").messageId("<interleave-p6@interleave-p6.example>"))
+                .andExpect(status().isOk());
+        String resolveBody = json.writeValueAsString(Map.of(
+                "applicationId", app.toString(), "sessionId", sess.toString(), "employerDomain", employer));
+        java.util.concurrent.atomic.AtomicBoolean armed = new java.util.concurrent.atomic.AtomicBoolean(true);
+        java.util.concurrent.atomic.AtomicReference<MvcResult> winner = new java.util.concurrent.atomic.AtomicReference<>();
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            org.mockito.Mockito.doAnswer(invocation -> {
+                if (armed.compareAndSet(true, false)) {
+                    winner.set(pool.submit(() -> mvc.perform(post("/api/v1/mailbox-verification/resolve")
+                                    .header("Authorization", WORKER)
+                                    .contentType(MediaType.APPLICATION_JSON).content(resolveBody))
+                            .andReturn()).get(15, TimeUnit.SECONDS));
+                }
+                return invocation.callRealMethod();
+            }).when(managedProviderSpy).findVerification(
+                    org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+                    org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+
+            MvcResult loser = mvc.perform(post("/api/v1/mailbox-verification/resolve")
+                            .header("Authorization", WORKER)
+                            .contentType(MediaType.APPLICATION_JSON).content(resolveBody))
+                    .andReturn();
+
+            assertThat(winner.get()).as("the interleaving was forced").isNotNull();
+            assertThat(winner.get().getResponse().getStatus()).isEqualTo(200);
+            assertThat(loser.getResponse().getStatus()).as(loser.getResponse().getContentAsString()).isEqualTo(200);
+            assertThat(json(loser).get("verificationId").asText()).isEqualTo(json(winner.get()).get("verificationId").asText());
+            assertThat(json(loser).get("otp").asText()).isEqualTo("731846");
+            assertThat(count("select count(*) from mailbox_verifications where application_id = ? and status = 'RESERVED'", app))
+                    .isEqualTo(1);
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     @Test

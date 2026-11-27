@@ -56,7 +56,12 @@ Each claim from Phase 5 was re-tested with new tests written for this phase. "De
 
 Defects found and fixed:
 
-- **Concurrent `/resolve` returned 404 to the losing racer** (`MailboxVerificationController`). When `tryReserveManagedMessage` returned `FALSE` because another request had just reserved the lease, the loser did not fall back to the active lease. It now retries `tryRecoverActiveLease` once before answering 404. `ManagedMailIT` passes 14/14, plus 3 repeated runs.
+- **Concurrent `/resolve` returned 404 to the losing racer** (`MailboxVerificationController`). This took two fixes, and **the first was incomplete**.
+  - **First fix:** when `tryReserveManagedMessage` returned `FALSE` because another request had just reserved the lease, the loser did not fall back to the active lease. It now retries `tryRecoverActiveLease` before answering 404. That passed locally (`ManagedMailIT` 14/14, 3 repeats) and in CI run `46038516243`.
+  - **Second failure:** CI run `46040832715` then failed the same test (`expected: 200 but was: 404`). There was a second interleaving: the loser's Path A saw no lease, the winner reserved and committed, and the loser's Path B no longer sees a reserved message as fresh, so it answered 404 before any recovery.
+  - **Fix:** Path B now also converges on this application's and session's active lease before answering 404. Path A is scoped to the same application and session, so no other application's lease can ever be returned.
+  - **Deterministic proof:** `ManagedMailIT#stage3iPhase6_aLeaseReservedBetweenPathAAndPathBIsSharedInsteadOfReportedMissing` spies the real managed provider so that, during the loser's Path B read, the winner's complete `/resolve` runs and commits first. That is exactly the CI interleaving, with no timing luck. Both requests get 200 with the same `verificationId` and OTP, and exactly one RESERVED lease exists. **Mutation check:** without the fix, the test fails every time with the CI symptom (`expected: 200 but was: 404`). `ManagedMailIT` now passes 15/15 in 3 consecutive runs.
+  - **Lesson recorded honestly:** the probabilistic two-thread test was green locally and in one CI run while a real race remained.
 - **Retention compared timestamps against the JVM clock** (`ManagedMailRetentionJob`). `sweep()` now purges against `select now()`, so worker and database clock skew cannot age out a live lease early. A test covers it.
 
 ### A3 — OTP and private email isolation: **VERIFIED**, no defect
@@ -196,7 +201,7 @@ No fixture-based submission is presented anywhere as a real employer submission.
 | Suite | Command | Result |
 |---|---|---|
 | Backend unit (surefire) | `mvn -B clean verify` | **2,132 run, 0 failures, 0 errors, 6 skipped** (`RedisConnectivityDiagnosticsTest`, `RedisLettuceAbExperimentTest` and `RedisTlsBindingTest`, 2 each; they need a real Redis) |
-| Backend ITs (failsafe, PostgreSQL 16 Testcontainers) | same run | **482 run, 0 failures, 0 errors, 7 skipped** (`ExternalDatabase*IT` ×3 and the live-provider `*LiveIngestionIT`/`PlatformLiveIT` ×4; they need external databases or the internet, which this phase does not touch). `BUILD SUCCESS` |
+| Backend ITs (failsafe, PostgreSQL 16 Testcontainers) | same run | **483 run, 0 failures, 0 errors, 7 skipped** (`ExternalDatabase*IT` ×3 and the live-provider `*LiveIngestionIT`/`PlatformLiveIT` ×4; they need external databases or the internet, which this phase does not touch). `BUILD SUCCESS` |
 | Worker | `npm test` (worker) | 406 tests: **405 passed, 0 failed, 1 skipped** (SIGTERM signal test; POSIX signals cannot reach a Node child on Windows, so it runs on Linux CI). `universal_engine.test.js` was also run 3 more times: 6/6 each time. |
 | Frontend type check | `npx tsc -b` | clean (one fixture-typing error from this phase's `source` union was fixed by typing it as `string`) |
 | Frontend tests | `npm test` (frontend) | 49 files, **492/492 passed** |
@@ -211,7 +216,7 @@ Targeted Phase 6 suites, also included in the full run above:
 | `SafeHttpClientTransportPinningTest` | 4 |
 | `AddressGuardAddressClassTest` | 53 |
 | `ManagedMailRetentionConcurrencyIT` | 6 |
-| `ManagedMailIT` | 14 |
+| `ManagedMailIT` | 15 |
 | `CloudflareTrustedAuthOtpIT` | 4 |
 | `LogScrubberAdversarialTest` | 24 |
 | `TrackPlanSelectionIT` | 6 |
@@ -228,7 +233,9 @@ That test had passed in every one of the 39 earlier CI runs we checked, includin
 
 **Fix:** `inspectLiveFormDom` retries the read-only inspection on the settled page, at most 3 times and only for navigation-race errors (`isNavigationRaceError`). Every caller's checks then run on that page, exactly as if the navigation had finished first. That includes CAPTCHA, host and identity checks, and, after the click, the 2xx-POST, DOM and origin evidence rules, so a retry cannot produce a confirmation. Other errors, and pages that never settle, still throw. The new test in `universal_reliability.test.js` covers all three cases.
 
-The final CI run on the HEAD that contains this fix is recorded on PR #21.
+The second push (`ef2e85a`, run `46040832715`) passed `worker` (406/406 on Linux), `frontend` and `cloudflare-email-worker`. **`backend` failed 1 of 482 ITs**: `ManagedMailIT.concurrentResolveSharesSingleActiveLeaseAndRetentionProtectsActiveLease` (`expected: 200 but was: 404`). That is the A2 race above, through a second path the first fix did not cover. It is now fixed and proven deterministically (§2, A2).
+
+The final CI run on the HEAD that contains both fixes is recorded on PR #21.
 
 ---
 

@@ -327,6 +327,15 @@ public class MailboxVerificationController {
         // Path B: look for a fresh unconsumed, unleased message outside DB transactions.
         var hit = provider.findVerification(ownerProfileId, employerDomain, finalMailboxAddress, finalAfter);
         if (hit.isEmpty() || (!hit.get().hasOtp() && !hit.get().hasLink())) {
+            // Stage 3I Phase 6 (found by CI): a concurrent /resolve for this same application and session can
+            // reserve and commit the message after our Path A check and before this read; a reserved message
+            // is no longer "fresh", so it is invisible here. Converge on that lease (Path A is scoped to this
+            // application and session only) instead of reporting that nothing was found.
+            ResponseEntity<?> racedRecovery = tryRecoverActiveLease(
+                    ownerProfileId, r.applicationId(), finalSessionId, employerDomain, finalMailboxAddress, finalAfter, request);
+            if (racedRecovery != null) {
+                return racedRecovery;
+            }
             return error(404, "Not Found", "No unambiguous verification message found in the registered mailbox. "
                     + "The workflow is paused for manual verification.", request);
         }
