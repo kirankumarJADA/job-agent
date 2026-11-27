@@ -141,3 +141,25 @@ test('Stage 3I Phase 5: redacts numeric JSON OTPs, new token/sig/activation para
   assert.ok(!JSON.stringify(scrubbedObj).includes('tok-999'));
   assert.ok(!JSON.stringify(scrubbedObj).includes('123456'));
 });
+
+test('Stage 3I Phase 6: bare JWTs and numeric "code:" values are redacted while HTTP statuses stay readable', () => {
+  const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlMTIz';
+  for (const [input, secret] of [
+    [`token ${jwt} leaked`, jwt],
+    [`navigation failed for https://x.example/cb#id_token=${jwt}`, jwt],
+    ['code: 556677', '556677'],
+    ['verification code: 1029384756', '1029384756'],
+    ['otp: 482913 sent', '482913'],
+    ['GET https://x.example/verify?token=abc123SECRET&lang=en', 'abc123SECRET'],
+    ['{"otp":482913}', '482913'],
+    ['X-Api-Key: k_live_123456789', 'k_live_123456789'],
+  ]) {
+    const out = redactSecrets(input);
+    assert.ok(!out.includes(secret), `${input} -> ${out}`);
+  }
+  assert.equal(redactSecrets('HTTP status code: 500 from upstream'), 'HTTP status code: 500 from upstream');
+  assert.equal(redactSecrets('code: 404'), 'code: 404');
+  const nested = redactSecrets({ step: 'verify', error: new Error(`failed ${jwt}`), detail: { url: 'https://x.example/a?code=556677' } });
+  assert.ok(!JSON.stringify(nested).includes(jwt));
+  assert.ok(!JSON.stringify(nested).includes('556677'));
+});

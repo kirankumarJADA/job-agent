@@ -108,6 +108,7 @@ class UniversalBrowserE2EIT {
     @Autowired private AutomationPlanRepository planRepository;
     @Autowired private UniversalBrowserPlanService universalPlans;
     @Autowired private SubmissionEvidenceRepository evidenceRepository;
+    @Autowired private javax.sql.DataSource dataSource;
 
     private MockHttpSession devSession;
     private MockHttpSession sessionB;
@@ -548,6 +549,57 @@ class UniversalBrowserE2EIT {
         return planId;
     }
 
+    /** A UNIVERSAL submit pass as the real flow leaves it: reviewed, approved, queued and claimed (RUNNING, approved). */
+    private UUID approvedSubmitPass(SeededApp seeded) throws Exception {
+        UUID planId = packageAndClaim(seeded);
+        mvc.perform(post("/api/v1/automation/plans/{id}/complete", planId)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN).contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("outcome", "HUMAN_REQUIRED", "detail", "Ready",
+                                "result", List.of(Map.of("type", "UNIVERSAL_OUTCOME", "planType", "UNIVERSAL", "requiredGaps", List.of()))))))
+                .andExpect(status().isNoContent());
+        mvc.perform(post("/api/v1/automation/plans/{id}/approve-submit", planId).with(csrf()).session(devSession)).andExpect(status().isOk());
+        mvc.perform(post("/api/v1/automation/plans/{id}/prepare-submit", planId).with(csrf()).session(devSession)).andExpect(status().isOk());
+        mvc.perform(post("/api/v1/automation/plans/{id}/claim", planId).header("Authorization", "Bearer " + WORKER_TOKEN))
+                .andExpect(status().isOk());
+        Map<String, Object> row = jdbc.queryForMap("select status, submit_approved from automation_plans where id = ?", planId);
+        assertThat(row.get("status")).isEqualTo("RUNNING");
+        assertThat(row.get("submit_approved")).isEqualTo(true);
+        return planId;
+    }
+
+    private org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder fenceRequest(UUID planId) throws Exception {
+        return post("/api/v1/automation/plans/{id}/steps", planId)
+                .header("Authorization", "Bearer " + WORKER_TOKEN).contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsString(Map.of("index", 99, "stepId", "pre-submit-attempting", "status", "RUNNING",
+                        "result", Map.of("phase", "PRE_SUBMIT_ATTEMPTING"))));
+    }
+
+    private int fenceCount(UUID planId) {
+        return jdbc.queryForObject("""
+                select count(*) from automation_steps where plan_id = ?
+                  and (step_key = 'pre-submit-attempting' or result->>'phase' = 'PRE_SUBMIT_ATTEMPTING')
+                """, Integer.class, planId);
+    }
+
+    private int invalidationAudits(UUID appId) {
+        return jdbc.queryForObject("select count(*) from audit_logs where action = 'PACKAGE_APPROVAL_INVALIDATED' and entity_id = ?",
+                Integer.class, appId);
+    }
+
+    /** Waits until some backend statement matching {@code fragment} is blocked on a lock (real PostgreSQL row lock). */
+    private void awaitLockWait(String fragment) throws InterruptedException {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(15);
+        while (System.nanoTime() < deadline) {
+            Integer waiting = jdbc.queryForObject("""
+                    select count(*) from pg_stat_activity
+                    where wait_event_type = 'Lock' and query like ? and pid <> pg_backend_pid()
+                    """, Integer.class, "%" + fragment + "%");
+            if (waiting != null && waiting > 0) return;
+            Thread.sleep(25);
+        }
+        throw new AssertionError("no statement containing '" + fragment + "' ever waited on the plan-row lock");
+    }
+
     /** Test isolation: never leave a PREPARED/RUNNING plan behind for another test's claim-next. */
     private void retire(UUID... planIds) {
         for (UUID id : planIds) jdbc.update("update automation_plans set status = 'ABANDONED' where id = ?", id);
@@ -611,7 +663,8 @@ class UniversalBrowserE2EIT {
     @Test
     void stage3f_concurrentPreSubmitFenceAcceptsExactlyOneAttempt() throws Exception {
         var seeded = seedReadyApplication("univ-3f-fence", "https://careers.example.com/jobs/fence-race");
-        UUID planId = packageAndClaim(seeded);
+        // Stage 3I Phase 6: the fence needs a standing human approval, so race on a real approved submit pass.
+        UUID planId = approvedSubmitPass(seeded);
         int threads = 8;
         var pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
         var start = new java.util.concurrent.CountDownLatch(1);
@@ -728,6 +781,116 @@ class UniversalBrowserE2EIT {
                 order by created_at desc limit 1""", String.class, seeded.appId());
         assertThat(after).contains("https://careers.example.com/jobs/audit-redact")
                 .doesNotContain("SECRET-TOKEN-123").doesNotContain("dev@example.local").doesNotContain("#section");
+    }
+
+    /**
+     * Stage 3I Phase 6 (APPLY audit finding): withdrawing a document or answer approval after the worker
+     * claimed the submit pass, but before the PRE_SUBMIT_ATTEMPTING fence, must stop the click. Before this
+     * phase only PREPARED/READY_TO_SUBMIT approvals were withdrawn and the fence never re-checked approval.
+     */
+    @Test
+    void stage3iPhase6_approvalWithdrawnBeforeTheFenceRefusesTheClickAndAnAttemptInFlightIsNeverUnwound() throws Exception {
+        // A. Withdrawn while RUNNING, before the fence: approval cleared, fence refused, no SUBMITTED, never APPLIED.
+        var early = seedReadyApplication("univ-p6-withdraw", "https://careers.example.com/jobs/withdraw-early");
+        UUID earlyPlan = approvedSubmitPass(early);
+        mvc.perform(put("/api/v1/resume-intelligence/cv/{id}/review", early.cvVersionId()).with(csrf()).session(devSession)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"approved\":false}"))
+                .andExpect(status().isOk());
+        Map<String, Object> row = jdbc.queryForMap("select status, submit_approved from automation_plans where id = ?", earlyPlan);
+        assertThat(row.get("status")).isEqualTo("RUNNING");
+        assertThat(row.get("submit_approved")).isEqualTo(false);
+        assertThat(invalidationAudits(early.appId())).isEqualTo(1);
+        mvc.perform(fenceRequest(earlyPlan))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("SUBMIT_APPROVAL_WITHDRAWN"));
+        assertThat(fenceCount(earlyPlan)).isZero();
+        // Even a worker that ignored the 409 and reported SUBMITTED is refused: completion needs the approval.
+        mvc.perform(post("/api/v1/automation/plans/{id}/complete", earlyPlan)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN).contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("outcome", "SUBMITTED", "detail", "Confirmed (EMP-2026-0001)",
+                                "result", List.of(Map.of("type", "SUBMISSION_EVIDENCE", "planType", "UNIVERSAL",
+                                        "category", "CONFIRMED", "confirmed", true, "confirmationNumber", "EMP-2026-0001",
+                                        "signals", List.of("UNIVERSAL_SUBMISSION_RESPONSE_2XX"), "evidence", "x",
+                                        "rawEvidence", "{\"schema\":\"robin-submission-evidence-v1\"}"))))))
+                .andExpect(status().isConflict());
+        // What the real worker does on that 409: no click, an honest unverified report for a human to resolve.
+        mvc.perform(post("/api/v1/automation/plans/{id}/complete", earlyPlan)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN).contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("outcome", "RECONCILIATION_REQUIRED",
+                                "detail", "Backend refused PRE_SUBMIT_ATTEMPTING fence (409 conflict)",
+                                "result", List.of(Map.of("type", "SUBMISSION_EVIDENCE", "planType", "UNIVERSAL",
+                                        "category", "PRIOR_ATTEMPT_UNVERIFIED", "confirmed", false,
+                                        "evidence", "Backend refused PRE_SUBMIT_ATTEMPTING fence (409 conflict)"))))))
+                .andExpect(status().isNoContent());
+        assertThat(jdbc.queryForObject("select status from automation_plans where id = ?", String.class, earlyPlan))
+                .isEqualTo("RECONCILIATION_REQUIRED");
+        assertThat(jdbc.queryForObject("select status from applications where id = ?", String.class, early.appId()))
+                .isNotEqualTo("APPLICATION_SUBMITTED");
+        Map<?, ?> track = json.readValue(mvc.perform(get("/api/v1/applications/{id}/track", early.appId()).session(devSession))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), Map.class);
+        assertThat(track.get("status")).isNotEqualTo("APPLIED");
+        assertThat(((Map<?, ?>) track.get("robinSubmission")).get("submitted")).isEqualTo(false);
+
+        // B. Fence first: the attempt is in flight and a later edit never unwinds it (nor claims it did).
+        var inflight = seedReadyApplication("univ-p6-inflight", "https://careers.example.com/jobs/withdraw-late");
+        UUID inflightPlan = approvedSubmitPass(inflight);
+        mvc.perform(fenceRequest(inflightPlan)).andExpect(status().isNoContent());
+        mvc.perform(put("/api/v1/resume-intelligence/cv/{id}/review", inflight.cvVersionId()).with(csrf()).session(devSession)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"approved\":false}"))
+                .andExpect(status().isOk());
+        row = jdbc.queryForMap("select status, submit_approved from automation_plans where id = ?", inflightPlan);
+        assertThat(row.get("status")).isEqualTo("RUNNING");
+        assertThat(row.get("submit_approved")).isEqualTo(true);
+        assertThat(invalidationAudits(inflight.appId())).isZero();
+
+        // C. Lock ordering on real PostgreSQL, both directions.
+        // C1. A withdrawal holding the plan-row lock is seen by a concurrent fence (re-checked on the updated row).
+        var lockedFirst = seedReadyApplication("univ-p6-lock-a", "https://careers.example.com/jobs/lock-a");
+        UUID planA = approvedSubmitPass(lockedFirst);
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(1);
+        try (java.sql.Connection c = dataSource.getConnection()) {
+            c.setAutoCommit(false);
+            try (var ps = c.prepareStatement("select id from automation_plans where id = ? for update")) {
+                ps.setObject(1, planA);
+                ps.executeQuery().close();
+            }
+            var fenceCall = pool.submit(() -> mvc.perform(fenceRequest(planA)).andReturn().getResponse().getStatus());
+            awaitLockWait("pre-submit-attempting");
+            try (var ps = c.prepareStatement("update automation_plans set submit_approved = false where id = ?")) {
+                ps.setObject(1, planA);
+                ps.executeUpdate();
+            }
+            c.commit();
+            assertThat(fenceCall.get(30, java.util.concurrent.TimeUnit.SECONDS)).isEqualTo(409);
+        }
+        assertThat(fenceCount(planA)).isZero();
+
+        // C2. A fence committed while the withdrawal waits on the lock is seen by it: the approval stays.
+        var fencedFirst = seedReadyApplication("univ-p6-lock-b", "https://careers.example.com/jobs/lock-b");
+        UUID planB = approvedSubmitPass(fencedFirst);
+        try (java.sql.Connection c = dataSource.getConnection()) {
+            c.setAutoCommit(false);
+            try (var ps = c.prepareStatement("select id from automation_plans where id = ? for update")) {
+                ps.setObject(1, planB);
+                ps.executeQuery().close();
+            }
+            var withdrawal = pool.submit(() -> planRepository.invalidateApproval(fencedFirst.appId()));
+            awaitLockWait("plan->>'planType' = 'UNIVERSAL'");
+            try (var ps = c.prepareStatement("""
+                    insert into automation_steps(id, plan_id, step_key, step_index, status, result)
+                    values (?, ?, 'pre-submit-attempting', 99, 'RUNNING', '{"phase":"PRE_SUBMIT_ATTEMPTING"}'::jsonb)
+                    """)) {
+                ps.setObject(1, UuidV7.generate());
+                ps.setObject(2, planB);
+                ps.executeUpdate();
+            }
+            c.commit();
+            assertThat(withdrawal.get(30, java.util.concurrent.TimeUnit.SECONDS)).isZero();
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(jdbc.queryForObject("select submit_approved from automation_plans where id = ?", Boolean.class, planB)).isTrue();
+        retire(earlyPlan, inflightPlan, planA, planB);
     }
 
     private record SeededApp(UUID jobId, UUID appId, UUID cvVersionId, String cvSha) {}

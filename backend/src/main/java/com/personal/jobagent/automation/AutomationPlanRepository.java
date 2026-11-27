@@ -488,6 +488,11 @@ public class AutomationPlanRepository {
      * fixed step key {@code pre-submit-attempting}, so concurrent attempts collide on the
      * unique (plan_id, step_key) index and exactly one can win.
      *
+     * <p>Stage 3I Phase 6: the fence also requires the human submit approval to still stand
+     * ({@code submit_approved=true}), read under a lock on the plan row, so an approval withdrawn
+     * by {@link #invalidateApproval} before the fence is always seen (re-checked on the updated
+     * row) and the click is refused.
+     *
      * @return true only for the single caller whose fence was inserted
      */
     public boolean recordPreSubmitAttemptIfAbsent(UUID planId, int index, String status, Map<String, Object> result,
@@ -498,7 +503,9 @@ public class AutomationPlanRepository {
             return db.update("""
                     insert into automation_steps(id, plan_id, step_key, step_index, status, result, screenshot_ref)
                     select ?, ?, 'pre-submit-attempting', ?, ?, ?::jsonb, ?
-                    where exists (select 1 from automation_plans where id = ? and status = 'RUNNING')
+                    where exists (select 1 from automation_plans
+                                  where id = ? and status = 'RUNNING' and submit_approved = true
+                                  for update)
                       and not exists (select 1 from automation_steps
                                       where plan_id = ?
                                         and (step_key = 'pre-submit-attempting'
@@ -579,10 +586,39 @@ public class AutomationPlanRepository {
      * human must re-approve the rebuilt package. Only the rows for this
      * application are touched.
      *
+     * <p>Stage 3I Phase 6: a UNIVERSAL submit pass that a worker already claimed (RUNNING) is
+     * still before the click until its {@code PRE_SUBMIT_ATTEMPTING} fence is recorded, so its
+     * approval is withdrawn too ({@code submit_approved=false}; the status and steps stay, the
+     * worker owns the run). The fence insert requires {@code submit_approved=true} under the same
+     * plan-row lock, so the click is refused. Once the fence exists the attempt is in flight and
+     * the approval is left as it was: it cannot be un-clicked, and the receipt records the
+     * documents that were sent.
+     *
      * @return how many approvals were withdrawn
      */
+    @Transactional
     public int invalidateApproval(UUID applicationId) {
         if (applicationId == null) return 0;
+        int withdrawn = withdrawQueuedApproval(applicationId);
+        // Row lock first, then the fence check in a new statement (READ COMMITTED: it sees a
+        // fence committed by a concurrent recordPreSubmitAttemptIfAbsent that held the lock).
+        List<UUID> running = db.query("""
+                select id from automation_plans
+                where application_id = ? and status = 'RUNNING' and submit_approved = true
+                  and plan->>'planType' = 'UNIVERSAL'
+                for update
+                """, (rs, n) -> (UUID) rs.getObject(1), applicationId);
+        for (UUID planId : running) {
+            if (hasPreSubmitAttemptCheckpoint(planId)) continue;
+            withdrawn += db.update("""
+                    update automation_plans set submit_approved = false, updated_at = now()
+                    where id = ? and status = 'RUNNING' and submit_approved = true
+                    """, planId);
+        }
+        return withdrawn;
+    }
+
+    private int withdrawQueuedApproval(UUID applicationId) {
         return db.update("""
                 update automation_plans
                 set submit_approved = false,

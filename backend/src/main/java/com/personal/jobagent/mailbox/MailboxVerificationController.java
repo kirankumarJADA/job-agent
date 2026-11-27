@@ -376,6 +376,15 @@ public class MailboxVerificationController {
                 return Boolean.TRUE;
             });
             if (!Boolean.TRUE.equals(acquired)) {
+                // Stage 3I Phase 6: a concurrent /resolve for this same application and session may have
+                // reserved the message between Path A and Path B (its reservation, not a key collision,
+                // makes ours fail). Converge on that lease instead of reporting nothing found; a lease
+                // held for any other application or session is never returned here.
+                ResponseEntity<?> racedRecovery = tryRecoverActiveLease(
+                        ownerProfileId, r.applicationId(), finalSessionId, employerDomain, finalMailboxAddress, finalAfter, request);
+                if (racedRecovery != null) {
+                    return racedRecovery;
+                }
                 return error(404, "Not Found", "This verification message is currently leased or resolved; "
                         + "request a fresh code or pause for manual verification.", request);
             }
@@ -749,9 +758,14 @@ public class MailboxVerificationController {
 
     private ResponseEntity<?> enforceApplicationBinding(UUID ownerProfileId, UUID applicationId,
                                                       String employerDomain, String action, HttpServletRequest request) {
-        if (credentials == null) return null;
-        EmployerCredentialService.ApplicationBinding binding = credentials.bindingFor(ownerProfileId, applicationId);
-        if (binding == null) return null;
+        // Stage 3I Phase 6: fail closed. Without the binding (running plan + permitted domains) nothing
+        // may be resolved, confirmed or released for an application.
+        EmployerCredentialService.ApplicationBinding binding = credentials == null ? null
+                : credentials.bindingFor(ownerProfileId, applicationId);
+        if (binding == null) {
+            auditVerification(action + "_REJECTED", ownerProfileId, applicationId, null, employerDomain, "BINDING_UNAVAILABLE");
+            return error(503, "Service Unavailable", "The application's automation binding could not be verified.", request);
+        }
         if (!binding.running()) {
             auditVerification(action + "_REJECTED", ownerProfileId, applicationId, null, employerDomain, "NO_RUNNING_PLAN");
             return error(409, "Conflict", "No automation run is currently executing for this application.", request);

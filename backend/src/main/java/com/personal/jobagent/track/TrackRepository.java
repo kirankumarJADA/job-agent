@@ -593,8 +593,11 @@ public class TrackRepository {
                        p.result::text as result, a.job_id, p.target_url
                 from automation_plans p join applications a on a.id = p.application_id and a.profile_id = p.profile_id
                 where a.profile_id = ?""" + appFilter + "\n" + """
-                order by p.application_id, p.created_at desc, p.id desc
+                order by p.application_id, (p.status = 'SUBMITTED') desc, p.created_at desc, p.id desc
                 """, (ResultSet rs) -> {
+            // Stage 3I Phase 6 (P2-8): the plan that represents the application is its SUBMITTED plan when
+            // one exists (V043 allows at most one), otherwise the latest; a later failed, paused or
+            // re-prepared plan can never hide a real submission, and nothing else is ever shown as one.
             String status = rs.getString("status");
             planRows.add(new PlanRow(
                     (UUID) rs.getObject("application_id"),

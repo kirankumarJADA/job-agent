@@ -233,4 +233,21 @@ describe('SubmissionReceiptModal', () => {
     expect(screen.getByTestId('browser-evidence').textContent).toContain('careers.acme.example (303) → careers.acme.example (200)');
     expect(screen.queryByText(/uploaded and confirmed/i)).toBeNull();
   });
+
+  it('labels a Universal receipt identity as prepared from the verified profile, never as the employer copy', async () => {
+    const prepared: SubmissionReceipt = {
+      ...BROWSER_OBSERVED_RECEIPT,
+      submittedIdentity: {
+        name: 'Ada Lovelace', firstName: 'Ada', lastName: 'Lovelace', email: 'robin+ada@mail.example',
+        phone: '+44 7700 900077', addressLine1: 'London, UK', linkedIn: 'https://linkedin.com/in/ada',
+        source: 'PREPARED_PACKAGE_PROFILE_FACTS',
+      },
+    };
+    mockedApiFetch.mockResolvedValueOnce(prepared);
+    render(<SubmissionReceiptModal isOpen={true} onClose={vi.fn()} applicationId="22222222-2222-7222-8222-222222222222" />);
+    expect((await screen.findByTestId('identity-provenance')).textContent).toContain('prepared by Robin from your verified profile');
+    expect(screen.getByText('Ada Lovelace')).toBeTruthy();
+    expect(screen.getByText('robin+ada@mail.example')).toBeTruthy();
+    expect(screen.getByText('SUBMITTED — BROWSER OBSERVED')).toBeTruthy();
+  });
 });

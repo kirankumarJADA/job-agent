@@ -64,7 +64,10 @@ public class ManagedMailRetentionJob {
             return;
         }
         try {
-            Result result = purge(Instant.now());
+            // Stage 3I Phase 6: leases are written with the database clock (MailboxVerificationController#dbNow),
+            // so expiry is judged by the same clock; an application server running ahead of the database
+            // must never make an active lease look expired.
+            Result result = purge(databaseNow());
             if (result.total() > 0) {
                 log.info("Managed mail retention: erased content of {} message(s), deleted {} message record(s) "
                         + "and {} webhook token(s)", result.contentErased(), result.messagesDeleted(), result.tokensDeleted());
@@ -76,6 +79,13 @@ public class ManagedMailRetentionJob {
             }
             log.warn("Managed mail retention sweep failed: {}", e.getClass().getSimpleName());
         }
+    }
+
+    /** The database's current time, the clock every lease expiry is written with. */
+    Instant databaseNow() {
+        Timestamp ts = db.queryForObject("select now()", Timestamp.class);
+        if (ts == null) throw new IllegalStateException("database clock unavailable");
+        return ts.toInstant();
     }
 
     public record Result(int contentErased, int messagesDeleted, int tokensDeleted) {

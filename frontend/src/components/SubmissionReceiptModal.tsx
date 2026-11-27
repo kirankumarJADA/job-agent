@@ -472,6 +472,17 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                 <h3 className="text-xs font-bold uppercase tracking-wider text-ink-muted border-b border-line pb-2">
                   Submitted Candidate Identity
                 </h3>
+                {receipt.submittedIdentity?.source === 'PREPARED_PACKAGE_PROFILE_FACTS' && (
+                  <p className="text-[11px] text-ink-muted" data-testid="identity-provenance">
+                    As prepared by Robin from your verified profile for this form. Only the fields the employer&apos;s
+                    form asked for were filled; Robin cannot see the employer&apos;s copy.
+                  </p>
+                )}
+                {receipt.submittedIdentity?.source === 'CURRENT_PROFILE' && (
+                  <p className="text-[11px] text-ink-muted" data-testid="identity-provenance">
+                    Your current profile — nothing has been submitted yet.
+                  </p>
+                )}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div>
                     <span className="text-ink-muted block text-[11px]">Full Name</span>

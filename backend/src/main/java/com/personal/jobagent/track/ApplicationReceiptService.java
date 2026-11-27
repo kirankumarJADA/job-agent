@@ -91,6 +91,15 @@ public class ApplicationReceiptService {
             Boolean validationPassed
     ) {}
 
+    /**
+     * The identity Robin used for the attempt.
+     *
+     * @param source where these values come from (Stage 3I Phase 6): {@code SUBMIT_STEP_IDENTITY} (the
+     *     submit step's own identity), {@code SUBMIT_STEP_FIELDS} (the submit step's field values),
+     *     {@code PREPARED_PACKAGE_PROFILE_FACTS} (the Universal package's verified profile facts that the
+     *     browser filled from — fields the form did not ask for were not sent), {@code CURRENT_PROFILE}
+     *     (no attempt yet), or null when nothing was recorded. Never the employer's copy.
+     */
     public record IdentityReceipt(
             String name,
             String firstName,
@@ -98,8 +107,14 @@ public class ApplicationReceiptService {
             String email,
             String phone,
             String addressLine1,
-            String linkedIn
-    ) {}
+            String linkedIn,
+            String source
+    ) {
+        public IdentityReceipt(String name, String firstName, String lastName, String email, String phone,
+                               String addressLine1, String linkedIn) {
+            this(name, firstName, lastName, email, phone, addressLine1, linkedIn, null);
+        }
+    }
 
     public record AnswerReceipt(
             String question,
@@ -339,8 +354,16 @@ public class ApplicationReceiptService {
             return Optional.empty();
         }
         if (selected == null) {
-            selected = plans.get(plans.size() - 1);
+            // Stage 3I Phase 6 (P2-8): by default show the attempt that submitted the application, when one
+            // did; a later failed or re-prepared attempt never hides it (attempt history still lists all).
             selectedIndex = plans.size() - 1;
+            for (int i = plans.size() - 1; i >= 0; i--) {
+                if ("SUBMITTED".equals(plans.get(i).status)) {
+                    selectedIndex = i;
+                    break;
+                }
+            }
+            selected = plans.get(selectedIndex);
         }
 
         return Optional.of(buildPlanReceipt(profileId, app, selected, selectedIndex + 1,
@@ -501,7 +524,7 @@ public class ApplicationReceiptService {
     @SuppressWarnings("unchecked")
     private IdentityReceipt extractIdentity(Map<String, Object> planMap) {
         if (!(planMap.get("steps") instanceof List<?> steps)) {
-            return new IdentityReceipt(null, null, null, null, null, null, null);
+            return preparedPackageIdentity(planMap);
         }
         String firstName = null;
         String lastName = null;
@@ -522,7 +545,8 @@ public class ApplicationReceiptService {
                                 nonBlankString(idMap.get("email")),
                                 nonBlankString(idMap.get("phone")),
                                 nonBlankString(idMap.get("addressLine1")),
-                                nonBlankString(idMap.get("linkedIn"))
+                                nonBlankString(idMap.get("linkedIn")),
+                                "SUBMIT_STEP_IDENTITY"
                         );
                     }
                     if ("LEVER_APPLY".equals(type) && params.get("fields") instanceof List<?> fields) {
@@ -562,7 +586,37 @@ public class ApplicationReceiptService {
             name = String.join(" ", firstName == null ? List.of(lastName)
                     : lastName == null ? List.of(firstName) : List.of(firstName, lastName));
         }
-        return new IdentityReceipt(name, firstName, lastName, email, phone, addressLine1, linkedIn);
+        boolean anyField = name != null || firstName != null || lastName != null || email != null || phone != null
+                || addressLine1 != null || linkedIn != null;
+        if (anyField) {
+            return new IdentityReceipt(name, firstName, lastName, email, phone, addressLine1, linkedIn, "SUBMIT_STEP_FIELDS");
+        }
+        return preparedPackageIdentity(planMap);
+    }
+
+    /**
+     * Stage 3I Phase 6 (P2-7): a Universal plan carries its identity in {@code package.profileFacts}, the
+     * server-built facts from the candidate's verified profile that the browser fills from (never anything
+     * read from the employer's page). Only identity fields are used; cover-letter text, portfolio and other
+     * facts are never copied into the receipt.
+     */
+    private static IdentityReceipt preparedPackageIdentity(Map<String, Object> planMap) {
+        Object pkgObj = planMap.get("package");
+        if (!"UNIVERSAL".equalsIgnoreCase(String.valueOf(planMap.get("planType")))
+                || !(pkgObj instanceof Map<?, ?> pkg) || !(pkg.get("profileFacts") instanceof Map<?, ?> facts)) {
+            return new IdentityReceipt(null, null, null, null, null, null, null, null);
+        }
+        String first = nonBlankString(facts.get("firstName"));
+        String last = nonBlankString(facts.get("lastName"));
+        String full = nonBlankString(facts.get("fullName"));
+        String email = nonBlankString(facts.get("email"));
+        String phone = nonBlankString(facts.get("phone"));
+        String location = nonBlankString(facts.get("location"));
+        String linkedIn = nonBlankString(facts.get("linkedin"));
+        if (full == null && first == null && last == null && email == null && phone == null && location == null && linkedIn == null) {
+            return new IdentityReceipt(null, null, null, null, null, null, null, null);
+        }
+        return new IdentityReceipt(full, first, last, email, phone, location, linkedIn, "PREPARED_PACKAGE_PROFILE_FACTS");
     }
 
     @SuppressWarnings("unchecked")
@@ -1185,7 +1239,8 @@ public class ApplicationReceiptService {
                         rs.getString("email"),
                         rs.getString("phone"),
                         rs.getString("location"),
-                        linkedIn
+                        linkedIn,
+                        "CURRENT_PROFILE"
                 );
             }, profileId);
         } catch (EmptyResultDataAccessException e) {

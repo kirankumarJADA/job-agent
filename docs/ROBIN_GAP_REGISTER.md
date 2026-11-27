@@ -2,7 +2,28 @@
 
 Each entry records evidence and status. Severity: **P0** user-facing truthfulness/safety defect; **P1** blocks a core promise or phase exit; **P2** genuine but not a current phase blocker.
 
-**Updated 2026-11-17** after PR #11 merged (`199e051`); appended **2026-11-26** with Stage 3G preparation, Stage 3H receipt architecture audit findings, Stage 3I Phase 0 security remediation, Stage 3I Phase 1 Cloudflare `message.headers` trust-boundary hardening + multi-channel receipt architecture, Stage 3I Phase 2 durable receipt linking & reconciliation (V071), and **2026-11-27** Stage 3I Phase 3 (`V072`), Phase 4 independent audit (`2a762af`), and **Stage 3I Phase 5 critical remediation (`V073`)** on `integration/wave-3`. Dated production observations below are historical evidence, not a statement of current production state.
+**Updated 2026-11-17** after PR #11 merged (`199e051`); appended **2026-11-26** with Stage 3G preparation, Stage 3H receipt architecture audit findings, Stage 3I Phase 0 security remediation, Stage 3I Phase 1 Cloudflare `message.headers` trust-boundary hardening + multi-channel receipt architecture, Stage 3I Phase 2 durable receipt linking & reconciliation (V071), and **2026-11-27** Stage 3I Phase 3 (`V072`), Phase 4 independent audit (`2a762af`), **Stage 3I Phase 5 critical remediation (`V073`)**, and **Stage 3I Phase 6 independent verification** on `integration/wave-3`. Dated production observations below are historical evidence, not a statement of current production state.
+
+---
+
+## P1 — Stage 3I Phase 6 Independent Verification (2026-11-27) — **P1 FIXES REPRODUCED; 1 NEW P1 FOUND & FIXED (UNIVERSAL); LEGACY-ADAPTER P1 OPEN; EXTERNAL VALIDATION `NO-GO`**
+
+**Evidence:** `docs/STAGE_3I_PHASE_6_INDEPENDENT_VERIFICATION_AND_INTEGRATION_AUDIT.md` (`integration/wave-3`, not merged; PR `#21` `OPEN` / `DRAFT`). PostgreSQL 16 `*IT` suites were run locally in this phase as well as in CI.
+
+- **A1 identity lifecycle and A3 OTP isolation: VERIFIED** by a new test, `CloudflareTrustedAuthOtpIT#stage3iPhase6_…`.
+- **A2 managed-mail retention: VERIFIED after 2 fixes** (`ManagedMailRetentionConcurrencyIT`, 6 tests with real row locks):
+  - a concurrent `/resolve` loser got 404 instead of the active lease;
+  - the retention sweep used the JVM clock instead of the database clock.
+- **A4 redaction: VERIFIED after fixes.** Backend `LogScrubber` missed credential headers (`x-api-key`, `x-auth-token`, `proxy-authorization`, CSRF), unquoted `key: value` secrets, numeric `code:` values and bare JWTs; worker `scrubString` missed numeric `code:` values and bare JWTs. `ROBIN_WORKER_SESSION_KEY` fails closed: verified.
+- **A5 (P1-5) SSRF pinning: PROVEN at the socket level** with a JDK hostile-DNS resolver SPI, 0 attacker connections and a positive control (`SafeHttpClientTransportPinningTest`). `AddressGuard` also refused too few address classes: TEST-NET, Teredo and discard prefixes, and NAT64/6to4 addresses embedding a private IPv4. Fixed, with 53 cases.
+- **A6 mailbox authorization: VERIFIED after a fix.** A missing binding failed open; it now returns 503 and an audit.
+- **P2-7 FIXED:** Universal `submittedIdentity` now comes from the prepared package's `profileFacts`, carries a `source` provenance and keeps `BROWSER_OBSERVED`. **P2-8 FIXED:** a SUBMITTED plan always represents the application in TRACK (`TrackPlanSelectionIT`).
+- **NEW P1 FOUND & FIXED (UNIVERSAL):** an approval withdrawn after the worker claimed the submit pass, but before the `PRE_SUBMIT_ATTEMPTING` fence, did not stop the click. The fence now requires `submit_approved` under a plan-row lock, and `invalidateApproval` withdraws RUNNING pre-fence approvals. Proven on real PostgreSQL in both lock orders, with a mutation check.
+- **Still open:**
+  - **P1** — Greenhouse, Ashby and Workday have no backend pre-submit fence, so the same window remains for those adapters.
+  - **P2** — no cross-process worker-plus-backend end-to-end test; no apply-time posting liveness check; hard filters are lenient on missing data; employer status comes from email only.
+  - **P3** — a withdrawn-approval fence is reported as reconciliation.
+- **Gate:** auto-apply never submits; every real submission needs `approve-submit` plus `prepare-submit` for that application. No real employer site has been exercised. External validation remains **`BLOCKED / NO-GO`**. No migration was added; `V001`–`V073` are untouched.
 
 ---
 
@@ -15,6 +36,7 @@ Each entry records evidence and status. Severity: **P0** user-facing truthfulnes
 - **P1-4 FIXED (`LogScrubber`, Logback converters, `logback-spring.xml`, `secret_redaction.js`, `universal_confirmation.js`, `store.js`, `worker.js`, `browser_worker.js`):** Wired `LogScrubber` converters + Logstash JSON decorator into Logback; expanded JS redaction (numeric JSON, `activation_code=`, `sig`/`jwt`/`sid`/`pin`, `Error`/object recursion, `serverRejected.errorMessage`); removed default plaintext `identity.email` fallback in `StateStore`; fail-closed startup check without 32-byte `ROBIN_WORKER_SESSION_KEY` (`assertWorkerSessionKeyConfigured`); clean lease release & unwind on navigation errors.
 - **P1-5 FIXED (`AddressGuard.checkAndResolve`, `SafeHttpClient.JdkTransport` / `PinnedTunnel`):** Single-lookup DNS resolution per hop socket-pinned via loopback TLS/HTTP tunnel preserving native JDK `HttpClient` TLS/SNI/SAN verification without second DNS resolution.
 - **P1-6, P2-1..P2-6 FIXED:** Resolved effective `applications.account_session_id` when `sessionId` is omitted and enforced `EmployerCredentialService.bindingFor` (`409` non-running / `403` unbound domain) across `/mailbox-verification/*` (`registration-identity`, `/confirm`, `/resolve`, `/release`); added `V073` active-lease partial unique index + Postgres `now()` deadlines + `AuditLogWriter` telemetry + `/release` `reserved_until` expiry check (`409`) + `usableAddressForAutomatedVerification()`; fixed `JobDiscoveryService`/`OutboxProcessor`/`BenchmarkRunner`/`SchedulerDatabaseGuard`/`TestcontainersContextCleanupListener` lifecycle guards; hardened worker `SessionVault.save` order, `409`-tolerant `confirmLease`, `universalSignupSucceeded` persistence, and `ACCOUNT_VERIFY_OTP` redirect guards.
+- **Phase 6 update:** `P2-7` and `P2-8` are now **FIXED**, and P1-1…P1-6 were independently reproduced (see the Phase 6 entry above).
 - **Still Deferred (Non-Blocking for Phase 5 Scope) & Gate Decision:** `P2-7` (`ApplicationReceiptService.extractIdentity` Universal `profileFacts` fallback), `P2-8` (`TrackRepository.snapshotParts` ordering), `P3-1`–`P3-5` polish, plus all Stage 3G external provisioning gates (`TRUSTED_AUTHSERV_IDS`, `ROBIN_WORKER_SESSION_KEY`, deployed synthetic staging fixture/driver, written operator authorisation, live Cloudflare routing verification) remain open. Controlled external validation and PR `#21` merge remain **`BLOCKED / NO-GO`**.
 
 ---
@@ -69,7 +91,7 @@ Each entry records evidence and status. Severity: **P0** user-facing truthfulnes
 - Future Outlook/IMAP/webhook adapters (`ExternalMailboxProviders.Outlook`/`Imap` remain fail-closed stubs; no employer webhook endpoint exists); `WEBHOOK_CONNECTOR` channel not added.
 - A browser cannot observe multipart file bytes (Chromium omits them even with route interception), so document upload proof tops out at `FILE_PART_OBSERVED`; files uploaded by a separate request on an earlier page are reported `ATTACHED_NOT_CONFIRMED`, never as sent.
 - Applications Robin never attempted and the candidate gave no submission date have no temporal anchor (`NO_SUBMISSION_ANCHOR`): only the future-dated rule applies.
-- `UNIVERSAL` remains excluded from trusted receipt policy (no Level C2 for Universal) and Universal receipts return empty `submittedIdentity` (`P2-7`); C1 depends on mailbox connectors whose live delivery is unverified (see the P0 and Stage 3G entries).
+- `UNIVERSAL` remains excluded from trusted receipt policy (no Level C2 for Universal). Universal receipts used to return an empty `submittedIdentity` (`P2-7`); this was **fixed in Stage 3I Phase 6**, where the identity comes from the prepared package's `profileFacts` and is labelled as prepared by Robin, not as the employer's copy. C1 depends on mailbox connectors whose live delivery is unverified (see the P0 and Stage 3G entries).
 - Receipts recorded before V071 keep `policy_version = track-receipt-policy-v1`; ones verified without a provider time are now shown as not verified at reconcile time.
 
 ---

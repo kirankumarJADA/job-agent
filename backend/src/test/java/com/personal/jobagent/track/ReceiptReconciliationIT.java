@@ -154,7 +154,12 @@ class ReceiptReconciliationIT {
         Map<String, Object> plan = Map.of(
                 "planType", "UNIVERSAL",
                 "correlation", Map.of("applicationId", appId.toString(), "jobId", jobId.toString()),
-                "package", Map.of("cv", Map.of("versionId", cvId.toString(), "sha256", cvSha, "fileName", "cv.pdf", "byteSize", 1024)),
+                "package", Map.of("cv", Map.of("versionId", cvId.toString(), "sha256", cvSha, "fileName", "cv.pdf", "byteSize", 1024),
+                        // As UniversalFieldMapper.buildProfileFactsPayload writes them (server-built, verified profile).
+                        "profileFacts", Map.of("fullName", "Ada Lovelace", "firstName", "Ada", "lastName", "Lovelace",
+                                "email", "robin+ada@mail.example", "phone", "+44 7700 900077", "location", "London, UK",
+                                "linkedin", "https://linkedin.com/in/ada", "github", "https://github.com/ada",
+                                "coverLetterText", "PRIVATE COVER LETTER BODY")),
                 "steps", List.of(Map.of("id", "apply", "type", "UNIVERSAL_APPLY", "params", Map.of())));
         UUID planId = UUID.randomUUID();
         jdbc.update("""
@@ -328,7 +333,21 @@ class ReceiptReconciliationIT {
         assertThat(before.get("needsReview").asBoolean()).isFalse();
         assertThat(before.at("/submissionEvidence/anchor/source").asText()).isEqualTo("PRE_SUBMIT_ATTEMPT");
         assertThat(before.at("/submissionEvidence/employerVerified").asBoolean()).isFalse();
-        assertThat(receipt(a.applicationId()).at("/browserEvidence/assessment").asText()).isEqualTo("BROWSER_OBSERVED_V2");
+        JsonNode submittedReceipt = receipt(a.applicationId());
+        assertThat(submittedReceipt.at("/browserEvidence/assessment").asText()).isEqualTo("BROWSER_OBSERVED_V2");
+        // P2-7: a Universal receipt shows the identity Robin prepared from the verified profile facts, labelled as such,
+        // and never carries non-identity facts such as the cover-letter text or other links.
+        assertThat(submittedReceipt.at("/submittedIdentity/name").asText()).isEqualTo("Ada Lovelace");
+        assertThat(submittedReceipt.at("/submittedIdentity/email").asText()).isEqualTo("robin+ada@mail.example");
+        assertThat(submittedReceipt.at("/submittedIdentity/phone").asText()).isEqualTo("+44 7700 900077");
+        assertThat(submittedReceipt.at("/submittedIdentity/addressLine1").asText()).isEqualTo("London, UK");
+        assertThat(submittedReceipt.at("/submittedIdentity/linkedIn").asText()).isEqualTo("https://linkedin.com/in/ada");
+        assertThat(submittedReceipt.at("/submittedIdentity/source").asText()).isEqualTo("PREPARED_PACKAGE_PROFILE_FACTS");
+        assertThat(submittedReceipt.get("submittedIdentity").toString()).doesNotContain("PRIVATE COVER LETTER BODY")
+                .doesNotContain("github.com/ada");
+        // The trust level is unchanged by the identity fallback.
+        assertThat(submittedReceipt.get("verificationLevel").asText()).isEqualTo("BROWSER_OBSERVED");
+        assertThat(submittedReceipt.at("/confirmation/confirmed").asBoolean()).isFalse();
 
         var ingest = acknowledgement(a, "APP-50599", Instant.now().minusSeconds(30));
         assertThat(ingest.receiptVerification()).isEqualTo("VERIFIED");

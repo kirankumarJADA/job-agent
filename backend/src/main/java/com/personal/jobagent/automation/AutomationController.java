@@ -340,11 +340,19 @@ public class AutomationController {
             // two concurrent reports can never both be accepted (the unique (plan_id, step_key)
             // index decides), and a plan that is not RUNNING can never record one.
             boolean recorded = plans.recordPreSubmitAttemptIfAbsent(id, r.index(), r.status(), resultMap, r.screenshotRef());
-            return recorded
-                    ? ResponseEntity.noContent().build()
-                    : ResponseEntity.status(409).body(Map.of(
-                            "error", "a pre-submit attempt checkpoint already exists or plan is not RUNNING",
-                            "code", "DUPLICATE_PRE_SUBMIT_ATTEMPT"));
+            if (recorded) {
+                return ResponseEntity.noContent().build();
+            }
+            // Stage 3I Phase 6: the fence also needs the human submit approval to still stand. Any
+            // 409 stops the worker before the click; the code only says which precondition failed.
+            boolean approvalWithdrawn = plans.findById(id)
+                    .map(p -> "RUNNING".equals(p.status()) && !p.submitApproved())
+                    .orElse(false) && !plans.hasPreSubmitAttemptCheckpoint(id);
+            return ResponseEntity.status(409).body(approvalWithdrawn
+                    ? Map.of("error", "the submit approval was withdrawn before the submission click",
+                             "code", "SUBMIT_APPROVAL_WITHDRAWN")
+                    : Map.of("error", "a pre-submit attempt checkpoint already exists or plan is not RUNNING",
+                             "code", "DUPLICATE_PRE_SUBMIT_ATTEMPT"));
         }
         return plans.appendStep(id, r.index(), r.stepId(), r.status(), resultMap, r.screenshotRef())
                 ? ResponseEntity.noContent().build()

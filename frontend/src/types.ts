@@ -1358,6 +1358,14 @@ export interface IdentityReceipt {
   phone: string | null;
   addressLine1: string | null;
   linkedIn: string | null;
+  /**
+   * Where the values come from (Stage 3I Phase 6): the submit step's identity or fields, the Universal
+   * package's verified profile facts the browser filled from, or the current profile (no attempt yet).
+   * Never the employer's copy. Known values: SUBMIT_STEP_IDENTITY, SUBMIT_STEP_FIELDS,
+   * PREPARED_PACKAGE_PROFILE_FACTS, CURRENT_PROFILE (kept a string, like the other server
+   * vocabularies here, so an unknown future value renders without a provenance note).
+   */
+  source?: string | null;
 }
 
 export interface DocumentReceipt {

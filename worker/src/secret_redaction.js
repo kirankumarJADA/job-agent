@@ -85,7 +85,11 @@ function scrubString(text) {
     .replace(
       /\b([A-Za-z0-9_-]*(?:api[_-]?key|apikey|secret|token|lease[_-]?token|credential|password|passwd|pwd|passcode|session_id|otp|pin|jwt|sid|sig|signature|nonce|ticket|verifier))\s*:\s*(?:\\"(?:[^"\\\r\n]|\\.)*\\"|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|\d+|[^\s,;"'<>]+)/gi,
       '$1: [REDACTED]'
-    );
+    )
+    // Stage 3I Phase 6: a bare numeric "code: 482913" (4+ digits, so HTTP statuses stay readable)
+    .replace(/\b((?:security |login |auth |access |verification |confirmation )?code)\s*:\s*(\d{4,10})\b/gi, '$1: [REDACTED]')
+    // Stage 3I Phase 6: bare JSON Web Tokens anywhere in free text
+    .replace(/\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/g, '[REDACTED_JWT]');
 }
 
 function redactRecursive(value, seen) {

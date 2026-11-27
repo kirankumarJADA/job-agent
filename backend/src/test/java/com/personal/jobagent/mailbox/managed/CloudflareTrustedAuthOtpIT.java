@@ -117,6 +117,7 @@ class CloudflareTrustedAuthOtpIT {
     @Autowired private ApplicationPipelineService pipeline;
     @Autowired private IdentityService identityService;
     @Autowired private RegistrationIdentityService registrationIdentities;
+    @Autowired private ManagedMailRetentionJob retention;
 
     @BeforeEach
     void setUp() {
@@ -565,6 +566,157 @@ class CloudflareTrustedAuthOtpIT {
         for (var entry : audits) {
             assertThat(String.valueOf(entry.get("after_state"))).doesNotContain(otpCode).doesNotContain(tok);
         }
+    }
+
+    /**
+     * Stage 3I Phase 6 independent verification of P1-1 (identity lifecycle), P1-3 (OTP isolation)
+     * and P1-6 (lease authorization) through the production routes on PostgreSQL.
+     */
+    @Test
+    @org.junit.jupiter.api.extension.ExtendWith(org.springframework.boot.test.system.OutputCaptureExtension.class)
+    void stage3iPhase6_identityLifecycleOtpIsolationAndLeaseAuthorization(
+            org.springframework.boot.test.system.CapturedOutput output) throws Exception {
+        String employer = "acme-verify.example";
+        Candidate a = createCandidate("cand-p6-a@personal.example", true);
+        assertThat(deliverCloudflare(a.managedAddress(), "Security <security@acme-verify.example>", "Welcome", "Active mailbox test",
+                employer, "mx.cloudflare.net", true, Instant.now()).getResponse().getStatus()).isEqualTo(200);
+        String jobUrl = "https://acme-verify.example/jobs/p6-a";
+        UUID appA = createApp(a.profileId(), jobUrl);
+        seedReadyCvForApplication(a.profileId(), appA, "p6-a");
+
+        // ── A1 / P1-1 regression: resolving the application contact email (the /package path) records no
+        //    employer identity, so authorizing account creation afterwards is not refused as "already registered".
+        String contact = registrationIdentities.resolveApplicationContactEmail(a.profileId(), jobUrl, "cand-p6-a@personal.example");
+        assertThat(contact).isEqualToIgnoringCase(a.managedAddress());
+        assertThat(jdbc.queryForObject("select count(*) from applicant_identities where profile_id = ?", Integer.class, a.profileId()))
+                .isZero();
+        JsonNode auth = json(mvc.perform(post("/api/v1/apply/applications/{id}/universal-account", appA)
+                        .with(csrf()).with(a.auth()).contentType(MediaType.APPLICATION_JSON).content("{\"acceptTerms\":true}"))
+                .andExpect(status().isOk()).andReturn());
+        UUID planId = UUID.fromString(auth.get("planId").asText());
+        UUID sessA = UUID.fromString(auth.get("sessionId").asText());
+        mvc.perform(post("/api/v1/automation/plans/{id}/claim", planId).header("Authorization", WORKER_HEADER)).andExpect(status().isOk());
+        String regA = json.writeValueAsString(Map.of("applicationId", appA.toString(), "sessionId", sessA.toString(), "employerDomain", employer));
+
+        // Interrupted signup: asking again while PENDING returns the same identity, never a duplicate, never "existing".
+        JsonNode first = json(mvc.perform(post("/api/v1/mailbox-verification/registration-identity").header("Authorization", WORKER_HEADER)
+                .contentType(MediaType.APPLICATION_JSON).content(regA)).andExpect(status().isOk()).andReturn());
+        JsonNode again = json(mvc.perform(post("/api/v1/mailbox-verification/registration-identity").header("Authorization", WORKER_HEADER)
+                .contentType(MediaType.APPLICATION_JSON).content(regA)).andExpect(status().isOk()).andReturn());
+        assertThat(first.get("existing").asBoolean()).isFalse();
+        assertThat(again.get("existing").asBoolean()).isFalse();
+        assertThat(again.get("identityId").asText()).isEqualTo(first.get("identityId").asText());
+        assertThat(jdbc.queryForObject("select count(*) from applicant_identities where profile_id = ? and domain = ?",
+                Integer.class, a.profileId(), employer)).isEqualTo(1);
+        // Duplicate registration is refused by the database itself.
+        assertThatThrownBy(() -> jdbc.update("insert into applicant_identities (id, profile_id, applicant_email, provider, domain, account_status) "
+                + "values (?, ?, 'dup@x.example', 'ROBIN_MANAGED', ?, 'PENDING')", UuidV7.generate(), a.profileId(), employer))
+                .isInstanceOf(org.springframework.dao.DuplicateKeyException.class);
+
+        // Another candidate's application or session can never confirm A's identity.
+        Candidate b = createCandidate("cand-p6-b@personal.example", true);
+        UUID appB = createApp(b.profileId(), "https://other-employer-p6.example/jobs/b");
+        seedRunningPlan(appB, "https://other-employer-p6.example/jobs/b/apply");
+        UUID sessB = startSession(b.profileId(), appB, "other-employer-p6.example");
+        mvc.perform(post("/api/v1/mailbox-verification/registration-identity/confirm").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("applicationId", appB.toString(), "employerDomain", employer))))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/api/v1/mailbox-verification/registration-identity/confirm").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("applicationId", appA.toString(), "sessionId", sessB.toString(),
+                                "employerDomain", employer))))
+                .andExpect(status().isNotFound());
+        assertThat(jdbc.queryForObject("select account_status from applicant_identities where profile_id = ? and domain = ?",
+                String.class, a.profileId(), employer)).isEqualTo("PENDING");
+        // A's own confirmation promotes A's identity, and only A's.
+        JsonNode promoted = json(mvc.perform(post("/api/v1/mailbox-verification/registration-identity/confirm").header("Authorization", WORKER_HEADER)
+                .contentType(MediaType.APPLICATION_JSON).content(regA)).andExpect(status().isOk()).andReturn());
+        assertThat(promoted.get("promoted").asBoolean()).isTrue();
+        assertThat(jdbc.queryForObject("select account_status from applicant_identities where profile_id = ? and domain = ?",
+                String.class, a.profileId(), employer)).isEqualTo("ACTIVE");
+        assertThat(jdbc.queryForObject("select count(*) from applicant_identities where profile_id = ?", Integer.class, b.profileId()))
+                .isZero();
+
+        // A DISABLED identity stays disabled: no registration, and confirmation never re-enables it.
+        jdbc.update("update applicant_identities set account_status = 'DISABLED' where profile_id = ? and domain = ?", a.profileId(), employer);
+        mvc.perform(post("/api/v1/mailbox-verification/registration-identity").header("Authorization", WORKER_HEADER)
+                .contentType(MediaType.APPLICATION_JSON).content(regA)).andExpect(status().isConflict());
+        JsonNode notPromoted = json(mvc.perform(post("/api/v1/mailbox-verification/registration-identity/confirm").header("Authorization", WORKER_HEADER)
+                .contentType(MediaType.APPLICATION_JSON).content(regA)).andExpect(status().isOk()).andReturn());
+        assertThat(notPromoted.get("promoted").asBoolean()).isFalse();
+        assertThat(jdbc.queryForObject("select account_status from applicant_identities where profile_id = ? and domain = ?",
+                String.class, a.profileId(), employer)).isEqualTo("DISABLED");
+        jdbc.update("update applicant_identities set account_status = 'ACTIVE' where profile_id = ? and domain = ?", a.profileId(), employer);
+
+        // ── A3 / P1-3: a verification e-mail with a numeric code, a tokenised link and the code in its subject.
+        String otp = "739204";
+        String linkSecret = "SECRETTOK" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        assertThat(deliverCloudflare(a.managedAddress(), "Security <security@acme-verify.example>",
+                "Your Acme verification code is " + otp,
+                "Use code " + otp + " to verify. {\"otp\": " + otp + "} Or open https://acme-verify.example/verify?token="
+                        + linkSecret + "&sig=" + linkSecret,
+                "mail.acme-verify.example", "mx.cloudflare.net", true, Instant.now()).getResponse().getStatus()).isEqualTo(200);
+
+        // The candidate's own surfaces never carry the code or the link token.
+        for (String path : java.util.List.of("/api/v1/applications/" + appA + "/track", "/api/v1/track/reviews",
+                "/api/v1/applications/" + appA + "/track/timeline")) {
+            String body = mvc.perform(get(path).with(a.auth())).andExpect(status().isOk()).andReturn().getResponse()
+                    .getContentAsString(StandardCharsets.UTF_8);
+            assertThat(body).as(path).doesNotContain(otp).doesNotContain(linkSecret);
+        }
+        assertThat(jdbc.queryForList("select coalesce(subject, '') || ' ' || coalesce(body_text, '') as t from emails where profile_id = ?",
+                String.class, a.profileId())).allSatisfy(t -> assertThat(t).doesNotContain(otp).doesNotContain(linkSecret));
+        // Candidates cannot call the worker's verification routes or the retired extraction route.
+        int candidateResolve = mvc.perform(post("/api/v1/mailbox-verification/resolve").with(csrf()).with(a.auth())
+                .contentType(MediaType.APPLICATION_JSON).content(regA)).andReturn().getResponse().getStatus();
+        assertThat(candidateResolve).as("a candidate session is refused by the worker-only route").isIn(401, 403);
+        mvc.perform(post("/api/v1/emails/verification/extract").with(csrf()).with(a.auth())
+                .contentType(MediaType.APPLICATION_JSON).content("{}")).andExpect(status().isForbidden());
+
+        // Only the authenticated worker, for this running application and session, receives the code.
+        JsonNode lease = json(mvc.perform(post("/api/v1/mailbox-verification/resolve").header("Authorization", WORKER_HEADER)
+                .contentType(MediaType.APPLICATION_JSON).content(regA)).andExpect(status().isOk()).andReturn());
+        assertThat(lease.get("otp").asText()).isEqualTo(otp);
+        String leaseToken = lease.get("leaseToken").asText();
+
+        // ── A6 / P1-6: session ownership and parity on the lease routes.
+        mvc.perform(post("/api/v1/mailbox-verification/resolve").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("applicationId", appA.toString(), "sessionId", sessB.toString(),
+                                "employerDomain", employer))))
+                .andExpect(status().isNotFound());
+        UUID strayA = startSession(a.profileId(), appA, employer);
+        jdbc.update("update applications set account_session_id = ? where id = ?", sessA, appA);
+        mvc.perform(post("/api/v1/mailbox-verification/resolve").header("Authorization", WORKER_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("applicationId", appA.toString(), "sessionId", strayA.toString(),
+                                "employerDomain", employer))))
+                .andExpect(status().isConflict());
+        // A stopped plan cannot continue verification.
+        jdbc.update("update automation_plans set status = 'FAILED' where id = ?", planId);
+        mvc.perform(post("/api/v1/mailbox-verification/resolve").header("Authorization", WORKER_HEADER)
+                .contentType(MediaType.APPLICATION_JSON).content(regA)).andExpect(status().isConflict());
+        mvc.perform(post("/api/v1/mailbox-verification/registration-identity/confirm").header("Authorization", WORKER_HEADER)
+                .contentType(MediaType.APPLICATION_JSON).content(regA)).andExpect(status().isConflict());
+
+        // Audit, outbox and logs never carry the code, the link token or the lease token.
+        for (String row : jdbc.queryForList("select coalesce(after_state::text, '') || coalesce(before_state::text, '') from audit_logs "
+                + "where entity_id in (?, ?)", String.class, appA, planId)) {
+            assertThat(row).doesNotContain(otp).doesNotContain(linkSecret).doesNotContain(leaseToken);
+        }
+        for (String payload : jdbc.queryForList("select payload::text from outbox_events", String.class)) {
+            assertThat(payload).doesNotContain(otp).doesNotContain(linkSecret).doesNotContain(leaseToken);
+        }
+        assertThat(output.getAll()).doesNotContain(otp).doesNotContain(linkSecret).doesNotContain(leaseToken);
+
+        // Retention removes the encrypted content once it is past the content window and unleased.
+        jdbc.update("update mailbox_verifications set status = 'RELEASED', reserved_until = null where application_id = ? and status = 'RESERVED'", appA);
+        jdbc.update("update managed_inbound_messages set reserved_at = null, reservation_expires_at = null, reserved_for_application_id = null, "
+                + "reserved_for_session_id = null, reservation_token_sha256 = null where profile_id = ?", a.profileId());
+        retention.purge(Instant.now().plus(java.time.Duration.ofHours(3)));
+        assertThat(jdbc.queryForObject("select count(*) from managed_inbound_messages where profile_id = ? and content_encrypted is not null",
+                Integer.class, a.profileId())).isZero();
     }
 
     private void seedReadyCvForApplication(UUID profileId, UUID appId, String tag) throws Exception {
