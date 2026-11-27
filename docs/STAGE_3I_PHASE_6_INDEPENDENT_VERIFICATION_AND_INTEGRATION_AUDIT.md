@@ -16,7 +16,7 @@ This document records what was independently reproduced, what was found broken w
 4. **External validation is NO-GO** (§9). There is no operator authorisation, synthetic staging infrastructure, credentials or production-grade secrets.
 5. **A green CI run proves the code behaves as its tests describe, on fixtures.** It does not prove behaviour against a real ATS, real mail delivery or a real network.
 
-During independent reproduction, Phase 6 found and fixed **one P1 submission-approval defect** (§4, APPLY). It also found and fixed **four smaller defects** in the Phase 5 remediations (§2: A2, A4, A5, A6).
+During independent reproduction, Phase 6 found and fixed **one P1 submission-approval defect** (§4, APPLY). It also found and fixed **four smaller defects** in the Phase 5 remediations (§2: A2, A4, A5, A6). The first CI run of this phase then exposed **a navigation race in the worker's live-form inspection**, which was fixed as well (§6).
 
 ---
 
@@ -197,7 +197,7 @@ No fixture-based submission is presented anywhere as a real employer submission.
 |---|---|---|
 | Backend unit (surefire) | `mvn -B clean verify` | **2,132 run, 0 failures, 0 errors, 6 skipped** (`RedisConnectivityDiagnosticsTest`, `RedisLettuceAbExperimentTest` and `RedisTlsBindingTest`, 2 each; they need a real Redis) |
 | Backend ITs (failsafe, PostgreSQL 16 Testcontainers) | same run | **482 run, 0 failures, 0 errors, 7 skipped** (`ExternalDatabase*IT` ×3 and the live-provider `*LiveIngestionIT`/`PlatformLiveIT` ×4; they need external databases or the internet, which this phase does not touch). `BUILD SUCCESS` |
-| Worker | `npm test` (worker) | 405 tests: **404 passed, 0 failed, 1 skipped** (SIGTERM signal test; POSIX signals cannot reach a Node child on Windows, so it runs on Linux CI) |
+| Worker | `npm test` (worker) | 406 tests: **405 passed, 0 failed, 1 skipped** (SIGTERM signal test; POSIX signals cannot reach a Node child on Windows, so it runs on Linux CI). `universal_engine.test.js` was also run 3 more times: 6/6 each time. |
 | Frontend type check | `npx tsc -b` | clean (one fixture-typing error from this phase's `source` union was fixed by typing it as `string`) |
 | Frontend tests | `npm test` (frontend) | 49 files, **492/492 passed** |
 | Frontend build | `npm run build` | built successfully |
@@ -220,7 +220,15 @@ Targeted Phase 6 suites, also included in the full run above:
 | `UniversalBrowserE2EIT` | 9 |
 | Worker `secret_redaction` | 22 |
 
-CI: the GitHub Actions run on the final pushed HEAD is recorded on PR #21.
+### CI, and the worker defect it exposed
+
+The first push of this phase (`ec1aac8`, run `46038516243`) passed `backend`, `frontend` and `cloudflare-email-worker`. **`worker` failed 1 of 405 tests**: `real Chromium validation 422 rejection and fake DOM banner without POST never confirm submission` threw `page.evaluate: Execution context was destroyed, most likely because of a navigation` inside `inspectLiveFormDom`, on the prep pass.
+
+That test had passed in every one of the 39 earlier CI runs we checked, including the Phase 5 baseline, and it passes locally; this phase's worker change (`secret_redaction.js`) is not on that path. It is still **not** dismissed as a flake. It is a real race in production code: `waitForLoadState('domcontentloaded')` can resolve while the previous document is still live, and a navigation that commits mid-`evaluate` aborts the whole run. On a real employer site with redirects or client-side routing, that means a failed run. It fails safe (no click, no duplicate), but it is a failure.
+
+**Fix:** `inspectLiveFormDom` retries the read-only inspection on the settled page, at most 3 times and only for navigation-race errors (`isNavigationRaceError`). Every caller's checks then run on that page, exactly as if the navigation had finished first. That includes CAPTCHA, host and identity checks, and, after the click, the 2xx-POST, DOM and origin evidence rules, so a retry cannot produce a confirmation. Other errors, and pages that never settle, still throw. The new test in `universal_reliability.test.js` covers all three cases.
+
+The final CI run on the HEAD that contains this fix is recorded on PR #21.
 
 ---
 

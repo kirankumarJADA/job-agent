@@ -19,6 +19,7 @@ Each entry records evidence and status. Severity: **P0** user-facing truthfulnes
 - **A6 mailbox authorization: VERIFIED after a fix.** A missing binding failed open; it now returns 503 and an audit.
 - **P2-7 FIXED:** Universal `submittedIdentity` now comes from the prepared package's `profileFacts`, carries a `source` provenance and keeps `BROWSER_OBSERVED`. **P2-8 FIXED:** a SUBMITTED plan always represents the application in TRACK (`TrackPlanSelectionIT`).
 - **NEW P1 FOUND & FIXED (UNIVERSAL):** an approval withdrawn after the worker claimed the submit pass, but before the `PRE_SUBMIT_ATTEMPTING` fence, did not stop the click. The fence now requires `submit_approved` under a plan-row lock, and `invalidateApproval` withdraws RUNNING pre-fence approvals. Proven on real PostgreSQL in both lock orders, with a mutation check.
+- **Worker navigation race FOUND BY CI & FIXED:** `inspectLiveFormDom` threw `Execution context was destroyed` when a navigation committed mid-inspection, which aborted the run. It now retries the read-only inspection on the settled page, at most 3 times and for navigation errors only.
 - **Still open:**
   - **P1** — Greenhouse, Ashby and Workday have no backend pre-submit fence, so the same window remains for those adapters.
   - **P2** — no cross-process worker-plus-backend end-to-end test; no apply-time posting liveness check; hard filters are lenient on missing data; employer status comes from email only.

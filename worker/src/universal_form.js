@@ -363,12 +363,36 @@ export async function installUniversalNavigationGuard(target, expectedUrl, { all
   };
 }
 
+const NAVIGATION_RACE_RE = /Execution context was destroyed|Cannot find context with specified id|Frame was detached/i;
+
+/** True when an evaluate failed only because the page navigated underneath it. */
+export function isNavigationRaceError(error) {
+  return NAVIGATION_RACE_RE.test(String(error?.message ?? error ?? ''));
+}
+
 /**
  * Passively inspects the live DOM (including accessible same-origin iframes and open Shadow DOM),
  * assigning ephemeral numeric `data-robin-control-id` attributes so page strings
  * are NEVER interpolated into Playwright selectors.
+ *
+ * Stage 3I Phase 6: `domcontentloaded` can resolve while the previous document is still live, so a
+ * navigation (next page, redirect, client-side route) may commit mid-evaluate and destroy the
+ * execution context. The inspection is read-only, so it is retried on the settled page (at most
+ * `attempts` times); every caller's checks then run on that page exactly as if the navigation had
+ * finished first. Any other error, or a page that never settles, still throws.
  */
-export async function inspectLiveFormDom(page) {
+export async function inspectLiveFormDom(page, { attempts = 3 } = {}) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await inspectLiveFormDomOnce(page);
+    } catch (error) {
+      if (attempt >= attempts || !isNavigationRaceError(error)) throw error;
+      await page.waitForLoadState('domcontentloaded').catch(() => {});
+    }
+  }
+}
+
+async function inspectLiveFormDomOnce(page) {
   return page.evaluate(() => {
     const clean = (s) => String(s ?? '').replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300);
     const docList = [{ doc: document, frameIndex: 0 }];

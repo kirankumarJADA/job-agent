@@ -537,3 +537,35 @@ test('Workstream D: authenticates saved-credential login wall securely, refuses 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('Stage 3I Phase 6: a navigation committing mid-inspection is re-read on the settled page, never swallowed', async () => {
+  const navigationRace = new Error('page.evaluate: Execution context was destroyed, most likely because of a navigation');
+  const fakePage = (failures, error = navigationRace) => {
+    const calls = { evaluate: 0, settle: 0 };
+    return {
+      calls,
+      evaluate: async () => {
+        calls.evaluate += 1;
+        if (calls.evaluate <= failures) throw error;
+        return { controls: [], securitySignals: {}, settledRead: calls.evaluate };
+      },
+      waitForLoadState: async () => { calls.settle += 1; },
+    };
+  };
+
+  // The CI flake: the context is destroyed once, then the next page is inspected normally.
+  const once = fakePage(1);
+  const settled = await inspectLiveFormDom(once);
+  assert.equal(settled.settledRead, 2);
+  assert.deepEqual(once.calls, { evaluate: 2, settle: 1 });
+
+  // A page that never settles still fails the run (bounded, no infinite loop).
+  const never = fakePage(99);
+  await assert.rejects(() => inspectLiveFormDom(never), /Execution context was destroyed/);
+  assert.equal(never.calls.evaluate, 3);
+
+  // Any other failure is never retried or hidden.
+  const other = fakePage(1, new Error('page.evaluate: Target page, context or browser has been closed'));
+  await assert.rejects(() => inspectLiveFormDom(other), /has been closed/);
+  assert.deepEqual(other.calls, { evaluate: 1, settle: 0 });
+});
