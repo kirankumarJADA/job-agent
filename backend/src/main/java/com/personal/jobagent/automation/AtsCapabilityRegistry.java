@@ -140,18 +140,14 @@ public final class AtsCapabilityRegistry {
     private static final AtsCapabilities WORKDAY = new AtsCapabilities(
             "WORKDAY", "Workday",
             List.of("myworkdayjobs.com"),
-            FULL, FULL, NONE, PARTIAL, FULL, NONE, NONE, NONE, NONE, NONE, NONE, FULL,
-            "Verified live (2026) against Workday platform data-automation-id standards, but only up to the sign-in "
-                    + "page: the multi-step wizard, honeypot anti-bot trap (beecatcher/website), and MFA/CAPTCHA detection "
-                    + "on that sign-in page are protected against live-observed markup. WorkdayExecutionPlanService's own "
-                    + "module comment is explicit that the actual multi-step APPLICATION form was never observed and is "
-                    + "never reached, inspected, or filled — reaching it would require signing in with a real candidate's "
-                    + "real credentials against a real employer's live tenant, which was deliberately not done. This "
-                    + "service only verifies that a candidate's saved credential still signs in, reporting success, "
-                    + "failure, or an MFA/CAPTCHA human-handoff. Phase 11 separately added a genuine, consent-gated, "
-                    + "idempotent account-CREATION path (accountCreationReadiness is PARTIAL because the real "
-                    + "post-creation verification mechanism is unknown). No form inspection, field filling, document "
-                    + "attachment, question answering, or submission of any kind exists for Workday today.");
+            FULL, FULL, PARTIAL, PARTIAL, FULL, PARTIAL, NONE, PARTIAL, PARTIAL, PARTIAL, PARTIAL, FULL,
+            "Sign-in readiness (FULL, WORKDAY_LOGIN) and consent-gated account creation (PARTIAL, WORKDAY_CREATE_ACCOUNT) "
+                    + "are verified against live-observed public sign-in page controls and honeypot boundaries (beecatcher/website). "
+                    + "Phase 19 also implements multi-step wizard navigation, identity-category form filling, document attachment "
+                    + "(CV/cover letter via data-automation-id), required-gap surfacing (custom questions remain human-only), and "
+                    + "approval-gated WORKDAY_SUBMIT_CLICK in backend/worker/UI — all marked PARTIAL because multi-step apply and "
+                    + "submission have been verified against controlled local Playwright/HTTP fixtures only and have never been "
+                    + "live-verified past sign-in against a real employer tenant.");
 
     private static final AtsCapabilities ASHBY = new AtsCapabilities(
             "ASHBY", "Ashby",
@@ -173,12 +169,21 @@ public final class AtsCapabilityRegistry {
             List.of(),
             FULL, FULL, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, FULL,
             "Every other platform Robin recognises on the discovery side (iCIMS, Workable, SmartRecruiters, a company's own "
-                    + "career page, and the rest of the 30-platform manifest) falls here: Robin resolves the real application "
-                    + "URL and still prepares a tailored CV, cover letter and answers for it, but has no dedicated "
-                    + "execution-plan service, so the employer's own form is never inspected, filled or submitted — the "
-                    + "candidate finishes and submits it themselves.");
+                    + "career page, and the rest of the 30-platform manifest) falls here: when universal execution is disabled "
+                    + "or an explicit INSPECTION plan is requested, Robin prepares a tailored CV, cover letter and answers "
+                    + "without touching the employer's form.");
 
-    private static final List<AtsCapabilities> ALL = List.of(GREENHOUSE, LEVER, ZOHO_RECRUIT, WORKDAY, ASHBY, GENERIC);
+    private static final AtsCapabilities UNIVERSAL = new AtsCapabilities(
+            "UNIVERSAL", "Universal browser engine",
+            List.of(),
+            FULL, FULL, FULL, NONE, PARTIAL, PARTIAL, PARTIAL, FULL, PARTIAL, PARTIAL, PARTIAL, FULL,
+            "Stage 3B live-DOM multi-step browser engine verified end to end against controlled local Playwright/HTTP "
+                    + "employer fixtures and PostgreSQL 16 integration tests. Uses SSRF-guarded navigation, ephemeral DOM control "
+                    + "tagging, verified candidate facts, human-confirmed answers, durable phase checkpoints, candidate pause/resume, "
+                    + "explicit approval-gated submission, and encrypted submission_evidence capture. No live third-party employer "
+                    + "submissions are performed in tests, and ordinary sites stay distinct from V069 sandbox-verified receipts.");
+
+    private static final List<AtsCapabilities> ALL = List.of(GREENHOUSE, LEVER, ZOHO_RECRUIT, WORKDAY, ASHBY, UNIVERSAL, GENERIC);
 
     public static List<AtsCapabilities> all() {
         return ALL;
@@ -189,13 +194,22 @@ public final class AtsCapabilityRegistry {
         return ALL.stream().filter(c -> c.kind().equalsIgnoreCase(planType)).findFirst().orElse(GENERIC);
     }
 
-    /** The platform whose declared host patterns match this application URL, or GENERIC when none do. */
+    /** The platform whose declared DNS host/subdomain patterns match this application URL, or GENERIC when none do. */
     public static AtsCapabilities byApplicationUrl(String applicationUrl) {
         if (applicationUrl == null || applicationUrl.isBlank()) return GENERIC;
-        String lower = applicationUrl.toLowerCase(java.util.Locale.ROOT);
+        java.net.URI uri;
+        try {
+            uri = java.net.URI.create(applicationUrl.trim());
+        } catch (IllegalArgumentException e) {
+            return GENERIC;
+        }
+        String host = uri.getHost();
+        if (host == null || host.isBlank()) return GENERIC;
+        String lowerHost = host.toLowerCase(java.util.Locale.ROOT);
         for (AtsCapabilities c : ALL) {
             for (String pattern : c.hostPatterns()) {
-                if (lower.contains(pattern)) return c;
+                String p = pattern.toLowerCase(java.util.Locale.ROOT);
+                if (lowerHost.equals(p) || lowerHost.endsWith("." + p)) return c;
             }
         }
         return GENERIC;

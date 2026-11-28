@@ -122,14 +122,33 @@ class ApplicationReconcilerTest {
     }
 
     @Test
-    void aConfirmedRobinSubmissionIsAppliedAndVerified() {
+    void aSubmittedPlanWithoutAVerifiedReceiptIsAppliedButNeverVerified() {
         S s = new S();
         s.plan = new PlanState("SUBMITTED", true);
         TrackState state = reconcile(s);
         assertThat(state.status()).isEqualTo(Stage.APPLIED);
+        assertThat(state.basis()).isEqualTo(Basis.UNVERIFIED);
+        assertThat(state.basis()).isNotEqualTo(Basis.VERIFIED);
+        assertThat(state.submission().state()).isEqualTo(SubmissionState.UNVERIFIED);
+        assertThat(state.robinSubmitted()).isTrue();
+        assertThat(state.robinSubmissionNote()).contains("could not be verified");
+        assertThat(state.reason()).doesNotContain("confirmed it with platform evidence");
+        assertThat(state.attention()).extracting(a -> a.code()).contains("RECEIPT_UNVERIFIED");
+        assertThat(state.unknowns()).contains("Whether the employer received this application is not verified.");
+    }
+
+    @Test
+    void aConfirmedRobinSubmissionIsAppliedAndVerified() {
+        S s = new S();
+        s.plan = new PlanState("SUBMITTED", true, null, true);
+        TrackState state = reconcile(s);
+        assertThat(state.status()).isEqualTo(Stage.APPLIED);
         assertThat(state.basis()).isEqualTo(Basis.VERIFIED);
-        assertThat(state.label()).isEqualTo("Applied — verified");
+        // A verified Robin receipt is a V069 sandbox receipt: it stays visibly sandbox-tagged.
+        assertThat(state.label()).isEqualTo("Applied — verified (sandbox)");
         assertThat(state.submission().state()).isEqualTo(SubmissionState.CONFIRMED);
+        assertThat(state.submission().sandbox()).isTrue();
+        assertThat(state.submission().verificationLevel()).isEqualTo("SANDBOX_VERIFIED");
         assertThat(state.robinSubmitted()).isTrue();
         assertThat(state.robinSubmissionNote()).contains("Robin submitted this application and confirmed it with platform evidence");
         assertThat(state.reason()).contains("Robin submitted this application and confirmed it with platform evidence");

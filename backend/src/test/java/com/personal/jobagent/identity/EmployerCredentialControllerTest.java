@@ -138,6 +138,19 @@ class EmployerCredentialControllerTest {
         verify(credentials).disable(profileId, "greenhouse.io");
     }
 
+    @Test
+    void candidateEndpointsRejectWorkerRequestsWith403() {
+        when(ownerContext.isWorkerRequest()).thenReturn(true);
+
+        assertThat(controller.list(request).getStatusCode().value()).isEqualTo(403);
+        assertThat(controller.save(new EmployerCredentialController.SaveRequest("greenhouse.io", "u", "p"), request)
+                .getStatusCode().value()).isEqualTo(403);
+        assertThat(controller.disable("greenhouse.io", request).getStatusCode().value()).isEqualTo(403);
+        verify(credentials, never()).list(any());
+        verify(credentials, never()).save(any(), any(), any(), any());
+        verify(credentials, never()).disable(any(), any());
+    }
+
     // ── worker-facing: resolve ───────────────────────────────────────
 
     @Test
@@ -181,10 +194,12 @@ class EmployerCredentialControllerTest {
 
     @Test
     void resolveReturns404WhenNoActiveCredentialIsStoredForThatDomain() {
+        // Also covers a DISABLED credential: find() only ever returns ACTIVE rows.
         UUID applicationId = UUID.randomUUID();
         UUID profileId = UUID.randomUUID();
         when(ownerContext.isWorkerRequest()).thenReturn(true);
         when(ownerContext.ownerOfApplication(applicationId)).thenReturn(Optional.of(profileId));
+        bind(profileId, applicationId, true, "greenhouse.io");
         when(credentials.find(profileId, "greenhouse.io")).thenReturn(Optional.empty());
 
         ResponseEntity<?> response = controller.resolve(
@@ -199,6 +214,7 @@ class EmployerCredentialControllerTest {
         UUID profileId = UUID.randomUUID();
         when(ownerContext.isWorkerRequest()).thenReturn(true);
         when(ownerContext.ownerOfApplication(applicationId)).thenReturn(Optional.of(profileId));
+        bind(profileId, applicationId, true, "greenhouse.io");
         when(credentials.find(profileId, "greenhouse.io")).thenReturn(Optional.of(
                 new EmployerCredentialService.StoredCredential(UUID.randomUUID(), "greenhouse.io",
                         "candidate@example.com", "the-real-password")));
@@ -210,5 +226,115 @@ class EmployerCredentialControllerTest {
         assertThat(response.getBody()).isEqualTo(Map.of("username", "candidate@example.com",
                 "password", "the-real-password"));
         verify(credentials).find(profileId, "greenhouse.io");
+    }
+
+    // ── Stage 3F (SEC-7): employer-domain binding ─────────────────────
+
+    private void bind(UUID profileId, UUID applicationId, boolean running, String... domains) {
+        when(credentials.bindingFor(profileId, applicationId))
+                .thenReturn(new EmployerCredentialService.ApplicationBinding(running, java.util.Set.of(domains)));
+    }
+
+    private ResponseEntity<?> resolveAsWorker(UUID applicationId, UUID profileId, String domain) {
+        when(ownerContext.isWorkerRequest()).thenReturn(true);
+        when(ownerContext.ownerOfApplication(applicationId)).thenReturn(Optional.of(profileId));
+        return controller.resolve(new EmployerCredentialController.ResolveRequest(applicationId, domain), request);
+    }
+
+    @Test
+    void resolveRefusesADomainThatIsNotThisApplicationsEmployer() {
+        UUID applicationId = UUID.randomUUID();
+        UUID profileId = UUID.randomUUID();
+        bind(profileId, applicationId, true, "careers.acme.com");
+
+        ResponseEntity<?> response = resolveAsWorker(applicationId, profileId, "greenhouse.io");
+
+        assertThat(response.getStatusCode().value()).isEqualTo(403);
+        verify(credentials, never()).find(any(), any());
+    }
+
+    @Test
+    void resolveRefusesLookalikeAndSuffixConfusionDomains() {
+        UUID applicationId = UUID.randomUUID();
+        UUID profileId = UUID.randomUUID();
+        bind(profileId, applicationId, true, "greenhouse.io");
+
+        for (String lookalike : List.of("greenhouse.io.evil.com", "evilgreenhouse.io", "greenhouse.io-login.com",
+                "sub.greenhouse.io", "xn--greenhuse-q9a.io", "io")) {
+            ResponseEntity<?> response = resolveAsWorker(applicationId, profileId, lookalike);
+            assertThat(response.getStatusCode().value()).as(lookalike).isIn(400, 403);
+        }
+        verify(credentials, never()).find(any(), any());
+    }
+
+    @Test
+    void resolveNormalisesCaseTrailingDotAndWwwBeforeMatching() {
+        UUID applicationId = UUID.randomUUID();
+        UUID profileId = UUID.randomUUID();
+        bind(profileId, applicationId, true, "careers.acme.com");
+        when(credentials.find(profileId, "careers.acme.com")).thenReturn(Optional.of(
+                new EmployerCredentialService.StoredCredential(UUID.randomUUID(), "careers.acme.com", "u", "p")));
+
+        assertThat(resolveAsWorker(applicationId, profileId, "WWW.Careers.ACME.com.").getStatusCode().value()).isEqualTo(200);
+    }
+
+    @Test
+    void resolveRefusesWhenNoAutomationRunIsActiveForTheApplication() {
+        UUID applicationId = UUID.randomUUID();
+        UUID profileId = UUID.randomUUID();
+        bind(profileId, applicationId, false, "greenhouse.io");
+
+        ResponseEntity<?> response = resolveAsWorker(applicationId, profileId, "greenhouse.io");
+
+        assertThat(response.getStatusCode().value()).isEqualTo(409);
+        verify(credentials, never()).find(any(), any());
+    }
+
+    @Test
+    void resolveRefusesAnApplicationWhoseJobHasNoUsableEmployerHost() {
+        // Missing/invalid application -> job relationship: no permitted domains at all.
+        UUID applicationId = UUID.randomUUID();
+        UUID profileId = UUID.randomUUID();
+        bind(profileId, applicationId, true);
+
+        assertThat(resolveAsWorker(applicationId, profileId, "greenhouse.io").getStatusCode().value()).isEqualTo(403);
+        verify(credentials, never()).find(any(), any());
+    }
+
+    @Test
+    void resolveReportsAnUndecryptableCredentialWithoutLeakingAnything() {
+        UUID applicationId = UUID.randomUUID();
+        UUID profileId = UUID.randomUUID();
+        bind(profileId, applicationId, true, "greenhouse.io");
+        when(credentials.find(profileId, "greenhouse.io"))
+                .thenThrow(new IllegalStateException("Credential decryption failed — was APP_SECRETS_KEY rotated?"));
+
+        ResponseEntity<?> response = resolveAsWorker(applicationId, profileId, "greenhouse.io");
+
+        assertThat(response.getStatusCode().value()).isEqualTo(409);
+        assertThat(String.valueOf(response.getBody())).doesNotContain("APP_SECRETS_KEY").doesNotContain("password");
+    }
+
+    @Test
+    void workerTokensCannotListSaveOrDisableCandidateCredentials() {
+        when(ownerContext.isWorkerRequest()).thenReturn(true);
+
+        assertThat(controller.list(request).getStatusCode().value()).isEqualTo(403);
+        assertThat(controller.save(new EmployerCredentialController.SaveRequest("greenhouse.io", "u", "p"), request)
+                .getStatusCode().value()).isEqualTo(403);
+        assertThat(controller.disable("greenhouse.io", request).getStatusCode().value()).isEqualTo(403);
+        verify(credentials, never()).save(any(), any(), any(), any());
+        verify(credentials, never()).list(any());
+    }
+
+    @Test
+    void hostDomainAcceptsOnlyHttpsNamedHostsWithoutUserinfo() {
+        assertThat(EmployerCredentialService.hostDomain("https://WWW.Careers.Acme.com/jobs/1?x=1")).contains("careers.acme.com");
+        assertThat(EmployerCredentialService.hostDomain("http://careers.acme.com/jobs")).isEmpty();
+        assertThat(EmployerCredentialService.hostDomain("https://user:pw@careers.acme.com/jobs")).isEmpty();
+        assertThat(EmployerCredentialService.hostDomain("https://127.0.0.1/jobs")).isEmpty();
+        assertThat(EmployerCredentialService.hostDomain("https://[::1]/jobs")).isEmpty();
+        assertThat(EmployerCredentialService.hostDomain("not a url")).isEmpty();
+        assertThat(EmployerCredentialService.hostDomain(null)).isEmpty();
     }
 }

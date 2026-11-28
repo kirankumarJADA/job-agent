@@ -140,4 +140,44 @@ class CsrfBearerExemptionIT {
                 .as("worker events must not be CSRF-blocked")
                 .isNotEqualTo(403);
     }
+
+    @Test
+    void invalidBearerTokenWithExistingCookieSessionCannotBypassCsrfToExecuteAction() throws Exception {
+        MockHttpSession session = login();
+
+        mockMvc.perform(post(healthCheckPath())
+                        .session(session)
+                        .header("Authorization", "Bearer invalid-firebase-or-worker-token")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void employerCredentialResolveRequiresValidWorkerTokenAndRefusesSessionsOrBadBearers() throws Exception {
+        MockHttpSession session = login();
+
+        // Candidate session without worker token is rejected (401) by WorkerEventTokenFilter
+        mockMvc.perform(post("/api/v1/employer-credentials/resolve")
+                        .session(session)
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"applicationId\":\"" + UUID.randomUUID() + "\",\"employerDomain\":\"greenhouse.io\"}"))
+                .andExpect(status().isUnauthorized());
+
+        // Candidate session + bogus Bearer token (even lowercase scheme) is rejected (401)
+        mockMvc.perform(post("/api/v1/employer-credentials/resolve")
+                        .session(session)
+                        .header("Authorization", "bearer wrong-worker-token")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"applicationId\":\"" + UUID.randomUUID() + "\",\"employerDomain\":\"greenhouse.io\"}"))
+                .andExpect(status().isUnauthorized());
+
+        // Valid worker token authenticates and reaches controller (404 for unknown application, never 401/403)
+        mockMvc.perform(post("/api/v1/employer-credentials/resolve")
+                        .header("Authorization", "Bearer test-worker-token-0123456789abcdef")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"applicationId\":\"" + UUID.randomUUID() + "\",\"employerDomain\":\"greenhouse.io\"}"))
+                .andExpect(status().isNotFound());
+    }
 }

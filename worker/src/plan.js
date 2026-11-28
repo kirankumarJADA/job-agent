@@ -93,7 +93,12 @@ export const StepType = Object.freeze({
   // Phase 19: Workday application form filling and guarded submission
   WORKDAY_APPLY: 'WORKDAY_APPLY',
   WORKDAY_SUBMIT_CLICK: 'WORKDAY_SUBMIT_CLICK',
+  // Stage 3B: Universal ordinary-website engine steps
+  UNIVERSAL_APPLY: 'UNIVERSAL_APPLY',
+  UNIVERSAL_SUBMIT_CLICK: 'UNIVERSAL_SUBMIT_CLICK',
 });
+
+export { universalPageIdentityMatches } from './universal_form.js';
 
 export const Policy = Object.freeze({ AUTO: 'AUTO', REQUIRES_APPROVAL: 'REQUIRES_APPROVAL', FORBIDDEN: 'FORBIDDEN' });
 

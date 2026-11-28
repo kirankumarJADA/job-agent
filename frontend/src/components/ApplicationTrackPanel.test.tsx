@@ -494,4 +494,128 @@ describe('ApplicationTrackPanel', () => {
     expect(screen.getByText(/Robin cannot read your mailbox \(no mailbox is connected\)/)).toBeTruthy();
     expect(screen.getByText(/inferred, not confirmed\)\. Confirm it below/)).toBeTruthy();
   });
+
+  // ── Stage 3I Phase 2 ────────────────────────────────────────────────
+
+  const levelB = (overrides: Partial<ApplicationTrack> = {}) =>
+    track({
+      status: 'APPLIED', label: 'Applied — not verified', basis: 'UNVERIFIED', evidenceStage: 'APPLIED',
+      reason: "Robin submitted this application in the browser and observed the employer's confirmation page.",
+      submission: {
+        state: 'UNVERIFIED', label: 'Submitted in browser — not verified by the employer',
+        reason: 'The employer has not independently verified that it was received.',
+        verificationLevel: 'BROWSER_OBSERVED', sandbox: false,
+      },
+      robinSubmission: { submitted: true, note: "Robin submitted this application in the browser and observed the employer's confirmation page." },
+      submissionEvidence: {
+        recorded: true, browserObserved: true, sandboxVerified: false, employerVerified: false,
+        recordedAt: '2026-11-10T10:00:20Z', recordedAtSource: 'SERVER_CLOCK', confirmationReference: 'APP-50599',
+        anchor: { source: 'PRE_SUBMIT_ATTEMPT', at: '2026-11-10T10:00:00Z', precision: 'EXACT', clockSkewSeconds: 300 },
+      },
+      ...overrides,
+    });
+
+  it('never renders a browser-observed submission as verified or green, and asks for no review', async () => {
+    serve({ 'GET /applications/app-1/track': levelB(), 'GET /applications/app-1/track/timeline': page([]) });
+    await openPanel();
+    const level = await screen.findByTestId('submission-level');
+    expect(level.textContent).toContain('Browser-observed — employer has not verified');
+    expect(level.innerHTML).toContain('amber');
+    expect(level.innerHTML).not.toContain('emerald');
+    expect(screen.getByTestId('submission-record').textContent).toContain('a browser observation is not employer verification');
+    expect(screen.getByTestId('submission-record').textContent).toContain('APP-50599');
+    expect(screen.queryByText(/Confirmed by verified employer evidence/)).toBeNull();
+    expect(screen.queryByText('Needs your review')).toBeNull();
+    expect(screen.getAllByText('Applied — not verified').every((el) => !el.className.includes('emerald'))).toBe(true);
+  });
+
+  it('tags a sandbox confirmation as sandbox, never as a live employer', async () => {
+    serve({
+      'GET /applications/app-1/track': track({
+        status: 'APPLIED', label: 'Applied — verified (sandbox)', basis: 'VERIFIED',
+        submission: {
+          state: 'CONFIRMED', label: 'Confirmed by sandbox receipt',
+          reason: '[SANDBOX] The verified receipt comes from a registered synthetic sandbox, not a live employer.',
+          verificationLevel: 'SANDBOX_VERIFIED', sandbox: true,
+        },
+        robinSubmission: { submitted: true, note: 'Robin submitted this application. [SANDBOX]' },
+      }),
+      'GET /applications/app-1/track/timeline': page([]),
+    });
+    await openPanel();
+    expect((await screen.findByTestId('sandbox-tag')).textContent).toContain('SANDBOX — not a live employer');
+    expect(screen.getByText('Submission confirmed by a sandbox receipt — not a live employer')).toBeTruthy();
+    expect(screen.queryByText('Submission confirmed by verified employer evidence')).toBeNull();
+    expect(screen.getByTestId('submission-level').innerHTML).not.toContain('emerald');
+    expect(screen.getAllByText('Applied — verified (sandbox)').every((el) => !el.className.includes('emerald'))).toBe(true);
+    expect(screen.getByText('Submission confirmed by a sandbox receipt — not a live employer').className).not.toContain('emerald');
+  });
+
+  it('shows a submission-reference conflict in red with both original values, and a contested receipt is never green', async () => {
+    const contested = receipt({
+      channel: 'MAILBOX_CONNECTOR', channelLabel: 'Retrieved from your connected mailbox', verification: 'VERIFIED', verificationLabel: 'Verified',
+      externalReference: 'APP-99999', evidenceAtSource: 'PROVIDER_RECEIPT',
+      link: {
+        decision: 'LINKED', origin: 'INGESTION', referenceConsistency: 'CONFLICTING', referenceDetail: 'REFERENCES_DIFFER',
+        submissionReference: 'APP-50599', temporalStatus: 'PLAUSIBLE', anchorSource: 'PRE_SUBMIT_ATTEMPT',
+        anchorAt: '2026-11-10T10:00:00Z', linkedAt: '2026-11-10T10:05:00Z', policyVersion: 'track-receipt-policy-v2',
+      },
+    });
+    serve({
+      'GET /applications/app-1/track': levelB({
+        status: 'NEEDS_REVIEW', label: 'Needs your review', basis: null, needsReview: true,
+        submission: {
+          state: 'CONFLICTING', label: 'Conflicting evidence',
+          reason: 'An employer acknowledgement quotes a different confirmation reference.',
+          verificationLevel: 'CONFLICTING', sandbox: false,
+        },
+        conflicts: [{
+          code: 'SUBMISSION_REFERENCE_CONFLICT',
+          message: 'An employer acknowledgement quotes the confirmation reference APP-99999, but the browser observed APP-50599.',
+          references: ['acknowledgement:APP-99999', 'browser-observed:APP-50599', 'receipt:rc-1'],
+        }],
+        attention: [{
+          code: 'RESOLVE_REFERENCE_CONFLICT',
+          message: 'Confirm this acknowledgement if it is about this application despite the different reference, or reject it.',
+          receiptId: 'rc-1',
+        }],
+        receipts: [contested],
+      }),
+      'GET /applications/app-1/track/timeline': page([]),
+    });
+    await openPanel();
+    const refs = await screen.findByTestId('conflict-references');
+    expect(refs.textContent).toContain('acknowledgement:APP-99999');
+    expect(refs.textContent).toContain('browser-observed:APP-50599');
+    expect(refs.textContent).not.toContain('receipt:');
+    const item = screen.getByTestId('track-receipt');
+    expect(within(item).getByText('Conflicts with the submission').className).toContain('red');
+    expect(within(item).queryByText('Verified')).toBeNull();
+    expect(within(item).getByTestId('receipt-link-issue').textContent).toContain('APP-50599');
+    expect(within(item).getByText(/time recorded by your mail provider/)).toBeTruthy();
+    expect(within(item).getByRole('button', { name: 'It is about this application' })).toBeTruthy();
+    expect(screen.getAllByText('Needs your review').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText('Needs your review').every((el) => el.className.includes('red'))).toBe(true);
+  });
+
+  it('flags an acknowledgement that arrived before the submission, and a resolved one shows the candidate decision', async () => {
+    const early = receipt({
+      verification: 'UNVERIFIED', verificationLabel: 'Not verified', evidenceAtSource: 'PROVIDER_RECEIPT',
+      link: {
+        decision: 'LINKED', origin: 'INGESTION', referenceConsistency: 'ALIGNED', referenceDetail: 'REFERENCES_MATCH',
+        submissionReference: 'APP-50599', temporalStatus: 'BEFORE_SUBMISSION', anchorSource: 'PRE_SUBMIT_ATTEMPT',
+        anchorAt: '2026-11-10T10:00:00Z', linkedAt: '2026-11-10T10:05:00Z', policyVersion: 'track-receipt-policy-v2',
+      },
+    });
+    serve({ 'GET /applications/app-1/track': levelB({ receipts: [early] }), 'GET /applications/app-1/track/timeline': page([]) });
+    await openPanel();
+    expect((await screen.findByTestId('receipt-link-issue')).textContent).toContain('Arrived before this application was submitted');
+    cleanup();
+
+    const resolved = { ...early, candidateReview: 'CONFIRMED' as const, link: { ...early.link!, decision: 'CANDIDATE_CONFIRMED' as const } };
+    serve({ 'GET /applications/app-1/track': levelB({ receipts: [resolved] }), 'GET /applications/app-1/track/timeline': page([]) });
+    await openPanel();
+    expect(await screen.findByText(/your confirmation does not make it verified/)).toBeTruthy();
+    expect(screen.queryByTestId('receipt-link-issue')).toBeNull();
+  });
 });

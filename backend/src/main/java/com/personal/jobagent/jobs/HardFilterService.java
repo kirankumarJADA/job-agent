@@ -50,22 +50,49 @@ public class HardFilterService {
     /**
      * Run all hard filters. Returns {@link HardFilterResult#pass()} when
      * every criterion is satisfied or unconstrained; otherwise a reject
-     * result with every failing reason.
+     * result with every failing reason. Missing fields pass leniently for
+     * general discovery browsing.
      */
     public HardFilterResult evaluate(JobRecord job, PreferenceSetRecord prefs) {
+        return evaluateInternal(job, prefs, null, false);
+    }
+
+    /**
+     * Stage 3I Phase 8: Strict hard-filter evaluation for autonomous apply /
+     * standing authorization. Missing or UNKNOWN salary, location, workplace
+     * type, employment type, experience level, or unconfirmed sponsorship for
+     * constrained dimensions fails closed instead of receiving the benefit
+     * of the doubt.
+     */
+    public HardFilterResult evaluateStrict(JobRecord job, PreferenceSetRecord prefs) {
+        return evaluateInternal(job, prefs, null, true);
+    }
+
+    public HardFilterResult evaluateStrict(JobRecord job, PreferenceSetRecord prefs, List<String> allowedCountries) {
+        return evaluateInternal(job, prefs, allowedCountries, true);
+    }
+
+    private HardFilterResult evaluateInternal(JobRecord job, PreferenceSetRecord prefs,
+                                              List<String> allowedCountries, boolean strict) {
         if (prefs == null) {
-            return HardFilterResult.pass();
+            if (!strict) {
+                return HardFilterResult.pass();
+            }
+            return HardFilterResult.reject(List.of(new HardFilterResult.FilterReason(
+                    "PREFERENCES", "Active preference set required", "NONE",
+                    "Strict autonomous eligibility requires an active preference set.")));
         }
 
         List<HardFilterResult.FilterReason> reasons = new ArrayList<>();
 
-        checkTitles(job, prefs, reasons);
-        checkLocation(job, prefs, reasons);
-        checkRemoteType(job, prefs, reasons);
-        checkEmploymentType(job, prefs, reasons);
-        checkExperienceLevel(job, prefs, reasons);
-        checkSalaryMin(job, prefs, reasons);
-        checkSponsorshipPolicy(job, prefs, reasons);
+        checkTitles(job, prefs, reasons, strict);
+        checkLocation(job, prefs, reasons, strict);
+        checkAllowedCountries(job, allowedCountries, reasons, strict);
+        checkRemoteType(job, prefs, reasons, strict);
+        checkEmploymentType(job, prefs, reasons, strict);
+        checkExperienceLevel(job, prefs, reasons, strict);
+        checkSalaryMin(job, prefs, reasons, strict);
+        checkSponsorshipPolicy(job, prefs, reasons, strict);
         checkCompanyFilters(job, prefs, reasons);
         checkExcludedKeywords(job, prefs, reasons);
 
@@ -88,12 +115,22 @@ public class HardFilterService {
             java.util.regex.Pattern.CASE_INSENSITIVE);
 
     private void checkTitles(JobRecord job, PreferenceSetRecord prefs,
-                             List<HardFilterResult.FilterReason> reasons) {
+                             List<HardFilterResult.FilterReason> reasons, boolean strict) {
         List<String> allowedTitles = prefs.titles();
         if (allowedTitles == null || allowedTitles.isEmpty()) return;
 
         String jobTitle = job.title();
-        if (isBlank(jobTitle)) return; // benefit of the doubt
+        if (isBlank(jobTitle)) {
+            if (strict) {
+                reasons.add(new HardFilterResult.FilterReason(
+                        "TITLE",
+                        String.join(", ", allowedTitles),
+                        "unknown",
+                        "Job title is missing; cannot verify role fit automatically."
+                ));
+            }
+            return;
+        }
 
         boolean matched = matchesAnyTitle(jobTitle, allowedTitles);
         if (!matched) {
@@ -141,16 +178,25 @@ public class HardFilterService {
     }
 
     private void checkLocation(JobRecord job, PreferenceSetRecord prefs,
-                               List<HardFilterResult.FilterReason> reasons) {
+                               List<HardFilterResult.FilterReason> reasons, boolean strict) {
         List<String> allowed = prefs.locationsAllowed();
         if (allowed == null || allowed.isEmpty()) return;
 
-        // If job has no location data at all, pass (benefit of the doubt)
         String city = job.city();
         String country = job.country();
         String locationRaw = job.locationRaw();
 
-        if (isBlank(city) && isBlank(country) && isBlank(locationRaw)) return;
+        if (isBlank(city) && isBlank(country) && isBlank(locationRaw)) {
+            if (strict) {
+                reasons.add(new HardFilterResult.FilterReason(
+                        "LOCATION",
+                        String.join(", ", allowed),
+                        "unknown",
+                        "Job location is missing; strict auto-apply will not assume location eligibility."
+                ));
+            }
+            return;
+        }
 
         boolean matched = matchesLocation(job, allowed);
 
@@ -161,6 +207,34 @@ public class HardFilterService {
                     String.join(", ", allowed),
                     jobLocation,
                     "Job location '" + jobLocation + "' is not in your allowed locations."
+            ));
+        }
+    }
+
+    private void checkAllowedCountries(JobRecord job, List<String> allowedCountries,
+                                       List<HardFilterResult.FilterReason> reasons, boolean strict) {
+        if (allowedCountries == null || allowedCountries.isEmpty()) return;
+        String city = job.city();
+        String country = job.country();
+        String locationRaw = job.locationRaw();
+        if (isBlank(city) && isBlank(country) && isBlank(locationRaw)) {
+            if (strict) {
+                reasons.add(new HardFilterResult.FilterReason(
+                        "COUNTRY",
+                        String.join(", ", allowedCountries),
+                        "unknown",
+                        "Job country is missing; strict auto-apply requires a verified allowed country."
+                ));
+            }
+            return;
+        }
+        if (!matchesLocation(job, allowedCountries)) {
+            String jobLocation = buildJobLocationString(city, country, locationRaw);
+            reasons.add(new HardFilterResult.FilterReason(
+                    "COUNTRY",
+                    String.join(", ", allowedCountries),
+                    jobLocation,
+                    "Job location '" + jobLocation + "' is outside allowed countries."
             ));
         }
     }
@@ -213,12 +287,22 @@ public class HardFilterService {
     }
 
     private void checkRemoteType(JobRecord job, PreferenceSetRecord prefs,
-                                 List<HardFilterResult.FilterReason> reasons) {
+                                 List<HardFilterResult.FilterReason> reasons, boolean strict) {
         List<String> allowedRemote = prefs.remoteTypes();
         if (allowedRemote == null || allowedRemote.isEmpty()) return;
 
         String jobRemote = job.remoteType();
-        if (isBlank(jobRemote) || "UNKNOWN".equalsIgnoreCase(jobRemote)) return;
+        if (isBlank(jobRemote) || "UNKNOWN".equalsIgnoreCase(jobRemote)) {
+            if (strict) {
+                reasons.add(new HardFilterResult.FilterReason(
+                        "REMOTE_TYPE",
+                        String.join(", ", allowedRemote),
+                        isBlank(jobRemote) ? "unknown" : jobRemote,
+                        "Job workplace type is missing; strict auto-apply requires confirmed workplace compatibility."
+                ));
+            }
+            return;
+        }
 
         boolean matched = allowedRemote.stream()
                 .anyMatch(r -> r.equalsIgnoreCase(jobRemote));
@@ -234,12 +318,22 @@ public class HardFilterService {
     }
 
     private void checkEmploymentType(JobRecord job, PreferenceSetRecord prefs,
-                                     List<HardFilterResult.FilterReason> reasons) {
+                                     List<HardFilterResult.FilterReason> reasons, boolean strict) {
         List<String> allowedTypes = prefs.employmentTypes();
         if (allowedTypes == null || allowedTypes.isEmpty()) return;
 
         String jobType = job.employmentType();
-        if (isBlank(jobType)) return;
+        if (isBlank(jobType)) {
+            if (strict) {
+                reasons.add(new HardFilterResult.FilterReason(
+                        "EMPLOYMENT_TYPE",
+                        String.join(", ", allowedTypes),
+                        "unknown",
+                        "Job employment type is missing; strict auto-apply requires confirmed employment type."
+                ));
+            }
+            return;
+        }
 
         boolean matched = allowedTypes.stream()
                 .anyMatch(t -> t.equalsIgnoreCase(jobType));
@@ -255,12 +349,22 @@ public class HardFilterService {
     }
 
     private void checkExperienceLevel(JobRecord job, PreferenceSetRecord prefs,
-                                      List<HardFilterResult.FilterReason> reasons) {
+                                      List<HardFilterResult.FilterReason> reasons, boolean strict) {
         List<String> allowedLevels = prefs.experienceLevels();
         if (allowedLevels == null || allowedLevels.isEmpty()) return;
 
         String jobLevel = job.experienceLevel();
-        if (isBlank(jobLevel)) return;
+        if (isBlank(jobLevel)) {
+            if (strict) {
+                reasons.add(new HardFilterResult.FilterReason(
+                        "EXPERIENCE_LEVEL",
+                        String.join(", ", allowedLevels),
+                        "unknown",
+                        "Job experience level is missing; strict auto-apply requires confirmed seniority fit."
+                ));
+            }
+            return;
+        }
 
         boolean matched = allowedLevels.stream()
                 .anyMatch(l -> l.equalsIgnoreCase(jobLevel));
@@ -275,39 +379,64 @@ public class HardFilterService {
         }
     }
 
+    public static boolean matchesSalary(JobRecord job, Long salaryMinGbp) {
+        if (salaryMinGbp == null || salaryMinGbp <= 0) return true;
+        BigDecimal jobMax = job.salaryMax();
+        if (jobMax == null) return true;
+        return jobMax.compareTo(BigDecimal.valueOf(salaryMinGbp)) >= 0;
+    }
+
     private void checkSalaryMin(JobRecord job, PreferenceSetRecord prefs,
-                                List<HardFilterResult.FilterReason> reasons) {
+                                List<HardFilterResult.FilterReason> reasons, boolean strict) {
         Long minSalary = prefs.salaryMinGbp();
         if (minSalary == null) return;
 
-        // If job declares no salary, pass (benefit of the doubt)
         BigDecimal jobMax = job.salaryMax();
-        if (jobMax == null) return;
+        BigDecimal jobMin = job.salaryMin();
+        if (jobMax == null && (!strict || jobMin == null)) {
+            if (strict) {
+                reasons.add(new HardFilterResult.FilterReason(
+                        "SALARY_MIN",
+                        ">= " + minSalary + " GBP",
+                        "unknown",
+                        "Job declares no salary; strict auto-apply requires salary >= " + minSalary + " GBP."
+                ));
+            }
+            return;
+        }
 
-        // If the job's declared maximum is below the user's minimum, reject
-        if (jobMax.compareTo(BigDecimal.valueOf(minSalary)) < 0) {
+        BigDecimal upperBound = jobMax != null ? jobMax : jobMin;
+        if (upperBound.compareTo(BigDecimal.valueOf(minSalary)) < 0) {
             reasons.add(new HardFilterResult.FilterReason(
                     "SALARY_MIN",
-                    "≥ " + minSalary + " GBP",
-                    jobMax + " GBP (max)",
-                    "Job's maximum salary (" + jobMax + " GBP) is below your minimum (" + minSalary + " GBP)."
+                    ">= " + minSalary + " GBP",
+                    upperBound + " GBP",
+                    "Job salary (" + upperBound + " GBP) is below your minimum (" + minSalary + " GBP)."
             ));
         }
     }
 
     private void checkSponsorshipPolicy(JobRecord job, PreferenceSetRecord prefs,
-                                        List<HardFilterResult.FilterReason> reasons) {
+                                        List<HardFilterResult.FilterReason> reasons, boolean strict) {
         String policy = prefs.sponsorshipPolicy();
         if (isBlank(policy) || "NONE".equalsIgnoreCase(policy)) return;
 
-        // "REQUIRED" means the user needs sponsorship — reject companies
-        // known NOT to sponsor. We check the sponsor_records table.
-        if (!"REQUIRED".equalsIgnoreCase(policy)) return;
+        // "REQUIRED" / "SPONSORSHIP_REQUIRED" means the user needs sponsorship.
+        if (!"REQUIRED".equalsIgnoreCase(policy) && !"SPONSORSHIP_REQUIRED".equalsIgnoreCase(policy)) return;
 
         UUID companyId = job.companyId();
-        if (companyId == null) return; // no company data → pass
+        if (companyId == null) {
+            if (strict) {
+                reasons.add(new HardFilterResult.FilterReason(
+                        "SPONSORSHIP",
+                        "Confirmed sponsor licence",
+                        "unknown company",
+                        "Visa sponsorship is required, but this employer is unverified for strict auto-apply."
+                ));
+            }
+            return;
+        }
 
-        // Look for any sponsor record with positive indicator
         List<Map<String, Object>> sponsorRows = db.queryForList(
                 """
                 select licence_indicator, confidence
@@ -317,7 +446,17 @@ public class HardFilterService {
                 limit 1
                 """, companyId);
 
-        if (sponsorRows.isEmpty()) return; // no data → pass
+        if (sponsorRows.isEmpty()) {
+            if (strict) {
+                reasons.add(new HardFilterResult.FilterReason(
+                        "SPONSORSHIP",
+                        "Confirmed sponsor licence",
+                        "no record",
+                        "Visa sponsorship is required, but no sponsor licence record exists for this company."
+                ));
+            }
+            return;
+        }
 
         String indicator = (String) sponsorRows.get(0).get("licence_indicator");
         if (indicator != null && "NO_LICENCE".equalsIgnoreCase(indicator)) {
@@ -326,6 +465,13 @@ public class HardFilterService {
                     "Sponsorship required",
                     "Company does not hold a sponsor licence",
                     "You require visa sponsorship, but this company is recorded as not holding a sponsor licence."
+            ));
+        } else if (strict && (isBlank(indicator) || "UNKNOWN".equalsIgnoreCase(indicator) || "UNVERIFIED".equalsIgnoreCase(indicator))) {
+            reasons.add(new HardFilterResult.FilterReason(
+                    "SPONSORSHIP",
+                    "Confirmed sponsor licence",
+                    isBlank(indicator) ? "unknown" : indicator,
+                    "Visa sponsorship is required, but company sponsorship indicator is unconfirmed."
             ));
         }
     }

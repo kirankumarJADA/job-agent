@@ -83,7 +83,7 @@ public final class TrackTimelineMapper {
         return switch (kind) {
             case "APPLICATION_CREATED" -> new Neutral("APPLICATION_CREATED", "Application record created", "ROBIN");
             case "PREPARATION" -> preparation(payload);
-            case "GREENHOUSE_PLAN_CREATED", "ASHBY_PLAN_CREATED", "INSPECTION_PLAN_CREATED" -> new Neutral("FORM_PLAN_PREPARED",
+            case "GREENHOUSE_PLAN_CREATED", "ASHBY_PLAN_CREATED", "INSPECTION_PLAN_CREATED", "UNIVERSAL_PLAN_CREATED" -> new Neutral("FORM_PLAN_PREPARED",
                     "Form-filling plan prepared — nothing is sent to the employer", "ROBIN");
             case "EXECUTION_PACKAGE_DEFERRED" -> new Neutral("PACKAGE_DEFERRED",
                     "Package deferred until your documents are reviewed", "ROBIN");
@@ -136,11 +136,16 @@ public final class TrackTimelineMapper {
             case "GREENHOUSE_FORM_REVIEWED" -> new Neutral("FORM_REVIEWED", "You reviewed the filled application form", "YOU");
             case "GREENHOUSE_SUBMIT_APPROVED" -> new Neutral("PACKAGE_APPROVED",
                     "You approved the package for submission — submission is disabled, nothing was sent", "YOU");
-            case "GREENHOUSE_SUBMIT_APPROVAL_REFUSED", "ASHBY_SUBMIT_APPROVAL_REFUSED" -> new Neutral("PACKAGE_APPROVAL_REFUSED",
-                    "Approval refused: the package was not ready", "ROBIN");
-            case "ASHBY_FORM_REVIEWED" -> new Neutral("FORM_REVIEWED", "You reviewed the filled application form", "YOU");
-            case "ASHBY_SUBMIT_APPROVED" -> new Neutral("PACKAGE_APPROVED",
+            case "GREENHOUSE_SUBMIT_APPROVAL_REFUSED", "ASHBY_SUBMIT_APPROVAL_REFUSED", "UNIVERSAL_SUBMIT_APPROVAL_REFUSED" ->
+                    new Neutral("PACKAGE_APPROVAL_REFUSED", "Approval refused: the package was not ready", "ROBIN");
+            case "ASHBY_FORM_REVIEWED", "UNIVERSAL_FORM_REVIEWED" ->
+                    new Neutral("FORM_REVIEWED", "You reviewed the filled application form", "YOU");
+            case "ASHBY_SUBMIT_APPROVED", "UNIVERSAL_SUBMIT_APPROVED" -> new Neutral("PACKAGE_APPROVED",
                     "You approved the package for submission — a separate authorization step is still required before anything is sent", "YOU");
+            case "STANDING_SUBMIT_AUTHORIZED" -> new Neutral("STANDING_SUBMIT_AUTHORIZED",
+                    "Approved automatically under your standing autonomous submission rules", "YOU");
+            case "UNIVERSAL_SUBMIT_QUEUED" -> new Neutral("SUBMISSION_QUEUED",
+                    "You queued the approved application for submission", "YOU");
             case "PACKAGE_APPROVAL_INVALIDATED" -> new Neutral("PACKAGE_APPROVAL_WITHDRAWN",
                     "Package approval withdrawn because a document or answer changed", "ROBIN");
             case "AUTOMATION_PLAN_HUMAN_REQUIRED" -> new Neutral("FORM_FILL_PAUSED",
@@ -150,6 +155,10 @@ public final class TrackTimelineMapper {
                     "Form filling stopped: the site blocked automation", "ROBIN");
             case "AUTOMATION_PLAN_COMPLETED" -> new Neutral("FORM_INSPECTED",
                     "Form inspection completed — nothing was submitted", "ROBIN");
+            case "AUTOMATION_PLAN_SUBMITTED" -> new Neutral("SUBMISSION_RECORDED",
+                    "Browser submission attempt finished — awaiting independent employer verification", "ROBIN");
+            case "AUTOMATION_PLAN_RECONCILIATION_REQUIRED" -> new Neutral("SUBMISSION_RECONCILIATION_REQUIRED",
+                    "Submission attempt outcome was unconfirmed — manual check recommended", "ROBIN");
             case "REVIEW_ITEM_APPROVED" -> new Neutral("MATCH_APPROVED", "You approved this job for an application", "YOU");
             default -> new Neutral("INTERNAL_EVENT", "Robin recorded an internal step", "ROBIN");
         };

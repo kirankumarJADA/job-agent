@@ -110,6 +110,27 @@ describe('Applications page — TRACK status', () => {
     expect((await screen.findAllByText('Needs your review')).length).toBeGreaterThan(0);
   });
 
+  it('styles conflicting and sandbox track pills honestly without green accents', async () => {
+    serve([
+      application({
+        id: 'app-conflict',
+        jobTitle: 'Contested Role',
+        track: { ...prepared, status: 'NEEDS_REVIEW', label: 'Needs your review', basis: null, submission: 'CONFLICTING', needsReview: true },
+      }),
+      application({
+        id: 'app-sandbox',
+        jobTitle: 'Sandbox Role',
+        track: { ...prepared, status: 'APPLIED', label: 'Applied — verified (sandbox)', basis: 'VERIFIED', submission: 'CONFIRMED', sandbox: true },
+      }),
+    ]);
+    renderPage();
+    const conflictCard = (await screen.findByText('Contested Role')).closest('section') as HTMLElement;
+    expect(within(conflictCard).getAllByText('Needs your review').every((el) => el.className.includes('red'))).toBe(true);
+
+    const sandboxCard = screen.getByText('Sandbox Role').closest('section') as HTMLElement;
+    expect(within(sandboxCard).getAllByText('Applied — verified (sandbox)').every((el) => !el.className.includes('emerald') && !el.className.includes('forest'))).toBe(true);
+  });
+
   it('lists employer messages awaiting review above the applications', async () => {
     serve([application({ track: prepared })]);
     renderPage();

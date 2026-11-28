@@ -4,16 +4,21 @@ import com.personal.jobagent.audit.AuditEntry;
 import com.personal.jobagent.audit.AuditLogWriter;
 import com.personal.jobagent.common.ApiError;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.documents.DocumentFactValidator;
+import com.personal.jobagent.jobs.JobRecord;
+import com.personal.jobagent.jobs.JobRepository;
 import com.personal.jobagent.profile.ProfileRecord;
 import com.personal.jobagent.profile.ProfileRepository;
 import com.personal.jobagent.security.AppUserDetails;
 import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -27,17 +32,29 @@ public class ApplicationAnswerController {
     private final ProfileRepository profileRepository;
     private final AuditLogWriter auditLogWriter;
     private final com.personal.jobagent.apply.ApplyPackageGuard packageGuard;
+    private final JobRepository jobRepository;
 
     public ApplicationAnswerController(ApplicationAnswerService answerService,
                                      ApplicationAnswerRepository answerRepository,
                                      ProfileRepository profileRepository,
                                      AuditLogWriter auditLogWriter,
                                      com.personal.jobagent.apply.ApplyPackageGuard packageGuard) {
+        this(answerService, answerRepository, profileRepository, auditLogWriter, packageGuard, null);
+    }
+
+    @Autowired
+    public ApplicationAnswerController(ApplicationAnswerService answerService,
+                                     ApplicationAnswerRepository answerRepository,
+                                     ProfileRepository profileRepository,
+                                     AuditLogWriter auditLogWriter,
+                                     com.personal.jobagent.apply.ApplyPackageGuard packageGuard,
+                                     @Autowired(required = false) JobRepository jobRepository) {
         this.answerService = answerService;
         this.answerRepository = answerRepository;
         this.profileRepository = profileRepository;
         this.auditLogWriter = auditLogWriter;
         this.packageGuard = packageGuard;
+        this.jobRepository = jobRepository;
     }
 
     public record DraftAnswerRequest(UUID jobId, UUID applicationId, String questionText) {}
@@ -144,6 +161,15 @@ public class ApplicationAnswerController {
         if (body.confirmForAutofill() == null && body.answerText() != null) {
             humanConfirmed = false;
         }
+        if ("ANSWERED".equals(status) && answerText != null && !answerText.isBlank()
+                && (body.answerText() != null || humanConfirmed)) {
+            List<String> factBlockers = validateAnswerFacts(profileId, existing.get().jobId(), answerText);
+            if (!factBlockers.isEmpty()) {
+                return ResponseEntity.badRequest().body(ApiError.of(400, "Bad Request",
+                        "Answer contains unverified factual claims: " + String.join("; ", factBlockers),
+                        request.getRequestURI(), correlationId()));
+            }
+        }
         answerRepository.updateStatusForProfile(id, status, body.answerText(), humanConfirmed, profileId);
         // Phase 8.2: an edited, confirmed or unconfirmed answer changes what
         // the execution package would carry, so any approved package for the
@@ -162,6 +188,31 @@ public class ApplicationAnswerController {
         ));
 
         return ResponseEntity.ok(answerRepository.findByIdForProfile(id, profileId).orElseThrow());
+    }
+
+    private List<String> validateAnswerFacts(UUID profileId, UUID jobId, String answerText) {
+        var profile = profileRepository.findById(profileId).orElse(null);
+        JobRecord job = jobRepository == null || jobId == null ? null : jobRepository.findById(jobId).orElse(null);
+        DocumentFactValidator.Report report = new DocumentFactValidator().validate(
+                answerText,
+                new DocumentFactValidator.CandidateFacts(
+                        profileRepository.findSkills(profileId),
+                        profileRepository.findExperiences(profileId),
+                        profileRepository.findEducation(profileId),
+                        profileRepository.findProjects(profileId),
+                        profileRepository.findCertifications(profileId),
+                        profile != null && profile.workEligibility() != null ? profile.workEligibility() : Map.of(),
+                        profile != null ? profile.professionalSummary() : null),
+                new DocumentFactValidator.JobContext(
+                        job != null ? job.companyNameRaw() : null,
+                        job != null ? job.skillsExtracted() : List.of()));
+        List<String> blockers = new ArrayList<>();
+        for (var finding : report.findings()) {
+            if (finding.severity() == DocumentFactValidator.Severity.BLOCKER) {
+                blockers.add(finding.message());
+            }
+        }
+        return blockers;
     }
 
     private ResponseEntity<?> notFound(HttpServletRequest request, String detail) {

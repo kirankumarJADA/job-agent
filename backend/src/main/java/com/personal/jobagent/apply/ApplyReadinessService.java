@@ -176,6 +176,7 @@ public class ApplyReadinessService {
             item.put("answerState", answerState);
             item.put("answerOrigin", answer == null ? null : answer.answerOrigin());
             item.put("answerId", answer == null ? null : String.valueOf(answer.id()));
+            item.put("answerText", answer == null ? null : answer.answerText());
             // Phase 8.2.5 source hiding: the capture source names the ATS platform
             // (e.g. GREENHOUSE_PUBLIC_FORM), so it is kept server-side only. The
             // employer's own form URL is still shown.
@@ -204,9 +205,30 @@ public class ApplyReadinessService {
             }
         }
         for (ApplicationAnswerRecord answer : stored) {
+            if (answer.validationNotes() != null
+                    && "UNIVERSAL_LIVE_DOM".equals(answer.validationNotes().get("source"))) {
+                String key = String.valueOf(answer.validationNotes().getOrDefault("questionKey", "q_" + answer.id()));
+                boolean alreadyListed = items.stream().anyMatch(it -> key.equals(it.get("questionKey")));
+                if (!alreadyListed) {
+                    String answerState = !"ANSWERED".equals(answer.status()) ? answer.status()
+                            : !answer.humanConfirmed() ? "UNCONFIRMED" : "CONFIRMED";
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("questionKey", key);
+                    item.put("questionText", answer.questionText() == null ? "" : answer.questionText());
+                    item.put("requiredState", String.valueOf(answer.validationNotes().getOrDefault("requiredState", "REQUIRED")));
+                    item.put("answerType", String.valueOf(answer.validationNotes().getOrDefault("htmlType", "text")));
+                    item.put("options", answer.validationNotes().getOrDefault("options", List.of()));
+                    item.put("answerState", answerState);
+                    item.put("answerOrigin", answer.answerOrigin());
+                    item.put("answerId", String.valueOf(answer.id()));
+                    item.put("answerText", answer.answerText());
+                    item.put("formUrl", answer.validationNotes().get("formUrl"));
+                    items.add(item);
+                }
+            }
             if ("NEEDS_USER_INPUT".equals(answer.status()) || "HARD_STOP".equals(answer.status())) {
                 blockers.add(item("QUESTIONS", "ANSWER_" + answer.status(),
-                        "\"" + answer.questionText() + "\" has a drafted answer that is " + answer.status() + "."));
+                        "\"" + answer.questionText() + "\" requires candidate answer (" + answer.status() + ")."));
             }
         }
         Map<String, Object> out = new LinkedHashMap<>();

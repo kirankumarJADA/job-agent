@@ -10,7 +10,7 @@
  * to Robin's backend at {@code /api/v1/managed-mail/inbound/cloudflare}.
  */
 
-import { parseMime } from './mime_parser.js';
+import { extractAuthenticationFromHeaders, parseMime } from './mime_parser.js';
 
 export default {
   async email(message, env, ctx) {
@@ -42,7 +42,16 @@ export default {
     }
 
     const rawText = new TextDecoder('utf-8').decode(rawBuffer);
-    const parsed = parseMime(rawText);
+    // Parse MIME body and standard non-security message headers from the raw stream,
+    // while deriving authentication verdicts strictly from Cloudflare's documented
+    // ForwardableEmailMessage.headers interface (fail closed if missing/untrusted).
+    const parsed = parseMime(rawText, { ignoreAuthHeaders: true });
+    const auth = extractAuthenticationFromHeaders(message.headers, env.TRUSTED_AUTHSERV_IDS);
+
+    const headerSpam = message.headers && typeof message.headers.get === 'function'
+      ? (message.headers.get('x-spam-flag') || message.headers.get('x-spam-status') || '')
+      : '';
+    const spam = parsed.spam === 'yes' || /yes|true/i.test(headerSpam) ? 'yes' : 'no';
 
     const payload = {
       envelopeRecipient: message.to,
@@ -55,9 +64,14 @@ export default {
       inReplyTo: parsed.inReplyTo,
       references: parsed.references,
       date: parsed.date,
-      spf: parsed.spf,
-      dkim: parsed.dkim,
-      spam: parsed.spam
+      spf: auth.spf,
+      dkim: auth.dkim,
+      dkimDomain: auth.dkimDomain,
+      dmarc: auth.dmarc,
+      authServId: auth.authServId,
+      authTrusted: auth.authTrusted,
+      authConflict: auth.authConflict,
+      spam
     };
 
     const payloadJson = JSON.stringify(payload);

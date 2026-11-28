@@ -7,6 +7,7 @@ import { ZohoRecruitReviewPanel } from '../components/ZohoRecruitReviewPanel';
 import { LeverReviewPanel } from '../components/LeverReviewPanel';
 import { WorkdayReviewPanel } from '../components/WorkdayReviewPanel';
 import { AshbyReviewPanel } from '../components/AshbyReviewPanel';
+import { UniversalReviewPanel } from '../components/UniversalReviewPanel';
 import { HandoffModal } from '../components/HandoffModal';
 import { ApplicationTrackPanel } from '../components/ApplicationTrackPanel';
 import { GmailMailboxCard } from '../components/GmailMailboxCard';
@@ -52,7 +53,7 @@ function extractErrorMessage(err: unknown, fallback: string): string {
 
 function isSubmissionCapablePlan(planType?: string | null, planId?: string | null): boolean {
   if (!planId || !planType) return false;
-  return planType === 'GREENHOUSE' || planType === 'ASHBY';
+  return planType === 'GREENHOUSE' || planType === 'ASHBY' || planType === 'UNIVERSAL';
 }
 
 export const ApplicationsPage: React.FC = () => {
@@ -346,6 +347,18 @@ export const ApplicationsPage: React.FC = () => {
                 </div>
               )}
 
+              {application.planId && application.planType === 'UNIVERSAL' && (
+                <div className="mt-3">
+                  <UniversalReviewPanel
+                    planId={application.planId}
+                    planStatus={application.planStatus}
+                    applicationId={application.id}
+                    embedded
+                    onChanged={fetchApplications}
+                  />
+                </div>
+              )}
+
               {application.planId && application.planType === 'INSPECTION' && (
                 <div className="mt-3 rounded-lg border border-line bg-surface-sunken px-3 py-2">
                   <div className="flex items-center gap-3 text-sm">
@@ -384,9 +397,7 @@ export const ApplicationsPage: React.FC = () => {
                       </span>
                     )}
                     {application.planStatus === 'SUBMITTED' && (
-                      <span className="text-green-400 text-xs font-medium">
-                        Confirmed submitted by the employer&apos;s own form
-                      </span>
+                      <SubmittedPlanNotice track={application.track} />
                     )}
                     {application.planStatus === 'AWAITING_SUBMIT_APPROVAL' && (
                       <span className="text-red-400 text-xs font-medium">Submission is disabled</span>
@@ -634,6 +645,44 @@ const RobinDecisionPanel: React.FC<{ planId: string; applicationId: string }> = 
  * response without TRACK data (an older server) shows the recorded status,
  * labelled as such.
  */
+function SubmittedPlanNotice({ track }: { track?: ApplicationSummary['track'] }) {
+  if (track?.availability === 'AVAILABLE') {
+    if (track.submission === 'CONFLICTING') {
+      return (
+        <span className="text-red-400 text-xs font-medium">
+          Submission evidence contested — review details below
+        </span>
+      );
+    }
+    if (track.submission === 'CONFIRMED' && track.sandbox) {
+      return (
+        <span className="text-sky-400 text-xs font-medium">
+          Sandbox receipt verified (synthetic test — not a live employer)
+        </span>
+      );
+    }
+    if (track.submission === 'CONFIRMED') {
+      return (
+        <span className="text-green-400 text-xs font-medium">
+          Confirmed submitted — employer acknowledgement verified
+        </span>
+      );
+    }
+    if (track.submissionLevel === 'BROWSER_OBSERVED') {
+      return (
+        <span className="text-amber-400 text-xs font-medium">
+          Submitted in browser — awaiting employer verification
+        </span>
+      );
+    }
+  }
+  return (
+    <span className="text-amber-400 text-xs font-medium">
+      Submit attempt recorded — awaiting employer verification
+    </span>
+  );
+}
+
 function TrackStatusPill({ application }: { application: ApplicationSummary }) {
   const track = application.track;
   if (track === undefined || track === null) {
@@ -642,7 +691,16 @@ function TrackStatusPill({ application }: { application: ApplicationSummary }) {
   if (track.availability !== 'AVAILABLE') {
     return <StatusPill tone="slate">Status unavailable</StatusPill>;
   }
-  return <StatusPill tone={stageTone(track.status, track.basis)}>{track.label ?? 'Status unknown'}</StatusPill>;
+  return (
+    <StatusPill
+      tone={stageTone(track.status, track.basis, {
+        conflicting: track.submission === 'CONFLICTING',
+        sandbox: Boolean(track.sandbox),
+      })}
+    >
+      {track.label ?? 'Status unknown'}
+    </StatusPill>
+  );
 }
 
 function PlanStatusBadge({ status }: { status?: string | null }) {  if (!status) return null;

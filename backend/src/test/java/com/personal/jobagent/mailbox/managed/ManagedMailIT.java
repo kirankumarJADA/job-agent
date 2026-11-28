@@ -44,6 +44,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -106,6 +111,8 @@ class ManagedMailIT {
     @Autowired private ManagedMailboxService mailboxes;
     @Autowired private com.personal.jobagent.identity.IdentityService identities;
     @Autowired private com.personal.jobagent.mailbox.RegistrationIdentityService registrationIdentities;
+    /** Stage 3I Phase 6: real bean, spied only to force one exact interleaving (calls through by default). */
+    @org.springframework.boot.test.mock.mockito.SpyBean private ManagedMailVerificationProvider managedProviderSpy;
 
     private MockHttpSession session;
     private UUID devProfile;
@@ -146,6 +153,7 @@ class ManagedMailIT {
 
         // Registration refuses to use an address that has not been proven to receive mail.
         UUID app = application(devProfile, "pending");
+        ensureRunningPlan(app, EMPLOYER);
         MvcResult refused = mvc.perform(post("/api/v1/mailbox-verification/registration-identity")
                         .header("Authorization", WORKER).contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(Map.of("applicationId", app.toString(), "employerDomain", EMPLOYER))))
@@ -299,13 +307,16 @@ class ManagedMailIT {
         proveReceiving();
         assertThat(count("select count(*) from gmail_connections where profile_id = ?", devProfile)).isZero();
         UUID app = application(devProfile, "lifecycle");
+        ensureRunningPlan(app, employer);
         UUID accountSession = accountSession(app, employer);
 
-        // 1. Sign-up: the worker asks which address to register with — the managed one.
+        // 1. Sign-up: the worker asks which address to register with — the managed one (initially PENDING).
         JsonNode identity = registrationIdentity(app, accountSession, employer);
         assertThat(identity.get("email").asText()).isEqualTo(alias);
         assertThat(identity.get("mailbox").asText()).isEqualTo("managed");
         assertThat(identity.get("existing").asBoolean()).isFalse();
+        assertThat(jdbc.queryForObject("select account_status from applicant_identities where profile_id = ? and domain = ?",
+                String.class, devProfile, employer)).isEqualTo("PENDING");
         assertThat(jdbc.queryForObject("select provider from applicant_identities where profile_id = ? and domain = ?",
                 String.class, devProfile, employer)).isEqualTo("ROBIN_MANAGED");
         assertThat(jdbc.queryForObject("select applicant_identity_id from account_sessions where id = ?", UUID.class,
@@ -317,15 +328,20 @@ class ManagedMailIT {
                 .body("Hi,\n\nYour verification code is 482913. It expires in 10 minutes.\n\n© 2026 Employer")
                 .messageId("<verify-1@careers.employer-it.example>")).andExpect(status().isOk());
 
-        // 3. The worker resolves it: no mailbox address needed, the session says which mailbox.
+        // 3. The worker resolves it into a bounded lease: no mailbox address needed, the session says which mailbox.
         JsonNode resolved = resolve(app, accountSession, employer, null, 200);
         assertThat(resolved.get("otp").asText()).isEqualTo("482913");
         assertThat(resolved.get("provider").asText()).isEqualTo("managed");
+        String verificationId = resolved.get("verificationId").asText();
+        String leaseToken = resolved.get("leaseToken").asText();
+        assertThat(verificationId).isNotBlank();
+        assertThat(leaseToken).isNotBlank();
+        assertThat(resolved.get("leaseExpiresAt").asText()).isNotBlank();
         assertThat(sessionState(accountSession)).isEqualTo("VERIFY_EMAIL");
 
-        // One-time: recorded without the code, content erased, never released again.
+        // While RESERVED: same-app/session replay recovers idempotently, cross-app cannot steal it, and content remains held until /confirm.
         Map<String, Object> audit = jdbc.queryForMap("""
-                select provider_id, source_managed_message_id, source_email_id, otp_value_ref, link_url, account_session_id
+                select provider_id, source_managed_message_id, source_email_id, otp_value_ref, link_url, account_session_id, status, reserved_until
                 from mailbox_verifications where application_id = ?""", app);
         assertThat(audit.get("provider_id")).isEqualTo("managed");
         assertThat(audit.get("source_managed_message_id")).isNotNull();
@@ -333,15 +349,66 @@ class ManagedMailIT {
         assertThat(audit.get("otp_value_ref")).isNull();
         assertThat(audit.get("link_url")).isNull();
         assertThat(audit.get("account_session_id")).isEqualTo(accountSession);
+        assertThat(audit.get("status")).isEqualTo("RESERVED");
+        assertThat(audit.get("reserved_until")).isNotNull();
+
+        Map<String, Object> reservedSource = jdbc.queryForMap(
+                "select consumed_at, content_encrypted, content_purged_at, reserved_for_application_id from managed_inbound_messages where id = ?",
+                audit.get("source_managed_message_id"));
+        assertThat(reservedSource.get("consumed_at")).isNull();
+        assertThat(reservedSource.get("content_encrypted")).isNotNull();
+        assertThat(reservedSource.get("content_purged_at")).isNull();
+        assertThat(reservedSource.get("reserved_for_application_id")).isEqualTo(app);
+
+        JsonNode replayed = resolve(app, accountSession, employer, null, 200);
+        assertThat(replayed.get("verificationId").asText()).isEqualTo(verificationId);
+        assertThat(replayed.get("otp").asText()).isEqualTo("482913");
+        String replayedLeaseToken = replayed.get("leaseToken").asText();
+
+        UUID otherApp = application(devProfile, "concurrent-other");
+        ensureRunningPlan(otherApp, employer);
+        UUID otherSession = accountSession(otherApp, employer);
+        registrationIdentity(otherApp, otherSession, employer);
+        resolve(otherApp, otherSession, employer, null, 404);
+
+        // 4. Stale pre-recovery leaseToken is rejected (409); current replayedLeaseToken consumes permanently.
+        String staleConfirmBody = json.writeValueAsString(Map.of(
+                "applicationId", app.toString(),
+                "sessionId", accountSession.toString(),
+                "verificationId", verificationId,
+                "leaseToken", leaseToken));
+        mvc.perform(post("/api/v1/mailbox-verification/confirm").header("Authorization", WORKER)
+                        .contentType(MediaType.APPLICATION_JSON).content(staleConfirmBody))
+                .andExpect(status().isConflict());
+
+        String confirmBody = json.writeValueAsString(Map.of(
+                "applicationId", app.toString(),
+                "sessionId", accountSession.toString(),
+                "verificationId", verificationId,
+                "leaseToken", replayedLeaseToken));
+        JsonNode confirmed = json(mvc.perform(post("/api/v1/mailbox-verification/confirm").header("Authorization", WORKER)
+                        .contentType(MediaType.APPLICATION_JSON).content(confirmBody))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(confirmed.get("status").asText()).isEqualTo("CONSUMED");
+        // Confirm is idempotent once already consumed.
+        mvc.perform(post("/api/v1/mailbox-verification/confirm").header("Authorization", WORKER)
+                        .contentType(MediaType.APPLICATION_JSON).content(confirmBody))
+                .andExpect(status().isOk());
+
+        assertThat(jdbc.queryForObject("select status from mailbox_verifications where application_id = ?", String.class, app))
+                .isEqualTo("CONSUMED");
         Map<String, Object> source = jdbc.queryForMap(
-                "select consumed_at, content_encrypted, content_purged_at from managed_inbound_messages where id = ?",
+                "select consumed_at, content_encrypted, content_purged_at, reserved_for_application_id from managed_inbound_messages where id = ?",
                 audit.get("source_managed_message_id"));
         assertThat(source.get("consumed_at")).isNotNull();
         assertThat(source.get("content_encrypted")).isNull();
         assertThat(source.get("content_purged_at")).isNotNull();
+        assertThat(source.get("reserved_for_application_id")).isNull();
         resolve(app, accountSession, employer, null, 404);
 
-        // 4. Login: the same identity, now an existing account.
+        // 4. Login: the same identity, now promoted to ACTIVE and an existing account.
+        assertThat(jdbc.queryForObject("select account_status from applicant_identities where profile_id = ? and domain = ?",
+                String.class, devProfile, employer)).isEqualTo("ACTIVE");
         JsonNode login = registrationIdentity(app, accountSession, employer);
         assertThat(login.get("email").asText()).isEqualTo(alias);
         assertThat(login.get("existing").asBoolean()).isTrue();
@@ -365,6 +432,7 @@ class ManagedMailIT {
         reserve(session);
         proveReceiving();
         UUID app = application(devProfile, "boundary");
+        ensureRunningPlan(app, employer);
         UUID accountSession = accountSession(app, employer);
         String body = json.writeValueAsString(Map.of("applicationId", app.toString(), "sessionId", accountSession.toString(),
                 "employerDomain", employer));
@@ -376,12 +444,18 @@ class ManagedMailIT {
         mvc.perform(post("/api/v1/mailbox-verification/registration-identity").session(session).with(csrf())
                 .contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isUnauthorized());
 
-        // The session's employer domain must match the request.
+        // An unbound employer domain is rejected (403); when a plan permits the domain, a session domain mismatch still returns 409.
         mvc.perform(post("/api/v1/mailbox-verification/registration-identity").header("Authorization", WORKER)
                 .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(Map.of(
                         "applicationId", app.toString(), "sessionId", accountSession.toString(),
-                        "employerDomain", "another-employer.example")))).andExpect(status().isConflict());
-        resolve(app, accountSession, "another-employer.example", null, 409);
+                        "employerDomain", "another-employer.example")))).andExpect(status().isForbidden());
+        resolve(app, accountSession, "another-employer.example", null, 403);
+        ensureRunningPlan(app, "session-mismatch.example");
+        mvc.perform(post("/api/v1/mailbox-verification/registration-identity").header("Authorization", WORKER)
+                .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(Map.of(
+                        "applicationId", app.toString(), "sessionId", accountSession.toString(),
+                        "employerDomain", "session-mismatch.example")))).andExpect(status().isConflict());
+        resolve(app, accountSession, "session-mismatch.example", null, 409);
         // Another candidate's session is not reachable through my application.
         UUID theirApp = application(otherProfile(), "boundary-other");
         UUID theirSession = accountSession(theirApp, employer, asOtherCandidate());
@@ -413,6 +487,7 @@ class ManagedMailIT {
         String alias = reserve(session);
         proveReceiving();
         UUID app = application(devProfile, "ambiguity");
+        ensureRunningPlan(app, employer);
         UUID accountSession = accountSession(app, employer);
         registrationIdentity(app, accountSession, employer);
 
@@ -460,8 +535,12 @@ class ManagedMailIT {
         jdbc.update("update managed_inbound_messages set received_at = now() - interval '5 minutes' where envelope_recipient = ?",
                 alias);
         resolve(app, accountSession, employer, null, 404);
-        // ... while the same message is fresh enough for a resolution that is not bound to a session.
-        assertThat(resolve(app, null, employer, alias, 200).get("otp").asText()).isEqualTo("482913");
+        // Omitting sessionId cannot bypass the bound session's created_at timestamp on the same application...
+        resolve(app, null, employer, alias, 404);
+        // ...while a separate application with no newer account session bound resolves it cleanly.
+        UUID freshApp = application(devProfile, "ambiguity-unbound");
+        ensureRunningPlan(freshApp, employer);
+        assertThat(resolve(freshApp, null, employer, alias, 200).get("otp").asText()).isEqualTo("482913");
         clearMessages();
 
         // A code addressed (To header) to me but delivered to someone else's alias never reaches my mailbox.
@@ -517,6 +596,7 @@ class ManagedMailIT {
         String alias = reserve(session);
         proveReceiving();
         UUID app = application(devProfile, "link");
+        ensureRunningPlan(app, employer);
         deliver(Delivery.to(alias).from(employerFrom).subject("Confirm your email")
                 .body("Confirm your address: https://careers." + employer + "/account/confirm?token=abc123\n"
                         + "Privacy: https://" + employer + "/privacy\nPhishing: https://attacker.example/verify?token=x"))
@@ -621,6 +701,7 @@ class ManagedMailIT {
         String alias = mailboxes.ensureAddress(profile).address();
         proveReceiving();
         UUID app = application(profile, "purge");
+        ensureRunningPlan(app, employer);
         UUID accountSession = identities.startSession(app, employer, profile).orElseThrow();
         registrationIdentities.resolve(profile, app, accountSession, employer);
         deliver(Delivery.to(alias).from(employerFrom(employer)).subject("Verify").body("Your verification code is 482913"))
@@ -634,6 +715,141 @@ class ManagedMailIT {
         assertThat(count("select count(*) from applicant_identities where profile_id = ?", profile)).isZero();
         assertThat(count("select count(*) from account_sessions where owner_profile_id = ?", profile)).isZero();
         assertThat(count("select count(*) from mailbox_verifications where application_id = ?", app)).isZero();
+    }
+
+    /**
+     * Stage 3I Phase 6 (found by CI run 46040832715): the losing /resolve of a concurrent pair got 404. Its Path A
+     * saw no lease; the winner then reserved and committed the message; its Path B no longer sees a reserved
+     * message as fresh. This forces exactly that interleaving (no timing luck): during the loser's Path B
+     * read, the winner's complete /resolve runs and commits first.
+     */
+    @Test
+    void stage3iPhase6_aLeaseReservedBetweenPathAAndPathBIsSharedInsteadOfReportedMissing() throws Exception {
+        String employer = "interleave-p6.example";
+        String alias = reserve(session);
+        proveReceiving();
+        UUID app = application(devProfile, "interleave-p6");
+        ensureRunningPlan(app, employer);
+        UUID sess = accountSession(app, employer);
+        registrationIdentity(app, sess, employer);
+        deliver(Delivery.to(alias).from(employerFrom(employer)).subject("Your verification code")
+                .body("Your verification code is 731846").messageId("<interleave-p6@interleave-p6.example>"))
+                .andExpect(status().isOk());
+        String resolveBody = json.writeValueAsString(Map.of(
+                "applicationId", app.toString(), "sessionId", sess.toString(), "employerDomain", employer));
+        java.util.concurrent.atomic.AtomicBoolean armed = new java.util.concurrent.atomic.AtomicBoolean(true);
+        java.util.concurrent.atomic.AtomicReference<MvcResult> winner = new java.util.concurrent.atomic.AtomicReference<>();
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            org.mockito.Mockito.doAnswer(invocation -> {
+                if (armed.compareAndSet(true, false)) {
+                    winner.set(pool.submit(() -> mvc.perform(post("/api/v1/mailbox-verification/resolve")
+                                    .header("Authorization", WORKER)
+                                    .contentType(MediaType.APPLICATION_JSON).content(resolveBody))
+                            .andReturn()).get(15, TimeUnit.SECONDS));
+                }
+                return invocation.callRealMethod();
+            }).when(managedProviderSpy).findVerification(
+                    org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+                    org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+
+            MvcResult loser = mvc.perform(post("/api/v1/mailbox-verification/resolve")
+                            .header("Authorization", WORKER)
+                            .contentType(MediaType.APPLICATION_JSON).content(resolveBody))
+                    .andReturn();
+
+            assertThat(winner.get()).as("the interleaving was forced").isNotNull();
+            assertThat(winner.get().getResponse().getStatus()).isEqualTo(200);
+            assertThat(loser.getResponse().getStatus()).as(loser.getResponse().getContentAsString()).isEqualTo(200);
+            assertThat(json(loser).get("verificationId").asText()).isEqualTo(json(winner.get()).get("verificationId").asText());
+            assertThat(json(loser).get("otp").asText()).isEqualTo("731846");
+            assertThat(count("select count(*) from mailbox_verifications where application_id = ? and status = 'RESERVED'", app))
+                    .isEqualTo(1);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void concurrentResolveSharesSingleActiveLeaseAndRetentionProtectsActiveLease() throws Exception {
+        String employer = "concurrent-p5.example";
+        String alias = reserve(session);
+        proveReceiving();
+        UUID app = application(devProfile, "concurrent-p5");
+        ensureRunningPlan(app, employer);
+        UUID sess = accountSession(app, employer);
+        registrationIdentity(app, sess, employer);
+
+        deliver(Delivery.to(alias).from(employerFrom(employer)).subject("Your verification code")
+                .body("Your verification code is 628194").messageId("<conc-p5@concurrent-p5.example>"))
+                .andExpect(status().isOk());
+
+        // Two concurrent /resolve calls for the same (applicationId, sessionId) must converge via V073 unique index + Path A recovery
+        String resolveBody = json.writeValueAsString(Map.of(
+                "applicationId", app.toString(),
+                "sessionId", sess.toString(),
+                "employerDomain", employer));
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            CountDownLatch ready = new CountDownLatch(2);
+            CountDownLatch start = new CountDownLatch(1);
+            List<Future<MvcResult>> futures = new java.util.ArrayList<>();
+            for (int i = 0; i < 2; i++) {
+                futures.add(pool.submit(() -> {
+                    ready.countDown();
+                    start.await();
+                    return mvc.perform(post("/api/v1/mailbox-verification/resolve")
+                                    .header("Authorization", WORKER)
+                                    .contentType(MediaType.APPLICATION_JSON).content(resolveBody))
+                            .andReturn();
+                }));
+            }
+            ready.await(5, TimeUnit.SECONDS);
+            start.countDown();
+
+            MvcResult r1 = futures.get(0).get(15, TimeUnit.SECONDS);
+            MvcResult r2 = futures.get(1).get(15, TimeUnit.SECONDS);
+            assertThat(r1.getResponse().getStatus()).isEqualTo(200);
+            assertThat(r2.getResponse().getStatus()).isEqualTo(200);
+            assertThat(json(r1).get("verificationId").asText()).isEqualTo(json(r2).get("verificationId").asText());
+            assertThat(count("select count(*) from mailbox_verifications where application_id = ? and status = 'RESERVED'", app))
+                    .isEqualTo(1);
+        } finally {
+            pool.shutdownNow();
+        }
+
+        // Age message past contentCutoff while lease stays RESERVED (reserved_until > now): retention must NEVER purge active lease!
+        jdbc.update("update managed_inbound_messages set received_at = now() - interval '3 hours' where envelope_recipient = ?", alias);
+        ExecutorService purgePool = Executors.newFixedThreadPool(2);
+        try {
+            CountDownLatch ready = new CountDownLatch(2);
+            CountDownLatch start = new CountDownLatch(1);
+            Future<ManagedMailRetentionJob.Result> purgeFuture = purgePool.submit(() -> {
+                ready.countDown();
+                start.await();
+                return retention.purge(Instant.now());
+            });
+            Future<MvcResult> replayFuture = purgePool.submit(() -> {
+                ready.countDown();
+                start.await();
+                return mvc.perform(post("/api/v1/mailbox-verification/resolve")
+                                .header("Authorization", WORKER)
+                                .contentType(MediaType.APPLICATION_JSON).content(resolveBody))
+                        .andReturn();
+            });
+            ready.await(5, TimeUnit.SECONDS);
+            start.countDown();
+
+            purgeFuture.get(15, TimeUnit.SECONDS);
+            MvcResult replayRes = replayFuture.get(15, TimeUnit.SECONDS);
+            assertThat(replayRes.getResponse().getStatus()).isEqualTo(200);
+            assertThat(json(replayRes).get("otp").asText()).isEqualTo("628194");
+            assertThat(jdbc.queryForObject(
+                    "select content_encrypted is not null from managed_inbound_messages where envelope_recipient = ?",
+                    Boolean.class, alias)).isTrue();
+        } finally {
+            purgePool.shutdownNow();
+        }
     }
 
     // ── helpers ──────────────────────────────────────────────────────────
@@ -826,6 +1042,14 @@ class ManagedMailIT {
                 values (?, ?, ?, ?, 'Employer IT', 'Platform Engineer', 'Build services.', '{}', 'SCORED', ?, ?, ?)
                 """, jobId, SOURCE, externalId, "dedup-" + externalId, "hash-" + externalId, url, url);
         return pipeline.createApplicationFromMatch(profileId, jobId).applicationId();
+    }
+
+    private void ensureRunningPlan(UUID applicationId, String employerDomain) {
+        jdbc.update("""
+                insert into automation_plans (id, profile_id, application_id, target_url, status, idempotency_key, plan)
+                select ?, profile_id, id, ?, 'RUNNING', ?, '{"planType":"UNIVERSAL","steps":[]}'::jsonb
+                from applications where id = ?
+                """, UuidV7.generate(), "https://" + employerDomain + "/jobs/1", "it-mm-" + UUID.randomUUID(), applicationId);
     }
 
     private UUID applicationWithJob(UUID profileId, String company, String title, String url, String req) {

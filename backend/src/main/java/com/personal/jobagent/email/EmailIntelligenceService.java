@@ -180,7 +180,7 @@ public class EmailIntelligenceService {
                                String subject, String body, Instant received, UUID applicationId) {
         Objects.requireNonNull(ownerProfileId, "ownerProfileId is required to ingest an email");
         return process(ownerProfileId, messageId, null, from, to, subject, body, received, applicationId,
-                Channel.CANDIDATE_FORWARDED, null, null, List.of());
+                Channel.CANDIDATE_FORWARDED, null, null, List.of(), null);
     }
 
     /** The authenticated mailbox-connector boundary (see {@link ConnectorMessage}). */
@@ -191,7 +191,7 @@ public class EmailIntelligenceService {
         return process(ownerProfileId, message.messageId(), message.threadId(), message.from(), message.to(), message.subject(),
                 message.body(), message.receivedAt(), null, Channel.MAILBOX_CONNECTOR,
                 message.authentication() == null ? SenderAuthentication.none() : message.authentication(),
-                message.mailboxAddress(), message.threadReferences());
+                message.mailboxAddress(), message.threadReferences(), message.providerId());
     }
 
     /**
@@ -224,7 +224,7 @@ public class EmailIntelligenceService {
     private IngestResult process(UUID ownerProfileId, String messageId, String threadId, String from, String to, String subject,
                                  String body, Instant received, UUID assertedApplicationId, Channel channel,
                                  SenderAuthentication authentication, String mailboxAddress,
-                                 List<String> threadReferences) {
+                                 List<String> threadReferences, String providerId) {
         boolean receivedTimeKnown = received != null;
         Instant receivedAt = received == null ? Instant.now() : received;
         if (assertedApplicationId != null && track.application(ownerProfileId, assertedApplicationId).isEmpty()) {
@@ -248,11 +248,17 @@ public class EmailIntelligenceService {
                 assertedApplicationId, category, threadApplications(ownerProfileId, threadId, threadReferences));
         String contentFingerprint = TrackText.sha256(TrackText.lower(from) + "|" + TrackText.lower(subject) + "|"
                 + (receivedTimeKnown ? receivedAt.getEpochSecond() : "unknown") + "|" + TrackText.sha256(body));
-        boolean retainBody = category == EmailCategory.VERIFICATION_CODE;
+        boolean managedMailConnector = channel == Channel.MAILBOX_CONNECTOR
+                && providerId != null
+                && ("cloudflare".equalsIgnoreCase(providerId)
+                        || "mailgun".equalsIgnoreCase(providerId)
+                        || "managed".equalsIgnoreCase(providerId));
+        boolean retainBody = category == EmailCategory.VERIFICATION_CODE && !managedMailConnector;
         UUID linkedApplication = association.established() ? association.applicationId() : null;
         boolean delivered = channel == Channel.MAILBOX_CONNECTOR && mailboxAddress != null
                 && Objects.equals(TrackText.addressOf(to), TrackText.addressOf(mailboxAddress));
         String quotedReference = TrackText.references(messageEvidence.scanText()).stream().findFirst().orElse(null);
+        String storedSubject = safeStoredSubject(subject, category, managedMailConnector);
 
         UUID emailId = UuidV7.generate();
         List<UUID> inserted = db.query("""
@@ -265,7 +271,7 @@ public class EmailIntelligenceService {
                         returning id
                         """, (rs, n) -> (UUID) rs.getObject(1),
                 emailId, messageId, threadId, from == null ? "" : TrackText.cap(from, 320), TrackText.cap(to, 320),
-                subject == null ? "" : TrackText.cap(subject, 500),
+                storedSubject,
                 retainBody ? TrackText.cap(body == null ? "" : body, TrackText.MAX_RETAINED_BODY_CHARS) : "",
                 Timestamp.from(receivedAt), linkedApplication, category.name(), classification.confidence(),
                 TrackEmailClassifier.VERSION + ":" + classification.ruleId(), ownerProfileId, channel.name(),
@@ -299,7 +305,8 @@ public class EmailIntelligenceService {
         String receiptVerification = null;
         if (linkedApplication != null) {
             MessageFacts facts = new MessageFacts(emailId, messageId, contentFingerprint, from, channel, receivedAt,
-                    receivedTimeKnown, classification.explicitReceipt(), quotedReference, authentication, delivered);
+                    receivedTimeKnown, classification.explicitReceipt(), quotedReference, authentication, delivered,
+                    channel == Channel.MAILBOX_CONNECTOR ? providerId : null);
             evidence.recordMessage(ownerProfileId, linkedApplication, facts, category,
                     association.strength() == com.personal.jobagent.track.TrackVocabulary.MatchStrength.CANDIDATE);
             if (classification.explicitReceipt() || category == EmailCategory.APPLICATION_ACKNOWLEDGEMENT) {
@@ -337,6 +344,21 @@ public class EmailIntelligenceService {
         boolean needsReview = linkStatus != null && List.of("PENDING_REVIEW", "UNMATCHED", "CONFLICT").contains(linkStatus);
         return new IngestResult((UUID) existing.get("id"), (String) existing.get("classification"),
                 (UUID) existing.get("application_id"), true, linkStatus, needsReview, null);
+    }
+
+    private static final Pattern SUBJECT_OTP_DIGITS = Pattern.compile(
+            "(?i)(?:verification|security|one[- ]time|passcode|otp|pin|confirm|activate|code)[^\\d]{0,25}\\d{4,8}|\\b\\d{4,8}\\b(?=[^\\d]{0,20}(?:verification|code|otp|pin|passcode))");
+    private static final Pattern SUBJECT_URL = Pattern.compile("(?i)https?://\\S+");
+
+    private static String safeStoredSubject(String subject, EmailCategory category, boolean managedMailConnector) {
+        if (subject == null || subject.isBlank()) {
+            return "";
+        }
+        String scrubbed = com.personal.jobagent.common.LogScrubber.scrub(subject);
+        if (category == EmailCategory.VERIFICATION_CODE || managedMailConnector) {
+            scrubbed = TrackText.collapse(TrackText.redact(scrubbed));
+        }
+        return TrackText.cap(scrubbed, 500);
     }
 
     private String authenticationJson(SenderAuthentication auth, boolean delivered) {
@@ -407,7 +429,8 @@ public class EmailIntelligenceService {
         }
 
         List<Map<String, Object>> owned = db.queryForList("""
-                select e.from_address, e.subject, e.body_text, e.received_at
+                select e.from_address, e.subject, e.body_text, e.received_at, e.channel,
+                       e.sender_authentication::text as sender_auth
                 from emails e
                 where e.id = ? and e.profile_id = ?
                 """, emailId, ownerProfileId);
@@ -416,29 +439,58 @@ public class EmailIntelligenceService {
             return Optional.empty();
         }
 
-        boolean sessionOwned = ownerContext.ownerOfAccountSession(sessionId)
-                .filter(ownerProfileId::equals)
-                .isPresent();
-        if (!sessionOwned) {
+        List<Map<String, Object>> sessions = db.queryForList("""
+                select state, expected_domain
+                from account_sessions
+                where id = ? and owner_profile_id = ?
+                """, sessionId, ownerProfileId);
+        if (sessions.isEmpty()) {
             log.debug("Refusing verification extraction: automation session is not owned by the caller");
             return Optional.empty();
         }
+        String sessionState = String.valueOf(sessions.get(0).get("state"));
+        if (com.personal.jobagent.mailbox.RegistrationIdentityService.CLOSED_SESSION_STATES.contains(sessionState)) {
+            return Optional.empty();
+        }
+        String sessionDomain = sessions.get(0).get("expected_domain") == null
+                ? null : String.valueOf(sessions.get(0).get("expected_domain")).toLowerCase(Locale.ROOT);
 
         Map<String, Object> email = owned.get(0);
         String sender = String.valueOf(email.get("from_address")).toLowerCase(Locale.ROOT);
-        if (expectedDomain != null && !sender.endsWith("@" + expectedDomain.toLowerCase(Locale.ROOT))) {
+        String effectiveDomain = expectedDomain != null && !expectedDomain.isBlank()
+                ? expectedDomain.trim().toLowerCase(Locale.ROOT)
+                : sessionDomain;
+        if (effectiveDomain == null || effectiveDomain.isBlank()
+                || (sessionDomain != null && !sessionDomain.equals(effectiveDomain))) {
+            return Optional.empty();
+        }
+        if (!sender.endsWith("@" + effectiveDomain) && !sender.contains("<") && !sender.endsWith("." + effectiveDomain)) {
+            return Optional.empty();
+        }
+        String senderAddress = TrackText.addressOf(sender);
+        if (senderAddress == null) return Optional.empty();
+        String senderHost = senderAddress.substring(senderAddress.indexOf('@') + 1).toLowerCase(Locale.ROOT);
+        if (!senderHost.equals(effectiveDomain) && !senderHost.endsWith("." + effectiveDomain)) {
+            return Optional.empty();
+        }
+        if ("MAILBOX_CONNECTOR".equals(email.get("channel")) && !trustedConnectorAuth(email.get("sender_auth"), effectiveDomain)) {
             return Optional.empty();
         }
         Instant receivedAt = ((Timestamp) email.get("received_at")).toInstant();
         if (receivedAt.isBefore(Instant.now().minus(Duration.ofMinutes(30)))) {
             return Optional.empty();
         }
-        Matcher matcher = OTP.matcher(email.get("subject") + " " + email.get("body_text"));
-        if (!matcher.find()) {
+        var extraction = com.personal.jobagent.mailbox.managed.VerificationContentExtractor.extract(
+                String.valueOf(email.get("subject")),
+                String.valueOf(email.get("body_text")),
+                List.of(),
+                effectiveDomain);
+        String code = extraction.code();
+        if (extraction.ambiguous() || code == null || code.isBlank()) {
             return Optional.empty();
         }
 
-        String valueRef = vault.store(matcher.group(), Duration.ofMinutes(10));
+        String valueRef = vault.store(code, Duration.ofMinutes(10));
         UUID id = UuidV7.generate();
         try {
             db.update("""
@@ -452,25 +504,53 @@ public class EmailIntelligenceService {
         return Optional.of(Map.of("extractionId", id, "verificationType", "OTP", "valueAvailable", true));
     }
 
+    private boolean trustedConnectorAuth(Object rawAuthJson, String expectedDomain) {
+        if (rawAuthJson == null) return false;
+        try {
+            Map<?, ?> auth = json.readValue(String.valueOf(rawAuthJson), Map.class);
+            if (!Boolean.TRUE.equals(auth.get("deliveredToConnectedMailbox"))) return false;
+            String spf = auth.get("spf") == null ? null : String.valueOf(auth.get("spf"));
+            String dkim = auth.get("dkim") == null ? null : String.valueOf(auth.get("dkim"));
+            String dmarc = auth.get("dmarc") == null ? null : String.valueOf(auth.get("dmarc"));
+            String dkimDomain = auth.get("dkimDomain") == null ? null : String.valueOf(auth.get("dkimDomain")).toLowerCase(Locale.ROOT);
+            if ("fail".equalsIgnoreCase(spf) || "fail".equalsIgnoreCase(dkim) || "fail".equalsIgnoreCase(dmarc)) {
+                return false;
+            }
+            if (dkimDomain != null && expectedDomain != null
+                    && !dkimDomain.equals(expectedDomain) && !dkimDomain.endsWith("." + expectedDomain)
+                    && !expectedDomain.endsWith("." + dkimDomain)) {
+                return false;
+            }
+            return "pass".equalsIgnoreCase(dkim) || "pass".equalsIgnoreCase(dmarc) || "pass".equalsIgnoreCase(spf);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     /**
      * Resolves (and consumes) an extracted code. Gated on the code having come
-     * from one of the caller's own emails — otherwise a caller who guessed an
-     * extraction id would be handed another account's live OTP.
+     * from one of the caller's own emails and an open session — otherwise a caller
+     * who guessed an extraction id would be handed another account's live OTP.
      */
     public String resolve(UUID ownerProfileId, UUID id) {
         if (ownerProfileId == null || id == null) {
             throw new IllegalStateException("verification unavailable");
         }
         List<Map<String, Object>> rows = db.queryForList("""
-                select v.value_ref, v.consumed_at, v.expires_at
+                select v.value_ref, v.consumed_at, v.expires_at, s.state as session_state
                 from verification_extractions v
                 join emails e on e.id = v.source_email_id
-                where v.id = ? and e.profile_id = ?
-                """, id, ownerProfileId);
+                join account_sessions s on s.id = v.account_session_id
+                where v.id = ? and e.profile_id = ? and s.owner_profile_id = ?
+                """, id, ownerProfileId, ownerProfileId);
         if (rows.isEmpty()) {
             throw new IllegalStateException("verification unavailable");
         }
         Map<String, Object> row = rows.get(0);
+        String sessionState = String.valueOf(row.get("session_state"));
+        if (com.personal.jobagent.mailbox.RegistrationIdentityService.CLOSED_SESSION_STATES.contains(sessionState)) {
+            throw new IllegalStateException("verification unavailable");
+        }
         if (row.get("consumed_at") != null
                 || ((Timestamp) row.get("expires_at")).toInstant().isBefore(Instant.now())) {
             throw new IllegalStateException("verification unavailable");

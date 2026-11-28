@@ -332,7 +332,7 @@ export const PreferencesPage: React.FC = () => {
               {[
                 { mode: 'MANUAL', title: 'Manual', desc: 'Discovery only; user submits all applications manually.' },
                 { mode: 'ASSISTED', title: 'Assisted (Recommended)', desc: 'Tailors CV & prepares interaction plan; requires user sign-off.' },
-                { mode: 'CONTROLLED_AUTO', title: 'Controlled Auto', desc: 'Autonomous submission within strict policy limits and kill-switches.' },
+                { mode: 'CONTROLLED_AUTO', title: 'Controlled Auto', desc: 'Prepares applications automatically within your rules; every submission still needs your explicit approval.' },
               ].map(({ mode, title, desc }) => {
                 const selected = appMode === mode;
                 return (

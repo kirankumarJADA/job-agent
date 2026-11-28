@@ -352,11 +352,20 @@ export interface AshbyOutcome {
 }
 
 export interface WorkdayField {
+  id?: string;
   label: string;
-  category: 'STANDARD' | 'OPTIONAL_STANDARD' | 'EXPERIENCE' | 'DECLARATION' | 'CUSTOM' | 'REQUIRES_HUMAN' | 'SENSITIVE' | 'UNKNOWN';
+  category: string;
   value?: string | null;
   required?: boolean;
+  reason?: string | null;
 }
+
+export type WorkdayDocumentUploadState =
+  | 'NO_FIELD'
+  | 'NO_ARTIFACT'
+  | 'REJECTED'
+  | 'ATTACHED'
+  | 'CONFIRMED';
 
 /**
  * Phase 19: the structured outcome a WORKDAY plan's WORKDAY_APPLY step reports
@@ -366,16 +375,20 @@ export interface WorkdayField {
 export interface WorkdayApplicationOutcome {
   type: 'WORKDAY_APPLICATION_OUTCOME';
   planType: 'WORKDAY';
-  currentStep?: 'MY_INFORMATION' | 'MY_EXPERIENCE' | 'APPLICATION_QUESTIONS' | 'VOLUNTARY_DISCLOSURES' | 'REVIEW' | 'UNKNOWN';
-  filled: WorkdayField[];
-  requiredGaps: WorkdayField[];
+  step?: string | null;
+  filledCategories?: string[];
+  requiredGaps?: WorkdayField[];
+  cvUploadState?: WorkdayDocumentUploadState | string | null;
+  coverLetterUploadState?: WorkdayDocumentUploadState | string | null;
+  applicationUrl?: string | null;
+  // Legacy fallback fields in case an older stored plan row used them
+  currentStep?: string | null;
+  filled?: WorkdayField[];
   fields?: WorkdayField[];
-  resumeUploadState: 'ATTACHED' | 'FAILED' | 'MISSING' | 'NOT_REQUESTED';
+  resumeUploadState?: string | null;
   resumeUploadReason?: string | null;
-  coverLetterUploadState?: 'ATTACHED' | 'FAILED' | 'MISSING' | 'NOT_REQUESTED';
   coverLetterUploadReason?: string | null;
   formFound?: boolean;
-  applicationUrl?: string | null;
   credentialSaved?: boolean;
 }
 
@@ -386,19 +399,45 @@ export interface WorkdayApplicationOutcome {
  */
 export interface SubmissionReconciliationResult {
   type: 'SUBMISSION_RECONCILIATION';
-  planType: 'GREENHOUSE' | 'ASHBY' | 'WORKDAY';
+  planType: 'GREENHOUSE' | 'ASHBY' | 'WORKDAY' | 'UNIVERSAL';
   category: string;
   evidence: string;
 }
 
-/** GET /automation/plans/{id} — the fields the Zoho Recruit / Lever / Workday / Ashby review panels read. */
+export interface UniversalOutcome {
+  type: 'UNIVERSAL_OUTCOME';
+  planType: 'UNIVERSAL';
+  filled: string[];
+  requiredGaps: Array<{ questionKey?: string; questionText?: string; reason?: string }>;
+  skippedOptional?: string[];
+  unsupported?: Array<{ key?: string; label?: string; reason?: string }>;
+  resumeUploadState?: string;
+  coverLetterUploadState?: string;
+  currentUrl?: string;
+  pageIndex?: number;
+  completedPages?: number[];
+  blockedResources?: Array<{ url: string; resourceType: string; reason: string }>;
+  closedShadowHosts?: string[];
+  validationErrors?: string[];
+  loginSucceeded?: boolean;
+}
+
+export interface EmployerCredentialSummary {
+  id?: string;
+  employerDomain: string;
+  username: string;
+  status: string;
+  updatedAt?: string | null;
+}
+
+/** GET /automation/plans/{id} — the fields the Zoho Recruit / Lever / Workday / Ashby / Universal review panels read. */
 export interface AutomationPlanView {
   id: string;
   applicationId: string;
   targetUrl: string;
   status: string;
   plan?: { planType?: string | null } | null;
-  result?: (ZohoRecruitOutcome | LeverOutcome | WorkdayOutcome | WorkdayApplicationOutcome | AshbyOutcome | PlanErrorResult | SubmissionReconciliationResult)[] | null;
+  result?: (ZohoRecruitOutcome | LeverOutcome | WorkdayOutcome | WorkdayApplicationOutcome | AshbyOutcome | UniversalOutcome | PlanErrorResult | SubmissionReconciliationResult)[] | null;
   submitApproved: boolean;
   heartbeatAt?: string | null;
   updatedAt: string;
@@ -993,6 +1032,7 @@ export interface ApplyQuestionItem {
   answerState: 'CONFIRMED' | 'UNCONFIRMED' | 'MISSING' | 'NEEDS_USER_INPUT' | 'HARD_STOP' | string;
   answerOrigin?: string | null;
   answerId?: string | null;
+  answerText?: string | null;
   formUrl: string;
 }
 
@@ -1071,6 +1111,16 @@ export type TrackStage =
 export type TrackBasis = 'VERIFIED' | 'CANDIDATE_CONFIRMED' | 'CANDIDATE_REPORTED' | 'UNVERIFIED' | 'INTERNAL' | 'INFERRED';
 export type TrackSubmissionState = 'CONFIRMED' | 'UNVERIFIED' | 'UNKNOWN' | 'CONFLICTING';
 export type TrackAcknowledgementState = 'VERIFIED' | 'UNVERIFIED' | 'NONE';
+/** The strongest source behind the submission state (Stage 3I Phase 2). Browser observation is never employer verification. */
+export type TrackSubmissionLevel =
+  | 'NOT_ATTEMPTED'
+  | 'ATTEMPT_RECORDED'
+  | 'BROWSER_OBSERVED'
+  | 'CANDIDATE_REPORTED'
+  | 'EMPLOYER_EMAIL_UNVERIFIED'
+  | 'SANDBOX_VERIFIED'
+  | 'EMPLOYER_EMAIL_VERIFIED'
+  | 'CONFLICTING';
 export type TrackEventClassification = 'INTERNAL' | 'EXTERNAL' | 'INFERRED' | 'CANDIDATE_REPORTED';
 export type TrackVerification = 'NOT_APPLICABLE' | 'VERIFIED' | 'UNVERIFIED' | 'REJECTED' | 'UNKNOWN';
 export type TrackTimePrecision = 'EXACT' | 'DATE' | 'UNKNOWN';
@@ -1091,6 +1141,8 @@ export interface TrackSummary {
   label?: string;
   basis?: TrackBasis | null;
   submission?: TrackSubmissionState;
+  submissionLevel?: TrackSubmissionLevel | null;
+  sandbox?: boolean;
   needsReview?: boolean;
   attentionCount?: number;
   pending?: string | null;
@@ -1114,6 +1166,45 @@ export interface TrackAttention {
 export interface TrackConflict {
   code: string;
   message: string;
+  /** Both original values with their provenance, e.g. "acknowledgement:APP-1", "browser-observed:APP-2". */
+  references?: string[];
+}
+
+/** The current durable correlation decision for a receipt (V071 application_receipt_links). */
+export interface TrackReceiptLink {
+  decision: 'LINKED' | 'CANDIDATE_CONFIRMED' | 'CANDIDATE_REJECTED' | 'NOT_ASSESSED';
+  origin: 'INGESTION' | 'CANDIDATE_REVIEW' | 'V071_BACKFILL';
+  referenceConsistency: 'ALIGNED' | 'CONFLICTING' | 'NOT_COMPARABLE' | 'NOT_ASSESSED';
+  referenceDetail: string | null;
+  submissionReference: string | null;
+  temporalStatus:
+    | 'PLAUSIBLE'
+    | 'BEFORE_SUBMISSION'
+    | 'FUTURE_DATED'
+    | 'EVIDENCE_TIME_UNKNOWN'
+    | 'NO_SUBMISSION_ANCHOR'
+    | 'NOT_ASSESSED';
+  anchorSource: 'PRE_SUBMIT_ATTEMPT' | 'SUBMIT_APPROVAL' | 'CANDIDATE_REPORTED_SUBMISSION' | 'NONE';
+  anchorAt: string | null;
+  linkedAt: string | null;
+  policyVersion: string;
+}
+
+/** Robin's own submission record: where it came from and when — never employer verification. */
+export interface TrackSubmissionEvidence {
+  recorded: boolean;
+  anchor: { source: string; at: string; precision: TrackTimePrecision; clockSkewSeconds: number } | null;
+  source?: string;
+  recordedAt?: string | null;
+  recordedAtSource?: string;
+  atsPlatform?: string;
+  browserObserved?: boolean;
+  sandboxVerified?: boolean;
+  employerVerified?: false;
+  schema?: string;
+  observation?: string | null;
+  confirmationReference?: string | null;
+  documentsWithoutUploadProof?: string[];
 }
 
 /** One piece of submission evidence and the verification policy's outcome for it. */
@@ -1137,6 +1228,9 @@ export interface TrackReceipt {
   candidateReviewedAt: string | null;
   reviewVersion: number;
   emailId: string | null;
+  /** Where the evidence time came from: the mail provider, or a value you entered. */
+  evidenceAtSource?: 'PROVIDER_RECEIPT' | 'CANDIDATE_SUPPLIED' | 'NONE';
+  link?: TrackReceiptLink | null;
 }
 
 /** An employer message waiting for the candidate's decision. */
@@ -1177,7 +1271,13 @@ export interface ApplicationTrack {
   evidenceStage: TrackStage;
   recordedStatus: string;
   recordedStatusLabel: string;
-  submission: { state: TrackSubmissionState; label: string; reason: string };
+  submission: {
+    state: TrackSubmissionState;
+    label: string;
+    reason: string;
+    verificationLevel?: TrackSubmissionLevel | null;
+    sandbox?: boolean;
+  };
   acknowledgement: { state: TrackAcknowledgementState; label: string };
   communications: { linkedMessages: number; awaitingReview: number };
   pending: { stage: TrackStage; label: string; emailId: string | null } | null;
@@ -1187,6 +1287,7 @@ export interface ApplicationTrack {
   needsReview: boolean;
   robinSubmission: { submitted: boolean; note: string };
   receipts: TrackReceipt[];
+  submissionEvidence?: TrackSubmissionEvidence;
   reviews: TrackReviewItem[];
   mailbox: { connected: boolean; note: string };
   versions?: Record<string, string>;
@@ -1248,95 +1349,136 @@ export interface EmailIngestResult {
   receiptVerification: string | null;
 }
 
-/** Application Submission Receipt (Phase 20) */
+/** Application Submission Receipt — matches ApplicationReceiptService.SubmissionReceipt */
 export interface IdentityReceipt {
-  fullName: string | null;
+  name: string | null;
+  firstName: string | null;
+  lastName: string | null;
   email: string | null;
   phone: string | null;
-  city: string | null;
-  country: string | null;
-  rightToWorkUk: boolean | null;
-  requiresVisaSponsorship: boolean | null;
+  addressLine1: string | null;
+  linkedIn: string | null;
+  /**
+   * Where the values come from (Stage 3I Phase 6): the submit step's identity or fields, the Universal
+   * package's verified profile facts the browser filled from, or the current profile (no attempt yet).
+   * Never the employer's copy. Known values: SUBMIT_STEP_IDENTITY, SUBMIT_STEP_FIELDS,
+   * PREPARED_PACKAGE_PROFILE_FACTS, CURRENT_PROFILE (kept a string, like the other server
+   * vocabularies here, so an unknown future value renders without a provenance note).
+   */
+  source?: string | null;
 }
 
 export interface DocumentReceipt {
-  cvId: string | null;
-  cvVersion: number | null;
-  cvFilename: string | null;
-  cvSha256: string | null;
-  coverLetterId: string | null;
-  coverLetterTitle: string | null;
-  coverLetterSha256: string | null;
-  coverLetterProvided: boolean;
+  versionId: string | null;
+  title: string | null;
+  kind: string | null;
+  sha256: string | null;
+  byteSize: number | null;
+  purpose: string | null;
+  fileName: string | null;
+  validationPassed: boolean | null;
 }
 
 export interface AnswerReceipt {
-  key: string;
-  questionText: string;
-  answerText: string;
+  question: string;
+  answer: string;
 }
 
 export interface ConfirmationEvidence {
   confirmed: boolean;
-  confirmationNumber: string | null;
-  receiptToken: string | null;
-  detectedAt: string | null;
-  pageTitle: string | null;
+  confirmationId: string | null;
   observedSignals: string[];
+  summary: string | null;
 }
 
 export interface ReconciliationDetails {
-  needed: boolean;
+  required: boolean;
   reason: string | null;
-  lastReconciledAt: string | null;
-  attemptCount: number;
+  suggestedAction: string | null;
 }
 
 export interface FailureDetails {
   failed: boolean;
-  failureStage: string | null;
-  errorMessage: string | null;
-  occurredAt: string | null;
+  reason: string | null;
+  code: string | null;
 }
 
 export interface AuthorizationRecord {
-  authorized: boolean;
-  authorizedBy: string | null;
-  authorizedAt: string | null;
-  consentSummary: string | null;
+  approved: boolean;
+  policy: string | null;
+  approvedAt: string | null;
+  actor: string | null;
 }
 
 export interface AttemptSummary {
   attemptId: string;
-  idempotencyKey: string;
+  attemptNumber: number;
+  atsKind: string;
+  idempotencyKey: string | null;
   status: string;
-  stage: string | null;
+  submitted: boolean;
   createdAt: string | null;
-  completedAt: string | null;
-  isCurrent: boolean;
+  updatedAt: string | null;
+  isLatest: boolean;
 }
 
+export type VerificationLevel =
+  | 'NOT_ATTEMPTED'
+  | 'ATTEMPT_RECORDED'
+  | 'BROWSER_OBSERVED'
+  | 'SANDBOX_VERIFIED'
+  | 'FAILED';
+
 export interface SubmissionReceipt {
-  receiptId: string;
+  receiptId: string | null;
   applicationId: string;
-  attemptId: string;
-  idempotencyKey: string;
-  companyName: string | null;
+  jobId: string;
   jobTitle: string | null;
+  company: string | null;
   applicationUrl: string | null;
+  atsKind: string;
+  attemptNumber: number;
+  isLatest: boolean;
+  idempotencyKey: string | null;
   status: string;
-  failureStage: string | null;
-  failureReason: string | null;
-  generatedAt: string;
+  submitted: boolean;
   submittedAt: string | null;
-  identity: IdentityReceipt;
-  documents: DocumentReceipt;
-  answers: AnswerReceipt[];
+  createdAt: string | null;
+  updatedAt: string | null;
+  authorization: AuthorizationRecord;
+  submittedIdentity: IdentityReceipt;
+  submittedAnswers: AnswerReceipt[];
+  cv: DocumentReceipt | null;
+  coverLetter: DocumentReceipt | null;
   confirmation: ConfirmationEvidence;
   reconciliation: ReconciliationDetails;
   failure: FailureDetails;
-  authorization: AuthorizationRecord;
-  attempts: AttemptSummary[];
+  attemptHistory: AttemptSummary[];
+  verificationLevel?: VerificationLevel | string;
+  /** Stage 3I Phase 2: what the browser evidence of a Universal attempt shows. Never employer verification. */
+  browserEvidence?: BrowserEvidenceView | null;
+}
+
+export interface DocumentUploadView {
+  kind: 'cv' | 'coverLetter' | string;
+  uploadVerification: 'FILE_PART_OBSERVED' | 'ATTACHED_NOT_CONFIRMED' | 'NOT_ATTACHED' | 'NO_FIELD' | 'NOT_RECORDED' | string;
+  label: string;
+  attachedSha256: string | null;
+  bytesObserved: boolean;
+}
+
+export interface BrowserEvidenceView {
+  schemaVersion: string | null;
+  schemaKind: string;
+  browserObserved: boolean;
+  assessment: string;
+  assessmentReason: string;
+  redirectChain: Array<{ host: string | null; status: number | null }>;
+  finalOrigin: string | null;
+  documents: DocumentUploadView[];
+  observedAt: string | null;
+  identifierSource: string | null;
+  employerVerification: 'NOT_VERIFIED_BY_BROWSER' | string;
 }
 
 export type HandoffBlockReason = 'CAPTCHA' | 'MFA' | 'CLOUDFLARE_TURNSTILE' | 'EMPLOYER_SECURITY_CHECK';
@@ -1355,5 +1497,24 @@ export interface HandoffSession {
   cancelledAt?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface SandboxRegistration {
+  id: string;
+  atsPlatform: string;
+  postingUrl: string;
+  permittedDomain: string;
+  approvedBy: string;
+  approvedAt: string;
+  revokedAt: string | null;
+  active: boolean;
+}
+
+export interface SandboxRegistrationsResponse {
+  configured: boolean;
+  allowedDomains: string[];
+  allowedPathPrefixes: string[];
+  requireHttps: boolean;
+  items: SandboxRegistration[];
 }
 

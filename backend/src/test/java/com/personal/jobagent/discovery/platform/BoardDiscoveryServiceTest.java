@@ -77,8 +77,9 @@ class BoardDiscoveryServiceTest {
         RuntimeException detailFailure;
         RuntimeException listFailure;
         long listDelayMs = 0;
+        PlatformKind kind = PlatformKind.GEM;
 
-        @Override public PlatformKind kind() { return PlatformKind.GEM; }
+        @Override public PlatformKind kind() { return kind; }
         @Override public Optional<BoardRef> recognize(URI url) { return Optional.empty(); }
         @Override public BoardRef parseIdentifier(String id) {
             if ("bad".equals(id)) throw new BoardConfigException("board identifier is not valid");
@@ -1384,5 +1385,180 @@ class BoardDiscoveryServiceTest {
 
         assertThat(report.ok()).isTrue();
         assertThat(report.counts().get("scan_offset")).isEqualTo(4);
+    }
+
+    // =========================================================================
+    // Wave 3: Proactive, Adaptive Per-Domain Token Bucket Rate Limiting Tests
+    // =========================================================================
+
+    @Test
+    void tokenBucketAllowsImmediateExecutionWithinBurstCapacity() {
+        List<Long> sleeps = new ArrayList<>();
+        service.setRateLimiterSleeper(sleeps::add);
+        service.configureDomainRateLimit(PlatformKind.GEM, 5.0, 3);
+
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(List.of(partial("1"), partial("2")), 1, null);
+
+        var report = service.run(SOURCE, a, "acme", "Acme Ltd", BoardDiscoveryService.Mode.MANUAL);
+
+        assertThat(report.ok()).isTrue();
+        assertThat(report.counts()).containsEntry("created", 2).containsEntry("listed", 2);
+        assertThat(sleeps).isEmpty();
+        verify(db).update(contains("source_status = 'MISSING'"), eq(SOURCE), any(java.sql.Timestamp.class));
+    }
+
+    @Test
+    void tokenBucketEnforcesDelaysWhenBurstCapacityExhausted() {
+        List<Long> sleeps = new ArrayList<>();
+        service.setRateLimiterSleeper(sleeps::add);
+        // 5 req/sec = 200ms spacing, burst capacity = 1
+        service.configureDomainRateLimit(PlatformKind.GEM, 5.0, 1);
+
+        Scripted a = new Scripted();
+        // 1 listing + 2 details = 3 operations (fits within default maxDetails=2)
+        // Op 1 (list): consumes burst token 1 -> no delay
+        // Op 2 (detail 1): deficit 1.0 -> ~200ms delay
+        // Op 3 (detail 2): deficit 1.0 -> ~200ms delay
+        a.listing = ListingResult.complete(List.of(partial("1"), partial("2")), 1, null);
+
+        var report = service.run(SOURCE, a, "acme", "Acme Ltd", BoardDiscoveryService.Mode.MANUAL);
+
+        assertThat(report.ok()).isTrue();
+        assertThat(report.counts()).containsEntry("created", 2).containsEntry("listed", 2);
+        assertThat(sleeps).hasSize(2);
+        assertThat(sleeps.get(0)).isBetween(180L, 220L);
+        assertThat(sleeps.get(1)).isBetween(380L, 420L);
+    }
+
+    @Test
+    void tokenBucketSharesRateLimitsAcrossConcurrentSourcesForSameDomain() {
+        List<Long> sleeps = new ArrayList<>();
+        service.setRateLimiterSleeper(sleeps::add);
+        // Greenhouse rate limit: 10 req/sec (100ms delay), burst = 2
+        service.configureDomainRateLimit(PlatformKind.GREENHOUSE, 10.0, 2);
+        // Ashby rate limit: 2 req/sec, burst = 4
+        service.configureDomainRateLimit(PlatformKind.ASHBY, 2.0, 4);
+
+        UUID sourceGreenhouse1 = UUID.randomUUID();
+        UUID sourceGreenhouse2 = UUID.randomUUID();
+        UUID sourceAshby = UUID.randomUUID();
+
+        Scripted gh1 = new Scripted();
+        gh1.kind = PlatformKind.GREENHOUSE;
+        gh1.listing = ListingResult.complete(List.of(full("g1")), 1, null);
+        service.run(sourceGreenhouse1, gh1, "org1", "Org 1", BoardDiscoveryService.Mode.MANUAL);
+        assertThat(sleeps).isEmpty();
+
+        Scripted gh2 = new Scripted();
+        gh2.kind = PlatformKind.GREENHOUSE;
+        gh2.listing = ListingResult.complete(List.of(full("g2")), 1, null);
+        service.run(sourceGreenhouse2, gh2, "org2", "Org 2", BoardDiscoveryService.Mode.MANUAL);
+        assertThat(sleeps).isEmpty();
+
+        service.run(sourceGreenhouse1, gh1, "org1", "Org 1", BoardDiscoveryService.Mode.MANUAL);
+        assertThat(sleeps).hasSize(1);
+        assertThat(sleeps.get(0)).isGreaterThanOrEqualTo(80L).isLessThanOrEqualTo(110L);
+
+        Scripted ashby = new Scripted();
+        ashby.kind = PlatformKind.ASHBY;
+        ashby.listing = ListingResult.complete(List.of(full("a1")), 1, null);
+        sleeps.clear();
+        service.run(sourceAshby, ashby, "ashby-org", "Ashby Org", BoardDiscoveryService.Mode.MANUAL);
+        assertThat(sleeps).isEmpty();
+    }
+
+    @Test
+    void tokenBucketAdaptiveMultiplicativeDecreaseAndCooldownOnHttp429() {
+        service.configureDomainRateLimit(PlatformKind.GEM, 10.0, 5);
+        DomainRateLimiter.TokenBucket bucket = service.getRateLimiter().bucket(PlatformKind.GEM);
+        assertThat(bucket.getCurrentRequestsPerSec()).isEqualTo(10.0);
+        assertThat(bucket.getAvailableTokens()).isGreaterThanOrEqualTo(4.0);
+
+        Scripted a = new Scripted();
+        a.listing = ListingResult.failed(FailureCategory.RATE_LIMITED, "HTTP 429 Too Many Requests");
+
+        var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.SCHEDULED);
+
+        assertThat(report.ok()).isFalse();
+        assertThat(report.failureCategory()).isEqualTo("RATE_LIMITED");
+
+        assertThat(bucket.getCurrentRequestsPerSec()).isEqualTo(5.0);
+        assertThat(bucket.getAvailableTokens()).isEqualTo(0.0);
+        assertThat(bucket.isBackingOff()).isTrue();
+
+        verify(db, never()).update(contains("source_status = 'MISSING'"), any(Object[].class));
+        verify(db, never()).update(contains("set deleted_at = now()"), any(Object[].class));
+    }
+
+    @Test
+    void tokenBucketAdaptiveAdditiveIncreaseOnConsecutiveSuccesses() {
+        service.configureDomainRateLimit(PlatformKind.GEM, 10.0, 5);
+        DomainRateLimiter.TokenBucket bucket = service.getRateLimiter().bucket(PlatformKind.GEM);
+
+        service.getRateLimiter().onRateLimited(PlatformKind.GEM);
+        assertThat(bucket.getCurrentRequestsPerSec()).isEqualTo(5.0);
+
+        bucket.reset();
+        bucket.configure(10.0, 5);
+        service.getRateLimiter().onRateLimited(PlatformKind.GEM);
+        assertThat(bucket.getCurrentRequestsPerSec()).isEqualTo(5.0);
+
+        service.getRateLimiter().onSuccess(PlatformKind.GEM);
+        service.getRateLimiter().onSuccess(PlatformKind.GEM);
+        service.getRateLimiter().onSuccess(PlatformKind.GEM);
+
+        assertThat(bucket.getCurrentRequestsPerSec()).isGreaterThan(5.0);
+    }
+
+    @Test
+    void tokenBucketDeadlineEnforcementFailsClosedWithoutHangingAndProtectsSafeDeletion() {
+        service.configureDomainRateLimit(PlatformKind.GEM, 0.1, 1);
+        DomainRateLimiter.TokenBucket bucket = service.getRateLimiter().bucket(PlatformKind.GEM);
+        bucket.reserve(0);
+
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(List.of(full("1")), 1, null);
+
+        var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.MANUAL,
+                Map.of(), null, null, null, 50L);
+
+        assertThat(report.ok()).isFalse();
+        assertThat(report.failureCategory()).isEqualTo("TIMEOUT");
+
+        verify(db, never()).update(contains("source_status = 'MISSING'"), any(Object[].class));
+        verify(db, never()).update(contains("set deleted_at = now()"), any(Object[].class));
+    }
+
+    @Test
+    void tokenBucketRateLimitingPreservesSafeDeletionGuardOnEmptyListing() {
+        service.configureDomainRateLimit(PlatformKind.GEM, 5.0, 2);
+        Scripted a = new Scripted();
+        a.listing = ListingResult.complete(List.of(), 1, null);
+
+        var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.SCHEDULED);
+
+        assertThat(report.ok()).isTrue();
+        assertThat(report.counts()).containsEntry("listed", 0);
+        verify(db, never()).update(contains("source_status = 'MISSING'"), any(Object[].class));
+        verify(db, never()).update(contains("set deleted_at = now()"), any(Object[].class));
+    }
+
+    @Test
+    void tokenBucketRateLimitingPreservesCursorRetentionOnUpstreamFailure() {
+        Map<String, Object> sourceRow = new java.util.HashMap<>();
+        sourceRow.put("default_offset", "33");
+        when(db.queryForList(contains("select last_run->>'scan_offset'"), eq(SOURCE)))
+                .thenReturn(List.of(sourceRow));
+
+        service.configureDomainRateLimit(PlatformKind.GEM, 5.0, 2);
+        Scripted a = new Scripted();
+        a.listing = ListingResult.failed(FailureCategory.RATE_LIMITED, "HTTP 429 Rate Limit Exceeded");
+
+        var report = service.run(SOURCE, a, "acme", null, BoardDiscoveryService.Mode.SCHEDULED);
+
+        assertThat(report.ok()).isFalse();
+        assertThat(report.counts().get("scan_offset")).isEqualTo(33);
+        verify(db).update(contains("failure_streak = failure_streak + 1"), contains("\"scan_offset\":33"), anyString(), any(), eq(SOURCE));
     }
 }

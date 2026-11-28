@@ -17,13 +17,20 @@ class ReceiptVerificationPolicyTest {
 
     private static final Instant NOW = Instant.parse("2026-10-10T12:00:00Z");
     private static final SenderAuthentication PASS = new SenderAuthentication("pass", "acme.example", "pass", "pass");
+    private static final EmployerDomainPolicy.DomainBinding BOUND = EmployerDomainPolicy.DomainBinding.bound("acme.example");
 
     private final ReceiptVerificationPolicy policy = new ReceiptVerificationPolicy();
 
     private static Evidence email(Channel channel, boolean identifiesThis, boolean identifiesOther, boolean explicit,
                                   SenderAuthentication auth, boolean delivered, Instant time) {
+        return email(channel, identifiesThis, identifiesOther, explicit, auth, delivered, time, BOUND);
+    }
+
+    private static Evidence email(Channel channel, boolean identifiesThis, boolean identifiesOther, boolean explicit,
+                                  SenderAuthentication auth, boolean delivered, Instant time,
+                                  EmployerDomainPolicy.DomainBinding binding) {
         return new Evidence(EvidenceType.EMPLOYER_ACKNOWLEDGEMENT_EMAIL, channel, identifiesThis, identifiesOther, explicit,
-                "talent.acme.example", auth, delivered, time, NOW);
+                "talent.acme.example", auth, delivered, time, NOW, binding);
     }
 
     private static Evidence valid() {
@@ -107,8 +114,51 @@ class ReceiptVerificationPolicyTest {
     }
 
     @Test
-    void anUnknownEvidenceTimeIsNotFabricatedAndDoesNotFailVerification() {
+    void timingAgainstTheSubmissionAnchorDecidesWhetherAnAuthenticatedAcknowledgementCanVerify() {
+        Instant submitted = NOW.minus(Duration.ofHours(3));
+        var anchor = new ReceiptTemporalPolicy.SubmissionAnchor(submitted, TrackVocabulary.TimePrecision.EXACT,
+                ReceiptTemporalPolicy.AnchorSource.PRE_SUBMIT_ATTEMPT);
+        var temporal = new ReceiptTemporalPolicy();
+        java.util.function.Function<Instant, Evidence> at = time -> new Evidence(EvidenceType.EMPLOYER_ACKNOWLEDGEMENT_EMAIL,
+                Channel.MAILBOX_CONNECTOR, true, false, true, "talent.acme.example", PASS, true, time, NOW, BOUND,
+                temporal.assess(time, TrackVocabulary.TimePrecision.EXACT, ReceiptTemporalPolicy.TimeSource.PROVIDER_RECEIPT,
+                        anchor, NOW));
+
+        var after = policy.evaluate(at.apply(submitted.plus(Duration.ofMinutes(2))));
+        assertThat(after.status()).isEqualTo(Verification.VERIFIED);
+        assertThat(after.reasons()).extracting(r -> r.get("code")).contains("TIMING_PLAUSIBLE");
+
+        var before = policy.evaluate(at.apply(submitted.minus(Duration.ofHours(1))));
+        assertThat(before.status()).isEqualTo(Verification.UNVERIFIED);
+        assertThat(before.reasons()).extracting(r -> r.get("code")).contains("RECEIPT_PREDATES_SUBMISSION");
+
+        var future = policy.evaluate(at.apply(NOW.plus(Duration.ofMinutes(30))));
+        assertThat(future.status()).isEqualTo(Verification.REJECTED);
+        assertThat(future.reasons()).extracting(r -> r.get("code")).contains("FUTURE_DATED");
+    }
+
+    @Test
+    void anUnknownEvidenceTimeIsNotFabricatedAndCannotBeVerified() {
+        // Stage 3I Phase 2: a missing provider-assigned time produces an unverified outcome, never
+        // fabricated certainty — the receipt cannot be checked against the submission.
         var outcome = policy.evaluate(email(Channel.MAILBOX_CONNECTOR, true, false, true, PASS, true, null));
-        assertThat(outcome.status()).isEqualTo(Verification.VERIFIED);
+        assertThat(outcome.status()).isEqualTo(Verification.UNVERIFIED);
+        assertThat(outcome.reasons()).extracting(r -> r.get("code")).contains("EVIDENCE_TIME_UNKNOWN");
+    }
+
+    @Test
+    void unboundOrUnknownEmployerDomainNeverVerifiesEvenWhenDkimPasses() {
+        var mismatched = policy.evaluate(email(Channel.MAILBOX_CONNECTOR, true, false, true, PASS, true, NOW,
+                EmployerDomainPolicy.DomainBinding.mismatch("SENDER_DOMAIN_NOT_BOUND_TO_EMPLOYER")));
+        var unknown = policy.evaluate(email(Channel.MAILBOX_CONNECTOR, true, false, true, PASS, true, NOW,
+                EmployerDomainPolicy.DomainBinding.unknown()));
+        var missingBinding = policy.evaluate(email(Channel.MAILBOX_CONNECTOR, true, false, true, PASS, true, NOW, null));
+
+        assertThat(mismatched.status()).isEqualTo(Verification.UNVERIFIED);
+        assertThat(mismatched.reasons()).extracting(r -> r.get("code")).contains("SENDER_DOMAIN_NOT_BOUND_TO_EMPLOYER");
+        assertThat(unknown.status()).isEqualTo(Verification.UNVERIFIED);
+        assertThat(unknown.reasons()).extracting(r -> r.get("code")).contains("EMPLOYER_TARGET_DOMAIN_UNKNOWN");
+        assertThat(missingBinding.status()).isEqualTo(Verification.UNVERIFIED);
+        assertThat(missingBinding.reasons()).extracting(r -> r.get("code")).contains("EMPLOYER_TARGET_DOMAIN_UNKNOWN");
     }
 }

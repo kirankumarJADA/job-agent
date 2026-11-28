@@ -18,6 +18,15 @@ jobs:
           java-version: "21"
           cache: maven
 
+      - name: Set up Node 22 (for real cross-process worker ITs)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install worker dependencies and Playwright Chromium
+        working-directory: worker
+        run: npm ci && npx playwright install --with-deps chromium
+
       # Testcontainers needs a Docker daemon, which ubuntu-latest runners
       # provide out of the box.
       - name: mvn verify (unit + ArchUnit + Testcontainers ITs)

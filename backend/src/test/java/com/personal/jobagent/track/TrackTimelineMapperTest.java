@@ -140,4 +140,27 @@ class TrackTimelineMapperTest {
         assertThat(item.toString()).doesNotContain("Selector").doesNotContain("alice@example.com");
         assertThat(item.get("summary")).isEqualTo("Form filling failed — nothing was submitted");
     }
+
+    @Test
+    void universalAndSubmissionLifecycleAuditActionsMapToNeutralNonLeakingEntries() {
+        for (String action : List.of(
+                "UNIVERSAL_FORM_REVIEWED",
+                "UNIVERSAL_SUBMIT_APPROVED",
+                "UNIVERSAL_SUBMIT_APPROVAL_REFUSED",
+                "UNIVERSAL_SUBMIT_QUEUED",
+                "AUTOMATION_PLAN_SUBMITTED",
+                "AUTOMATION_PLAN_RECONCILIATION_REQUIRED")) {
+            assertThat(TrackRepository.PROJECTED_AUDIT_ACTIONS).contains(action);
+            Map<String, Object> item = mapper.map(audit(action, "{\"planType\":\"UNIVERSAL\",\"secret\":\"abc\"}", "alice@example.com"));
+            assertThat(item.get("type")).isNotEqualTo("INTERNAL_EVENT");
+            assertThat(item.toString().toLowerCase())
+                    .doesNotContain("universal")
+                    .doesNotContain("greenhouse")
+                    .doesNotContain("alice@example.com");
+        }
+        assertThat(mapper.map(audit("UNIVERSAL_SUBMIT_APPROVED", "{}", "alice@example.com")).get("summary").toString())
+                .doesNotContain("submission is disabled");
+        assertThat(mapper.map(audit("AUTOMATION_PLAN_SUBMITTED", "{}", "worker")).get("summary").toString())
+                .contains("awaiting independent employer verification");
+    }
 }

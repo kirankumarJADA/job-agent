@@ -81,6 +81,47 @@ public class EmployerCredentialService {
                 profileId);
     }
 
+    /**
+     * Stage 3F (SEC-7): what a worker may resolve credentials for, for one application.
+     *
+     * @param running          an automation plan for this application is currently RUNNING
+     * @param permittedDomains canonical employer hosts the application is actually executing
+     *                         against: the persisted job's application URL host and the target
+     *                         URL host of its RUNNING plan(s). Exact hosts only — no parent-domain
+     *                         or suffix matching, so lookalikes ({@code greenhouse.io.evil.com},
+     *                         {@code evilgreenhouse.io}) can never match.
+     */
+    public record ApplicationBinding(boolean running, java.util.Set<String> permittedDomains) {}
+
+    public ApplicationBinding bindingFor(UUID ownerProfileId, UUID applicationId) {
+        java.util.Set<String> domains = new java.util.LinkedHashSet<>();
+        List<String> jobUrls = db.queryForList("""
+                select j.application_url from applications a join jobs j on j.id = a.job_id
+                where a.id = ? and a.profile_id = ?
+                """, String.class, applicationId, ownerProfileId);
+        jobUrls.forEach(u -> hostDomain(u).ifPresent(domains::add));
+        List<String> runningTargets = db.queryForList("""
+                select target_url from automation_plans
+                where application_id = ? and profile_id = ? and status = 'RUNNING'
+                """, String.class, applicationId, ownerProfileId);
+        runningTargets.forEach(u -> hostDomain(u).ifPresent(domains::add));
+        return new ApplicationBinding(!runningTargets.isEmpty(), java.util.Set.copyOf(domains));
+    }
+
+    /** Canonical employer host of an https URL; empty for anything else (http, IP literals, userinfo, junk). */
+    static Optional<String> hostDomain(String url) {
+        if (url == null || url.isBlank()) return Optional.empty();
+        try {
+            java.net.URI uri = new java.net.URI(url.trim());
+            if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getRawUserInfo() != null || uri.getHost() == null) {
+                return Optional.empty();
+            }
+            return com.personal.jobagent.mailbox.managed.MailAddresses.employerDomain(uri.getHost());
+        } catch (java.net.URISyntaxException e) {
+            return Optional.empty();
+        }
+    }
+
     public boolean exists(UUID profileId, String employerDomain) {
         Integer count = db.queryForObject("""
                 select count(*) from employer_credentials

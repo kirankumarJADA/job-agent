@@ -493,6 +493,64 @@ class CloudflareManagedMailIT {
         assertThat(dbCount).isEqualTo(1);
     }
 
+    @Test
+    @DisplayName("Gate 0A: Forged or domain-mismatched inbound Cloudflare acknowledgement never creates a VERIFIED receipt")
+    void forgedOrUnboundInboundAcknowledgementNeverProducesVerifiedReceipt() throws Exception {
+        TestCandidate candidate = createCandidate("dkim-sec-" + UUID.randomUUID() + "@test.local", "Security Candidate");
+        String acmeUrl = "https://boards.greenhouse.io/acme/jobs/7771001";
+        UUID appId = createApplicationWithJob(candidate.profileId(), "Acme Corp", "Staff Engineer", acmeUrl, "REQ-SEC-77");
+
+        // Attack 1: Forged From @acme.com + "dkim": "pass" WITHOUT authServId/dkimDomain (or untrusted server)
+        Map<String, Object> spoofedNoAuth = new LinkedHashMap<>();
+        spoofedNoAuth.put("envelopeRecipient", candidate.emailAddress());
+        spoofedNoAuth.put("envelopeSender", "bounce@unrelated.example");
+        spoofedNoAuth.put("from", "Acme Recruiting <jobs@acme.com>");
+        spoofedNoAuth.put("subject", "Application confirmation REQ-SEC-77");
+        spoofedNoAuth.put("text", "We have received your application for " + acmeUrl + " (REQ-SEC-77).");
+        spoofedNoAuth.put("messageId", "<forged-no-domain-" + UUID.randomUUID() + "@unrelated.example>");
+        spoofedNoAuth.put("date", "Sat, 24 Oct 2026 10:05:00 +0000");
+        spoofedNoAuth.put("spf", "pass");
+        spoofedNoAuth.put("dkim", "pass");
+        spoofedNoAuth.put("spam", "no");
+
+        MvcResult res1 = deliverSigned(json.writeValueAsString(spoofedNoAuth), "tok-forged-1-" + UUID.randomUUID(), Instant.now());
+        assertThat(res1.getResponse().getStatus()).isEqualTo(200);
+
+        // Attack 2: "dkim": "pass" with valid dkimDomain=unrelated.example quoting Greenhouse URL (unbound domain!)
+        Map<String, Object> unboundDomain = new LinkedHashMap<>(spoofedNoAuth);
+        unboundDomain.put("from", "Recruiting <hr@unrelated.example>");
+        unboundDomain.put("messageId", "<unbound-" + UUID.randomUUID() + "@unrelated.example>");
+        unboundDomain.put("dkimDomain", "unrelated.example");
+        unboundDomain.put("dmarc", "pass");
+        unboundDomain.put("authServId", "mx.cloudflare.net");
+        unboundDomain.put("authTrusted", true);
+
+        MvcResult res2 = deliverSigned(json.writeValueAsString(unboundDomain), "tok-forged-2-" + UUID.randomUUID(), Instant.now());
+        assertThat(res2.getResponse().getStatus()).isEqualTo(200);
+
+        List<Map<String, Object>> receipts = jdbc.queryForList(
+                "select verification_status, verification_reasons::text as reasons from application_receipts where profile_id = ? and application_id = ?",
+                candidate.profileId(), appId);
+        assertThat(receipts).isNotEmpty();
+        for (Map<String, Object> row : receipts) {
+            assertThat(row.get("verification_status")).isEqualTo("UNVERIFIED");
+        }
+        Integer verifiedCount = jdbc.queryForObject(
+                "select count(*) from application_receipts where profile_id = ? and verification_status = 'VERIFIED'",
+                Integer.class, candidate.profileId());
+        assertThat(verifiedCount).isZero();
+
+        // Gate 0D: Active Managed Mail marks mailboxConnected = true for owner; DISABLED fails closed to false
+        mvc.perform(get("/api/v1/track/reviews").with(candidate.auth()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.mailboxConnected").value(true));
+
+        jdbc.update("update managed_mail_addresses set status = 'DISABLED' where profile_id = ?", candidate.profileId());
+        mvc.perform(get("/api/v1/track/reviews").with(candidate.auth()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.mailboxConnected").value(false));
+    }
+
     private JsonNode json(MvcResult result) throws Exception {
         String body = result.getResponse().getContentAsString(StandardCharsets.UTF_8);
         return body.isEmpty() ? json.createObjectNode() : json.readTree(body);

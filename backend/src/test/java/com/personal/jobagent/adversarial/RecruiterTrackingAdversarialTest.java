@@ -3,6 +3,7 @@ package com.personal.jobagent.adversarial;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.audit.AuditLogWriter;
 import com.personal.jobagent.gmail.GmailConnectionStore;
+import com.personal.jobagent.mailbox.managed.ManagedMailboxService;
 import com.personal.jobagent.security.OwnerContext;
 import com.personal.jobagent.track.ApplicationTrackingService;
 import com.personal.jobagent.track.TrackEvidenceRecorder;
@@ -181,5 +182,64 @@ class RecruiterTrackingAdversarialTest {
         assertThat(followUp).isNotNull();
         assertThat(followUp.get("due")).isEqualTo(false);
         assertThat(followUp.get("status")).isEqualTo("NOT_NEEDED");
+    }
+
+    @Test
+    @DisplayName("Gate 0D: mailboxConnected recognises active owner-scoped Managed Mail and fails closed when disabled/misconfigured/cross-tenant")
+    void testMailboxConnectedRecognizesActiveManagedMailAndFailsClosed() {
+        UUID profileId = UUID.randomUUID();
+        UUID otherProfileId = UUID.randomUUID();
+        UUID appId = UUID.randomUUID();
+        ManagedMailboxService mailboxes = Mockito.mock(ManagedMailboxService.class);
+        ApplicationTrackingService serviceWithManaged = new ApplicationTrackingService(
+                repository, recorder, audit, ownerContext, new ObjectMapper(), gmailConnections, mailboxes);
+
+        when(ownerContext.profileIdOrNull()).thenReturn(profileId);
+        when(gmailConnections.find(profileId)).thenReturn(Optional.empty());
+
+        // 1. Active domain-configured Managed Mail for owner -> connected = true
+        when(mailboxes.status(profileId)).thenReturn(new ManagedMailboxService.Status(
+                ManagedMailboxService.Readiness.ACTIVE,
+                "mail.aplivenosi.com",
+                new ManagedMailboxService.ManagedAddress(UUID.randomUUID(), profileId, "robin+abc", "mail.aplivenosi.com", "ACTIVE"),
+                null, List.of()));
+        assertThat(serviceWithManaged.mailboxConnected()).isTrue();
+
+        ApplicationHeader header = new ApplicationHeader(
+                appId, UUID.randomUUID(), "SUBMITTED", Instant.now().minus(Duration.ofDays(1)),
+                "Engineer", "Acme", "Remote");
+        when(repository.snapshotParts(eq(profileId), eq(appId))).thenReturn(snapshotWith(appId, header, List.of()));
+        when(repository.receipts(any(), any())).thenReturn(List.of());
+        when(repository.reviewQueue(any(), any(Integer.class))).thenReturn(List.of());
+        when(repository.threadsForApplication(any(), any())).thenReturn(List.of());
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> mailboxView = (Map<String, Object>) serviceWithManaged.view(profileId, appId).orElseThrow().get("mailbox");
+        assertThat(mailboxView.get("connected")).isEqualTo(true);
+        assertThat(String.valueOf(mailboxView.get("note"))).contains("Robin-managed");
+
+        // 2. DISABLED address -> fail closed (false)
+        when(mailboxes.status(profileId)).thenReturn(new ManagedMailboxService.Status(
+                ManagedMailboxService.Readiness.ACTIVE,
+                "mail.aplivenosi.com",
+                new ManagedMailboxService.ManagedAddress(UUID.randomUUID(), profileId, "robin+abc", "mail.aplivenosi.com", "DISABLED"),
+                null, List.of()));
+        assertThat(serviceWithManaged.mailboxConnected()).isFalse();
+
+        // 3. NOT_CONFIGURED domain -> fail closed (false)
+        when(mailboxes.status(profileId)).thenReturn(new ManagedMailboxService.Status(
+                ManagedMailboxService.Readiness.NOT_CONFIGURED,
+                "",
+                new ManagedMailboxService.ManagedAddress(UUID.randomUUID(), profileId, "robin+abc", "mail.aplivenosi.com", "ACTIVE"),
+                null, List.of("APP_MANAGED_MAIL_DOMAIN")));
+        assertThat(serviceWithManaged.mailboxConnected()).isFalse();
+
+        // 4. Another profile's address leaking back -> fail closed (false)
+        when(mailboxes.status(profileId)).thenReturn(new ManagedMailboxService.Status(
+                ManagedMailboxService.Readiness.ACTIVE,
+                "mail.aplivenosi.com",
+                new ManagedMailboxService.ManagedAddress(UUID.randomUUID(), otherProfileId, "robin+other", "mail.aplivenosi.com", "ACTIVE"),
+                null, List.of()));
+        assertThat(serviceWithManaged.mailboxConnected()).isFalse();
     }
 }

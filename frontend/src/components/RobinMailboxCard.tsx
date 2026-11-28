@@ -21,14 +21,20 @@ export type ManagedMailReadiness = 'NOT_CONFIGURED' | 'PENDING_RECEIVING_VERIFIC
 
 export interface ManagedMailStatus {
   readiness: ManagedMailReadiness;
+  transportReadiness?: ManagedMailReadiness;
+  senderAuthenticationReadiness?: string | null;
+  employerVerificationReadiness?: string | null;
   provider?: string | null;
   domain?: string | null;
   address?: string | null;
   addressStatus?: string | null;
   usableForRegistration: boolean;
+  usableForAutomatedVerification?: boolean;
+  trustedAuthServConfigured?: boolean;
   receivingVerifiedAt?: string | null;
   lastInboundAt?: string | null;
   missing?: string[];
+  verificationMissing?: string[];
 }
 
 export interface ManagedMessage {
@@ -87,9 +93,14 @@ export const RobinMailboxCard: React.FC = () => {
     }
   }, [loadMessages]);
 
+  const transportReadiness = status?.transportReadiness ?? status?.readiness;
   const active = status?.readiness === 'ACTIVE' && status.usableForRegistration === true;
   const disabled = status?.addressStatus === 'DISABLED';
   const pending = status?.readiness === 'PENDING_RECEIVING_VERIFICATION' && !disabled;
+  const verificationBlockedByAuth = active
+    && (status?.employerVerificationReadiness === 'TRUSTED_AUTHSERV_REQUIRED'
+      || status?.senderAuthenticationReadiness === 'UNCONFIGURED'
+      || status?.usableForAutomatedVerification === false);
 
   return (
     <SectionCard title="Robin email address" hint="for employer sign-ups and verification codes">
@@ -126,16 +137,37 @@ export const RobinMailboxCard: React.FC = () => {
           <>
             <div className="flex flex-wrap items-center gap-2">
               {active && <StatusPill tone="emerald">Active</StatusPill>}
+              {verificationBlockedByAuth && <StatusPill tone="amber">Verification paused</StatusPill>}
               {pending && <StatusPill tone="amber">Not receiving yet</StatusPill>}
               {disabled && <StatusPill tone="slate">Disabled</StatusPill>}
               <code className="break-all font-semibold text-ink">{status.address}</code>
             </div>
-            {active && (
+            {(status.senderAuthenticationReadiness || status.employerVerificationReadiness) && (
+              <div className="flex flex-wrap gap-3 text-[11px] text-ink-muted" data-testid="managed-mail-readiness-details">
+                <span>Transport: <strong className="text-ink">{transportReadiness}</strong></span>
+                {status.senderAuthenticationReadiness && (
+                  <span>Sender auth: <strong className="text-ink">{status.senderAuthenticationReadiness}</strong></span>
+                )}
+                {status.employerVerificationReadiness && (
+                  <span>Verification: <strong className="text-ink">{status.employerVerificationReadiness}</strong></span>
+                )}
+              </div>
+            )}
+            {active && !verificationBlockedByAuth && (
               <p className="text-ink-muted">
                 New employer accounts are registered with this address, and Robin reads their verification
                 codes from it. Robin only receives mail here — it never sends from it. Your Gmail connection
                 is not needed for this and stays read-only for tracking.
               </p>
+            )}
+            {verificationBlockedByAuth && (
+              <Alert tone="warn">
+                Inbound transport on {status.domain} is active for registration, but automated OTP and verification-link
+                reading is disabled because sender authentication is unconfigured
+                {status.verificationMissing && status.verificationMissing.length > 0
+                  ? ` (${status.verificationMissing.join(', ')})`
+                  : ''}. Verification messages will pause for manual confirmation until configured.
+              </Alert>
             )}
             {disabled && (
               <p className="text-ink-muted">This address is disabled. Robin does not use it for new employer accounts.</p>

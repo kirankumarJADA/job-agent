@@ -1,0 +1,489 @@
+{
+  "benchmark_version": "2.2.0-heldout-annotated",
+  "description": "Held-out evaluation dataset for evaluating multi-stage ranking in Robin vs baseline across diverse candidates and noisy vacancies",
+  "notes": "Versioned held-out dataset v2: Corrected hjob-16 relevance for candidate c5-junior-qa-engineer from 1 to 0. Justification: Candidate c5 is a Junior QA Automation Engineer persona whose target roles are QA Engineer, Test Engineer, and Quality Assurance Engineer; hjob-16 is a pure Junior Python / Backend Developer role without QA, testing, or test automation responsibilities.",
+  "candidates": [
+    {
+      "id": "c1-senior-java-backend",
+      "name": "Senior Java Backend Engineer",
+      "skills": ["Java", "Spring Boot", "PostgreSQL", "Docker", "REST APIs", "Microservices", "Kafka"],
+      "titles": ["Backend Engineer", "Software Engineer", "Java Developer", "Platform Engineer"],
+      "locations": ["London", "UK"],
+      "remoteTypes": ["HYBRID", "REMOTE"],
+      "salaryMin": 75000,
+      "experienceLevels": ["SENIOR", "LEAD"]
+    },
+    {
+      "id": "c2-mid-frontend-react",
+      "name": "Mid-Level Frontend React Developer",
+      "skills": ["React", "TypeScript", "JavaScript", "HTML5", "CSS", "Next.js", "Redux", "Tailwind"],
+      "titles": ["Frontend Engineer", "Frontend Developer", "Web Developer", "UI Engineer"],
+      "locations": ["UK"],
+      "remoteTypes": ["REMOTE", "HYBRID"],
+      "salaryMin": 50000,
+      "experienceLevels": ["MID", "SENIOR"]
+    },
+    {
+      "id": "c3-lead-platform-sre",
+      "name": "Lead Platform / SRE Engineer",
+      "skills": ["Kubernetes", "AWS", "Terraform", "Docker", "Linux", "Go", "CI/CD", "Prometheus"],
+      "titles": ["Platform Engineer", "Site Reliability Engineer", "DevOps Engineer", "Cloud Engineer"],
+      "locations": ["London", "UK"],
+      "remoteTypes": ["HYBRID", "REMOTE"],
+      "salaryMin": 90000,
+      "experienceLevels": ["LEAD", "STAFF", "PRINCIPAL"]
+    },
+    {
+      "id": "c4-senior-ml-data-scientist",
+      "name": "Senior Machine Learning / Data Scientist",
+      "skills": ["Python", "PyTorch", "TensorFlow", "SQL", "Pandas", "Scikit-learn", "MLOps", "Docker"],
+      "titles": ["Data Scientist", "Machine Learning Engineer", "ML Engineer", "AI Engineer"],
+      "locations": ["London", "UK"],
+      "remoteTypes": ["HYBRID", "REMOTE"],
+      "salaryMin": 80000,
+      "experienceLevels": ["SENIOR", "LEAD"]
+    },
+    {
+      "id": "c5-junior-qa-engineer",
+      "name": "Junior QA Automation Engineer",
+      "skills": ["Cypress", "Selenium", "JavaScript", "Python", "Postman", "Jest", "Git"],
+      "titles": ["QA Engineer", "QA Automation Engineer", "Test Engineer", "Quality Assurance Engineer"],
+      "locations": ["UK"],
+      "remoteTypes": ["REMOTE", "HYBRID", "ONSITE"],
+      "salaryMin": 32000,
+      "experienceLevels": ["ENTRY", "JUNIOR", "MID"]
+    },
+    {
+      "id": "c6-eng-manager-director",
+      "name": "Engineering Manager / Tech Director",
+      "skills": ["Engineering Management", "Agile", "System Design", "Mentorship", "Java", "Cloud Architecture"],
+      "titles": ["Engineering Manager", "Tech Lead", "Software Engineering Manager", "Development Manager", "Head of Engineering", "Director of Engineering"],
+      "locations": ["London", "UK"],
+      "remoteTypes": ["HYBRID", "REMOTE"],
+      "salaryMin": 105000,
+      "experienceLevels": ["LEAD", "STAFF", "PRINCIPAL", "EXECUTIVE"]
+    }
+  ],
+  "jobs": [
+    {
+      "id": "hjob-01",
+      "title": "Senior Backend Engineer - Java / Distributed Systems",
+      "company": "Fintech Alpha",
+      "skills": ["Java", "Spring Boot", "PostgreSQL", "Kafka", "Microservices"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 80000,
+      "salaryMax": 95000,
+      "experienceLevel": "SENIOR",
+      "relevance": {
+        "c1-senior-java-backend": 3,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0,
+        "c4-senior-ml-data-scientist": 0,
+        "c5-junior-qa-engineer": 0,
+        "c6-eng-manager-director": 1
+      }
+    },
+    {
+      "id": "hjob-02",
+      "title": "Lead Site Reliability Engineer (Kubernetes & AWS)",
+      "company": "CloudNative UK",
+      "skills": ["Kubernetes", "AWS", "Terraform", "Docker", "Go", "Linux"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 95000,
+      "salaryMax": 115000,
+      "experienceLevel": "LEAD",
+      "relevance": {
+        "c1-senior-java-backend": 1,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 3,
+        "c4-senior-ml-data-scientist": 1,
+        "c5-junior-qa-engineer": 0,
+        "c6-eng-manager-director": 2
+      }
+    },
+    {
+      "id": "hjob-03",
+      "title": "Mid-Level Frontend Developer (React & TypeScript)",
+      "company": "SaaS Solutions",
+      "skills": ["React", "TypeScript", "Next.js", "CSS", "REST APIs"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "REMOTE",
+      "salaryMin": 52000,
+      "salaryMax": 65000,
+      "experienceLevel": "MID",
+      "relevance": {
+        "c1-senior-java-backend": 0,
+        "c2-mid-frontend-react": 3,
+        "c3-lead-platform-sre": 0,
+        "c4-senior-ml-data-scientist": 0,
+        "c5-junior-qa-engineer": 0,
+        "c6-eng-manager-director": 0
+      }
+    },
+    {
+      "id": "hjob-04",
+      "title": "Senior Machine Learning Engineer - LLM & MLOps",
+      "company": "DeepTech Labs",
+      "skills": ["Python", "PyTorch", "MLOps", "Docker", "SQL", "Scikit-learn"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 85000,
+      "salaryMax": 110000,
+      "experienceLevel": "SENIOR",
+      "relevance": {
+        "c1-senior-java-backend": 0,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0,
+        "c4-senior-ml-data-scientist": 3,
+        "c5-junior-qa-engineer": 0,
+        "c6-eng-manager-director": 1
+      }
+    },
+    {
+      "id": "hjob-05",
+      "title": "QA Automation Engineer (Cypress / JavaScript)",
+      "company": "E-Commerce Tech",
+      "skills": ["Cypress", "JavaScript", "Jest", "Git", "Postman"],
+      "location": "Manchester, UK",
+      "city": "Manchester",
+      "country": "GB",
+      "remoteType": "REMOTE",
+      "salaryMin": 35000,
+      "salaryMax": 45000,
+      "experienceLevel": "MID",
+      "relevance": {
+        "c1-senior-java-backend": 0,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0,
+        "c4-senior-ml-data-scientist": 0,
+        "c5-junior-qa-engineer": 3,
+        "c6-eng-manager-director": 0
+      }
+    },
+    {
+      "id": "hjob-06",
+      "title": "Engineering Manager - Platform & Infrastructure",
+      "company": "Enterprise Scale",
+      "skills": ["Engineering Management", "Agile", "System Design", "Cloud Architecture", "Mentorship"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 110000,
+      "salaryMax": 135000,
+      "experienceLevel": "LEAD",
+      "relevance": {
+        "c1-senior-java-backend": 1,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0,
+        "c4-senior-ml-data-scientist": 0,
+        "c5-junior-qa-engineer": 0,
+        "c6-eng-manager-director": 3
+      }
+    },
+    {
+      "id": "hjob-07",
+      "title": "International Trade & Policy Specialist",
+      "company": "Global Logistics",
+      "skills": ["Trade", "Compliance", "Logistics"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "ONSITE",
+      "salaryMin": 40000,
+      "salaryMax": 50000,
+      "experienceLevel": "MID",
+      "relevance": {
+        "c1-senior-java-backend": 0,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0,
+        "c4-senior-ml-data-scientist": 0,
+        "c5-junior-qa-engineer": 0,
+        "c6-eng-manager-director": 0
+      }
+    },
+    {
+      "id": "hjob-08",
+      "title": "Principal SRE / Cloud Architect",
+      "company": "Infrastructure Direct",
+      "skills": ["Kubernetes", "AWS", "Terraform", "Go", "Docker", "Linux"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 105000,
+      "salaryMax": 130000,
+      "experienceLevel": "PRINCIPAL",
+      "relevance": {
+        "c1-senior-java-backend": 1,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 3,
+        "c4-senior-ml-data-scientist": 0,
+        "c5-junior-qa-engineer": 0,
+        "c6-eng-manager-director": 2
+      }
+    },
+    {
+      "id": "hjob-09",
+      "title": "Junior Test Automation Engineer",
+      "company": "Digital Media Corp",
+      "skills": ["Selenium", "Python", "Git", "Postman"],
+      "location": "Birmingham, UK",
+      "city": "Birmingham",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 30000,
+      "salaryMax": 36000,
+      "experienceLevel": "ENTRY",
+      "relevance": {
+        "c1-senior-java-backend": 0,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0,
+        "c4-senior-ml-data-scientist": 0,
+        "c5-junior-qa-engineer": 3,
+        "c6-eng-manager-director": 0
+      }
+    },
+    {
+      "id": "hjob-10",
+      "title": "Lead Data Scientist - Predictive Modeling",
+      "company": "Retail Insights",
+      "skills": ["Python", "SQL", "Pandas", "Scikit-learn", "TensorFlow"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 90000,
+      "salaryMax": 110000,
+      "experienceLevel": "LEAD",
+      "relevance": {
+        "c1-senior-java-backend": 0,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0,
+        "c4-senior-ml-data-scientist": 3,
+        "c5-junior-qa-engineer": 0,
+        "c6-eng-manager-director": 1
+      }
+    },
+    {
+      "id": "hjob-11",
+      "title": "Senior Software Engineer (Java, Kafka, Microservices)",
+      "company": "Payments Engine",
+      "skills": ["Java", "Kafka", "Docker", "REST APIs", "PostgreSQL"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "REMOTE",
+      "salaryMin": 85000,
+      "salaryMax": 105000,
+      "experienceLevel": "SENIOR",
+      "relevance": {
+        "c1-senior-java-backend": 3,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0,
+        "c4-senior-ml-data-scientist": 0,
+        "c5-junior-qa-engineer": 0,
+        "c6-eng-manager-director": 1
+      }
+    },
+    {
+      "id": "hjob-12",
+      "title": "Staff Platform Engineer",
+      "company": "ScaleUp Tech",
+      "skills": ["Go", "Kubernetes", "Linux", "Docker", "Terraform", "Prometheus"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "REMOTE",
+      "salaryMin": 95000,
+      "salaryMax": 120000,
+      "experienceLevel": "STAFF",
+      "relevance": {
+        "c1-senior-java-backend": 1,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 3,
+        "c4-senior-ml-data-scientist": 0,
+        "c5-junior-qa-engineer": 0,
+        "c6-eng-manager-director": 2
+      }
+    },
+    {
+      "id": "hjob-13",
+      "title": "Senior Frontend Engineer - Design Systems & Web",
+      "company": "Fintech Platform",
+      "skills": ["React", "TypeScript", "Tailwind", "CSS", "HTML5"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 75000,
+      "salaryMax": 90000,
+      "experienceLevel": "SENIOR",
+      "relevance": {
+        "c1-senior-java-backend": 0,
+        "c2-mid-frontend-react": 3,
+        "c3-lead-platform-sre": 0,
+        "c4-senior-ml-data-scientist": 0,
+        "c5-junior-qa-engineer": 0,
+        "c6-eng-manager-director": 0
+      }
+    },
+    {
+      "id": "hjob-14",
+      "title": "Software Engineering Manager - Core Applications",
+      "company": "Enterprise Global",
+      "skills": ["Engineering Management", "System Design", "Agile", "Java", "Mentorship"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 115000,
+      "salaryMax": 140000,
+      "experienceLevel": "LEAD",
+      "relevance": {
+        "c1-senior-java-backend": 1,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0,
+        "c4-senior-ml-data-scientist": 0,
+        "c5-junior-qa-engineer": 0,
+        "c6-eng-manager-director": 3
+      }
+    },
+    {
+      "id": "hjob-15",
+      "title": "Clinical Nurse Specialist",
+      "company": "Healthcare Trust",
+      "skills": ["Patient Assessment", "Healthcare", "Clinical"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "ONSITE",
+      "salaryMin": 45000,
+      "salaryMax": 52000,
+      "experienceLevel": "MID",
+      "relevance": {
+        "c1-senior-java-backend": 0,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0,
+        "c4-senior-ml-data-scientist": 0,
+        "c5-junior-qa-engineer": 0,
+        "c6-eng-manager-director": 0
+      }
+    },
+    {
+      "id": "hjob-16",
+      "title": "Junior Python / Backend Developer",
+      "company": "Agency Digital",
+      "skills": ["Python", "SQL", "Git", "REST APIs"],
+      "location": "Bristol, UK",
+      "city": "Bristol",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 28000,
+      "salaryMax": 35000,
+      "experienceLevel": "ENTRY",
+      "relevance": {
+        "c1-senior-java-backend": 0,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0,
+        "c4-senior-ml-data-scientist": 0,
+        "c5-junior-qa-engineer": 0,
+        "c6-eng-manager-director": 0
+      }
+    },
+    {
+      "id": "hjob-17",
+      "title": "Full Stack Java & React Engineer",
+      "company": "Media Cloud",
+      "skills": ["Java", "Spring Boot", "React", "TypeScript", "PostgreSQL"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 78000,
+      "salaryMax": 92000,
+      "experienceLevel": "SENIOR",
+      "relevance": {
+        "c1-senior-java-backend": 2,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0,
+        "c4-senior-ml-data-scientist": 0,
+        "c5-junior-qa-engineer": 0,
+        "c6-eng-manager-director": 1
+      }
+    },
+    {
+      "id": "hjob-18",
+      "title": "Machine Learning Engineer (Computer Vision & PyTorch)",
+      "company": "Autonomous Vision",
+      "skills": ["Python", "PyTorch", "Docker", "Linux", "MLOps"],
+      "location": "Cambridge, UK",
+      "city": "Cambridge",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 80000,
+      "salaryMax": 100000,
+      "experienceLevel": "SENIOR",
+      "relevance": {
+        "c1-senior-java-backend": 0,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0,
+        "c4-senior-ml-data-scientist": 3,
+        "c5-junior-qa-engineer": 0,
+        "c6-eng-manager-director": 0
+      }
+    },
+    {
+      "id": "hjob-19",
+      "title": "Head of Engineering",
+      "company": "HyperGrowth Startup",
+      "skills": ["Engineering Management", "Agile", "System Design", "Cloud Architecture", "Leadership"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 120000,
+      "salaryMax": 160000,
+      "experienceLevel": "EXECUTIVE",
+      "relevance": {
+        "c1-senior-java-backend": 0,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0,
+        "c4-senior-ml-data-scientist": 0,
+        "c5-junior-qa-engineer": 0,
+        "c6-eng-manager-director": 3
+      }
+    },
+    {
+      "id": "hjob-20",
+      "title": "QA Test Engineer - Web & Mobile APIs",
+      "company": "Payments Co",
+      "skills": ["Postman", "Cypress", "JavaScript", "Git"],
+      "location": "London, UK",
+      "city": "London",
+      "country": "GB",
+      "remoteType": "HYBRID",
+      "salaryMin": 40000,
+      "salaryMax": 50000,
+      "experienceLevel": "MID",
+      "relevance": {
+        "c1-senior-java-backend": 0,
+        "c2-mid-frontend-react": 0,
+        "c3-lead-platform-sre": 0,
+        "c4-senior-ml-data-scientist": 0,
+        "c5-junior-qa-engineer": 3,
+        "c6-eng-manager-director": 0
+      }
+    }
+  ]
+}

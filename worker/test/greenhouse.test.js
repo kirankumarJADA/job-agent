@@ -186,10 +186,12 @@ function greenhouseSubmitPlan(root, { expectedConfirmationText } = {}) {
   return plan;
 }
 
-function routedWorker(root, routeHandler) {
+function routedWorker(root, routeHandler, opts = {}) {
   return new BrowserWorker({
     statePath: path.join(root, 'state.json'), artifactDir: root,
+    stepsReporter: async () => ({ ok: true }),
     onPageCreated: async (page) => { await page.route(`${URL}**`, routeHandler); },
+    ...opts,
   });
 }
 
@@ -292,6 +294,7 @@ test('a click whose resulting navigation never completes times out as a genuine 
   const plan = greenhouseSubmitPlan(root, { expectedConfirmationText: 'Thanks for applying' });
   const instance = new BrowserWorker({
     statePath: path.join(root, 'state.json'), artifactDir: root,
+    stepsReporter: async () => ({ ok: true }),
     onPageCreated: async (page) => {
       page.setDefaultTimeout(300);
       page.setDefaultNavigationTimeout(300);

@@ -61,7 +61,13 @@ public class AutomationController {
     private final GreenhouseExecutionPlanService greenhousePlans;
     private final AshbyExecutionPlanService ashbyPlans;
     private final WorkdayExecutionPlanService workdayPlans;
+    private final UniversalBrowserPlanService universalPlans;
+    private final com.personal.jobagent.qa.ApplicationAnswerRepository answerRepository;
     private final MaintenanceModeService maintenanceMode;
+    private final SubmissionCompletionService submissions;
+    private final PreSubmitAuthorizationService preSubmitAuthorization;
+    private final PostingLivenessService livenessService;
+    private final StandingAuthorizationService standingAuthorizationService;
 
     @Autowired
     public AutomationController(AutomationPlanRepository plans,
@@ -77,7 +83,13 @@ public class AutomationController {
                                 GreenhouseExecutionPlanService greenhousePlans,
                                 AshbyExecutionPlanService ashbyPlans,
                                 WorkdayExecutionPlanService workdayPlans,
-                                @Autowired(required = false) MaintenanceModeService maintenanceMode) {
+                                @Autowired(required = false) MaintenanceModeService maintenanceMode,
+                                @Autowired(required = false) SubmissionCompletionService submissions,
+                                @Autowired(required = false) UniversalBrowserPlanService universalPlans,
+                                @Autowired(required = false) com.personal.jobagent.qa.ApplicationAnswerRepository answerRepository,
+                                @Autowired(required = false) PreSubmitAuthorizationService preSubmitAuthorization,
+                                @Autowired(required = false) PostingLivenessService livenessService,
+                                @Autowired(required = false) StandingAuthorizationService standingAuthorizationService) {
         this.plans = plans;
         this.audit = audit;
         this.ownerContext = ownerContext;
@@ -92,6 +104,97 @@ public class AutomationController {
         this.ashbyPlans = ashbyPlans;
         this.workdayPlans = workdayPlans;
         this.maintenanceMode = maintenanceMode != null ? maintenanceMode : new MaintenanceModeService(false);
+        this.submissions = submissions;
+        this.universalPlans = universalPlans;
+        this.answerRepository = answerRepository;
+        this.preSubmitAuthorization = preSubmitAuthorization;
+        this.livenessService = livenessService;
+        this.standingAuthorizationService = standingAuthorizationService;
+    }
+
+    public AutomationController(AutomationPlanRepository plans,
+                                AuditLogWriter audit,
+                                OwnerContext ownerContext,
+                                String workerToken,
+                                ExecutionPackageService executionPackages,
+                                NotificationService notifications,
+                                AutomationMetrics metrics,
+                                com.personal.jobagent.apply.ApplyReadinessService applyReadiness,
+                                ApplyDocumentSelector documentSelector,
+                                com.personal.jobagent.application.ApplicationStatusService applicationStatus,
+                                GreenhouseExecutionPlanService greenhousePlans,
+                                AshbyExecutionPlanService ashbyPlans,
+                                WorkdayExecutionPlanService workdayPlans,
+                                MaintenanceModeService maintenanceMode,
+                                SubmissionCompletionService submissions,
+                                UniversalBrowserPlanService universalPlans,
+                                com.personal.jobagent.qa.ApplicationAnswerRepository answerRepository,
+                                PreSubmitAuthorizationService preSubmitAuthorization) {
+        this(plans, audit, ownerContext, workerToken, executionPackages, notifications, metrics,
+                applyReadiness, documentSelector, applicationStatus, greenhousePlans, ashbyPlans, workdayPlans,
+                maintenanceMode, submissions, universalPlans, answerRepository, preSubmitAuthorization, null, null);
+    }
+
+    public AutomationController(AutomationPlanRepository plans,
+                                AuditLogWriter audit,
+                                OwnerContext ownerContext,
+                                String workerToken,
+                                ExecutionPackageService executionPackages,
+                                NotificationService notifications,
+                                AutomationMetrics metrics,
+                                com.personal.jobagent.apply.ApplyReadinessService applyReadiness,
+                                ApplyDocumentSelector documentSelector,
+                                com.personal.jobagent.application.ApplicationStatusService applicationStatus,
+                                GreenhouseExecutionPlanService greenhousePlans,
+                                AshbyExecutionPlanService ashbyPlans,
+                                WorkdayExecutionPlanService workdayPlans,
+                                MaintenanceModeService maintenanceMode,
+                                SubmissionCompletionService submissions,
+                                UniversalBrowserPlanService universalPlans,
+                                com.personal.jobagent.qa.ApplicationAnswerRepository answerRepository) {
+        this(plans, audit, ownerContext, workerToken, executionPackages, notifications, metrics,
+                applyReadiness, documentSelector, applicationStatus, greenhousePlans, ashbyPlans, workdayPlans,
+                maintenanceMode, submissions, universalPlans, answerRepository, null);
+    }
+
+    public AutomationController(AutomationPlanRepository plans,
+                                AuditLogWriter audit,
+                                OwnerContext ownerContext,
+                                String workerToken,
+                                ExecutionPackageService executionPackages,
+                                NotificationService notifications,
+                                AutomationMetrics metrics,
+                                com.personal.jobagent.apply.ApplyReadinessService applyReadiness,
+                                ApplyDocumentSelector documentSelector,
+                                com.personal.jobagent.application.ApplicationStatusService applicationStatus,
+                                GreenhouseExecutionPlanService greenhousePlans,
+                                AshbyExecutionPlanService ashbyPlans,
+                                WorkdayExecutionPlanService workdayPlans,
+                                MaintenanceModeService maintenanceMode,
+                                SubmissionCompletionService submissions) {
+        this(plans, audit, ownerContext, workerToken, executionPackages, notifications, metrics,
+                applyReadiness, documentSelector, applicationStatus, greenhousePlans, ashbyPlans, workdayPlans,
+                maintenanceMode, submissions, null, null);
+    }
+
+    /** Without a {@link SubmissionCompletionService}, a real submission can never be recorded (fails closed). */
+    public AutomationController(AutomationPlanRepository plans,
+                                AuditLogWriter audit,
+                                OwnerContext ownerContext,
+                                String workerToken,
+                                ExecutionPackageService executionPackages,
+                                NotificationService notifications,
+                                AutomationMetrics metrics,
+                                com.personal.jobagent.apply.ApplyReadinessService applyReadiness,
+                                ApplyDocumentSelector documentSelector,
+                                com.personal.jobagent.application.ApplicationStatusService applicationStatus,
+                                GreenhouseExecutionPlanService greenhousePlans,
+                                AshbyExecutionPlanService ashbyPlans,
+                                WorkdayExecutionPlanService workdayPlans,
+                                MaintenanceModeService maintenanceMode) {
+        this(plans, audit, ownerContext, workerToken, executionPackages, notifications, metrics,
+                applyReadiness, documentSelector, applicationStatus, greenhousePlans, ashbyPlans, workdayPlans,
+                maintenanceMode, null);
     }
 
     public AutomationController(AutomationPlanRepository plans,
@@ -117,6 +220,9 @@ public class AutomationController {
     public record OutcomeRequest(String outcome, String detail, List<Map<String, Object>> result) {
         public OutcomeRequest(String outcome, String detail) { this(outcome, detail, null); }
     }
+    public record DiscoveredQuestionItem(String questionKey, String questionText, String htmlType,
+                                         String requiredState, List<String> options) {}
+    public record DiscoveredQuestionsRequest(String formUrl, int pageIndex, List<DiscoveredQuestionItem> questions) {}
     public record WorkerEvent(String eventId, UUID planId, UUID applicationId, UUID jobId, String type, Map<String, Object> payload) {}
     /** Phase 15: an optional, free-text note the candidate may attach when requesting reconciliation — never evidence by itself. */
     public record ReconcileRequest(String note) {}
@@ -152,7 +258,9 @@ public class AutomationController {
             // — a platform-confirmed non-acceptance, never a guess — see ashby.js.
             "ASHBY", Set.of("SUBMISSION_REJECTED"),
             // Phase 19: Workday platform validation errors or explicit rejection
-            "WORKDAY", Set.of("VALIDATION_ERROR", "SUBMISSION_REJECTED", "FORM_STILL_PRESENT"));
+            "WORKDAY", Set.of("VALIDATION_ERROR", "SUBMISSION_REJECTED", "FORM_STILL_PRESENT"),
+            // Stage 3B: Universal engine pre-submit or employer 4xx validation rejection
+            "UNIVERSAL", Set.of("VALIDATION_ERROR", "SUBMISSION_REJECTED"));
 
     @PostMapping("/plans/{id}/reconcile")
     public ResponseEntity<?> reconcile(@PathVariable UUID id, @RequestBody(required = false) ReconcileRequest r) {
@@ -192,6 +300,8 @@ public class AutomationController {
                 ? ashbyPlans.createRetryExecutionPlan(profileId, plan.applicationId(), jobId, id)
                 : "WORKDAY".equals(planType)
                 ? workdayPlans.createRetryExecutionPlan(profileId, plan.applicationId(), jobId, id)
+                : "UNIVERSAL".equals(planType) && universalPlans != null
+                ? universalPlans.createRetryExecutionPlan(profileId, plan.applicationId(), jobId, id)
                 : greenhousePlans.createRetryExecutionPlan(profileId, plan.applicationId(), jobId, id);
         if (retryPlanId.isEmpty()) {
             return ResponseEntity.status(409).body(Map.of("error", "could not prepare a new attempt for this application"));
@@ -206,6 +316,9 @@ public class AutomationController {
 
     @PostMapping("/plans")
     public ResponseEntity<?> create(@RequestBody CreateRequest r) {
+        if (ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(403).body(Map.of("error", "creating a plan requires a candidate session"));
+        }
         if (r.applicationId() == null || r.jobId() == null || r.targetUrl() == null || r.idempotencyKey() == null) {
             return ResponseEntity.badRequest().body(Map.of("error", "missing correlation or target"));
         }
@@ -241,6 +354,21 @@ public class AutomationController {
         if (!mayActOnPlan(id)) {
             return notFound();
         }
+        if (!machineOrLocalDev()) {
+            return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
+        }
+        if (livenessService != null) {
+            PostingLivenessService.LivenessResult liveness = livenessService.evaluateForPlan(id);
+            if (liveness.blocksExecution()) {
+                List<Object> payload = new java.util.ArrayList<>();
+                payload.add(Map.of("type", "LIVENESS_FAILED", "code", liveness.code(), "detail", liveness.detail()));
+                plans.failClosedBeforeClaim(id, "PREPARED", payload);
+                return ResponseEntity.status(409).body(Map.of(
+                        "status", "FAILED",
+                        "code", liveness.code(),
+                        "error", liveness.detail()));
+            }
+        }
         return plans.claim(id) ? ResponseEntity.ok(Map.of("status", "RUNNING"))
                 : ResponseEntity.status(409).body(Map.of("error", "plan is not PREPARED"));
     }
@@ -250,6 +378,9 @@ public class AutomationController {
         if (!mayActOnPlan(id)) {
             return notFound();
         }
+        if (!machineOrLocalDev()) {
+            return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
+        }
         return plans.heartbeat(id) ? ResponseEntity.noContent().build() : ResponseEntity.status(409).build();
     }
 
@@ -258,10 +389,193 @@ public class AutomationController {
         if (!mayActOnPlan(id)) {
             return notFound();
         }
-        return plans.appendStep(id, r.index(), r.stepId(), r.status(),
-                r.result() == null ? Map.of() : r.result(), r.screenshotRef())
+        if (!machineOrLocalDev()) {
+            return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
+        }
+        var plan = plans.findById(id).orElse(null);
+        if (plan == null) {
+            return notFound();
+        }
+        Map<String, Object> resultMap = r.result() == null ? Map.of() : r.result();
+        String rawPhase = resultMap.get("phase") == null ? null : String.valueOf(resultMap.get("phase"));
+        UniversalExecutionPhase phase = UniversalExecutionPhase.parseOrNull(rawPhase);
+        boolean isPreSubmitFence = phase == UniversalExecutionPhase.PRE_SUBMIT_ATTEMPTING
+                || "pre-submit-attempting".equals(r.stepId());
+        if (isPreSubmitFence) {
+            if (preSubmitAuthorization == null) {
+                return ResponseEntity.status(503).body(Map.of(
+                        "error", "pre-submit authorization service is unavailable",
+                        "code", "PRE_SUBMIT_AUTH_UNAVAILABLE"));
+            }
+            PreSubmitAuthorizationService.AuthorizationOutcome auth =
+                    preSubmitAuthorization.authorizeAndFence(id, r.index(), r.status(), resultMap, r.screenshotRef());
+            if (auth.authorized()) {
+                return ResponseEntity.noContent().build();
+            }
+            if (auth.httpStatus() == 404) {
+                return notFound();
+            }
+            return ResponseEntity.status(auth.httpStatus()).body(Map.of(
+                    "error", auth.error(),
+                    "code", auth.code()));
+        }
+        return plans.appendStep(id, r.index(), r.stepId(), r.status(), resultMap, r.screenshotRef())
                 ? ResponseEntity.noContent().build()
                 : ResponseEntity.notFound().build();
+    }
+
+    /**
+     * Explicit candidate action to withdraw submit approval from either a queued
+     * ({@code READY_TO_SUBMIT}/{@code PREPARED}) plan or an in-flight ({@code RUNNING})
+     * pre-fence plan across any submit-capable ATS adapter.
+     */
+    @PostMapping("/plans/{id}/withdraw-approval")
+    public ResponseEntity<?> withdrawApproval(@PathVariable UUID id) {
+        if (!mayActOnPlan(id)) {
+            return notFound();
+        }
+        if (ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(403).body(Map.of("error", "candidate authentication required"));
+        }
+        UUID profileId = ownerContext.profileIdOrNull();
+        if (profileId == null) {
+            return ResponseEntity.status(403).body(Map.of("error", "a profile is required"));
+        }
+        AutomationPlanRepository.WithdrawalStatus outcome = plans.withdrawPlanApproval(id, profileId);
+        return switch (outcome) {
+            case WITHDRAWN -> {
+                audit.write(new AuditEntry(ownerContext.actorOr("user"), "SUBMIT_APPROVAL_WITHDRAWN",
+                        "AUTOMATION_PLAN", id, Map.of("submitApproved", true),
+                        Map.of("submitApproved", false), null, UuidV7.generate()));
+                yield ResponseEntity.ok(Map.of("withdrawn", true, "planId", id.toString()));
+            }
+            case ALREADY_FENCED -> ResponseEntity.status(409).body(Map.of(
+                    "error", "submission attempt has already crossed the pre-submit fence or completed",
+                    "code", "PRE_SUBMIT_ATTEMPT_ALREADY_STARTED"));
+            case NOT_WITHDRAWABLE -> ResponseEntity.status(409).body(Map.of(
+                    "error", "plan does not have an active withdrawable submit approval",
+                    "code", "APPROVAL_NOT_WITHDRAWABLE"));
+            case NOT_FOUND -> notFound();
+        };
+    }
+
+    /**
+     * Stage 3B: Worker persists newly discovered mandatory live-DOM form questions
+     * into {@code application_answers} ({@code NEEDS_USER_INPUT}) so the candidate
+     * can review and answer them before clicking {@code /resume}.
+     */
+    @PostMapping("/plans/{id}/discovered-questions")
+    public ResponseEntity<?> discoveredQuestions(@PathVariable UUID id, @RequestBody DiscoveredQuestionsRequest r) {
+        if (!mayActOnPlan(id)) {
+            return notFound();
+        }
+        if (!machineOrLocalDev()) {
+            return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
+        }
+        if (answerRepository == null) {
+            return ResponseEntity.status(503).body(Map.of("error", "question store unavailable"));
+        }
+        var plan = plans.findById(id).orElse(null);
+        if (plan == null || plan.applicationId() == null) {
+            return notFound();
+        }
+        UUID profileId = plans.ownerOfPlan(id).orElse(null);
+        UUID jobId = plans.jobIdOf(id).orElse(null);
+        if (profileId == null || jobId == null) {
+            return notFound();
+        }
+        List<DiscoveredQuestionItem> items = r == null || r.questions() == null ? List.of() : r.questions();
+        if (items.size() > 50) {
+            return ResponseEntity.badRequest().body(Map.of("error", "too many discovered questions"));
+        }
+        List<UUID> answerIds = new ArrayList<>();
+        for (DiscoveredQuestionItem q : items) {
+            String sanitizedText = UniversalFieldMapper.sanitizeText(q.questionText());
+            if (sanitizedText.isBlank()) continue;
+            String key = q.questionKey() == null || q.questionKey().isBlank()
+                    ? "q_" + Math.abs(sanitizedText.hashCode())
+                    : UniversalFieldMapper.sanitizeText(q.questionKey());
+            Map<String, Object> notes = new LinkedHashMap<>();
+            notes.put("source", "UNIVERSAL_LIVE_DOM");
+            notes.put("questionKey", key);
+            notes.put("requiredState", q.requiredState() == null ? "REQUIRED" : q.requiredState());
+            notes.put("htmlType", q.htmlType() == null ? "text" : q.htmlType());
+            notes.put("options", q.options() == null ? List.of() : q.options());
+            notes.put("pageIndex", r.pageIndex());
+            notes.put("planId", id.toString());
+            if (r.formUrl() != null && !r.formUrl().isBlank()) {
+                notes.put("formUrl", UniversalFieldMapper.sanitizeText(r.formUrl()));
+            }
+            UUID aid = answerRepository.upsertUniversalDiscoveredQuestion(
+                    profileId, jobId, plan.applicationId(), key, sanitizedText, q.htmlType(), notes);
+            answerIds.add(aid);
+        }
+        plans.appendStep(id, Math.max(0, r == null ? 0 : r.pageIndex()) + 50,
+                "phase-awaiting-candidate-input-p" + (r == null ? 0 : r.pageIndex()),
+                "COMPLETED",
+                Map.of("phase", UniversalExecutionPhase.AWAITING_CANDIDATE_INPUT.name(),
+                        "discoveredCount", answerIds.size()),
+                null);
+        audit.write(new AuditEntry(ownerContext.actorOr("worker"), "UNIVERSAL_QUESTIONS_DISCOVERED",
+                "AUTOMATION_PLAN", id, null, Map.of("count", answerIds.size()), null, UuidV7.generate()));
+        return ResponseEntity.ok(Map.of("persistedCount", answerIds.size(), "answerIds", answerIds));
+    }
+
+    /**
+     * Stage 3B: Candidate-only resume of a paused {@code UNIVERSAL} plan after
+     * resolving discovered mandatory questions. Re-checks readiness & SSRF bounds
+     * and returns the plan to {@code PREPARED} without queueing submission.
+     */
+    @PostMapping("/plans/{id}/resume")
+    public ResponseEntity<?> resumeUniversal(@PathVariable UUID id) {
+        if (ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(403).body(Map.of("error", "resuming a paused plan requires a candidate action"));
+        }
+        if (!mayActOnPlan(id)) {
+            return notFound();
+        }
+        UUID profileId = ownerContext.profileIdOrNull();
+        var plan = plans.find(profileId, id).orElse(null);
+        if (plan == null || !"AWAITING_APPROVAL".equals(plan.status())
+                || !"UNIVERSAL".equals(planTypeOf(plan))
+                || plan.submitApproved()
+                || isRealSubmitAttempt(id)
+                || plans.hasPreSubmitAttemptCheckpoint(id)) {
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "plan cannot be resumed unless it is a paused UNIVERSAL plan awaiting review without submit approval"));
+        }
+        if (universalPlans == null) {
+            return ResponseEntity.status(503).body(Map.of("error", "universal engine unavailable"));
+        }
+        Map<String, Object> state = applyReadiness.evaluate(profileId, plan.applicationId());
+        if (!Boolean.TRUE.equals(state.get("packageReady"))) {
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "resolve remaining blockers before resuming",
+                    "code", "APPLY_NOT_READY",
+                    "blockers", state.get("blockers")));
+        }
+        Map<String, Object> rebuilt;
+        try {
+            rebuilt = universalPlans.rebuildForResume(profileId, id);
+        } catch (ExecutionPackageBlockedException blocked) {
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", blocked.getMessage(),
+                    "code", "EXECUTION_PACKAGE_BLOCKED",
+                    "blockers", blocked.blockers()));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(409).body(Map.of("error", e.getMessage()));
+        }
+        if (!plans.resumeUniversalPlan(id, rebuilt)) {
+            return ResponseEntity.status(409).body(Map.of("error", "plan state changed or submit attempt recorded"));
+        }
+        plans.appendStep(id, 90, "phase-ready-to-continue", "COMPLETED",
+                Map.of("phase", UniversalExecutionPhase.READY_TO_CONTINUE.name()), null);
+        audit.write(new AuditEntry(ownerContext.actorOr("user"), "UNIVERSAL_PLAN_RESUMED",
+                "AUTOMATION_PLAN", id, null, Map.of("status", "PREPARED"), null, UuidV7.generate()));
+        return ResponseEntity.ok(Map.of(
+                "planId", id,
+                "status", "PREPARED",
+                "completedSteps", plans.findSteps(id)));
     }
 
     @PostMapping("/plans/{id}/approve-submit")
@@ -346,21 +660,38 @@ public class AutomationController {
             return ResponseEntity.status(409).body(Map.of(
                     "error", "a plan can only be queued for real submission once it is approved and READY_TO_SUBMIT"));
         }
+        Map<String, Object> readinessState;
+        try {
+            readinessState = applyReadiness.evaluate(profileId, plan.applicationId());
+        } catch (java.util.NoSuchElementException e) {
+            return notFound();
+        } catch (com.personal.jobagent.apply.ApplyReadinessService.ReadinessUnavailableException e) {
+            return ResponseEntity.status(503).body(Map.of(
+                    "availability", "UNAVAILABLE", "reason", e.getMessage(),
+                    "message", "Preparation state could not be verified, so nothing was queued."));
+        }
+        if (!Boolean.TRUE.equals(readinessState.get("packageReady"))) {
+            audit.write(new AuditEntry(ownerContext.actorOr("user"), planTypeOf(plan) + "_SUBMIT_QUEUE_REFUSED",
+                    "AUTOMATION_PLAN", id, null, Map.of("blockers", readinessState.get("blockers")), null, UuidV7.generate()));
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "the application is no longer ready for submission",
+                    "code", "APPLY_NOT_READY",
+                    "blockers", readinessState.get("blockers")));
+        }
         String drift = packageDrift(plan, profileId);
         if (drift != null) {
             audit.write(new AuditEntry(ownerContext.actorOr("user"), planTypeOf(plan) + "_SUBMIT_QUEUE_REFUSED",
                     "AUTOMATION_PLAN", id, null, Map.of("reason", drift), null, UuidV7.generate()));
             return ResponseEntity.status(409).body(Map.of("error", drift, "code", "PACKAGE_DRIFT"));
         }
-        // Phase 14: ASHBY is the first plan type besides GREENHOUSE to reach
-        // this point at all — approvalPrecondition() refuses every other
-        // plan type, so only these two queuing methods are ever dispatched
-        // to here.
+        // Phase 14/19/Stage 3B dispatch.
         String planType = planTypeOf(plan);
         boolean queued = "ASHBY".equals(planType)
                 ? plans.prepareAshbySubmission(id)
                 : "WORKDAY".equals(planType)
                 ? plans.prepareWorkdaySubmission(id)
+                : "UNIVERSAL".equals(planType)
+                ? plans.prepareUniversalSubmission(id)
                 : plans.prepareRealSubmission(id);
         if (!queued) {
             return ResponseEntity.status(409).body(Map.of("error", "plan state changed"));
@@ -395,16 +726,39 @@ public class AutomationController {
         if ("RECONCILIATION_REQUIRED".equals(outcome) && (r.detail() == null || r.detail().isBlank())) {
             return ResponseEntity.status(400).body(Map.of("error", "an unconfirmed real submission outcome requires evidence"));
         }
-        // Phase 15 defence in depth: a plan whose last step is a real
-        // submission click can never resolve to HUMAN_REQUIRED/AWAITING_APPROVAL
-        // — the worker's own outcome.js never sends that combination any more
-        // (see computePlanOutcome), but this refuses it here too, since
-        // AWAITING_APPROVAL would otherwise be re-approvable through the
-        // normal review flow for a plan that may already have reached the
-        // employer.
+        if (!machineOrLocalDev()) {
+            return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
+        }
+        // Phase 15 defence in depth + Stage 3I Phase 8 pre-fence withdrawal recovery:
+        // If a real click already happened (or an un-marked submit plan ended without an
+        // explicit pre-fence AUTHORIZATION_REFUSED), refuse HUMAN_REQUIRED and insist on
+        // RECONCILIATION_REQUIRED. However, when the backend pre-submit fence refused prior
+        // to ANY browser click (no checkpoint exists + AUTHORIZATION_REFUSED clicked=false),
+        // cleanly restore the plan to AWAITING_APPROVAL with submit_approved=false and submit
+        // steps stripped instead of misclassifying as PRIOR_ATTEMPT_UNVERIFIED reconciliation.
+        boolean preFenceRefusal = "HUMAN_REQUIRED".equals(outcome)
+                && isPreFenceAuthorizationRefusal(r.result())
+                && !plans.hasPreSubmitAttemptCheckpoint(id);
         if ("HUMAN_REQUIRED".equals(outcome) && isRealSubmitAttempt(id)) {
+            if (preFenceRefusal) {
+                boolean restored = plans.returnUnfencedSubmitToAwaitingApproval(
+                        id, r.result() == null ? List.of() : new java.util.ArrayList<Object>(r.result()));
+                if (!restored) {
+                    return ResponseEntity.status(409).body(Map.of("error", "illegal or unsafe transition"));
+                }
+                audit.write(new AuditEntry(ownerContext.actorOr("worker"),
+                        "AUTOMATION_PLAN_PRE_FENCE_WITHDRAWN", "AUTOMATION_PLAN", id,
+                        null, Map.of("detail", r.detail() == null ? "" : r.detail(), "clicked", false),
+                        null, UuidV7.generate()));
+                metrics.planOutcome("HUMAN_REQUIRED");
+                notifyPlanOutcome(id, "HUMAN_REQUIRED", r.detail());
+                return ResponseEntity.noContent().build();
+            }
             return ResponseEntity.status(400).body(Map.of(
                     "error", "a real submission attempt can never resolve to HUMAN_REQUIRED; report RECONCILIATION_REQUIRED instead"));
+        }
+        if ("SUBMITTED".equals(outcome)) {
+            return completeRealSubmission(id, r);
         }
         boolean ok = switch (outcome == null ? "" : outcome) {
             case "HUMAN_REQUIRED", "COMPLETED", "FAILED", "BLOCKED_ANTI_BOT", "RECONCILIATION_REQUIRED" -> {
@@ -413,7 +767,6 @@ public class AutomationController {
                         ? plans.transitionWithResult(id, "RUNNING", to, new java.util.ArrayList<>(r.result()))
                         : plans.transition(id, "RUNNING", to);
             }
-            case "SUBMITTED" -> plans.completeRealSubmission(id);
             default -> false;
         };
         if (!ok) {
@@ -422,11 +775,62 @@ public class AutomationController {
         audit.write(new AuditEntry(ownerContext.actorOr("worker"), "AUTOMATION_PLAN_" + outcome, "AUTOMATION_PLAN", id,
                 null, Map.of("detail", r.detail() == null ? "" : r.detail()), null, UuidV7.generate()));
         metrics.planOutcome(outcome);
-        if ("SUBMITTED".equals(outcome)) {
-            markApplicationSubmitted(id, r.detail());
-        }
         notifyPlanOutcome(id, outcome, r.detail());
+        if ("HUMAN_REQUIRED".equals(outcome)
+                && !preFenceRefusal
+                && standingAuthorizationService != null) {
+            standingAuthorizationService.tryAutoAuthorizeAfterPreparation(id);
+        }
         return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * Sprint 2.2.1: the worker-only SUBMITTED branch. The caller has already
+     * been checked to be the authenticated worker and to have supplied a
+     * non-blank detail. The structured evidence, the SUBMITTED transition and
+     * the audit row are written atomically by {@link SubmissionCompletionService};
+     * a report without valid structured evidence lands in
+     * RECONCILIATION_REQUIRED (never SUBMITTED, never retried automatically).
+     */
+    private ResponseEntity<?> completeRealSubmission(UUID id, OutcomeRequest r) {
+        if (submissions == null) {
+            return ResponseEntity.status(503).body(Map.of(
+                    "error", "real submissions cannot be recorded: the submission evidence store is unavailable"));
+        }
+        // The worker principal comes from the authenticated security context, never from the body.
+        String workerPrincipal = ownerContext.actorOr("worker");
+        SubmissionCompletionService.Result result;
+        try {
+            result = submissions.completeWorkerSubmission(id, workerPrincipal, r.detail(), r.result());
+        } catch (org.springframework.dao.DataAccessException e) {
+            // The completion transaction rolled back: no evidence, no SUBMITTED, no audit row.
+            log.error("Real submission for plan {} could not be recorded: {}", id, e.getMostSpecificCause().getMessage());
+            return ResponseEntity.status(503).body(Map.of(
+                    "error", "the submission could not be recorded; nothing was written",
+                    "code", "SUBMISSION_RECORDING_UNAVAILABLE"));
+        }
+        switch (result.outcome()) {
+            case SUBMITTED -> {
+                metrics.planOutcome("SUBMITTED");
+                markApplicationSubmitted(id, r.detail());
+                notifyPlanOutcome(id, "SUBMITTED", r.detail());
+                return ResponseEntity.noContent().build();
+            }
+            case RECONCILIATION_REQUIRED -> {
+                metrics.planOutcome("RECONCILIATION_REQUIRED");
+                notifyPlanOutcome(id, "RECONCILIATION_REQUIRED",
+                        "A submission was reported without verifiable evidence: " + result.reason());
+                return ResponseEntity.status(422).body(Map.of(
+                        "error", "a real submission requires structured SUBMISSION_EVIDENCE; the attempt now requires reconciliation",
+                        "code", "SUBMISSION_EVIDENCE_REQUIRED",
+                        "status", "RECONCILIATION_REQUIRED",
+                        "reason", result.reason()));
+            }
+            default -> {
+                return ResponseEntity.status(409).body(Map.of(
+                        "error", "illegal or unsafe transition", "reason", String.valueOf(result.reason())));
+            }
+        }
     }
 
     /** True when the plan's own stored last step is a real submission click (GREENHOUSE or ASHBY). */
@@ -437,7 +841,10 @@ public class AutomationController {
         if (!(stepsObj instanceof List<?> steps) || steps.isEmpty()) return false;
         Map<String, Object> last = asObjectMap(steps.get(steps.size() - 1));
         String type = String.valueOf(last.get("type"));
-        return "REAL_SUBMIT_CLICK".equals(type) || "ASHBY_SUBMIT_CLICK".equals(type) || "WORKDAY_SUBMIT_CLICK".equals(type);
+        return "REAL_SUBMIT_CLICK".equals(type)
+                || "ASHBY_SUBMIT_CLICK".equals(type)
+                || "WORKDAY_SUBMIT_CLICK".equals(type)
+                || "UNIVERSAL_SUBMIT_CLICK".equals(type);
     }
 
     /**
@@ -446,7 +853,7 @@ public class AutomationController {
      * reads) reflects it, not just the automation plan row. Deliberately
      * tolerant of an unexpected current application status: the
      * automation_plans row reaching SUBMITTED is the authoritative,
-     * database-guarded fact (completeRealSubmission's own atomic guard); a
+     * database-guarded fact (completeRealSubmissionWithResult's own atomic guard); a
      * mismatch here is logged, not allowed to undo or mask that fact.
      */
     private void markApplicationSubmitted(UUID planId, String detail) {
@@ -456,10 +863,19 @@ public class AutomationController {
             return;
         }
         try {
+            String currentStatus = applicationStatus.find(profileId, plan.applicationId())
+                    .map(row -> row.get("status"))
+                    .map(String::valueOf)
+                    .orElse(null);
+            if ("READY_TO_APPLY".equals(currentStatus)) {
+                applicationStatus.apply(profileId, plan.applicationId(), "APPLICATION_STARTED",
+                        "automation.real_submit.start:" + planId, "worker",
+                        Map.of("planId", planId.toString()));
+            }
             applicationStatus.apply(profileId, plan.applicationId(), "APPLICATION_SUBMITTED",
                     "automation.real_submit:" + planId, "worker",
                     Map.of("planId", planId.toString(), "detail", detail == null ? "" : detail));
-        } catch (IllegalStateException | java.util.NoSuchElementException e) {
+        } catch (IllegalStateException | java.util.NoSuchElementException | org.springframework.dao.DataAccessException e) {
             log.warn("Could not mirror real submission onto application status for plan {}: {}", planId, e.getMessage());
         }
     }
@@ -539,9 +955,72 @@ public class AutomationController {
         if (!machineOrLocalDev()) {
             return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
         }
-        return plans.claimNext()
-                .<ResponseEntity<?>>map(ResponseEntity::ok)
-                .orElseGet(() -> ResponseEntity.noContent().build());
+        AutomationPlanRepository.PlanRow claimed = null;
+        for (int attempt = 0; attempt < 10; attempt++) {
+            var next = plans.claimNext().orElse(null);
+            if (next == null) {
+                return ResponseEntity.noContent().build();
+            }
+            if (livenessService != null) {
+                PostingLivenessService.LivenessResult liveness = livenessService.evaluateForPlan(next.id());
+                if (liveness.blocksExecution()) {
+                    List<Object> payload = new java.util.ArrayList<>();
+                    payload.add(Map.of("type", "LIVENESS_FAILED", "code", liveness.code(), "detail", liveness.detail()));
+                    plans.failClosedBeforeClaim(next.id(), "RUNNING", payload);
+                    continue;
+                }
+            }
+            claimed = next;
+            break;
+        }
+        if (claimed == null) {
+            return ResponseEntity.noContent().build();
+        }
+        AutomationPlanRepository.PlanRow plan = claimed;
+        int requeueCount = plans.manualRequeueCount(plan.id());
+        List<Map<String, Object>> steps = plans.findSteps(plan.id());
+        if (requeueCount <= 0 && steps.isEmpty() && !"UNIVERSAL".equals(planTypeOf(plan))) {
+            return ResponseEntity.ok(plan);
+        }
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("id", plan.id());
+        body.put("applicationId", plan.applicationId());
+        body.put("targetUrl", plan.targetUrl());
+        body.put("status", plan.status());
+        body.put("plan", plan.plan());
+        body.put("result", plan.result());
+        body.put("submitApproved", plan.submitApproved());
+        body.put("heartbeatAt", plan.heartbeatAt());
+        body.put("updatedAt", plan.updatedAt());
+        if (requeueCount > 0) {
+            body.put("requeueCount", requeueCount);
+        }
+        if (!steps.isEmpty()) {
+            body.put("completedSteps", steps);
+        }
+        return ResponseEntity.ok(body);
+    }
+
+    private static boolean isPreFenceAuthorizationRefusal(List<?> result) {
+        if (result == null || result.isEmpty()) {
+            return false;
+        }
+        for (Object item : result) {
+            if (item instanceof Map<?, ?> map) {
+                Object type = map.get("type");
+                Object denied = map.get("authorizationDenied");
+                Object clicked = map.get("clicked");
+                Object code = map.get("code") != null ? map.get("code") : map.get("category");
+                if ("AUTHORIZATION_REFUSED".equals(type)
+                        && Boolean.TRUE.equals(denied)
+                        && !Boolean.TRUE.equals(clicked)
+                        && !"DUPLICATE_PRE_SUBMIT_ATTEMPT".equals(code)
+                        && !"PRIOR_ATTEMPT_UNVERIFIED".equals(code)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     @PostMapping("/plans/{id}/review")
@@ -592,6 +1071,9 @@ public class AutomationController {
      * human-readable rejection reason.
      */
     private String approvalPrecondition(AutomationPlanRepository.PlanRow plan) {
+        if (plans.hasPreSubmitAttemptCheckpoint(plan.id())) {
+            return "a pre-submit attempt checkpoint already exists for this plan";
+        }
         Map<String, Object> stored = plan.plan() == null ? Map.of() : plan.plan();
         if ("ASHBY".equals(stored.get("planType"))) {
             return ashbyApprovalPrecondition(plan, stored);
@@ -599,8 +1081,11 @@ public class AutomationController {
         if ("WORKDAY".equals(stored.get("planType"))) {
             return workdayApprovalPrecondition(plan, stored);
         }
+        if ("UNIVERSAL".equals(stored.get("planType"))) {
+            return universalApprovalPrecondition(plan, stored);
+        }
         if (!"GREENHOUSE".equals(stored.get("planType"))) {
-            return "only greenhouse, ashby, and workday execution plans can be approved for submission";
+            return "only greenhouse, ashby, workday, and universal execution plans can be approved for submission";
         }
         Map<String, Object> pkg = asObjectMap(stored.get("package"));
         Map<String, Object> correlation = asObjectMap(stored.get("correlation"));
@@ -729,10 +1214,52 @@ public class AutomationController {
         if (!pkg.isEmpty()) {
             String cvReason = verifyArtifact(plan.id(), profileId, applicationId, jobId, "cv", pkg.get("cv"), false);
             if (cvReason != null) return cvReason;
-            String clReason = verifyArtifact(plan.id(), profileId, applicationId, jobId, "coverLetter", pkg.get("coverLetter"), false);
+            String clReason = verifyArtifact(plan.id(), profileId, applicationId, jobId, "cover-letter", pkg.get("coverLetter"), false);
             if (clReason != null) return clReason;
         }
         return null;
+    }
+
+    /** Stage 3B: approval preconditions for a live-inspected UNIVERSAL plan. */
+    private String universalApprovalPrecondition(AutomationPlanRepository.PlanRow plan, Map<String, Object> stored) {
+        if (stored.get("steps") instanceof List<?> steps) {
+            for (Object o : steps) {
+                Map<String, Object> step = asObjectMap(o);
+                String type = String.valueOf(step.get("type"));
+                if ("REAL_SUBMIT_CLICK".equals(type) || "MOCK_SUBMIT".equals(type)
+                        || "ASHBY_SUBMIT_CLICK".equals(type) || "WORKDAY_SUBMIT_CLICK".equals(type)
+                        || "UNIVERSAL_SUBMIT_CLICK".equals(type)) {
+                    return "submission-capable steps cannot be approved";
+                }
+            }
+        }
+        if (plans.hasPreSubmitAttemptCheckpoint(plan.id())) {
+            return "a pre-submit attempt checkpoint already exists for this plan";
+        }
+        Map<String, Object> outcome = (plan.result() == null ? List.<Object>of() : plan.result()).stream()
+                .map(this::asObjectMap)
+                .filter(o -> "UNIVERSAL_OUTCOME".equals(o.get("type")))
+                .findFirst().orElse(null);
+        if (outcome == null) {
+            return "no Universal preparation outcome is recorded for this plan";
+        }
+        if (outcome.get("requiredGaps") instanceof List<?> gaps && !gaps.isEmpty()) {
+            return "unresolved human-required fields remain (" + gaps.size() + ")";
+        }
+        Map<String, Object> correlation = asObjectMap(stored.get("correlation"));
+        UUID applicationId = uuid(correlation.get("applicationId"));
+        UUID jobId = uuid(correlation.get("jobId"));
+        UUID profileId = ownerContext.profileIdOrNull();
+        if (applicationId == null || jobId == null || profileId == null) {
+            return "plan correlation is incomplete";
+        }
+        if (universalPlans != null && universalPlans.countUnresolvedAnswers(profileId, jobId, applicationId) > 0) {
+            return "unresolved discovered or drafted questions remain";
+        }
+        Map<String, Object> pkg = asObjectMap(stored.get("package"));
+        String cvReason = verifyArtifact(plan.id(), profileId, applicationId, jobId, "cv", pkg.get("cv"), true);
+        if (cvReason != null) return cvReason;
+        return verifyArtifact(plan.id(), profileId, applicationId, jobId, "cover-letter", pkg.get("coverLetter"), false);
     }
 
     /** Verifies one artifact precondition; null when satisfied, else the reason. */
@@ -768,41 +1295,11 @@ public class AutomationController {
      */
     private String packageDrift(AutomationPlanRepository.PlanRow plan, UUID profileId) {
         Map<String, Object> stored = plan.plan() == null ? Map.of() : plan.plan();
-        Map<String, Object> pkg = asObjectMap(stored.get("package"));
         Map<String, Object> correlation = asObjectMap(stored.get("correlation"));
         UUID applicationId = uuid(correlation.get("applicationId"));
         UUID jobId = uuid(correlation.get("jobId"));
-        if (applicationId == null || jobId == null) return "plan correlation is incomplete";
-        ApplyDocumentSelector.DocumentSelection selection = documentSelector.select(profileId, jobId, applicationId);
-        if (selection.blocked()) {
-            Object first = selection.blockers().isEmpty() ? null : selection.blockers().get(0).get("message");
-            return "the package's documents are no longer usable: " + first;
-        }
-        Map<String, Object> cv = asObjectMap(pkg.get("cv"));
-        if (!cv.isEmpty()) {
-            if (selection.cv() == null) {
-                return "the CV in this package is no longer selected for this application; rebuild the package";
-            }
-            if (!String.valueOf(selection.cv().versionId()).equals(cv.get("versionId"))) {
-                return "the CV attached to this package is no longer the reviewed version; rebuild the package";
-            }
-        }
-        Map<String, Object> cover = asObjectMap(pkg.get("coverLetter"));
-        if (!cover.isEmpty()) {
-            if (selection.coverLetter() == null) {
-                return "the cover letter in this package is no longer approved for this application; rebuild the package";
-            }
-            if (!String.valueOf(selection.coverLetter().versionId()).equals(cover.get("versionId"))) {
-                return "the cover letter in this package is no longer the approved version; rebuild the package";
-            }
-        }
-        List<Map<String, Object>> packagedAnswers = pkg.get("answers") instanceof List<?> list
-                ? list.stream().filter(o -> o instanceof Map).map(this::asObjectMap).toList()
-                : List.of();
-        if (!executionPackages.answersStillCurrent(profileId, applicationId, jobId, packagedAnswers)) {
-            return "an answer in this package has changed since it was built; rebuild the package";
-        }
-        return null;
+        return PreSubmitAuthorizationService.detectPackageDrift(
+                profileId, applicationId, jobId, stored, documentSelector, executionPackages);
     }
 
     @SuppressWarnings("unchecked")
@@ -869,7 +1366,7 @@ public class AutomationController {
         if (profileId == null || jobId == null) {
             return notFound();
         }
-        if (!kind.equals("cv") && !kind.equals("cover-letter")) {
+        if (!kind.equals("cv") && !kind.equals("cover-letter") && !kind.equals("cover-letter-pdf")) {
             return ResponseEntity.badRequest().body(Map.of("error", "unknown artifact kind"));
         }
         ExecutionPackageService.ArtifactBytes bytes;
@@ -896,9 +1393,15 @@ public class AutomationController {
             return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
         }
         if (maintenanceMode != null && maintenanceMode.isMaintenanceMode()) {
-            return ResponseEntity.status(503).body(Map.of("error", "maintenance mode active", "recovered", 0));
+            return ResponseEntity.status(503).body(Map.of(
+                    "error", "maintenance mode active",
+                    "recovered", 0,
+                    "quarantined", 0));
         }
-        return ResponseEntity.ok(Map.of("recovered", plans.recoverStale(Instant.now().minusSeconds(minutes * 60))));
+        var recovery = plans.recoverStaleDetailed(Instant.now().minusSeconds(minutes * 60));
+        return ResponseEntity.ok(Map.of(
+                "recovered", recovery.recovered(),
+                "quarantined", recovery.quarantined()));
     }
 
     // ── authorization helpers ─────────────────────────────────────────

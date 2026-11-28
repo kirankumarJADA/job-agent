@@ -5,10 +5,17 @@ import com.personal.jobagent.audit.AuditEntry;
 import com.personal.jobagent.audit.AuditLogWriter;
 import com.personal.jobagent.common.QuotaService;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.jobs.HardFilterResult;
+import com.personal.jobagent.jobs.HardFilterService;
+import com.personal.jobagent.jobs.JobRecord;
 import com.personal.jobagent.jobs.JobRepository;
+import com.personal.jobagent.preferences.PreferenceSetRecord;
+import com.personal.jobagent.preferences.PreferenceSetRepository;
+import com.personal.jobagent.preferences.StandingAutoApplyPolicy;
 import com.personal.jobagent.profile.ProfileRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -73,6 +80,29 @@ public class AutoApplyBatchService {
     private final QuotaService quotaService;
     private final JdbcTemplate db;
     private final AuditLogWriter audit;
+    private final HardFilterService hardFilterService;
+    private final PreferenceSetRepository preferenceSets;
+
+    @Autowired
+    public AutoApplyBatchService(AutoApplySettingsService settingsService,
+                                 JobRepository jobRepository,
+                                 ProfileRepository profileRepository,
+                                 ApplicationPipelineService pipeline,
+                                 QuotaService quotaService,
+                                 JdbcTemplate db,
+                                 AuditLogWriter audit,
+                                 @Autowired(required = false) HardFilterService hardFilterService,
+                                 @Autowired(required = false) PreferenceSetRepository preferenceSets) {
+        this.settingsService = settingsService;
+        this.jobRepository = jobRepository;
+        this.profileRepository = profileRepository;
+        this.pipeline = pipeline;
+        this.quotaService = quotaService;
+        this.db = db;
+        this.audit = audit;
+        this.hardFilterService = hardFilterService;
+        this.preferenceSets = preferenceSets;
+    }
 
     public AutoApplyBatchService(AutoApplySettingsService settingsService,
                                  JobRepository jobRepository,
@@ -81,13 +111,7 @@ public class AutoApplyBatchService {
                                  QuotaService quotaService,
                                  JdbcTemplate db,
                                  AuditLogWriter audit) {
-        this.settingsService = settingsService;
-        this.jobRepository = jobRepository;
-        this.profileRepository = profileRepository;
-        this.pipeline = pipeline;
-        this.quotaService = quotaService;
-        this.db = db;
-        this.audit = audit;
+        this(settingsService, jobRepository, profileRepository, pipeline, quotaService, db, audit, null, null);
     }
 
     public record PreviewItem(UUID jobId, String jobTitle, String companyName, Integer matchScore, String predictedOutcome, String detail) {}
@@ -109,6 +133,8 @@ public class AutoApplyBatchService {
      */
     public PreviewResult preview(UUID profileId) {
         AutoApplySettingsService.Settings settings = settingsService.get(profileId);
+        PreferenceSetRecord prefs = preferenceSets == null ? null
+                : preferenceSets.findActiveByProfileId(profileId).orElse(null);
         List<JobRepository.FeedItem> candidates = fetchCandidates(profileId, settings);
         long usedToday = usedToday(profileId);
 
@@ -120,6 +146,12 @@ public class AutoApplyBatchService {
             if (score == null || score < settings.minScore()) {
                 items.add(new PreviewItem(item.job().id(), item.job().title(), item.job().companyNameRaw(),
                         score, "SKIPPED_THRESHOLD", "Below your configured minimum score (" + settings.minScore() + ")"));
+                continue;
+            }
+            String strictRejection = strictEligibilityRejection(item.job(), settings, prefs);
+            if (strictRejection != null) {
+                items.add(new PreviewItem(item.job().id(), item.job().title(), item.job().companyNameRaw(),
+                        score, "SKIPPED_THRESHOLD", strictRejection));
                 continue;
             }
             eligible++;
@@ -174,6 +206,8 @@ public class AutoApplyBatchService {
         int considered = 0, eligible = 0, prepared = 0, skippedDuplicate = 0, skippedThreshold = 0,
                 skippedMissingProfile = 0, skippedUnsupported = 0, quotaLimited = 0, failures = 0;
         try {
+            PreferenceSetRecord prefs = preferenceSets == null ? null
+                    : preferenceSets.findActiveByProfileId(profileId).orElse(null);
             List<JobRepository.FeedItem> candidates = fetchCandidates(profileId, settings);
             considered = candidates.size();
 
@@ -186,6 +220,12 @@ public class AutoApplyBatchService {
                     skippedThreshold++;
                     recordItem(runId, jobId, score, "SKIPPED_THRESHOLD",
                             "Below the configured minimum score (" + settings.minScore() + ")");
+                    continue;
+                }
+                String strictRejection = strictEligibilityRejection(item.job(), settings, prefs);
+                if (strictRejection != null) {
+                    skippedThreshold++;
+                    recordItem(runId, jobId, score, "SKIPPED_THRESHOLD", strictRejection);
                     continue;
                 }
                 eligible++;
@@ -303,6 +343,57 @@ public class AutoApplyBatchService {
                 select count(*) from applications where profile_id = ? and job_id = ? and status not in ('FAILED','WITHDRAWN')
                 """, Integer.class, profileId, jobId);
         return count != null && count > 0;
+    }
+
+    private String strictEligibilityRejection(JobRecord job, AutoApplySettingsService.Settings settings,
+                                              PreferenceSetRecord prefs) {
+        if (job == null) {
+            return "Job record unavailable; routed to manual review.";
+        }
+        if (settings.salaryMin() != null) {
+            java.math.BigDecimal salaryBound = job.salaryMax() != null ? job.salaryMax() : job.salaryMin();
+            if (salaryBound == null || salaryBound.compareTo(settings.salaryMin()) < 0) {
+                return "Strict eligibility review needed: job salary is missing or below minimum ("
+                        + settings.salaryMin() + ").";
+            }
+        }
+        if (settings.location() != null && !settings.location().isBlank()) {
+            boolean locMissing = (job.city() == null || job.city().isBlank())
+                    && (job.country() == null || job.country().isBlank())
+                    && (job.locationRaw() == null || job.locationRaw().isBlank());
+            if (locMissing || !HardFilterService.matchesLocation(job, List.of(settings.location()))) {
+                return "Strict eligibility review needed: job location is missing or does not match '"
+                        + settings.location() + "'.";
+            }
+        }
+        if (settings.remoteType() != null && !settings.remoteType().isBlank()) {
+            if (job.remoteType() == null || "UNKNOWN".equalsIgnoreCase(job.remoteType())
+                    || !settings.remoteType().equalsIgnoreCase(job.remoteType())) {
+                return "Strict eligibility review needed: job workplace type is missing or not "
+                        + settings.remoteType() + ".";
+            }
+        }
+        if (settings.employmentType() != null && !settings.employmentType().isBlank()) {
+            if (job.employmentType() == null || !settings.employmentType().equalsIgnoreCase(job.employmentType())) {
+                return "Strict eligibility review needed: job employment type is missing or not "
+                        + settings.employmentType() + ".";
+            }
+        }
+        if (hardFilterService != null && prefs != null) {
+            StandingAutoApplyPolicy policy = StandingAutoApplyPolicy.fromExtraFilters(prefs.extraFilters());
+            HardFilterResult strict = hardFilterService.evaluateStrict(
+                    job, prefs, policy.effectiveAllowedCountries(prefs));
+            if (!strict.passed()) {
+                return "Strict eligibility review needed: " + strict.reasons().stream()
+                        .map(HardFilterResult.FilterReason::message)
+                        .findFirst().orElse("missing or unmatched strict preference constraints");
+            }
+            if (!policy.matchesPermittedRole(job.title(), prefs)) {
+                return "Strict eligibility review needed: job title '" + job.title()
+                        + "' is outside permitted auto-apply roles.";
+            }
+        }
+        return null;
     }
 
     private long usedToday(UUID profileId) {

@@ -48,6 +48,7 @@ public class EmployerCredentialController {
     /** The candidate's own saved credentials. Usernames are shown; passwords never are. */
     @GetMapping
     public ResponseEntity<?> list(HttpServletRequest request) {
+        if (ownerContext.isWorkerRequest()) return forbiddenCandidateEndpoint(request);
         UUID profileId = ownerContext.profileIdOrNull();
         if (profileId == null) return notFound(request, "No profile exists for this account.");
         List<Map<String, Object>> body = credentials.list(profileId).stream()
@@ -65,6 +66,7 @@ public class EmployerCredentialController {
     /** Saves or replaces the credential for one employer domain. Write-only: never returned. */
     @PostMapping
     public ResponseEntity<?> save(@RequestBody SaveRequest r, HttpServletRequest request) {
+        if (ownerContext.isWorkerRequest()) return forbiddenCandidateEndpoint(request);
         UUID profileId = ownerContext.profileIdOrNull();
         if (profileId == null) return notFound(request, "No profile exists for this account.");
         String domain = r == null ? null : MailAddresses.employerDomain(r.employerDomain()).orElse(null);
@@ -78,6 +80,7 @@ public class EmployerCredentialController {
     /** Disables (does not delete) the credential for one employer domain. */
     @DeleteMapping("/{employerDomain}")
     public ResponseEntity<?> disable(@PathVariable String employerDomain, HttpServletRequest request) {
+        if (ownerContext.isWorkerRequest()) return forbiddenCandidateEndpoint(request);
         UUID profileId = ownerContext.profileIdOrNull();
         if (profileId == null) return notFound(request, "No profile exists for this account.");
         String domain = MailAddresses.employerDomain(employerDomain).orElse(null);
@@ -106,14 +109,33 @@ public class EmployerCredentialController {
         if (domain == null) return badRequest(request, "employerDomain must be a domain name");
         UUID ownerProfileId = ownerContext.ownerOfApplication(r.applicationId()).orElse(null);
         if (ownerProfileId == null) return notFound(request, "No such application");
-        return credentials.find(ownerProfileId, domain)
-                .<ResponseEntity<?>>map(stored -> ResponseEntity.ok(
-                        Map.of("username", stored.username(), "password", stored.password())))
+        // Stage 3F (SEC-7): bind the request to what this application is actually executing.
+        EmployerCredentialService.ApplicationBinding binding = credentials.bindingFor(ownerProfileId, r.applicationId());
+        if (binding == null || !binding.running()) {
+            return error(409, "Conflict", "No automation run is active for this application.", request);
+        }
+        if (!binding.permittedDomains().contains(domain)) {
+            return error(403, "Forbidden", "This employer domain is not the one this application is being submitted to.", request);
+        }
+        java.util.Optional<EmployerCredentialService.StoredCredential> stored;
+        try {
+            stored = credentials.find(ownerProfileId, domain);
+        } catch (IllegalStateException e) {
+            // Undecryptable (e.g. rotated key): never a 500 with a stack trace, never a partial secret.
+            return error(409, "Conflict", "The stored credential for this employer domain cannot be used.", request);
+        }
+        return stored
+                .<ResponseEntity<?>>map(s -> ResponseEntity.ok(
+                        Map.of("username", s.username(), "password", s.password())))
                 .orElseGet(() -> notFound(request, "No active credential stored for this employer domain"));
     }
 
     private ResponseEntity<?> forbidden(HttpServletRequest request) {
         return error(403, "Forbidden", "Only the automation worker may resolve employer credentials.", request);
+    }
+
+    private ResponseEntity<?> forbiddenCandidateEndpoint(HttpServletRequest request) {
+        return error(403, "Forbidden", "Worker tokens cannot manage candidate employer credentials.", request);
     }
 
     private ResponseEntity<?> notFound(HttpServletRequest request, String detail) {

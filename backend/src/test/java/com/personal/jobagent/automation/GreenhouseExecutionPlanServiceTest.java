@@ -91,6 +91,46 @@ class GreenhouseExecutionPlanServiceTest {
         verifyNoInteractions(db);
     }
 
+    @Test
+    void createExecutionPlanRequeuesFailedOrBlockedPlanBeforeRebuilding() throws Exception {
+        for (String terminalStatus : List.of("FAILED", "BLOCKED_ANTI_BOT")) {
+            reset(plans, packages, db);
+            when(db.queryForMap(contains("from applications a join jobs"), eq(APPLICATION), eq(PROFILE), eq(JOB)))
+                    .thenReturn(Map.of("id", APPLICATION, "profile_id", PROFILE, "job_id", JOB, "application_url", URL));
+            when(plans.create(eq(PROFILE), eq(APPLICATION), eq(JOB), eq(URL), eq("greenhouse:" + APPLICATION), anyList()))
+                    .thenReturn(PLAN);
+            when(plans.findById(PLAN)).thenReturn(Optional.of(new AutomationPlanRepository.PlanRow(
+                    PLAN, APPLICATION, URL, terminalStatus, Map.of(), List.of(), false, null, Instant.now())));
+            when(plans.requeueFailedPlan(PLAN)).thenReturn(true);
+            when(packages.build(PLAN, PROFILE, APPLICATION, JOB)).thenReturn(executionPackage(URL,
+                    List.of(field("email", "text", "SUPPORTED_AUTO", "jane@example.com", "users.email")),
+                    List.of()));
+            when(db.update(contains("update automation_plans set plan"), anyString(), eq(PLAN), eq(PROFILE), eq(APPLICATION)))
+                    .thenReturn(1);
+
+            Optional<UUID> requeued = service.createExecutionPlan(PROFILE, APPLICATION, JOB);
+
+            assertThat(requeued).contains(PLAN);
+            verify(plans).requeueFailedPlan(PLAN);
+            verify(db).update(contains("update automation_plans set plan"), anyString(), eq(PLAN), eq(PROFILE), eq(APPLICATION));
+        }
+    }
+
+    @Test
+    void createRetryExecutionPlanDoesNotRequeueSupersededOrFailedRow() throws Exception {
+        UUID superseded = UUID.randomUUID();
+        when(plans.create(eq(PROFILE), eq(APPLICATION), eq(JOB), eq(URL), eq("greenhouse-retry:" + superseded), anyList()))
+                .thenReturn(PLAN);
+        when(plans.findById(PLAN)).thenReturn(Optional.of(new AutomationPlanRepository.PlanRow(
+                PLAN, APPLICATION, URL, "FAILED", Map.of(), List.of(), false, null, Instant.now())));
+
+        Optional<UUID> retried = service.createRetryExecutionPlan(PROFILE, APPLICATION, JOB, superseded);
+
+        assertThat(retried).contains(PLAN);
+        verify(plans, never()).requeueFailedPlan(any());
+        verify(db, never()).update(contains("update automation_plans set plan"), anyString(), any(), any(), any());
+    }
+
     private ExecutionPackageService.ExecutionPackage executionPackage(
             String expectedUrl, List<Map<String, Object>> fields, List<Map<String, Object>> gaps) {
         return new ExecutionPackageService.ExecutionPackage(PLAN, APPLICATION, JOB, expectedUrl,

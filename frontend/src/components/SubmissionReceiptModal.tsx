@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../api/client';
-import type { SubmissionReceipt } from '../types';
+import type { BrowserEvidenceView, SubmissionReceipt } from '../types';
 import { Alert, Loading, SecondaryButton, StatusPill } from './ui';
 
 export interface SubmissionReceiptModalProps {
@@ -35,7 +35,9 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
       .then((data) => {
         setReceipt(data);
         if (!attemptId) {
-          setSelectedAttemptId(data.attemptId);
+          setSelectedAttemptId(
+            data.receiptId ?? data.attemptHistory?.find((a) => a.isLatest)?.attemptId ?? null
+          );
         }
       })
       .catch((err: unknown) => {
@@ -73,6 +75,32 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
 
   if (!isOpen) return null;
 
+  const isConfirmedProof =
+    receipt != null &&
+    receipt.status === 'SUBMITTED' &&
+    receipt.confirmation?.confirmed === true &&
+    receipt.reconciliation?.required !== true;
+
+  const isBrowserObserved =
+    receipt != null &&
+    receipt.status === 'SUBMITTED' &&
+    !isConfirmedProof &&
+    receipt.verificationLevel === 'BROWSER_OBSERVED' &&
+    receipt.reconciliation?.required !== true;
+
+  const needsReconciliation =
+    receipt != null &&
+    (receipt.status === 'RECONCILIATION_REQUIRED' ||
+      receipt.reconciliation?.required === true ||
+      (receipt.status === 'SUBMITTED' && !isConfirmedProof && !isBrowserObserved));
+
+  const isFailedAttempt =
+    receipt != null &&
+    !isConfirmedProof &&
+    !isBrowserObserved &&
+    !needsReconciliation &&
+    (receipt.status === 'FAILED' || receipt.status === 'BLOCKED_ANTI_BOT' || receipt.failure?.failed === true);
+
   return (
     <div
       role="dialog"
@@ -99,26 +127,37 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
               {receipt && (
                 <StatusPill
                   tone={
-                    receipt.status === 'SUBMITTED'
+                    isConfirmedProof
                       ? 'emerald'
-                      : receipt.status === 'RECONCILIATION_REQUIRED'
+                      : isBrowserObserved
+                      ? 'sky'
+                      : needsReconciliation
                       ? 'amber'
-                      : 'red'
+                      : isFailedAttempt
+                      ? 'red'
+                      : 'slate'
                   }
                 >
-                  {receipt.status}
+                  {isBrowserObserved
+                    ? 'SUBMITTED — BROWSER OBSERVED'
+                    : receipt.status === 'SUBMITTED' && !isConfirmedProof
+                    ? 'SUBMITTED — UNVERIFIED'
+                    : receipt.status}
                 </StatusPill>
               )}
             </div>
             <h2 id="receipt-modal-title" className="mt-1 text-lg font-bold text-ink">
               {jobTitle || receipt?.jobTitle || 'Application Receipt'}
-              {(companyName || receipt?.companyName) && (
-                <span className="font-normal text-ink-muted"> at {companyName || receipt?.companyName}</span>
+              {(companyName || receipt?.company) && (
+                <span className="font-normal text-ink-muted"> at {companyName || receipt?.company}</span>
               )}
             </h2>
             {receipt && (
               <p className="mt-0.5 text-xs text-ink-faint font-mono">
-                Receipt ID: {receipt.receiptId} • Generated {new Date(receipt.generatedAt).toLocaleString()}
+                Receipt ID: {receipt.receiptId ?? 'Not yet attempted'}
+                {' • '}Attempt #{receipt.attemptNumber}
+                {receipt.atsKind ? ` • ${receipt.atsKind}` : ''}
+                {receipt.updatedAt ? ` • Updated ${new Date(receipt.updatedAt).toLocaleString()}` : ''}
               </p>
             )}
           </div>
@@ -156,19 +195,22 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
           {receipt && (
             <>
               {/* Attempt History Switcher (when multiple attempts exist) */}
-              {receipt.attempts && receipt.attempts.length > 1 && (
+              {receipt.attemptHistory && receipt.attemptHistory.length > 1 && (
                 <div className="rounded-xl border border-line bg-surface-sunken p-3">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-xs font-semibold text-ink-muted uppercase tracking-wider">
-                      Submission Attempts &amp; Retries ({receipt.attempts.length})
+                      Submission Attempts &amp; Retries ({receipt.attemptHistory.length})
                     </span>
                     <span className="text-[11px] text-ink-faint">
                       Select an attempt to inspect its exact submitted payload
                     </span>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    {receipt.attempts.map((att, idx) => {
-                      const isSelected = att.attemptId === receipt.attemptId;
+                    {receipt.attemptHistory.map((att) => {
+                      const isSelected =
+                        att.attemptId === receipt.receiptId ||
+                        att.attemptNumber === receipt.attemptNumber ||
+                        att.attemptId === selectedAttemptId;
                       return (
                         <button
                           key={att.attemptId}
@@ -180,7 +222,7 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                               : 'border-line bg-surface text-ink-soft hover:border-forest-300 hover:bg-forest-50'
                           }`}
                         >
-                          <span>Attempt #{receipt.attempts.length - idx}</span>
+                          <span>Attempt #{att.attemptNumber}</span>
                           <span
                             className={`inline-block w-2 h-2 rounded-full ${
                               att.status === 'SUBMITTED'
@@ -190,7 +232,7 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                                 : 'bg-red-400'
                             }`}
                           />
-                          {att.isCurrent && (
+                          {att.isLatest && (
                             <span className="text-[10px] opacity-75 font-normal">(latest)</span>
                           )}
                         </button>
@@ -201,7 +243,7 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
               )}
 
               {/* Status Outcome Banner */}
-              {receipt.status === 'SUBMITTED' && (
+              {isConfirmedProof && (
                 <div className="rounded-xl border border-emerald-300 bg-emerald-50/80 p-4">
                   <div className="flex items-start gap-3">
                     <div className="rounded-full bg-emerald-100 p-1.5 text-emerald-800">
@@ -214,20 +256,14 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                         Confirmed Submission Proof
                       </h3>
                       <p className="mt-1 text-xs text-emerald-900 leading-relaxed">
-                        Robin confirmed this submission on the employer's platform. Submission proofs and confirmation
-                        tokens have been verified and archived below.
+                        Robin confirmed this submission on the employer&apos;s platform. Submission proofs and verification
+                        evidence have been verified and archived below.
                       </p>
                       <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                        {receipt.confirmation.confirmationNumber && (
+                        {receipt.confirmation?.confirmationId && (
                           <div className="rounded-lg bg-emerald-100/70 p-2">
-                            <span className="font-semibold text-emerald-950">Confirmation Number:</span>{' '}
-                            <span className="font-mono font-medium">{receipt.confirmation.confirmationNumber}</span>
-                          </div>
-                        )}
-                        {receipt.confirmation.receiptToken && (
-                          <div className="rounded-lg bg-emerald-100/70 p-2">
-                            <span className="font-semibold text-emerald-950">Receipt Token:</span>{' '}
-                            <span className="font-mono font-medium">{receipt.confirmation.receiptToken}</span>
+                            <span className="font-semibold text-emerald-950">Confirmation ID:</span>{' '}
+                            <span className="font-mono font-medium">{receipt.confirmation.confirmationId}</span>
                           </div>
                         )}
                         {receipt.submittedAt && (
@@ -236,13 +272,60 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                             <span>{new Date(receipt.submittedAt).toLocaleString()}</span>
                           </div>
                         )}
+                        {receipt.confirmation?.summary && (
+                          <div className="sm:col-span-2 rounded-lg bg-emerald-100/70 p-2">
+                            <span className="font-semibold text-emerald-950">Evidence Summary:</span>{' '}
+                            <span>{receipt.confirmation.summary}</span>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
                 </div>
               )}
 
-              {receipt.status === 'RECONCILIATION_REQUIRED' && (
+              {isBrowserObserved && (
+                <div className="rounded-xl border border-sky-300 bg-sky-50/80 p-4">
+                  <div className="flex items-start gap-3">
+                    <div className="rounded-full bg-sky-100 p-1.5 text-sky-800">
+                      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                    </div>
+                    <div className="flex-1">
+                      <h3 className="text-sm font-semibold text-sky-950">
+                        Browser-Observed Submission — Awaiting Employer Verification
+                      </h3>
+                      <p className="mt-1 text-xs text-sky-900 leading-relaxed">
+                        Robin observed the form submission and confirmation view in the browser and archived encrypted DOM
+                        evidence. Employer acknowledgement has not yet been independently verified by email or ATS API.
+                      </p>
+                      <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                        {receipt.confirmation?.confirmationId && (
+                          <div className="rounded-lg bg-sky-100/70 p-2">
+                            <span className="font-semibold text-sky-950">Observed Reference:</span>{' '}
+                            <span className="font-mono font-medium">{receipt.confirmation.confirmationId}</span>
+                          </div>
+                        )}
+                        {receipt.submittedAt && (
+                          <div className="rounded-lg bg-sky-100/70 p-2">
+                            <span className="font-semibold text-sky-950">Submitted At:</span>{' '}
+                            <span>{new Date(receipt.submittedAt).toLocaleString()}</span>
+                          </div>
+                        )}
+                        {receipt.confirmation?.summary && (
+                          <div className="sm:col-span-2 rounded-lg bg-sky-100/70 p-2">
+                            <span className="font-semibold text-sky-950">Observation Summary:</span>{' '}
+                            <span>{receipt.confirmation.summary}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {needsReconciliation && (
                 <div className="rounded-xl border border-amber-300 bg-amber-50/80 p-4">
                   <div className="flex items-start gap-3">
                     <div className="rounded-full bg-amber-100 p-1.5 text-amber-800">
@@ -255,21 +338,26 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                         Unconfirmed Submission — Reconciliation Required
                       </h3>
                       <p className="mt-1 text-xs text-amber-900 leading-relaxed">
-                        The submission was dispatched, but conclusive confirmation from the platform was not detected.
-                        Under Robin's strict truthfulness policy, Robin never fabricates confirmation or assumes
-                        unobserved success. Robin will reconcile this status using inbound recruiter communications or mailbox evidence.
+                        The submission was dispatched, or stored receipt evidence is incomplete/unverified. Under Robin&apos;s
+                        strict truthfulness policy, Robin never fabricates confirmation or assumes unobserved success.
                       </p>
-                      {receipt.reconciliation.reason && (
-                        <div className="mt-2 text-xs font-mono bg-amber-100/70 rounded-lg p-2 text-amber-950">
-                          {receipt.reconciliation.reason}
+                      {(receipt.reconciliation?.reason || receipt.confirmation?.summary) && (
+                        <div className="mt-2 space-y-1 text-xs font-mono bg-amber-100/70 rounded-lg p-2 text-amber-950">
+                          {receipt.reconciliation?.reason && <div>{receipt.reconciliation.reason}</div>}
+                          {receipt.confirmation?.summary && <div className="font-sans">{receipt.confirmation.summary}</div>}
                         </div>
+                      )}
+                      {receipt.reconciliation?.suggestedAction && (
+                        <p className="mt-2 text-xs text-amber-900 font-medium">
+                          Next step: {receipt.reconciliation.suggestedAction}
+                        </p>
                       )}
                     </div>
                   </div>
                 </div>
               )}
 
-              {receipt.status === 'FAILED' && (
+              {isFailedAttempt && (
                 <div className="rounded-xl border border-red-300 bg-red-50/80 p-4">
                   <div className="flex items-start gap-3">
                     <div className="rounded-full bg-red-100 p-1.5 text-red-800">
@@ -279,13 +367,22 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                     </div>
                     <div className="flex-1">
                       <h3 className="text-sm font-semibold text-red-950">
-                        Submission Failed at Stage: {receipt.failureStage || 'EXECUTION'}
+                        Submission Failed{receipt.failure?.code ? ` (${receipt.failure.code})` : ''}
                       </h3>
                       <p className="mt-1 text-xs text-red-900 leading-relaxed">
-                        {receipt.failureReason || receipt.failure.errorMessage || 'An error occurred during execution.'}
+                        {receipt.failure?.reason || 'An error occurred during execution.'}
                       </p>
                     </div>
                   </div>
+                </div>
+              )}
+
+              {!isConfirmedProof && !isBrowserObserved && !needsReconciliation && !isFailedAttempt && receipt.attemptNumber === 0 && (
+                <div className="rounded-xl border border-line bg-surface-sunken p-4">
+                  <h3 className="text-sm font-semibold text-ink">No Submission Executed Yet</h3>
+                  <p className="mt-1 text-xs text-ink-muted leading-relaxed">
+                    {receipt.confirmation?.summary || 'No submission attempt has been executed yet.'}
+                  </p>
                 </div>
               )}
 
@@ -300,27 +397,30 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                 <div className="space-y-3">
                   {/* CV Record */}
                   <div className="rounded-lg border border-line bg-surface-sunken p-3">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <svg className="w-4 h-4 text-forest-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                         </svg>
                         <span className="text-xs font-semibold text-ink">
-                          Curriculum Vitae {receipt.documents.cvVersion ? `(v${receipt.documents.cvVersion})` : ''}
+                          Curriculum Vitae{receipt.cv?.title ? ` — ${receipt.cv.title}` : ''}
                         </span>
+                        {receipt.cv?.validationPassed === true && (
+                          <StatusPill tone="emerald">Validated</StatusPill>
+                        )}
                       </div>
-                      {receipt.documents.cvFilename && (
-                        <span className="text-xs text-ink-muted">{receipt.documents.cvFilename}</span>
+                      {receipt.cv?.fileName && (
+                        <span className="text-xs text-ink-muted">{receipt.cv.fileName}</span>
                       )}
                     </div>
-                    {receipt.documents.cvSha256 ? (
+                    {receipt.cv?.sha256 ? (
                       <div className="mt-2 flex items-center justify-between gap-2 rounded bg-surface border border-line px-2.5 py-1.5">
                         <span className="font-mono text-[11px] text-ink-soft truncate select-all">
-                          SHA-256: {receipt.documents.cvSha256}
+                          SHA-256: {receipt.cv.sha256}
                         </span>
                         <button
                           type="button"
-                          onClick={() => copyToClipboard(receipt.documents.cvSha256!, 'cv')}
+                          onClick={() => copyToClipboard(receipt.cv!.sha256!, 'cv')}
                           className="shrink-0 text-xs font-medium text-forest-700 hover:text-forest-900"
                         >
                           {copiedText === 'cv' ? 'Copied!' : 'Copy'}
@@ -329,37 +429,42 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                     ) : (
                       <p className="mt-1 text-xs text-ink-faint italic">No CV checksum recorded</p>
                     )}
+                    <UploadProof receipt={receipt} kind="cv" />
                   </div>
 
                   {/* Cover Letter Record */}
                   <div className="rounded-lg border border-line bg-surface-sunken p-3">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <svg className="w-4 h-4 text-forest-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                         </svg>
-                        <span className="text-xs font-semibold text-ink">Cover Letter</span>
+                        <span className="text-xs font-semibold text-ink">
+                          Cover Letter{receipt.coverLetter?.title ? ` — ${receipt.coverLetter.title}` : ''}
+                        </span>
                       </div>
                       <span className="text-xs text-ink-muted">
-                        {receipt.documents.coverLetterProvided ? (receipt.documents.coverLetterTitle || 'Included') : 'None requested/provided'}
+                        {receipt.coverLetter ? (receipt.coverLetter.fileName || 'Included') : 'None requested/provided'}
                       </span>
                     </div>
-                    {receipt.documents.coverLetterSha256 && (
+                    {receipt.coverLetter?.sha256 && (
                       <div className="mt-2 flex items-center justify-between gap-2 rounded bg-surface border border-line px-2.5 py-1.5">
                         <span className="font-mono text-[11px] text-ink-soft truncate select-all">
-                          SHA-256: {receipt.documents.coverLetterSha256}
+                          SHA-256: {receipt.coverLetter.sha256}
                         </span>
                         <button
                           type="button"
-                          onClick={() => copyToClipboard(receipt.documents.coverLetterSha256!, 'coverLetter')}
+                          onClick={() => copyToClipboard(receipt.coverLetter!.sha256!, 'coverLetter')}
                           className="shrink-0 text-xs font-medium text-forest-700 hover:text-forest-900"
                         >
                           {copiedText === 'coverLetter' ? 'Copied!' : 'Copy'}
                         </button>
                       </div>
                     )}
+                    <UploadProof receipt={receipt} kind="coverLetter" />
                   </div>
                 </div>
+                {receipt.browserEvidence && <BrowserEvidenceBlock evidence={receipt.browserEvidence} />}
               </div>
 
               {/* Candidate Identity Section */}
@@ -367,54 +472,59 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                 <h3 className="text-xs font-bold uppercase tracking-wider text-ink-muted border-b border-line pb-2">
                   Submitted Candidate Identity
                 </h3>
+                {receipt.submittedIdentity?.source === 'PREPARED_PACKAGE_PROFILE_FACTS' && (
+                  <p className="text-[11px] text-ink-muted" data-testid="identity-provenance">
+                    As prepared by Robin from your verified profile for this form. Only the fields the employer&apos;s
+                    form asked for were filled; Robin cannot see the employer&apos;s copy.
+                  </p>
+                )}
+                {receipt.submittedIdentity?.source === 'CURRENT_PROFILE' && (
+                  <p className="text-[11px] text-ink-muted" data-testid="identity-provenance">
+                    Your current profile — nothing has been submitted yet.
+                  </p>
+                )}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div>
                     <span className="text-ink-muted block text-[11px]">Full Name</span>
-                    <span className="font-medium text-ink">{receipt.identity.fullName || '—'}</span>
+                    <span className="font-medium text-ink">
+                      {receipt.submittedIdentity?.name
+                        || [receipt.submittedIdentity?.firstName, receipt.submittedIdentity?.lastName].filter(Boolean).join(' ')
+                        || '—'}
+                    </span>
                   </div>
                   <div>
                     <span className="text-ink-muted block text-[11px]">Email Address</span>
-                    <span className="font-medium text-ink">{receipt.identity.email || '—'}</span>
+                    <span className="font-medium text-ink">{receipt.submittedIdentity?.email || '—'}</span>
                   </div>
                   <div>
                     <span className="text-ink-muted block text-[11px]">Phone Number</span>
-                    <span className="font-medium text-ink">{receipt.identity.phone || '—'}</span>
+                    <span className="font-medium text-ink">{receipt.submittedIdentity?.phone || '—'}</span>
                   </div>
                   <div>
-                    <span className="text-ink-muted block text-[11px]">Location</span>
-                    <span className="font-medium text-ink">
-                      {[receipt.identity.city, receipt.identity.country].filter(Boolean).join(', ') || '—'}
-                    </span>
+                    <span className="text-ink-muted block text-[11px]">Address</span>
+                    <span className="font-medium text-ink">{receipt.submittedIdentity?.addressLine1 || '—'}</span>
                   </div>
-                  <div>
-                    <span className="text-ink-muted block text-[11px]">Right to Work (UK)</span>
-                    <span className="font-medium text-ink">
-                      {receipt.identity.rightToWorkUk === true ? 'Yes' : receipt.identity.rightToWorkUk === false ? 'No' : '—'}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-ink-muted block text-[11px]">Requires Visa Sponsorship</span>
-                    <span className="font-medium text-ink">
-                      {receipt.identity.requiresVisaSponsorship === true ? 'Yes' : receipt.identity.requiresVisaSponsorship === false ? 'No' : '—'}
-                    </span>
+                  <div className="sm:col-span-2">
+                    <span className="text-ink-muted block text-[11px]">LinkedIn</span>
+                    <span className="font-medium text-ink break-all">{receipt.submittedIdentity?.linkedIn || '—'}</span>
                   </div>
                 </div>
               </div>
 
               {/* Submitted Questionnaire Answers */}
-              {receipt.answers && receipt.answers.length > 0 && (
+              {receipt.submittedAnswers && receipt.submittedAnswers.length > 0 && (
                 <div className="rounded-xl border border-line bg-surface p-4 space-y-3">
                   <div className="flex items-center justify-between border-b border-line pb-2">
                     <h3 className="text-xs font-bold uppercase tracking-wider text-ink-muted">
-                      Questionnaire &amp; Custom Answers ({receipt.answers.length})
+                      Questionnaire &amp; Custom Answers ({receipt.submittedAnswers.length})
                     </h3>
                     <span className="text-[11px] text-ink-faint">Exact answers delivered</span>
                   </div>
                   <div className="space-y-2.5">
-                    {receipt.answers.map((ans, idx) => (
+                    {receipt.submittedAnswers.map((ans, idx) => (
                       <div key={idx} className="rounded-lg bg-surface-sunken p-3 text-xs border border-line">
-                        <p className="font-semibold text-ink">{ans.questionText || ans.key}</p>
-                        <p className="mt-1 text-ink-soft whitespace-pre-wrap">{ans.answerText}</p>
+                        <p className="font-semibold text-ink">{ans.question}</p>
+                        <p className="mt-1 text-ink-soft whitespace-pre-wrap">{ans.answer}</p>
                       </div>
                     ))}
                   </div>
@@ -430,13 +540,13 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                   <div>
                     <span className="text-ink-muted block text-[11px]">Idempotency Key</span>
                     <span className="font-mono text-ink-soft text-[11px] truncate block select-all">
-                      {receipt.idempotencyKey}
+                      {receipt.idempotencyKey || '—'}
                     </span>
                   </div>
                   <div>
-                    <span className="text-ink-muted block text-[11px]">Attempt ID</span>
+                    <span className="text-ink-muted block text-[11px]">Receipt / Attempt ID</span>
                     <span className="font-mono text-ink-soft text-[11px] truncate block select-all">
-                      {receipt.attemptId}
+                      {receipt.receiptId || '—'}
                     </span>
                   </div>
                   {receipt.applicationUrl && (
@@ -452,13 +562,7 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                       </a>
                     </div>
                   )}
-                  {receipt.confirmation.pageTitle && (
-                    <div className="sm:col-span-2">
-                      <span className="text-ink-muted block text-[11px]">Observed Page Title</span>
-                      <span className="font-medium text-ink">{receipt.confirmation.pageTitle}</span>
-                    </div>
-                  )}
-                  {receipt.confirmation.observedSignals && receipt.confirmation.observedSignals.length > 0 && (
+                  {receipt.confirmation?.observedSignals && receipt.confirmation.observedSignals.length > 0 && (
                     <div className="sm:col-span-2">
                       <span className="text-ink-muted block text-[11px]">Observed Confirmation Signals</span>
                       <div className="mt-1 flex flex-wrap gap-1">
@@ -479,24 +583,29 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
                   <h3 className="text-xs font-bold uppercase tracking-wider text-ink-muted">
                     Candidate Authorization &amp; Audit Trail
                   </h3>
-                  <StatusPill tone={receipt.authorization.authorized ? 'emerald' : 'amber'}>
-                    {receipt.authorization.authorized ? 'Authorized' : 'Unconfirmed'}
+                  <StatusPill tone={receipt.authorization?.approved ? 'emerald' : 'amber'}>
+                    {receipt.authorization?.approved ? 'Authorized' : 'Unconfirmed'}
                   </StatusPill>
                 </div>
                 <div className="text-xs text-ink-soft space-y-1">
                   <p>
                     <span className="font-medium text-ink">Authorized by:</span>{' '}
-                    {receipt.authorization.authorizedBy || 'Candidate (via Robin Web Application)'}
+                    {receipt.authorization?.actor || 'Candidate (via Robin Web Application)'}
                   </p>
-                  {receipt.authorization.authorizedAt && (
+                  {receipt.authorization?.policy && (
+                    <p>
+                      <span className="font-medium text-ink">Policy:</span>{' '}
+                      <span className="font-mono">{receipt.authorization.policy}</span>
+                    </p>
+                  )}
+                  {receipt.authorization?.approvedAt && (
                     <p>
                       <span className="font-medium text-ink">Timestamp:</span>{' '}
-                      {new Date(receipt.authorization.authorizedAt).toLocaleString()}
+                      {new Date(receipt.authorization.approvedAt).toLocaleString()}
                     </p>
                   )}
                   <p className="text-[11px] text-ink-faint mt-1">
-                    {receipt.authorization.consentSummary ||
-                      'Explicit candidate consent was verified before dispatching automation payload to the employer portal.'}
+                    Explicit candidate consent was verified before dispatching automation payload to the employer portal.
                   </p>
                 </div>
               </div>
@@ -513,7 +622,7 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
             {receipt && (
               <SecondaryButton
                 onClick={() => {
-                  const summary = `Submission Receipt\nCompany: ${receipt.companyName}\nJob: ${receipt.jobTitle}\nReceipt ID: ${receipt.receiptId}\nStatus: ${receipt.status}\nCV SHA-256: ${receipt.documents.cvSha256 || 'N/A'}\nConfirmation: ${receipt.confirmation.confirmationNumber || receipt.confirmation.receiptToken || 'N/A'}`;
+                  const summary = `Submission Receipt\nCompany: ${companyName || receipt.company || 'N/A'}\nJob: ${jobTitle || receipt.jobTitle || 'N/A'}\nReceipt ID: ${receipt.receiptId ?? 'N/A'}\nStatus: ${receipt.status}\nCV SHA-256: ${receipt.cv?.sha256 || 'N/A'}\nConfirmation: ${isConfirmedProof ? (receipt.confirmation?.confirmationId || 'Confirmed') : 'UNCONFIRMED'}`;
                   copyToClipboard(summary, 'all');
                 }}
               >
@@ -527,3 +636,47 @@ export const SubmissionReceiptModal: React.FC<SubmissionReceiptModalProps> = ({
     </div>
   );
 };
+
+/**
+ * Stage 3I Phase 2: what the browser evidence shows about one document. A browser can see that a file
+ * was attached and that a file part was sent, never the bytes the employer received — so no label here
+ * says "uploaded" or "received", and none is green.
+ */
+const UploadProof: React.FC<{ receipt: SubmissionReceipt; kind: 'cv' | 'coverLetter' }> = ({ receipt, kind }) => {
+  const doc = receipt.browserEvidence?.documents?.find((d) => d.kind === kind);
+  if (!doc) return null;
+  const tone = doc.uploadVerification === 'FILE_PART_OBSERVED' ? 'sky'
+    : doc.uploadVerification === 'NOT_RECORDED' || doc.uploadVerification === 'NO_FIELD' ? 'slate' : 'amber';
+  const label = {
+    FILE_PART_OBSERVED: 'Included in the submitted form',
+    ATTACHED_NOT_CONFIRMED: 'Attached — inclusion not confirmed',
+    NOT_ATTACHED: 'Not attached',
+    NO_FIELD: 'No field on the form',
+    NOT_RECORDED: 'Upload proof not recorded',
+  }[doc.uploadVerification] ?? 'Upload proof unknown';
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2" data-testid={`upload-proof-${kind}`}>
+      <StatusPill tone={tone}>{label}</StatusPill>
+      <span className="text-[11px] text-ink-muted">{doc.label}</span>
+    </div>
+  );
+};
+
+const BrowserEvidenceBlock: React.FC<{ evidence: BrowserEvidenceView }> = ({ evidence }) => (
+  <div className="mt-3 rounded-lg border border-line bg-surface-sunken p-3 text-xs" data-testid="browser-evidence">
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="font-semibold text-ink">Browser evidence</span>
+      <StatusPill tone={evidence.browserObserved ? 'amber' : 'red'}>
+        {evidence.browserObserved ? 'Browser-observed — not employer verified' : 'Browser evidence failed its checks'}
+      </StatusPill>
+      <span className="text-ink-faint">{evidence.schemaVersion ?? 'schema not recorded'}</span>
+    </div>
+    <p className="mt-1 text-ink-muted">{evidence.assessmentReason}</p>
+    {evidence.redirectChain.length > 0 && (
+      <p className="mt-1 text-ink-muted">
+        Pages seen during submission: {evidence.redirectChain.map((h) => `${h.host ?? 'unknown host'} (${h.status ?? '—'})`).join(' → ')}
+        {evidence.finalOrigin ? ` · confirmation page on ${evidence.finalOrigin}` : ''}
+      </p>
+    )}
+  </div>
+);

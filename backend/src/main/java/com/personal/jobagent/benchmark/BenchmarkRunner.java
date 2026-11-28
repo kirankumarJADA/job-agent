@@ -1,11 +1,14 @@
 package com.personal.jobagent.benchmark;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.personal.jobagent.common.SchedulerDatabaseGuard;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.llm.LlmCompletionRequest;
 import com.personal.jobagent.llm.ModelRouter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
@@ -37,6 +40,9 @@ public class BenchmarkRunner {
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
 
+    @Autowired(required = false)
+    private SchedulerDatabaseGuard databaseGuard;
+
     public BenchmarkRunner(SuiteLoader suiteLoader, ModelRouter modelRouter,
                             JdbcTemplate jdbcTemplate, ObjectMapper objectMapper) {
         this.suiteLoader = suiteLoader;
@@ -47,22 +53,41 @@ public class BenchmarkRunner {
 
     @Async
     public void runAsync(UUID runId, String suiteRef, List<String> modelKeys) {
+        if (databaseGuard != null && !databaseGuard.isReady()) {
+            log.debug("Skipping benchmark run {}: database guard is not ready", runId);
+            return;
+        }
         try {
             List<BenchmarkCase> cases = suiteLoader.load(suiteRef);
             int caseIndex = 0;
             for (BenchmarkCase testCase : cases) {
                 for (String modelKey : modelKeys) {
+                    if (databaseGuard != null && !databaseGuard.isReady()) {
+                        log.debug("Aborting benchmark run {}: database guard became unavailable", runId);
+                        return;
+                    }
                     runOneCase(runId, testCase, modelKey, caseIndex);
                 }
                 caseIndex++;
             }
+            if (databaseGuard != null && !databaseGuard.isReady()) {
+                return;
+            }
             jdbcTemplate.update(
                     "update model_benchmark_runs set status = 'COMPLETED', finished_at = now() where id = ?", runId);
         } catch (Exception e) {
+            if (databaseGuard != null && !databaseGuard.isReady()) {
+                log.debug("Suppressing benchmark failure update for {} during shutdown: {}", runId, e.getClass().getSimpleName());
+                return;
+            }
             log.error("Benchmark run {} failed: {}", runId, e.getMessage(), e);
-            jdbcTemplate.update(
-                    "update model_benchmark_runs set status = 'FAILED', finished_at = now(), notes = ? where id = ?",
-                    e.getMessage(), runId);
+            try {
+                jdbcTemplate.update(
+                        "update model_benchmark_runs set status = 'FAILED', finished_at = now(), notes = ? where id = ?",
+                        e.getMessage(), runId);
+            } catch (DataAccessException dbErr) {
+                log.warn("Could not persist FAILED status for benchmark run {}: {}", runId, dbErr.getMessage());
+            }
         }
     }
 

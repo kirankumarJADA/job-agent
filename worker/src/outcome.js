@@ -62,12 +62,78 @@ function reconciliationResult(planType, submitResult) {
   }];
 }
 
+/**
+ * Sprint 2.2.1: the structured evidence a confirmed real submission reports.
+ * The backend refuses to record SUBMITTED without exactly one such entry
+ * (category CONFIRMED, confirmed true, non-blank evidence) and moves the
+ * attempt to RECONCILIATION_REQUIRED instead. Only fields the worker actually
+ * observed are included: a confirmation number, signals or raw DOM evidence
+ * are sent when the submit step captured them, and are otherwise omitted —
+ * never invented. Provenance, sandbox and approval status are deliberately
+ * NOT sent: the backend derives all three from its own records.
+ */
+function submissionEvidenceResult(planType, submitResult) {
+  const entry = {
+    type: 'SUBMISSION_EVIDENCE',
+    planType,
+    category: 'CONFIRMED',
+    confirmed: true,
+    evidence: String(submitResult.evidence ?? ''),
+  };
+  if (typeof submitResult.confirmationNumber === 'string' && submitResult.confirmationNumber.trim()) {
+    entry.confirmationNumber = submitResult.confirmationNumber.trim();
+  }
+  if (Array.isArray(submitResult.signals) && submitResult.signals.length > 0) {
+    entry.signals = submitResult.signals.map((s) => String(s)).filter((s) => s.trim().length > 0);
+  }
+  if (typeof submitResult.rawEvidence === 'string' && submitResult.rawEvidence.trim()) {
+    entry.rawEvidence = submitResult.rawEvidence;
+  }
+  return [entry];
+}
+
+function authorizationRefusedOutcome(planType, submitResult) {
+  const code = typeof submitResult?.authorizationCode === 'string' && submitResult.authorizationCode.trim()
+    ? submitResult.authorizationCode.trim()
+    : (typeof submitResult?.category === 'string' && submitResult.category.trim()
+        ? submitResult.category.trim()
+        : 'PRE_SUBMIT_AUTHORIZATION_REFUSED');
+  const evidence = submitResult?.evidence ?? 'pre-submit authorization was refused before clicking submit';
+  return {
+    outcome: 'HUMAN_REQUIRED',
+    detail: `Pre-submit authorization refused before any browser click [${code}]: ${evidence}`,
+    result: [{
+      type: 'AUTHORIZATION_REFUSED',
+      planType,
+      category: code,
+      code,
+      authorizationDenied: true,
+      clicked: false,
+      evidence,
+    }],
+  };
+}
+
+function isPreFenceWithdrawalOrDenial(submitResult) {
+  if (!submitResult || submitResult.confirmed || submitResult.clicked === true) {
+    return false;
+  }
+  if (submitResult.authorizationDenied !== true) {
+    return false;
+  }
+  const code = submitResult.authorizationCode ?? submitResult.category;
+  return code !== 'DUPLICATE_PRE_SUBMIT_ATTEMPT' && code !== 'PRIOR_ATTEMPT_UNVERIFIED';
+}
+
 export function computePlanOutcome(plan, runResult) {
   const isSubmitAttempt = plan.planType === 'GREENHOUSE' && plan.steps.at(-1)?.type === 'REAL_SUBMIT_CLICK';
   if (isSubmitAttempt) {
     const submitResult = runResult.submitResult;
     if (submitResult?.confirmed) {
-      return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: null };
+      return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: submissionEvidenceResult('GREENHOUSE', submitResult) };
+    }
+    if (isPreFenceWithdrawalOrDenial(submitResult)) {
+      return authorizationRefusedOutcome('GREENHOUSE', submitResult);
     }
     // Phase 15: never HUMAN_REQUIRED (which the backend's own precondition
     // now treats as a plain, re-approvable preparation outcome) — a real
@@ -90,7 +156,10 @@ export function computePlanOutcome(plan, runResult) {
   if (isAshbySubmitAttempt) {
     const submitResult = runResult.ashbySubmitResult;
     if (submitResult?.confirmed) {
-      return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: null };
+      return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: submissionEvidenceResult('ASHBY', submitResult) };
+    }
+    if (isPreFenceWithdrawalOrDenial(submitResult)) {
+      return authorizationRefusedOutcome('ASHBY', submitResult);
     }
     // Phase 15: same reasoning as the GREENHOUSE branch above.
     return {
@@ -105,13 +174,65 @@ export function computePlanOutcome(plan, runResult) {
   if (isWorkdaySubmitAttempt) {
     const submitResult = runResult.workdaySubmitResult;
     if (submitResult?.confirmed) {
-      return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: null };
+      return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: submissionEvidenceResult('WORKDAY', submitResult) };
+    }
+    if (isPreFenceWithdrawalOrDenial(submitResult)) {
+      return authorizationRefusedOutcome('WORKDAY', submitResult);
     }
     return {
       outcome: 'RECONCILIATION_REQUIRED',
       detail: `Submit click completed but was not confirmed [${submitResult?.category ?? 'UNKNOWN'}]: ${submitResult?.evidence
         ?? 'no result was recorded'}; this cannot be retried automatically — human reconciliation is required.`,
       result: reconciliationResult('WORKDAY', submitResult),
+    };
+  }
+  // Stage 3B: Universal browser engine guarded submission & preparation outcomes
+  const isUniversalSubmitAttempt = plan.planType === 'UNIVERSAL' && plan.steps.at(-1)?.type === 'UNIVERSAL_SUBMIT_CLICK';
+  if (isUniversalSubmitAttempt) {
+    const submitResult = runResult.universalSubmitResult;
+    if (submitResult?.confirmed) {
+      return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: submissionEvidenceResult('UNIVERSAL', submitResult) };
+    }
+    if (isPreFenceWithdrawalOrDenial(submitResult)) {
+      return authorizationRefusedOutcome('UNIVERSAL', submitResult);
+    }
+    return {
+      outcome: 'RECONCILIATION_REQUIRED',
+      detail: `Submit click completed but was not confirmed [${submitResult?.category ?? 'UNKNOWN'}]: ${submitResult?.evidence
+        ?? 'no result was recorded'}; this cannot be retried automatically — human reconciliation is required.`,
+      result: reconciliationResult('UNIVERSAL', submitResult),
+    };
+  }
+  if (plan.planType === 'UNIVERSAL') {
+    const univ = runResult.universalResult ?? {};
+    const filledCount = (univ.filled ?? []).length;
+    const gapCount = (univ.requiredGaps ?? []).length;
+    const resumeState = univ.resumeUploadState ?? 'NO_FIELD';
+    const note = gapCount > 0
+      ? `${gapCount} mandatory question(s) need candidate input before continuing.`
+      : 'form preparation ready for candidate review and approval.';
+    return {
+      outcome: 'HUMAN_REQUIRED',
+      detail: `Universal form preparation finished: ${filledCount} field(s) filled, ${resumeState} CV upload; ${note}`,
+      result: [{
+        type: 'UNIVERSAL_OUTCOME',
+        planType: 'UNIVERSAL',
+        filled: univ.filled ?? [],
+        requiredGaps: univ.requiredGaps ?? [],
+        skippedOptional: univ.skippedOptional ?? [],
+        unsupported: univ.unsupported ?? [],
+        resumeUploadState: resumeState,
+        coverLetterUploadState: univ.coverLetterUploadState ?? 'NO_FIELD',
+        currentUrl: univ.currentUrl ?? plan.targetUrl,
+        pageIndex: univ.pageIndex ?? 1,
+        completedPages: univ.completedPages ?? [],
+        blockedResources: univ.blockedResources ?? [],
+        closedShadowHosts: univ.closedShadowHosts ?? [],
+        validationErrors: univ.validationErrors ?? [],
+        loginSucceeded: Boolean(univ.loginSucceeded),
+        signupSucceeded: Boolean(univ.signupSucceeded),
+        emailVerified: Boolean(univ.emailVerified),
+      }],
     };
   }
   if (plan.planType === 'ASHBY') {

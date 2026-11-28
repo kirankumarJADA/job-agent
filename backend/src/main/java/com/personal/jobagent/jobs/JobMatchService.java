@@ -487,7 +487,9 @@ public class JobMatchService {
     private CategoryScore computeVisaCategory(JobRecord job, String sponsorshipPolicy,
                                               Map<String, Integer> weights) {
         int weight = weights.get("visa");
-        if (sponsorshipPolicy == null || sponsorshipPolicy.isBlank() || !"REQUIRED".equalsIgnoreCase(sponsorshipPolicy)) {
+        if (sponsorshipPolicy == null || sponsorshipPolicy.isBlank()
+                || (!"REQUIRED".equalsIgnoreCase(sponsorshipPolicy)
+                    && !"SPONSORSHIP_REQUIRED".equalsIgnoreCase(sponsorshipPolicy))) {
             return CategoryScore.notApplicable("visa", weight);
         }
         List<Map<String, Object>> rows = jdbcTemplate.queryForList("""

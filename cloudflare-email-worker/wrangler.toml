@@ -14,6 +14,9 @@ addresses = ["robin@mail.aplivenosi.com"]
 ROBIN_BACKEND_URL = "https://job-agent-mwhu.onrender.com"
 ROBIN_INBOUND_PATH = "/api/v1/managed-mail/inbound/cloudflare"
 MAX_EMAIL_BYTES = 10485760
+# Fail-closed by default: must match backend `app.managed-mail.cloudflare.trusted-authserv-ids`
+# (e.g., "mx.cloudflare.net") only when Cloudflare Email Routing receiver checks are intentionally enabled.
+TRUSTED_AUTHSERV_IDS = ""
 
 # Secrets required (configure via `wrangler secret put`):
 # CLOUDFLARE_EMAIL_WORKER_SECRET

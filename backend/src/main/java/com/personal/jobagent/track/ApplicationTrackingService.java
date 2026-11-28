@@ -5,7 +5,9 @@ import com.personal.jobagent.audit.AuditEntry;
 import com.personal.jobagent.audit.AuditLogWriter;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.gmail.GmailConnectionStore;
+import com.personal.jobagent.mailbox.managed.ManagedMailboxService;
 import com.personal.jobagent.security.OwnerContext;
+import org.springframework.beans.factory.annotation.Autowired;
 import com.personal.jobagent.track.ReceiptVerificationPolicy.SenderAuthentication;
 import com.personal.jobagent.track.TrackEvidenceRecorder.IdentityFacts;
 import com.personal.jobagent.track.TrackEvidenceRecorder.MessageFacts;
@@ -88,32 +90,71 @@ public class ApplicationTrackingService {
     private final OwnerContext ownerContext;
     private final TrackTimelineMapper timelineMapper;
     private final GmailConnectionStore gmailConnections;
+    private final ManagedMailboxService managedMailboxes;
     private final ApplicationReconciler reconciler = new ApplicationReconciler();
     private final ReceiptVerificationPolicy policy = new ReceiptVerificationPolicy();
 
+    @Autowired
     public ApplicationTrackingService(TrackRepository repository, TrackEvidenceRecorder recorder, AuditLogWriter audit,
                                       OwnerContext ownerContext, ObjectMapper json,
-                                      GmailConnectionStore gmailConnections) {
+                                      GmailConnectionStore gmailConnections,
+                                      @Autowired(required = false) ManagedMailboxService managedMailboxes) {
         this.repository = repository;
         this.recorder = recorder;
         this.audit = audit;
         this.ownerContext = ownerContext;
         this.timelineMapper = new TrackTimelineMapper(json);
         this.gmailConnections = gmailConnections;
+        this.managedMailboxes = managedMailboxes;
+    }
+
+    public ApplicationTrackingService(TrackRepository repository, TrackEvidenceRecorder recorder, AuditLogWriter audit,
+                                      OwnerContext ownerContext, ObjectMapper json,
+                                      GmailConnectionStore gmailConnections) {
+        this(repository, recorder, audit, ownerContext, json, gmailConnections, null);
     }
 
     /**
-     * True when the signed-in candidate has an active Gmail connection
-     * (Phase 8.4). The reconciler only treats MAILBOX_CONNECTOR evidence as
-     * verifiable when this is backed by a real, connected mailbox.
+     * True when the signed-in candidate has an active Gmail connection or an
+     * active, domain-configured Robin-managed inbound address. The reconciler only
+     * treats MAILBOX_CONNECTOR evidence as verifiable when backed by a connected mailbox.
      */
     public boolean mailboxConnected() {
         try {
             UUID profileId = ownerContext.profileIdOrNull();
             if (profileId == null) return false;
-            return gmailConnections.find(profileId)
+            return gmailActive(profileId) || managedMailboxActive(profileId);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean gmailActive(UUID profileId) {
+        try {
+            return gmailConnections != null && gmailConnections.find(profileId)
                     .map(GmailConnectionStore.Connection::active)
                     .orElse(false);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean managedMailboxActive(UUID profileId) {
+        try {
+            if (managedMailboxes == null) return false;
+            ManagedMailboxService.Status status = managedMailboxes.status(profileId);
+            if (status == null || status.readiness() != ManagedMailboxService.Readiness.ACTIVE
+                    || !status.usableForRegistration()) {
+                return false;
+            }
+            if (status.domain() == null || status.domain().isBlank()) {
+                return false;
+            }
+            ManagedMailboxService.ManagedAddress addr = status.address();
+            return addr != null
+                    && profileId.equals(addr.profileId())
+                    && status.domain().equalsIgnoreCase(addr.domain())
+                    && "ACTIVE".equalsIgnoreCase(addr.status());
         } catch (Exception e) {
             return false;
         }
@@ -132,19 +173,38 @@ public class ApplicationTrackingService {
         out.put("applicationId", applicationId.toString());
         out.put("availability", "AVAILABLE");
         out.put("application", applicationMap(header));
-        out.put("receipts", repository.receipts(profileId, applicationId).stream().map(this::receiptMap).toList());
+        Map<UUID, TrackRepository.ReceiptLinkRow> currentLinks = new LinkedHashMap<>();
+        for (TrackRepository.ReceiptLinkRow link : repository.receiptLinks(profileId, applicationId)) {
+            if (link.current()) currentLinks.put(link.receiptId(), link);
+        }
+        out.put("receipts", repository.receipts(profileId, applicationId).stream()
+                .map(r -> receiptMap(r, currentLinks.get(r.id()))).toList());
+        out.put("submissionEvidence", submissionEvidenceMap(parts.submissions().get(applicationId), parts.anchorFor(applicationId)));
         List<LinkRow> concerning = repository.reviewQueue(profileId, 200).stream()
                 .filter(l -> applicationId.equals(l.applicationId()) || candidateIds(l).contains(applicationId))
                 .toList();
         out.put("reviews", reviewMaps(profileId, concerning));
-        out.put("mailbox", Map.of("connected", mailboxConnected(),
-                "note", mailboxConnected()
-                        ? "Connected to your Gmail account. Robin reads new employer messages read-only; they are "
-                          + "classified and verified under the same policy as everything else."
-                        : "Robin cannot read your mailbox: no mailbox connection exists in this version. Add employer "
-                          + "messages yourself; they are recorded as added by you and cannot be verified."));
+        boolean gmailConnected = gmailActive(profileId);
+        boolean managedConnected = managedMailboxActive(profileId);
+        boolean anyMailboxConnected = gmailConnected || managedConnected;
+        String mailboxNote;
+        if (gmailConnected && managedConnected) {
+            mailboxNote = "Connected to your Gmail account and Robin-managed mailbox. Employer messages "
+                    + "delivered there are classified and verified under the same policy.";
+        } else if (gmailConnected) {
+            mailboxNote = "Connected to your Gmail account. Robin reads new employer messages read-only; they are "
+                    + "classified and verified under the same policy as everything else.";
+        } else if (managedConnected) {
+            mailboxNote = "Connected to your Robin-managed inbound mailbox. Employer messages delivered there "
+                    + "are classified and verified under the same policy as everything else.";
+        } else {
+            mailboxNote = "Robin cannot read your mailbox: no mailbox connection exists in this version. Add employer "
+                    + "messages yourself; they are recorded as added by you and cannot be verified.";
+        }
+        out.put("mailbox", Map.of("connected", anyMailboxConnected, "note", mailboxNote));
         out.put("versions", Map.of("reconciler", ApplicationReconciler.VERSION, "receiptPolicy", ReceiptVerificationPolicy.VERSION,
-                "classifier", TrackEmailClassifier.VERSION, "matcher", EmailApplicationMatcher.VERSION));
+                "classifier", TrackEmailClassifier.VERSION, "matcher", EmailApplicationMatcher.VERSION,
+                "temporalPolicy", ReceiptTemporalPolicy.VERSION, "referencePolicy", SubmissionReferencePolicy.VERSION));
         out.put("threads", repository.threadsForApplication(profileId, applicationId));
 
         Instant createdAt = header.createdAt();
@@ -171,6 +231,10 @@ public class ApplicationTrackingService {
             followUp.put("status", "NONE");
         }
         out.put("followUp", followUp);
+        out.put("reconciliationScope", mapOf(
+                "employerStatusSource", "EMAIL_AND_RECEIPT_ONLY",
+                "employerPortalPollingSupported", false,
+                "note", "Employer lifecycle progression (acknowledgement, interview, rejection, offer) is reconciled solely from linked employer emails and verified submission receipts; Robin does not poll external employer portals automatically."));
         out.put("computedAt", Instant.now().toString());
         return Optional.of(out);
     }
@@ -204,6 +268,8 @@ public class ApplicationTrackingService {
             summary.put("label", state.label());
             summary.put("basis", state.basis() == null ? null : state.basis().name());
             summary.put("submission", state.submission().state().name());
+            summary.put("submissionLevel", state.submission().verificationLevel());
+            summary.put("sandbox", state.submission().sandbox());
             summary.put("needsReview", state.needsReview());
             summary.put("attentionCount", state.attention().size() + state.conflicts().size());
             summary.put("pending", state.pending() == null ? null : state.pending().label());
@@ -297,10 +363,15 @@ public class ApplicationTrackingService {
             ReceiptVerificationPolicy.Outcome outcome = policy.evaluate(new ReceiptVerificationPolicy.Evidence(
                     EvidenceType.CANDIDATE_STATEMENT, Channel.CANDIDATE_ENTERED, false, false, false, null,
                     SenderAuthentication.none(), false, eventTime, Instant.now()));
+            String statementFingerprint = TrackText.sha256("STATEMENT|" + eventKey);
             receiptId = repository.insertReceipt(new ReceiptWrite(profileId, applicationId, EvidenceType.CANDIDATE_STATEMENT,
                     Channel.CANDIDATE_ENTERED, null, null, null, null, eventTime, precision,
-                    TrackText.sha256("STATEMENT|" + eventKey), outcome.status(), outcome.reasons(),
+                    statementFingerprint, outcome.status(), outcome.reasons(),
                     "Your statement that you submitted this application — not verified", List.of())).orElse(null);
+            if (receiptId != null) {
+                recorder.recordCandidateStatementLink(profileId, applicationId, receiptId, statementFingerprint,
+                        eventTime, precision, actor());
+            }
         }
 
         Map<String, Object> payload = new LinkedHashMap<>();
@@ -340,6 +411,7 @@ public class ApplicationTrackingService {
             throw new TrackConflictException("This evidence was reviewed in the meantime. Reload and try again.");
         }
         appendReceiptReview(profileId, applicationId, receipt, value, receipt.reviewVersion() + 1);
+        recorder.recordReceiptReview(profileId, applicationId, receiptId, value, actor());
         audit.write(new AuditEntry(actor(), "TRACK_RECEIPT_REVIEWED", "APPLICATION", applicationId,
                 mapOf("receiptId", receiptId.toString(), "candidateReview", nullToEmpty(receipt.candidateReview())),
                 mapOf("receiptId", receiptId.toString(), "candidateReview", value,
@@ -456,6 +528,7 @@ public class ApplicationTrackingService {
             if (repository.reviewReceipt(profileId, applicationId, receipt.id(), receipt.reviewVersion(), "REJECTED",
                     "The message was removed from this application")) {
                 appendReceiptReview(profileId, applicationId, receipt, "REJECTED", receipt.reviewVersion() + 1);
+                recorder.recordReceiptReview(profileId, applicationId, receipt.id(), "REJECTED", actor());
             }
         }
     }
@@ -477,7 +550,9 @@ public class ApplicationTrackingService {
                 parts.preparation().getOrDefault(id, TrackModels.Preparation.none()), parts.plans().get(id),
                 parts.statusChanges().getOrDefault(id, List.of()), parts.reports().getOrDefault(id, List.of()),
                 parts.receipts().getOrDefault(id, List.of()), parts.messages().getOrDefault(id, List.of()),
-                mailboxConnected(), Instant.now());
+                mailboxConnected(), Instant.now(), parts.submissions().get(id), parts.anchorFor(id),
+                parts.disqualifiedReferences().getOrDefault(id, Set.of()),
+                parts.foreignReferences().getOrDefault(id, Set.of()));
     }
 
     private Map<String, Object> stateMap(TrackState state) {
@@ -495,7 +570,8 @@ public class ApplicationTrackingService {
         out.put("recordedStatus", state.recordedStatus());
         out.put("recordedStatusLabel", state.recordedStatusLabel());
         out.put("submission", mapOf("state", state.submission().state().name(), "label", state.submission().label(),
-                "reason", state.submission().reason()));
+                "reason", state.submission().reason(), "verificationLevel", state.submission().verificationLevel(),
+                "sandbox", state.submission().sandbox()));
         out.put("acknowledgement", mapOf("state", state.acknowledgement().state().name(),
                 "label", state.acknowledgement().label()));
         out.put("communications", mapOf("linkedMessages", state.communications().linkedMessages(),
@@ -507,9 +583,60 @@ public class ApplicationTrackingService {
                 "emailId", a.emailId() == null ? null : a.emailId().toString(),
                 "receiptId", a.receiptId() == null ? null : a.receiptId().toString())).toList());
         out.put("unknowns", state.unknowns());
-        out.put("conflicts", state.conflicts().stream().map(c -> mapOf("code", c.code(), "message", c.message())).toList());
+        out.put("conflicts", state.conflicts().stream().map(c -> mapOf("code", c.code(), "message", c.message(),
+                "references", c.references())).toList());
         out.put("needsReview", state.needsReview());
         out.put("robinSubmission", mapOf("submitted", state.robinSubmitted(), "note", state.robinSubmissionNote()));
+        return out;
+    }
+
+    /**
+     * Robin's own submission record for the API: where it came from and when, never presented as employer
+     * verification. {@code recorded = false} when Robin holds no submission evidence for the application;
+     * the anchor is reported either way.
+     */
+    private static Map<String, Object> submissionEvidenceMap(TrackModels.SubmissionFacts facts,
+                                                             ReceiptTemporalPolicy.SubmissionAnchor anchor) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("anchor", anchor == null || !anchor.present() ? null : mapOf(
+                "source", anchor.source().name(),
+                "at", anchor.precision() == TimePrecision.DATE
+                        ? LocalDate.ofInstant(anchor.time(), ZoneOffset.UTC).toString() : anchor.time().toString(),
+                "precision", anchor.precision().name(),
+                "clockSkewSeconds", ReceiptTemporalPolicy.CLOCK_SKEW.toSeconds()));
+        if (facts == null) {
+            out.put("recorded", false);
+            return out;
+        }
+        out.put("recorded", true);
+        out.put("source", "AUTHENTICATED_WORKER_BROWSER_OBSERVATION");
+        out.put("recordedAt", facts.recordedAt() == null ? null : facts.recordedAt().toString());
+        out.put("recordedAtSource", "SERVER_CLOCK");
+        out.put("atsPlatform", facts.atsPlatform());
+        out.put("browserObserved", facts.browserObserved());
+        out.put("sandboxVerified", facts.sandboxVerified());
+        out.put("employerVerified", false);
+        out.put("schema", facts.schemaKind());
+        out.put("observation", facts.observationCode());
+        out.put("confirmationReference", facts.referenceTrusted() ? facts.employerConfirmationId() : null);
+        out.put("documentsWithoutUploadProof", facts.documentsWithoutUploadProof());
+        return out;
+    }
+
+    private Map<String, Object> receiptMap(ReceiptRow r, TrackRepository.ReceiptLinkRow link) {
+        Map<String, Object> out = receiptMap(r);
+        out.put("evidenceAtSource", ReceiptTemporalPolicy.sourceFor(r.channel(), r.evidenceTime(), r.precision()).name());
+        out.put("link", link == null ? null : mapOf(
+                "decision", link.decision(),
+                "origin", link.origin(),
+                "referenceConsistency", link.referenceConsistency(),
+                "referenceDetail", link.referenceDetail(),
+                "submissionReference", link.submissionReference(),
+                "temporalStatus", link.temporalStatus(),
+                "anchorSource", link.anchorSource(),
+                "anchorAt", link.anchorTime() == null ? null : link.anchorTime().toString(),
+                "linkedAt", link.linkedAt() == null ? null : link.linkedAt().toString(),
+                "policyVersion", link.policyVersion()));
         return out;
     }
 

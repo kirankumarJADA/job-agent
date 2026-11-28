@@ -44,6 +44,9 @@ public class ExecutionPackageService {
                                    String packageDigest) {}
     public record ArtifactBytes(byte[] content, String sha256, String contentType, String fileName) {}
 
+    /** Stage 3F (Workstream D): the one artifact size ceiling, matching the worker's per-ATS caps. */
+    public static final int MAX_ARTIFACT_BYTES = 10 * 1024 * 1024;
+
     private final JdbcTemplate db;
     private final GreenhouseAdapter greenhouseAdapter;
     private final ApplyDocumentSelector documentSelector;
@@ -118,13 +121,16 @@ public class ExecutionPackageService {
                 join users u on u.id = p.user_id
                 where a.id = ? and a.profile_id = ? and a.job_id = ?
                 """, applicationId, profileId, jobId);
-        List<GreenhouseFieldMapper.Answer> storedAnswers = db.query("""
-                select id, question_text, answer_text, status, human_confirmed from application_answers
-                where application_id = ? and profile_id = ? and job_id = ?
-                order by created_at, id
-                """, (rs, row) -> new GreenhouseFieldMapper.Answer(
-                (UUID) rs.getObject("id"), rs.getString("question_text"),
-                rs.getString("answer_text"), rs.getString("status"), rs.getBoolean("human_confirmed")), applicationId, profileId, jobId);
+        List<GreenhouseFieldMapper.Answer> storedAnswers = deduplicateByApplicationScope(db.query("""
+                select id, application_id, question_text, answer_text, status, human_confirmed from application_answers
+                where profile_id = ? and job_id = ? and (application_id = ? or application_id is null)
+                order by case when application_id = ? then 0 else 1 end, created_at, id
+                """, (rs, row) -> new ScopedAnswerRow(
+                (UUID) rs.getObject("application_id"),
+                new GreenhouseFieldMapper.Answer(
+                        (UUID) rs.getObject("id"), rs.getString("question_text"),
+                        rs.getString("answer_text"), rs.getString("status"), rs.getBoolean("human_confirmed"))),
+                profileId, jobId, applicationId, applicationId));
 
         // The exact selected documents (ApplyDocumentSelector has proven
         // ownership, review/approval, current validation and integrity).
@@ -322,14 +328,16 @@ public class ExecutionPackageService {
     public boolean answersStillCurrent(UUID profileId, UUID applicationId, UUID jobId,
                                        List<Map<String, Object>> packagedAnswers) {
         if (packagedAnswers == null || packagedAnswers.isEmpty()) return true;
-        List<GreenhouseFieldMapper.Answer> current = db.query("""
-                select id, question_text, answer_text, status, human_confirmed from application_answers
-                where application_id = ? and profile_id = ? and job_id = ?
-                order by created_at, id
-                """, (rs, row) -> new GreenhouseFieldMapper.Answer(
-                (UUID) rs.getObject("id"), rs.getString("question_text"),
-                rs.getString("answer_text"), rs.getString("status"), rs.getBoolean("human_confirmed")),
-                applicationId, profileId, jobId);
+        List<GreenhouseFieldMapper.Answer> current = deduplicateByApplicationScope(db.query("""
+                select id, application_id, question_text, answer_text, status, human_confirmed from application_answers
+                where profile_id = ? and job_id = ? and (application_id = ? or application_id is null)
+                order by case when application_id = ? then 0 else 1 end, created_at, id
+                """, (rs, row) -> new ScopedAnswerRow(
+                (UUID) rs.getObject("application_id"),
+                new GreenhouseFieldMapper.Answer(
+                        (UUID) rs.getObject("id"), rs.getString("question_text"),
+                        rs.getString("answer_text"), rs.getString("status"), rs.getBoolean("human_confirmed"))),
+                profileId, jobId, applicationId, applicationId));
         for (Map<String, Object> packaged : packagedAnswers) {
             String question = String.valueOf(packaged.getOrDefault("questionText", ""));
             String answer = String.valueOf(packaged.getOrDefault("answerText", ""));
@@ -347,7 +355,7 @@ public class ExecutionPackageService {
             throw new IllegalArgumentException("artifact correlation and immutable version are required");
         if (!jobId.equals(db.queryForObject("select job_id from applications where id = ? and profile_id = ?", UUID.class, applicationId, profileId)))
             throw new IllegalArgumentException("artifact application/job mismatch");
-        return switch (kind) {
+        ArtifactBytes resolved = switch (kind) {
             case "cv" -> {
                 List<Map<String, Object>> rows = db.queryForList("""
                         select f.content, f.sha256, f.content_type from applications a
@@ -371,8 +379,24 @@ public class ExecutionPackageService {
                 byte[] content = String.valueOf(rows.getFirst().get("body_markdown")).getBytes(StandardCharsets.UTF_8);
                 yield new ArtifactBytes(content, Sha256.of(content), "text/plain; charset=utf-8", "cover-letter-" + versionId + ".txt");
             }
+            case "cover-letter-pdf" -> {
+                // Stage 3F: the letter's immutable rendered PDF, re-verified against its recorded checksum.
+                List<Map<String, Object>> rows = db.queryForList("""
+                        select f.content, f.sha256 from cover_letters c join files f on f.id = c.pdf_file_id
+                        where c.id = ? and c.profile_id = ? and c.job_id = ? and c.application_id = ? and f.content is not null
+                        """, versionId, profileId, jobId, applicationId);
+                if (rows.isEmpty()) yield null;
+                byte[] content = (byte[]) rows.getFirst().get("content");
+                String sha = (String) rows.getFirst().get("sha256");
+                if (content == null || sha == null || !sha.equals(Sha256.of(content))) throw new IllegalStateException("COVER_LETTER_PDF_CHECKSUM_MISMATCH");
+                yield new ArtifactBytes(content, sha, "application/pdf", "cover-letter-" + versionId + ".pdf");
+            }
             default -> throw new IllegalArgumentException("unknown artifact kind");
         };
+        if (resolved != null && resolved.content().length > MAX_ARTIFACT_BYTES) {
+            throw new IllegalStateException("ARTIFACT_TOO_LARGE");
+        }
+        return resolved;
     }
 
     private static boolean uniqueConfirmedQuestion(com.personal.jobagent.ats.AtsAdapter.FormFieldDescriptor field,
@@ -390,6 +414,31 @@ public class ExecutionPackageService {
     private Map<String, Object> readJson(Object value) {
         try { return json.readValue(String.valueOf(value), Map.class); }
         catch (Exception ignored) { return Map.of(); }
+    }
+
+    private record ScopedAnswerRow(UUID applicationId, GreenhouseFieldMapper.Answer answer) {}
+
+    /**
+     * When both an application-specific answer and a job-level ({@code application_id is null})
+     * fallback answer exist for the same normalized question text, prefer the application-specific
+     * row so null-app fallbacks never create false ambiguity, while preserving multiple rows
+     * within the same scope so genuine contradictions still fail closed.
+     */
+    private static List<GreenhouseFieldMapper.Answer> deduplicateByApplicationScope(List<ScopedAnswerRow> rows) {
+        java.util.Set<String> hasAppScoped = new java.util.HashSet<>();
+        for (ScopedAnswerRow row : rows) {
+            if (row.applicationId() != null) {
+                hasAppScoped.add(normalize(row.answer().questionText()));
+            }
+        }
+        List<GreenhouseFieldMapper.Answer> out = new ArrayList<>();
+        for (ScopedAnswerRow row : rows) {
+            if (row.applicationId() == null && hasAppScoped.contains(normalize(row.answer().questionText()))) {
+                continue;
+            }
+            out.add(row.answer());
+        }
+        return out;
     }
 
     private static String normalize(String value) { return value == null ? "" : value.trim().toLowerCase().replaceAll("\\s+", " "); }

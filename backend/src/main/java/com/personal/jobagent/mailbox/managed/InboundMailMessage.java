@@ -1,6 +1,8 @@
 package com.personal.jobagent.mailbox.managed;
 
 import java.util.List;
+import java.util.Locale;
+import java.util.regex.Pattern;
 
 /**
  * One inbound message as delivered by a receiving provider, already parsed,
@@ -27,12 +29,23 @@ import java.util.List;
  *                          In-Reply-To id first, then References newest first.
  *                          Sender-supplied, so only ever a hint that the
  *                          owner-scoped thread lookup can confirm.
+ * @param dkimDomain        verified DKIM signing domain ({@code header.d} / {@code header.i})
+ *                          from a trusted receiver Authentication-Results header, or null.
+ *                          Never derived from the unauthenticated {@code From} header.
+ * @param dmarcResult       DMARC verdict from the same trusted receiver header, or null.
+ * @param authServId        receiver {@code authserv-id} that produced the verdict, or null.
+ * @param authConflict      true when conflicting authentication headers/clauses were detected.
  */
 public record InboundMailMessage(String providerId, String envelopeRecipient, String envelopeSender,
                                  String fromHeader, String fromAddress, String subject, String text,
                                  List<String> links, String messageId, String date,
                                  List<String> spfResults, List<String> dkimResults, List<String> spamFlags,
-                                 List<String> threadReferences) {
+                                 List<String> threadReferences,
+                                 String dkimDomain, String dmarcResult, String authServId, boolean authConflict) {
+
+    private static final Pattern VALID_DOMAIN = Pattern.compile(
+            "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$");
+    private static final Pattern VALID_AUTHSERV = Pattern.compile("^[a-z0-9._-]+$");
 
     public InboundMailMessage {
         links = List.copyOf(links);
@@ -40,6 +53,19 @@ public record InboundMailMessage(String providerId, String envelopeRecipient, St
         dkimResults = List.copyOf(dkimResults);
         spamFlags = List.copyOf(spamFlags);
         threadReferences = threadReferences == null ? List.of() : List.copyOf(threadReferences);
+        dkimDomain = normaliseDomain(dkimDomain);
+        dmarcResult = normaliseToken(dmarcResult);
+        authServId = normaliseAuthServId(authServId);
+    }
+
+    /** Convenience constructor preserving the 14-arg shape without trusted DKIM/DMARC provenance. */
+    public InboundMailMessage(String providerId, String envelopeRecipient, String envelopeSender,
+                              String fromHeader, String fromAddress, String subject, String text,
+                              List<String> links, String messageId, String date,
+                              List<String> spfResults, List<String> dkimResults, List<String> spamFlags,
+                              List<String> threadReferences) {
+        this(providerId, envelopeRecipient, envelopeSender, fromHeader, fromAddress, subject, text, links,
+                messageId, date, spfResults, dkimResults, spamFlags, threadReferences, null, null, null, false);
     }
 
     /** A message from a provider that does not report reply headers. */
@@ -48,7 +74,7 @@ public record InboundMailMessage(String providerId, String envelopeRecipient, St
                               List<String> links, String messageId, String date,
                               List<String> spfResults, List<String> dkimResults, List<String> spamFlags) {
         this(providerId, envelopeRecipient, envelopeSender, fromHeader, fromAddress, subject, text, links,
-                messageId, date, spfResults, dkimResults, spamFlags, List.of());
+                messageId, date, spfResults, dkimResults, spamFlags, List.of(), null, null, null, false);
     }
 
     /** Domain of the From mailbox, or null. */
@@ -57,12 +83,12 @@ public record InboundMailMessage(String providerId, String envelopeRecipient, St
     }
 
     /**
-     * True when the provider reported a failed sender check, or reported
-     * conflicting verdicts (a sender can add its own copy of these headers, so
-     * a disagreement is treated as a failure). A "pass" is never treated as
-     * proof of anything: these headers can only exclude a message.
+     * True when the provider reported a failed sender check, reported conflicting
+     * verdicts across headers, or flagged an authentication conflict.
      */
     public boolean authenticationFailed() {
+        if (authConflict) return true;
+        if ("fail".equals(dmarcResult) || "permerror".equals(dmarcResult)) return true;
         return failedOrConflicting(spfResults) || failedOrConflicting(dkimResults);
     }
 
@@ -70,14 +96,14 @@ public record InboundMailMessage(String providerId, String envelopeRecipient, St
         return spamFlags.stream().anyMatch(flag -> !flag.equals("no"));
     }
 
-    /** The provider's SPF verdict when it reported exactly one, else null. */
+    /** The provider's SPF verdict when it reported a single consistent value and no conflict. */
     public String spfResult() {
-        return single(spfResults);
+        return authConflict ? "fail" : single(spfResults);
     }
 
-    /** The provider's DKIM verdict when it reported exactly one, else null. */
+    /** The provider's DKIM verdict when consistent and not conflicted, else null/fail. */
     public String dkimResult() {
-        return single(dkimResults);
+        return authConflict ? "fail" : single(dkimResults);
     }
 
     private static boolean failedOrConflicting(List<String> values) {
@@ -87,5 +113,27 @@ public record InboundMailMessage(String providerId, String envelopeRecipient, St
 
     private static String single(List<String> values) {
         return values.stream().distinct().count() == 1 ? values.get(0) : null;
+    }
+
+    private static String normaliseDomain(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        String cleaned = raw.trim().toLowerCase(Locale.ROOT);
+        while (cleaned.startsWith("@")) cleaned = cleaned.substring(1);
+        while (cleaned.endsWith(".")) cleaned = cleaned.substring(0, cleaned.length() - 1);
+        return VALID_DOMAIN.matcher(cleaned).matches() ? cleaned : null;
+    }
+
+    private static String normaliseToken(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        String cleaned = raw.trim().toLowerCase(Locale.ROOT);
+        return cleaned.chars().allMatch(c -> (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_')
+                ? cleaned : null;
+    }
+
+    private static String normaliseAuthServId(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        String cleaned = raw.trim().toLowerCase(Locale.ROOT);
+        while (cleaned.endsWith(".")) cleaned = cleaned.substring(0, cleaned.length() - 1);
+        return VALID_AUTHSERV.matcher(cleaned).matches() ? cleaned : null;
     }
 }

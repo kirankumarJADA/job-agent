@@ -43,12 +43,41 @@ public class IdentityService {
      * {@code profileId} is the authenticated caller's own profile.
      */
     public UUID create(UUID profileId, String email, String domain, String credentialRef) {
+        List<Map<String, Object>> existing = db.queryForList(
+                "select id, applicant_email::text as applicant_email, provider from applicant_identities where profile_id=? and domain=?",
+                profileId, domain);
+        if (!existing.isEmpty() && "ROBIN_MANAGED".equals(existing.get(0).get("provider"))) {
+            String managedEmail = String.valueOf(existing.get(0).get("applicant_email")).trim();
+            if (email == null || !managedEmail.equalsIgnoreCase(email.trim())) {
+                throw new IllegalStateException("Cannot overwrite a Robin-managed employer identity email");
+            }
+            UUID existingId = (UUID) existing.get(0).get("id");
+            db.update("update applicant_identities set credential_ref=?, updated_at=now() where id=? and profile_id=?",
+                    credentialRef, existingId, profileId);
+            return existingId;
+        }
         UUID id = UuidV7.generate();
-        db.update("insert into applicant_identities(id,profile_id,applicant_email,credential_ref,domain) "
+        int updated = db.update("insert into applicant_identities(id,profile_id,applicant_email,credential_ref,domain) "
                         + "values(?,?,?,?,?) on conflict(profile_id,domain) do update set "
                         + "applicant_email=excluded.applicant_email, "
-                        + "credential_ref=excluded.credential_ref, updated_at=now()",
+                        + "credential_ref=excluded.credential_ref, updated_at=now() "
+                        + "where applicant_identities.provider <> 'ROBIN_MANAGED'",
                 id, profileId, email, credentialRef, domain);
+        if (updated == 0) {
+            Map<String, Object> winner = db.queryForMap(
+                    "select id, applicant_email::text as applicant_email, provider from applicant_identities where profile_id=? and domain=?",
+                    profileId, domain);
+            if ("ROBIN_MANAGED".equals(winner.get("provider"))) {
+                String managedEmail = String.valueOf(winner.get("applicant_email")).trim();
+                if (email == null || !managedEmail.equalsIgnoreCase(email.trim())) {
+                    throw new IllegalStateException("Cannot overwrite a Robin-managed employer identity email");
+                }
+                UUID winnerId = (UUID) winner.get("id");
+                db.update("update applicant_identities set credential_ref=?, updated_at=now() where id=? and profile_id=?",
+                        credentialRef, winnerId, profileId);
+                return winnerId;
+            }
+        }
         return db.queryForObject(
                 "select id from applicant_identities where profile_id=? and domain=?",
                 UUID.class, profileId, domain);

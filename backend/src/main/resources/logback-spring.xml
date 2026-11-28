@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
+    <conversionRule conversionWord="scrubMsg" converterClass="com.personal.jobagent.common.ScrubbingMessageConverter" />
+    <conversionRule conversionWord="scrubEx" converterClass="com.personal.jobagent.common.ScrubbingThrowableConverter" />
+
     <!--
         Structured JSON logs with correlation_id always present (see
         CorrelationIdFilter, which populates MDC before any request logging
@@ -11,6 +14,8 @@
             <includeMdcKeyName>correlation_id</includeMdcKeyName>
             <customFields>{"service":"job-agent-backend"}</customFields>
             <timestampPattern>yyyy-MM-dd'T'HH:mm:ss.SSSXXX</timestampPattern>
+            <jsonGeneratorDecorator class="com.personal.jobagent.common.ScrubbingJsonGeneratorDecorator" />
+            <throwableConverter class="com.personal.jobagent.common.ScrubbingThrowableConverter" />
         </encoder>
     </appender>
 
@@ -19,7 +24,7 @@
              correlation_id via %X{correlation_id}. -->
         <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
             <encoder>
-                <pattern>%d{HH:mm:ss.SSS} [%X{correlation_id}] %-5level %logger{36} - %msg%n</pattern>
+                <pattern>%d{HH:mm:ss.SSS} [%X{correlation_id}] %-5level %logger{36} - %scrubMsg%n%scrubEx</pattern>
             </encoder>
         </appender>
         <root level="INFO">

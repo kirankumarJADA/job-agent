@@ -14,6 +14,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.Locale;
 import java.util.Optional;
 
 /**
@@ -167,13 +168,22 @@ public class ManagedInboundService {
         ManagedMailboxService.ManagedAddress owner = address.get();
         boolean keepContent = !message.authenticationFailed() && !message.spamFlagged();
         String encrypted = keepContent ? content.encrypt(message) : null;
+        ReceiptVerificationPolicy.SenderAuthentication trustedAuth = buildSenderAuthentication(providerId, message);
+        String persistedDkimResult = persistableDkimResult(providerId, message, trustedAuth);
+        boolean authTrusted = isCloudflareAuthTrusted(providerId, message, trustedAuth);
+        String persistedDkimDomain = (authTrusted && "pass".equalsIgnoreCase(trustedAuth.dkim()))
+                ? trustedAuth.dkimDomain() : null;
+        String persistedDmarcResult = trustedAuth.dmarc();
+        String persistedAuthServId = message.authServId();
+
         int stored = db.update("""
                         insert into managed_inbound_messages
                             (id, profile_id, address_id, provider_id, message_id_sha256, content_sha256,
                              envelope_recipient, envelope_sender, from_address, sender_domain, subject_redacted,
                              content_encrypted, content_purged_at, spf_result, dkim_result, spam_flagged,
-                             authentication_failed, signed_at, received_at)
-                        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             authentication_failed, signed_at, received_at,
+                             dkim_domain, dmarc_result, auth_serv_id, auth_trusted)
+                        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         on conflict do nothing
                         """,
                 UuidV7.generate(), owner.profileId(), owner.id(), providerId,
@@ -181,8 +191,9 @@ public class ManagedInboundService {
                 contentFingerprint(message), message.envelopeRecipient(), message.envelopeSender(),
                 message.fromAddress(), message.senderDomain(), redactedSubject(message.subject()),
                 encrypted, encrypted == null ? Timestamp.from(now) : null,
-                message.spfResult(), message.dkimResult(), message.spamFlagged(), message.authenticationFailed(),
-                Timestamp.from(signedAt), Timestamp.from(now));
+                message.spfResult(), persistedDkimResult, message.spamFlagged(), message.authenticationFailed(),
+                Timestamp.from(signedAt), Timestamp.from(now),
+                persistedDkimDomain, persistedDmarcResult, persistedAuthServId, authTrusted);
         Outcome outcome = stored == 1 ? Outcome.STORED : Outcome.DUPLICATE_MESSAGE;
         // Identifiers only: never the alias, subject, body, code or token.
         log.info("Managed inbound delivery accepted: outcome={} address={} contentKept={}", outcome, owner.id(),
@@ -192,21 +203,19 @@ public class ManagedInboundService {
             EmailIntelligenceService intel = emailIntelligence.getIfAvailable();
             if (intel != null) {
                 try {
-                    String dkim = message.dkimResult();
-                    String spf = message.spfResult();
-                    ReceiptVerificationPolicy.SenderAuthentication auth = new ReceiptVerificationPolicy.SenderAuthentication(
-                            dkim, message.senderDomain(),
-                            spf, null);
+                    String safeForwardSubject = shouldRedactForwardedSubject(message)
+                            ? redactedSubject(message.subject())
+                            : message.subject();
                     EmailIntelligenceService.ConnectorMessage connectorMessage = new EmailIntelligenceService.ConnectorMessage(
                             message.providerId(),
                             message.messageId(),
                             message.fromAddress(),
                             message.envelopeRecipient(),
-                            message.subject(),
+                            safeForwardSubject,
                             message.text(),
                             signedAt != null ? signedAt : now,
                             message.envelopeRecipient(),
-                            auth,
+                            trustedAuth,
                             message.threadReferences()
                     );
                     intel.ingestFromMailboxConnector(owner.profileId(), connectorMessage);
@@ -218,6 +227,93 @@ public class ManagedInboundService {
         }
 
         return outcome;
+    }
+
+    private static boolean shouldRedactForwardedSubject(InboundMailMessage message) {
+        String subject = message.subject();
+        if (subject == null || subject.isBlank()) return false;
+        var ext = VerificationContentExtractor.extract(subject, message.text(), message.links(), "example.com");
+        return ext.code() != null;
+    }
+
+    /**
+     * Build cryptographic/provider-verified sender authentication metadata.
+     *
+     * <p>Fail closed:
+     * <ul>
+     *   <li>Never copy {@code message.senderDomain()} (the unauthenticated {@code From:} domain)
+     *       into {@code dkimDomain}.</li>
+     *   <li>For Cloudflare, accept a {@code dkim=pass} verdict only when the message has no conflict,
+     *       reports an {@code authServId} explicitly present in {@code settings.cloudflareTrustedAuthServIds()},
+     *       and specifies an explicit verified {@code dkimDomain}.</li>
+     *   <li>For providers that do not supply a verified {@code dkimDomain} (such as Mailgun webhooks),
+     *       preserve explicit failures ({@code "fail"}) while failing closed on {@code dkim="pass"}.</li>
+     * </ul>
+     */
+    private ReceiptVerificationPolicy.SenderAuthentication buildSenderAuthentication(String providerId,
+                                                                                     InboundMailMessage message) {
+        if (message.authConflict() || message.authenticationFailed()) {
+            return new ReceiptVerificationPolicy.SenderAuthentication(
+                    "fail", null,
+                    "fail".equalsIgnoreCase(message.spfResult()) ? "fail" : message.spfResult(),
+                    "fail".equalsIgnoreCase(message.dmarcResult()) ? "fail" : message.dmarcResult());
+        }
+
+        if (ManagedMailSettings.PROVIDER_CLOUDFLARE.equals(providerId)
+                || ManagedMailSettings.PROVIDER_CLOUDFLARE.equals(message.providerId())) {
+            boolean trustedReceiver = message.authServId() != null
+                    && settings.cloudflareTrustedAuthServIds().contains(message.authServId().toLowerCase(Locale.ROOT));
+            if (!trustedReceiver) {
+                return new ReceiptVerificationPolicy.SenderAuthentication(
+                        "fail".equalsIgnoreCase(message.dkimResult()) ? "fail" : null,
+                        null,
+                        "fail".equalsIgnoreCase(message.spfResult()) ? "fail" : null,
+                        "fail".equalsIgnoreCase(message.dmarcResult()) ? "fail" : null);
+            }
+            boolean dkimVerified = "pass".equalsIgnoreCase(message.dkimResult()) && message.dkimDomain() != null;
+            String dkim = dkimVerified ? "pass"
+                    : ("fail".equalsIgnoreCase(message.dkimResult()) || "permerror".equalsIgnoreCase(message.dkimResult())
+                    ? message.dkimResult() : null);
+            String dkimDomain = dkimVerified ? message.dkimDomain() : null;
+            return new ReceiptVerificationPolicy.SenderAuthentication(
+                    dkim, dkimDomain, message.spfResult(), message.dmarcResult());
+        }
+
+        // Other providers (e.g. Mailgun): only pass dkimDomain if the provider explicitly
+        // extracted a real DKIM d= domain; never synthesize from message.senderDomain().
+        boolean hasVerifiedDkimDomain = "pass".equalsIgnoreCase(message.dkimResult()) && message.dkimDomain() != null;
+        String dkim = hasVerifiedDkimDomain ? "pass"
+                : ("fail".equalsIgnoreCase(message.dkimResult()) || "permerror".equalsIgnoreCase(message.dkimResult())
+                ? message.dkimResult() : null);
+        String dkimDomain = hasVerifiedDkimDomain ? message.dkimDomain() : null;
+        return new ReceiptVerificationPolicy.SenderAuthentication(
+                dkim, dkimDomain, message.spfResult(), message.dmarcResult());
+    }
+
+    private boolean isCloudflareAuthTrusted(String providerId, InboundMailMessage message,
+                                            ReceiptVerificationPolicy.SenderAuthentication trustedAuth) {
+        if (!(ManagedMailSettings.PROVIDER_CLOUDFLARE.equals(providerId)
+                || ManagedMailSettings.PROVIDER_CLOUDFLARE.equals(message.providerId()))) {
+            return false;
+        }
+        if (message.authConflict() || message.authenticationFailed() || message.authServId() == null) {
+            return false;
+        }
+        boolean trustedReceiver = settings.cloudflareTrustedAuthServIds()
+                .contains(message.authServId().toLowerCase(Locale.ROOT));
+        return trustedReceiver && "pass".equalsIgnoreCase(trustedAuth.dkim()) && trustedAuth.dkimDomain() != null;
+    }
+
+    private static String persistableDkimResult(String providerId, InboundMailMessage message,
+                                                ReceiptVerificationPolicy.SenderAuthentication trustedAuth) {
+        if ("fail".equalsIgnoreCase(message.dkimResult()) || "permerror".equalsIgnoreCase(message.dkimResult())) {
+            return message.dkimResult();
+        }
+        if (ManagedMailSettings.PROVIDER_CLOUDFLARE.equals(providerId)
+                || ManagedMailSettings.PROVIDER_CLOUDFLARE.equals(message.providerId())) {
+            return trustedAuth.dkim();
+        }
+        return message.dkimResult();
     }
 
     /** Subject with numbers (codes), links and addresses removed, for display and audit. */

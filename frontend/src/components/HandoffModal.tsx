@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import type { HandoffSession } from '../types';
-import { completeHandoff, cancelHandoff } from '../api/client';
+import { completeHandoff, cancelHandoff, resumeHandoff } from '../api/client';
 
 interface HandoffModalProps {
   session: HandoffSession;
@@ -32,6 +32,7 @@ export function isValidHttpsUrl(urlString?: string | null): boolean {
 export const HandoffModal: React.FC<HandoffModalProps> = ({ session, onClose, onResumed }) => {
   const [attested, setAttested] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -74,6 +75,20 @@ export const HandoffModal: React.FC<HandoffModalProps> = ({ session, onClose, on
       setError(err instanceof Error ? err.message : 'Failed to cancel handoff session.');
     } finally {
       setCancelling(false);
+    }
+  };
+
+  const handleResumeAutomation = async () => {
+    setResuming(true);
+    setError(null);
+    try {
+      await resumeHandoff(session.id);
+      onResumed();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to resume automation plan.');
+    } finally {
+      setResuming(false);
     }
   };
 
@@ -178,29 +193,37 @@ export const HandoffModal: React.FC<HandoffModalProps> = ({ session, onClose, on
           )}
         </div>
 
-        <div className="bg-slate-950 px-6 py-4 border-t border-slate-800 flex items-center justify-between gap-3">
+        <div className="bg-slate-950 px-6 py-4 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
           <button
             type="button"
             onClick={handleCancel}
-            disabled={cancelling || submitting}
+            disabled={cancelling || submitting || resuming}
             className="px-3 py-1.5 rounded-lg border border-red-500/30 text-red-400 hover:bg-red-500/10 text-xs font-medium transition disabled:opacity-50"
           >
             {cancelling ? 'Cancelling...' : 'Cancel Application'}
           </button>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={onClose}
-              disabled={submitting || cancelling}
+              disabled={submitting || cancelling || resuming}
               className="px-3 py-1.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 text-xs font-medium transition"
             >
               Dismiss
             </button>
             <button
               type="button"
+              onClick={handleResumeAutomation}
+              disabled={submitting || cancelling || resuming || isInactive}
+              className="px-3 py-1.5 rounded-lg border border-sky-500/40 bg-sky-950/60 text-sky-200 hover:bg-sky-900/60 text-xs font-semibold transition disabled:opacity-50"
+            >
+              {resuming ? 'Resuming...' : 'Resume Automation'}
+            </button>
+            <button
+              type="button"
               onClick={handleConfirm}
-              disabled={submitting || cancelling || isInactive || !attested}
+              disabled={submitting || cancelling || resuming || isInactive || !attested}
               className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-lg shadow-emerald-900/40 transition disabled:opacity-50"
             >
               {submitting ? 'Recording Attestation...' : 'Confirm External Submission'}

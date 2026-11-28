@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { apiFetch, ApiError } from '../api/client';
-import type { ApplicationSummary } from '../types';
+import type { ApplicationSummary, TrackSummary } from '../types';
 import { ApplicationsPage } from './ApplicationsPage';
 
 vi.mock('../api/client', () => {
@@ -147,13 +147,79 @@ describe('Applications page — real submission queuing', () => {
     expect(within(card).getByText(/Submitting now — outcome not yet confirmed/)).toBeTruthy();
   });
 
-  it('shows the confirmed-submitted state for SUBMITTED, distinctly from every other state', async () => {
-    serveBaseline([application({ planStatus: 'SUBMITTED' })]);
+  it('never claims confirmed submission for unverified or browser-observed SUBMITTED plans, and shows green only on live employer verification', async () => {
+    const confirmedLiveTrack: TrackSummary = {
+      availability: 'AVAILABLE',
+      status: 'ACKNOWLEDGED',
+      label: 'Acknowledged by the employer',
+      basis: 'VERIFIED',
+      submission: 'CONFIRMED',
+      submissionLevel: 'EMPLOYER_EMAIL_VERIFIED',
+      sandbox: false,
+    };
+    const browserObservedTrack: TrackSummary = {
+      availability: 'AVAILABLE',
+      status: 'APPLIED',
+      label: 'Applied — not verified',
+      basis: 'UNVERIFIED',
+      submission: 'UNVERIFIED',
+      submissionLevel: 'BROWSER_OBSERVED',
+      sandbox: false,
+    };
+    const sandboxTrack: TrackSummary = {
+      availability: 'AVAILABLE',
+      status: 'APPLIED',
+      label: 'Applied — verified (sandbox)',
+      basis: 'VERIFIED',
+      submission: 'CONFIRMED',
+      submissionLevel: 'SANDBOX_VERIFIED',
+      sandbox: true,
+    };
+    const contestedTrack: TrackSummary = {
+      availability: 'AVAILABLE',
+      status: 'NEEDS_REVIEW',
+      label: 'Needs your review',
+      basis: null,
+      submission: 'CONFLICTING',
+      submissionLevel: 'CONFLICTING',
+      sandbox: false,
+      needsReview: true,
+    };
+
+    serveBaseline([
+      application({ id: 'app-unverified', jobTitle: 'Unverified Role', planStatus: 'SUBMITTED' }),
+      application({ id: 'app-browser', jobTitle: 'Browser Role', planStatus: 'SUBMITTED', track: browserObservedTrack }),
+      application({ id: 'app-sandbox', jobTitle: 'Sandbox Role', planStatus: 'SUBMITTED', track: sandboxTrack }),
+      application({ id: 'app-contested', jobTitle: 'Contested Role', planStatus: 'SUBMITTED', track: contestedTrack }),
+      application({ id: 'app-verified', jobTitle: 'Verified Role', planStatus: 'SUBMITTED', track: confirmedLiveTrack }),
+    ]);
     renderPage();
-    const card = (await screen.findByText('Platform Engineer')).closest('section') as HTMLElement;
-    expect(within(card).getByText(/Confirmed submitted by the employer/)).toBeTruthy();
-    expect(within(card).queryByRole('button', { name: /Submit to employer now/ })).toBeNull();
-    expect(within(card).queryByRole('button', { name: /Approve for submission/ })).toBeNull();
+
+    const unverifiedCard = (await screen.findByText('Unverified Role')).closest('section') as HTMLElement;
+    const unverifiedNotice = within(unverifiedCard).getByText(/Submit attempt recorded — awaiting employer verification/);
+    expect(unverifiedNotice.className).not.toContain('text-green');
+    expect(within(unverifiedCard).queryByText(/Confirmed submitted/)).toBeNull();
+    expect(within(unverifiedCard).queryByRole('button', { name: /Submit to employer now/ })).toBeNull();
+    expect(within(unverifiedCard).queryByRole('button', { name: /Approve for submission/ })).toBeNull();
+
+    const browserCard = screen.getByText('Browser Role').closest('section') as HTMLElement;
+    const browserNotice = within(browserCard).getByText(/Submitted in browser — awaiting employer verification/);
+    expect(browserNotice.className).not.toContain('text-green');
+    expect(within(browserCard).queryByText(/Confirmed submitted/)).toBeNull();
+
+    const sandboxCard = screen.getByText('Sandbox Role').closest('section') as HTMLElement;
+    const sandboxNotice = within(sandboxCard).getByText(/Sandbox receipt verified \(synthetic test — not a live employer\)/);
+    expect(sandboxNotice.className).not.toContain('text-green');
+    expect(within(sandboxCard).getAllByText('Applied — verified (sandbox)').every((el) => !el.className.includes('emerald'))).toBe(true);
+
+    const contestedCard = screen.getByText('Contested Role').closest('section') as HTMLElement;
+    const contestedNotice = within(contestedCard).getByText(/Submission evidence contested — review details below/);
+    expect(contestedNotice.className).toContain('text-red');
+    expect(within(contestedCard).getAllByText('Needs your review').every((el) => el.className.includes('red'))).toBe(true);
+
+    const verifiedCard = screen.getByText('Verified Role').closest('section') as HTMLElement;
+    const verifiedNotice = within(verifiedCard).getByText(/Confirmed submitted — employer acknowledgement verified/);
+    expect(verifiedNotice.className).toContain('text-green');
   });
 
   it('points a FAILED plan at recovery instead of a bare failure label, and never offers to submit it', async () => {

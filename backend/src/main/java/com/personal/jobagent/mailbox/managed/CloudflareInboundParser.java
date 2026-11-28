@@ -74,7 +74,7 @@ public final class CloudflareInboundParser {
 
         String from = text(root, "from");
         String fromHeader = from == null ? "" : TrackText.cap(from.trim(), 998);
-        String fromAddress = MailAddresses.singleMailbox(fromHeader).orElse(envelopeSender);
+        String fromAddress = MailAddresses.singleMailbox(fromHeader).orElse(null);
 
         String subjectRaw = text(root, "subject");
         String subject = TrackText.cap(subjectRaw == null ? "" : subjectRaw.trim(), MAX_SUBJECT);
@@ -94,9 +94,27 @@ public final class CloudflareInboundParser {
         String messageId = cleanMessageId(text(root, "messageId"));
         String date = text(root, "date");
 
-        List<String> spfResults = collectResult(text(root, "spf"));
-        List<String> dkimResults = collectResult(text(root, "dkim"));
+        String authServId = text(root, "authServId");
+        boolean authConflict = root.has("authConflict") && root.get("authConflict").isBoolean()
+                && root.get("authConflict").asBoolean(false);
+        boolean explicitlyTrusted = root.has("authTrusted") && root.get("authTrusted").isBoolean()
+                && root.get("authTrusted").asBoolean(false);
+        boolean untrusted = !explicitlyTrusted;
+
+        List<String> spfResults = sanitizeSpfResults(collectResult(text(root, "spf")), authServId, authConflict, untrusted);
+        List<String> rawDkimResults = collectResult(text(root, "dkim"));
         List<String> spamFlags = collectResult(text(root, "spam"));
+
+        String rawDkimDomain = text(root, "dkimDomain");
+        String dmarc = text(root, "dmarc");
+
+        // Fail closed: never retain a DKIM "pass" claim unless the worker explicitly
+        // extracted a valid signing domain under an identified receiver (authServId),
+        // explicitly asserted authTrusted=true from the provider's header interface,
+        // without untrusted/conflicted signals. Never derive dkimDomain from From.
+        String dkimDomain = (authConflict || untrusted) ? null : validDomainOrNull(rawDkimDomain);
+        String effectiveDmarc = (authConflict || untrusted) ? ("fail".equalsIgnoreCase(dmarc) ? "fail" : null) : dmarc;
+        List<String> dkimResults = sanitizeDkimResults(rawDkimResults, dkimDomain, authServId, authConflict, untrusted);
 
         InboundMailMessage message = new InboundMailMessage(
                 ManagedMailSettings.PROVIDER_CLOUDFLARE,
@@ -112,7 +130,11 @@ public final class CloudflareInboundParser {
                 spfResults,
                 dkimResults,
                 spamFlags,
-                threadReferences(text(root, "inReplyTo"), text(root, "references"))
+                threadReferences(text(root, "inReplyTo"), text(root, "references")),
+                dkimDomain,
+                effectiveDmarc,
+                authServId,
+                authConflict
         );
         return Result.ok(message);
     }
@@ -155,6 +177,53 @@ public final class CloudflareInboundParser {
         if (val == null || val.isBlank()) return List.of();
         String lower = val.trim().toLowerCase(Locale.ROOT);
         return List.of(lower);
+    }
+
+    private static List<String> sanitizeSpfResults(List<String> raw, String authServId,
+                                                     boolean authConflict, boolean explicitlyUntrusted) {
+        if (authConflict) return List.of("fail");
+        if (raw.isEmpty()) return List.of();
+        List<String> kept = new ArrayList<>();
+        boolean provenReceiver = !explicitlyUntrusted && authServId != null && !authServId.isBlank();
+        for (String verdict : raw) {
+            if ("pass".equals(verdict)) {
+                if (provenReceiver) {
+                    kept.add("pass");
+                }
+            } else {
+                kept.add(verdict);
+            }
+        }
+        return List.copyOf(kept);
+    }
+
+    private static List<String> sanitizeDkimResults(List<String> raw, String validDkimDomain, String authServId,
+                                                    boolean authConflict, boolean explicitlyUntrusted) {
+        if (authConflict) return List.of("fail");
+        if (raw.isEmpty()) return List.of();
+        List<String> kept = new ArrayList<>();
+        for (String verdict : raw) {
+            if ("pass".equals(verdict)) {
+                boolean proven = !explicitlyUntrusted
+                        && validDkimDomain != null
+                        && authServId != null && !authServId.isBlank();
+                if (proven) {
+                    kept.add("pass");
+                }
+            } else {
+                kept.add(verdict);
+            }
+        }
+        return List.copyOf(kept);
+    }
+
+    private static String validDomainOrNull(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        String cleaned = raw.trim().toLowerCase(Locale.ROOT);
+        while (cleaned.startsWith("@")) cleaned = cleaned.substring(1);
+        while (cleaned.endsWith(".")) cleaned = cleaned.substring(0, cleaned.length() - 1);
+        return cleaned.matches("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$")
+                ? cleaned : null;
     }
 
     private static String cleanMessageId(String id) {

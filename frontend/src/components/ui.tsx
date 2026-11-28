@@ -260,7 +260,7 @@ export const Loading: React.FC<{ children?: React.ReactNode }> = ({ children }) 
   </div>
 );
 
-export const Alert: React.FC<{ tone?: 'success' | 'error' | 'info'; children: React.ReactNode }> = ({
+export const Alert: React.FC<{ tone?: 'success' | 'error' | 'info' | 'warn'; children: React.ReactNode }> = ({
   tone = 'info',
   children,
 }) => {
@@ -268,6 +268,7 @@ export const Alert: React.FC<{ tone?: 'success' | 'error' | 'info'; children: Re
     success: 'border-emerald-200 bg-emerald-50 text-emerald-900',
     error: 'border-red-200 bg-red-50 text-red-800',
     info: 'border-forest-200 bg-forest-50 text-forest-900',
+    warn: 'border-amber-200 bg-amber-50 text-amber-900',
   } as const;
   return (
     <div role={tone === 'error' ? 'alert' : 'status'} className={`rounded-lg border px-4 py-3 text-sm leading-relaxed ${tones[tone]}`}>

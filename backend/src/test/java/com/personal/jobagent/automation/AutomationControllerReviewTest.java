@@ -45,6 +45,7 @@ class AutomationControllerReviewTest {
     private AshbyExecutionPlanService ashbyPlans;
     private WorkdayExecutionPlanService workdayPlans;
     private AutomationController controller;
+    private SubmissionCompletionService submissions;
     private final UUID cvVersionId = UUID.randomUUID();
     private final UUID coverVersionId = UUID.randomUUID();
 
@@ -75,9 +76,13 @@ class AutomationControllerReviewTest {
         greenhousePlans = mock(GreenhouseExecutionPlanService.class);
         ashbyPlans = mock(AshbyExecutionPlanService.class);
         workdayPlans = mock(WorkdayExecutionPlanService.class);
+        submissions = mock(SubmissionCompletionService.class);
+        when(submissions.completeWorkerSubmission(any(), any(), any(), any()))
+                .thenReturn(SubmissionCompletionService.Result.illegal("plan is not RUNNING and approved"));
         controller = new AutomationController(plans, audit, owner, "worker-secret",
                 executionPackages, notifications, new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()),
-                applyReadiness, documentSelector, applicationStatus, greenhousePlans, ashbyPlans, workdayPlans);
+                applyReadiness, documentSelector, applicationStatus, greenhousePlans, ashbyPlans, workdayPlans,
+                new com.personal.jobagent.common.MaintenanceModeService(false), submissions);
     }
 
     /** Phase 8.2: approval re-runs the readiness gate server-side. */
@@ -128,6 +133,7 @@ class AutomationControllerReviewTest {
     /** A failed run must not silently disappear: the owner is notified. */
     @Test
     void failedOutcomeNotifiesThePlanOwner() {
+        when(owner.isWorkerRequest()).thenReturn(true);
         when(plans.transition(planId, "RUNNING", "FAILED")).thenReturn(true);
         when(plans.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
         when(plans.findById(planId)).thenReturn(Optional.of(row("FAILED", planPayload())));
@@ -140,7 +146,19 @@ class AutomationControllerReviewTest {
     }
 
     @Test
+    void candidateSessionCannotCallCompleteWhenWorkerTokenIsConfigured() {
+        when(owner.isWorkerRequest()).thenReturn(false);
+
+        ResponseEntity<?> response = controller.complete(planId,
+                new AutomationController.OutcomeRequest("COMPLETED", "done"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(403);
+        verify(plans, never()).transition(any(), anyString(), anyString());
+    }
+
+    @Test
     void completedOutcomeStaysSilent() {
+        when(owner.isWorkerRequest()).thenReturn(true);
         when(plans.transition(planId, "RUNNING", "COMPLETED")).thenReturn(true);
         when(plans.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
         when(plans.findById(planId)).thenReturn(Optional.of(row("COMPLETED", planPayload())));
@@ -158,6 +176,7 @@ class AutomationControllerReviewTest {
      */
     @Test
     void humanRequiredWithAStructuredResultPersistsItViaTheResultAwareTransition() {
+        when(owner.isWorkerRequest()).thenReturn(true);
         List<Map<String, Object>> result = List.of(Map.of(
                 "type", "ZOHO_RECRUIT_OUTCOME",
                 "filled", List.of(Map.of("label", "First Name *", "category", "IDENTITY_FIRST_NAME")),
@@ -177,6 +196,7 @@ class AutomationControllerReviewTest {
     /** No result payload at all still uses the plain transition — no behavior change for Greenhouse. */
     @Test
     void humanRequiredWithoutAResultPayloadUsesThePlainTransition() {
+        when(owner.isWorkerRequest()).thenReturn(true);
         when(plans.transition(planId, "RUNNING", "AWAITING_APPROVAL")).thenReturn(true);
         when(plans.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
         when(plans.findById(planId)).thenReturn(Optional.of(row("AWAITING_APPROVAL", planPayload())));
@@ -212,10 +232,10 @@ class AutomationControllerReviewTest {
 
     /**
      * Approval stays human-only. A worker-identity SUBMITTED report with no
-     * properly-approved plan behind it is rejected too — here specifically
-     * because {@code completeRealSubmission} is never stubbed, so the
-     * Mockito-default {@code false} makes the transition fail, exactly as it
-     * would for a real, un-approved plan. The worker's own ability to report
+     * properly-approved plan behind it is rejected too — the completion
+     * service reports an illegal transition (its repository guard refuses a
+     * plan that is not RUNNING with submit_approved=true), and the controller
+     * surfaces that as 409. The worker's own ability to report
      * SUBMITTED for a plan that genuinely did go through prepare-submit is
      * covered separately below (Phase 4), not by this test.
      */
@@ -294,7 +314,7 @@ class AutomationControllerReviewTest {
         ResponseEntity<?> response = controller.complete(planId, new AutomationController.OutcomeRequest("SUBMITTED", "confirmed on page"));
 
         assertThat(response.getStatusCode().value()).isEqualTo(403);
-        verify(plans, never()).completeRealSubmission(any());
+        verifyNoInteractions(submissions);
     }
 
     @Test
@@ -306,36 +326,134 @@ class AutomationControllerReviewTest {
 
         assertThat(blank.getStatusCode().value()).isEqualTo(400);
         assertThat(missing.getStatusCode().value()).isEqualTo(400);
-        verify(plans, never()).completeRealSubmission(any());
+        verifyNoInteractions(submissions);
     }
 
-    /** The one successful path: worker, real evidence, repository guard passes. */
+    /**
+     * The one successful path: worker identity, structured evidence, and the
+     * completion service's atomic transaction committed. The worker principal
+     * passed on is the authenticated principal, never a body field.
+     */
     @Test
     void completeRecordsAConfirmedRealSubmissionAndMirrorsItOntoTheApplication() {
         when(owner.isWorkerRequest()).thenReturn(true);
-        when(plans.completeRealSubmission(planId)).thenReturn(true);
+        when(owner.actorOr(anyString())).thenReturn("worker");
+        List<Map<String, Object>> evidence = List.of(Map.of("type", "SUBMISSION_EVIDENCE", "planType", "GREENHOUSE",
+                "category", "CONFIRMED", "confirmed", true, "evidence", "confirmation container rendered"));
+        when(submissions.completeWorkerSubmission(planId, "worker", "page text matched the expected confirmation", evidence))
+                .thenReturn(new SubmissionCompletionService.Result(SubmissionCompletionService.Outcome.SUBMITTED,
+                        null, UUID.randomUUID(), "STORED_ENCRYPTED"));
         when(plans.findById(planId)).thenReturn(Optional.of(row("SUBMITTED", planPayload(), true)));
         when(plans.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
 
-        ResponseEntity<?> response = controller.complete(planId,
-                new AutomationController.OutcomeRequest("SUBMITTED", "page text matched the expected confirmation"));
+        ResponseEntity<?> response = controller.complete(planId, new AutomationController.OutcomeRequest(
+                "SUBMITTED", "page text matched the expected confirmation", evidence));
 
         assertThat(response.getStatusCode().value()).isEqualTo(204);
-        verify(plans).completeRealSubmission(planId);
+        verify(submissions).completeWorkerSubmission(planId, "worker", "page text matched the expected confirmation", evidence);
         verify(applicationStatus).apply(eq(profileId), eq(applicationId), eq("APPLICATION_SUBMITTED"),
                 anyString(), eq("worker"), any());
     }
 
-    /** The repository's own atomic guard failing must not be papered over. */
+    @Test
+    void completeSubmittedAdvancesApplicationFromReadyToApplyThroughStarted() {
+        when(owner.isWorkerRequest()).thenReturn(true);
+        when(owner.actorOr(anyString())).thenReturn("worker");
+        List<Map<String, Object>> evidence = List.of(Map.of(
+                "type", "SUBMISSION_EVIDENCE",
+                "planType", "GREENHOUSE",
+                "category", "CONFIRMED",
+                "confirmed", true,
+                "confirmationNumber", "GH-READY-1",
+                "evidence", "Application submitted"));
+        when(submissions.completeWorkerSubmission(planId, "worker", "confirmed", evidence))
+                .thenReturn(new SubmissionCompletionService.Result(
+                        SubmissionCompletionService.Outcome.SUBMITTED,
+                        null, UUID.randomUUID(), "STORED_ENCRYPTED"));
+        when(plans.findById(planId)).thenReturn(Optional.of(row("SUBMITTED", planPayload(), true)));
+        when(plans.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
+        when(applicationStatus.find(profileId, applicationId))
+                .thenReturn(Optional.of(Map.of("id", applicationId, "status", "READY_TO_APPLY")));
+
+        ResponseEntity<?> response = controller.complete(planId,
+                new AutomationController.OutcomeRequest("SUBMITTED", "confirmed", evidence));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(204);
+        var ordered = inOrder(applicationStatus);
+        ordered.verify(applicationStatus).apply(eq(profileId), eq(applicationId), eq("APPLICATION_STARTED"),
+                eq("automation.real_submit.start:" + planId), eq("worker"), any());
+        ordered.verify(applicationStatus).apply(eq(profileId), eq(applicationId), eq("APPLICATION_SUBMITTED"),
+                eq("automation.real_submit:" + planId), eq("worker"), any());
+    }
+
+    @Test
+    void completeSubmittedSwallowsDataAccessExceptionWhenMirroringApplicationStatus() {
+        when(owner.isWorkerRequest()).thenReturn(true);
+        when(owner.actorOr(anyString())).thenReturn("worker");
+        List<Map<String, Object>> evidence = List.of(Map.of(
+                "type", "SUBMISSION_EVIDENCE",
+                "planType", "GREENHOUSE",
+                "category", "CONFIRMED",
+                "confirmed", true,
+                "confirmationNumber", "GH-DBERR-1",
+                "evidence", "Application submitted"));
+        when(submissions.completeWorkerSubmission(planId, "worker", "confirmed", evidence))
+                .thenReturn(new SubmissionCompletionService.Result(
+                        SubmissionCompletionService.Outcome.SUBMITTED,
+                        null, UUID.randomUUID(), "STORED_ENCRYPTED"));
+        when(plans.findById(planId)).thenReturn(Optional.of(row("SUBMITTED", planPayload(), true)));
+        when(plans.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
+        when(applicationStatus.apply(eq(profileId), eq(applicationId), eq("APPLICATION_SUBMITTED"),
+                anyString(), eq("worker"), any()))
+                .thenThrow(new org.springframework.dao.DataAccessResourceFailureException("transient db blip"));
+
+        ResponseEntity<?> response = controller.complete(planId,
+                new AutomationController.OutcomeRequest("SUBMITTED", "confirmed", evidence));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(204);
+    }
+
+    /** The completion service's atomic guard failing must not be papered over. */
     @Test
     void completeRejectsASubmittedOutcomeWhenTheRepositoryGuardFails() {
         when(owner.isWorkerRequest()).thenReturn(true);
-        when(plans.completeRealSubmission(planId)).thenReturn(false);
 
         ResponseEntity<?> response = controller.complete(planId,
                 new AutomationController.OutcomeRequest("SUBMITTED", "page text matched the expected confirmation"));
 
         assertThat(response.getStatusCode().value()).isEqualTo(409);
+        verify(applicationStatus, never()).apply(any(), any(), any(), any(), any(), any());
+    }
+
+    /** SUBMITTED without valid structured evidence never reaches SUBMITTED: it lands in reconciliation. */
+    @Test
+    void completeWithoutStructuredEvidenceRequiresReconciliationInsteadOfSubmitted() {
+        when(owner.isWorkerRequest()).thenReturn(true);
+        when(submissions.completeWorkerSubmission(any(), any(), any(), any()))
+                .thenReturn(new SubmissionCompletionService.Result(
+                        SubmissionCompletionService.Outcome.RECONCILIATION_REQUIRED,
+                        "no structured result was reported", null, null));
+
+        ResponseEntity<?> response = controller.complete(planId,
+                new AutomationController.OutcomeRequest("SUBMITTED", "page text matched the expected confirmation"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(422);
+        assertThat(String.valueOf(response.getBody())).contains("SUBMISSION_EVIDENCE_REQUIRED", "RECONCILIATION_REQUIRED");
+        verify(applicationStatus, never()).apply(any(), any(), any(), any(), any(), any());
+    }
+
+    /** Without a completion service wired, a real submission can never be recorded. */
+    @Test
+    void completeFailsClosedWithoutACompletionService() {
+        AutomationController unwired = new AutomationController(plans, audit, owner, "worker-secret",
+                executionPackages, notifications, new AutomationMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()),
+                applyReadiness, documentSelector, applicationStatus, greenhousePlans, ashbyPlans, workdayPlans);
+        when(owner.isWorkerRequest()).thenReturn(true);
+
+        ResponseEntity<?> response = unwired.complete(planId,
+                new AutomationController.OutcomeRequest("SUBMITTED", "page text matched the expected confirmation"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(503);
         verify(applicationStatus, never()).apply(any(), any(), any(), any(), any(), any());
     }
 
@@ -346,6 +464,7 @@ class AutomationControllerReviewTest {
      */
     @Test
     void uncertainSubmitOutcomeFallsBackToHumanReviewThroughTheSharedTransition() {
+        when(owner.isWorkerRequest()).thenReturn(true);
         when(plans.transition(planId, "RUNNING", "AWAITING_APPROVAL")).thenReturn(true);
         when(plans.ownerOfPlan(planId)).thenReturn(Optional.of(profileId));
         when(plans.findById(planId)).thenReturn(Optional.of(row("AWAITING_APPROVAL", planPayload())));
@@ -595,6 +714,51 @@ class AutomationControllerReviewTest {
                 rowWithResult("AWAITING_APPROVAL", payload, workdayOutcome(List.of()))));
 
         assertThat(controller.approve(planId).getStatusCode().value()).isEqualTo(409);
+        verify(plans, never()).approveForSubmission(any());
+    }
+
+    @Test
+    void approvalSucceedsForAWorkdayPlanWithVerifiedCvAndCoverLetterPackages() {
+        Map<String, Object> payload = workdayPlanPayload();
+        payload.put("package", Map.of(
+                "cv", Map.of("versionId", cvVersionId.toString(), "sha256", cvSha,
+                        "jobId", jobId.toString(), "applicationId", applicationId.toString()),
+                "coverLetter", Map.of("versionId", coverVersionId.toString(), "sha256", coverSha,
+                        "jobId", jobId.toString(), "applicationId", applicationId.toString())));
+        when(plans.find(profileId, planId)).thenReturn(Optional.of(
+                rowWithResult("AWAITING_APPROVAL", payload, workdayOutcome(List.of()))));
+        when(executionPackages.artifactBytes(eq(planId), eq(profileId), eq(applicationId), eq(jobId), eq("cv"), eq(cvVersionId)))
+                .thenReturn(new ExecutionPackageService.ArtifactBytes(new byte[]{1}, cvSha, "application/pdf", "cv.pdf"));
+        when(executionPackages.artifactBytes(eq(planId), eq(profileId), eq(applicationId), eq(jobId), eq("cover-letter"), eq(coverVersionId)))
+                .thenReturn(new ExecutionPackageService.ArtifactBytes(new byte[]{2}, coverSha, "text/plain", "cover.txt"));
+        when(plans.approveForSubmission(planId)).thenReturn(true);
+
+        ResponseEntity<?> response = controller.approve(planId);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        verify(executionPackages).artifactBytes(planId, profileId, applicationId, jobId, "cover-letter", coverVersionId);
+        verify(plans).approveForSubmission(planId);
+    }
+
+    @Test
+    void approvalRejectsAWorkdayPlanWithTamperedCoverLetterChecksum() {
+        Map<String, Object> payload = workdayPlanPayload();
+        payload.put("package", Map.of(
+                "cv", Map.of("versionId", cvVersionId.toString(), "sha256", cvSha,
+                        "jobId", jobId.toString(), "applicationId", applicationId.toString()),
+                "coverLetter", Map.of("versionId", coverVersionId.toString(), "sha256", coverSha,
+                        "jobId", jobId.toString(), "applicationId", applicationId.toString())));
+        when(plans.find(profileId, planId)).thenReturn(Optional.of(
+                rowWithResult("AWAITING_APPROVAL", payload, workdayOutcome(List.of()))));
+        when(executionPackages.artifactBytes(eq(planId), eq(profileId), eq(applicationId), eq(jobId), eq("cv"), eq(cvVersionId)))
+                .thenReturn(new ExecutionPackageService.ArtifactBytes(new byte[]{1}, cvSha, "application/pdf", "cv.pdf"));
+        when(executionPackages.artifactBytes(eq(planId), eq(profileId), eq(applicationId), eq(jobId), eq("cover-letter"), eq(coverVersionId)))
+                .thenReturn(new ExecutionPackageService.ArtifactBytes(new byte[]{2}, "f".repeat(64), "text/plain", "cover.txt"));
+
+        ResponseEntity<?> response = controller.approve(planId);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(409);
+        assertThat(String.valueOf(response.getBody())).contains("cover-letter artifact checksum does not match");
         verify(plans, never()).approveForSubmission(any());
     }
 

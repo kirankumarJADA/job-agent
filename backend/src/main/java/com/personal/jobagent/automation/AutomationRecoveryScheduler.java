@@ -2,6 +2,7 @@ package com.personal.jobagent.automation;
 
 import com.personal.jobagent.common.AutomationMetrics;
 import com.personal.jobagent.common.MaintenanceModeService;
+import com.personal.jobagent.common.SchedulerDatabaseGuard;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,6 +39,9 @@ public class AutomationRecoveryScheduler {
     private final MaintenanceModeService maintenanceMode;
     private final com.personal.jobagent.automation.handoff.AtsHandoffService handoffService;
 
+    @Autowired(required = false)
+    private SchedulerDatabaseGuard databaseGuard;
+
     @Autowired
     public AutomationRecoveryScheduler(AutomationPlanRepository plans,
                                        @Value("${app.automation.stale-plan-minutes:15}") long stalePlanMinutes,
@@ -64,6 +68,11 @@ public class AutomationRecoveryScheduler {
         this(plans, stalePlanMinutes, metrics, maintenanceMode, null);
     }
 
+    /** For unit tests that construct without Spring field injection. */
+    void setDatabaseGuard(SchedulerDatabaseGuard databaseGuard) {
+        this.databaseGuard = databaseGuard;
+    }
+
     @PostConstruct
     void init() {
         if (maintenanceMode.isMaintenanceMode()) {
@@ -74,21 +83,32 @@ public class AutomationRecoveryScheduler {
 
     @Scheduled(fixedDelayString = "${app.automation.stale-sweep-interval-ms:60000}")
     public void recoverStalePlans() {
-        if (maintenanceMode.isMaintenanceMode()) {
+        if (maintenanceMode.isMaintenanceMode() || (databaseGuard != null && !databaseGuard.isReady())) {
             return;
         }
-        int recovered = plans.recoverStale(Instant.now().minusSeconds(stalePlanMinutes * 60));
-        metrics.stalePlansRecovered(recovered);
-        if (recovered > 0) {
-            log.warn("Recovered {} automation plan(s) with no heartbeat for over {} minute(s) — returned to PREPARED",
-                    recovered, stalePlanMinutes);
-        }
-        if (handoffService != null) {
-            try {
-                handoffService.expireStaleSessions();
-            } catch (Exception e) {
-                log.warn("Could not sweep expired handoff sessions: {}", e.getMessage());
+        try {
+            int recovered = plans.recoverStale(Instant.now().minusSeconds(stalePlanMinutes * 60));
+            metrics.stalePlansRecovered(recovered);
+            if (recovered > 0) {
+                log.warn("Recovered {} automation plan(s) with no heartbeat for over {} minute(s) — returned to PREPARED",
+                        recovered, stalePlanMinutes);
             }
+            if (handoffService != null && (databaseGuard == null || databaseGuard.isReady())) {
+                try {
+                    handoffService.expireStaleSessions();
+                } catch (Exception e) {
+                    if (databaseGuard != null && !databaseGuard.isReady()) {
+                        return;
+                    }
+                    log.warn("Could not sweep expired handoff sessions: {}", e.getMessage());
+                }
+            }
+        } catch (RuntimeException e) {
+            if (databaseGuard != null && !databaseGuard.isReady()) {
+                log.debug("Skipping automation recovery error during shutdown: {}", e.getClass().getSimpleName());
+                return;
+            }
+            throw e;
         }
     }
 }

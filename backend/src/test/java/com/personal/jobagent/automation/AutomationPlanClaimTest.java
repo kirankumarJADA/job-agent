@@ -88,6 +88,32 @@ class AutomationPlanClaimTest {
         int recovered = repo.recoverStale(cutoff);
 
         assertThat(recovered).isEqualTo(2);
+        verify(db).update(contains("submit_approved = false"), any(java.sql.Timestamp.class));
+        verify(db).update(contains("status='RECONCILIATION_REQUIRED'"), anyString(), any(java.sql.Timestamp.class));
+    }
+
+    @Test
+    void submitStepPredicateMatchesExplicitSubmitStepsOnlyAndExcludesGenericClick() {
+        Instant cutoff = Instant.now().minusSeconds(900);
+        org.mockito.ArgumentCaptor<String> preparedSql = org.mockito.ArgumentCaptor.forClass(String.class);
+        org.mockito.ArgumentCaptor<String> quarantineSql = org.mockito.ArgumentCaptor.forClass(String.class);
+        when(db.update(preparedSql.capture(), any(java.sql.Timestamp.class))).thenReturn(1);
+        when(db.update(quarantineSql.capture(), anyString(), any(java.sql.Timestamp.class))).thenReturn(2);
+
+        var detailed = repo.recoverStaleDetailed(cutoff);
+        assertThat(detailed.recovered()).isEqualTo(1);
+        assertThat(detailed.quarantined()).isEqualTo(2);
+
+        String reclaimQuery = preparedSql.getValue();
+        String quarantineQuery = quarantineSql.getValue();
+        for (String sql : List.of(reclaimQuery, quarantineQuery)) {
+            assertThat(sql)
+                    .contains("'REAL_SUBMIT_CLICK'")
+                    .contains("'ASHBY_SUBMIT_CLICK'")
+                    .contains("'WORKDAY_SUBMIT_CLICK'")
+                    .contains("'MOCK_SUBMIT'")
+                    .doesNotContain("'CLICK'");
+        }
     }
 
     @Test

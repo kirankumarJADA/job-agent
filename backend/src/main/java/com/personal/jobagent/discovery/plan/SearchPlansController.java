@@ -56,7 +56,16 @@ public class SearchPlansController implements DisposableBean {
 
     @Override
     public void destroy() {
-        manualRunExecutor.shutdownNow();
+        manualRunExecutor.shutdown();
+        try {
+            if (!manualRunExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                manualRunExecutor.shutdownNow();
+                manualRunExecutor.awaitTermination(2, TimeUnit.SECONDS);
+            }
+        } catch (InterruptedException ie) {
+            manualRunExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 
     @GetMapping

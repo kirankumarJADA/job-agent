@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { apiFetch } from '../api/client';
 import { WorkdayReviewPanel } from './WorkdayReviewPanel';
+// @ts-expect-error Worker pure outcome module is plain ESM JavaScript
+import { computePlanOutcome } from '../../../worker/src/outcome.js';
 
 vi.mock('../api/client', () => ({ apiFetch: vi.fn() }));
 const mocked = vi.mocked(apiFetch);
@@ -200,22 +202,25 @@ describe('WorkdayReviewPanel', () => {
 
   // ── Phase 19: Workday Multi-step Application Workflow Tests ───────────
 
-  it('renders Workday application preparation with wizard step, filled fields, and document status', async () => {
-    mocked.mockResolvedValue(PLAN([{
-      type: 'WORKDAY_APPLICATION_OUTCOME',
-      planType: 'WORKDAY',
-      currentStep: 'MY_INFORMATION',
-      filled: [
-        { label: 'First Name', category: 'STANDARD', value: 'Jane' },
-        { label: 'Last Name', category: 'STANDARD', value: 'Doe' },
-        { label: 'Email Address', category: 'STANDARD', value: 'jane@example.com' },
-      ],
-      requiredGaps: [],
-      resumeUploadState: 'ATTACHED',
-      coverLetterUploadState: 'ATTACHED',
-      formFound: true,
-      applicationUrl: 'https://nvidia.wd5.myworkdayjobs.com/en-US/job/apply',
-    }], 'AWAITING_APPROVAL'));
+  it('renders exact WORKDAY_APPLICATION_OUTCOME payload emitted by worker/src/outcome.js', async () => {
+    const completion = computePlanOutcome(
+      {
+        planType: 'WORKDAY',
+        targetUrl: 'https://nvidia.wd5.myworkdayjobs.com/en-US/job/apply',
+        steps: [{ type: 'WORKDAY_APPLY' }],
+      },
+      {
+        workdayResult: {
+          step: 'MY_INFORMATION',
+          filledCategories: ['FIRST_NAME', 'LAST_NAME', 'EMAIL'],
+          requiredGaps: [],
+          cvUploadState: 'ATTACHED',
+          coverLetterUploadState: 'CONFIRMED',
+        },
+      }
+    );
+
+    mocked.mockResolvedValue(PLAN(completion.result, 'AWAITING_APPROVAL'));
 
     renderPanel();
 
@@ -224,19 +229,41 @@ describe('WorkdayReviewPanel', () => {
     expect(screen.getByText('My Information')).toBeTruthy();
     expect(screen.getByText('Filled automatically (3)')).toBeTruthy();
     expect(screen.getByText(/First Name/)).toBeTruthy();
+    expect(screen.getByText(/Last Name/)).toBeTruthy();
+    expect(screen.getByText(/Email Address/)).toBeTruthy();
     expect(screen.getByText(/Résumé \/ CV/)).toBeTruthy();
+    expect(screen.getByText(/Attached to the form — not yet submitted/)).toBeTruthy();
+    expect(screen.getByText(/Confirmed attached on the form — not yet submitted/)).toBeTruthy();
     expect(screen.getByText('Review needed before authorizing submission')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Approve for Submission' })).toBeTruthy();
+  });
+
+  it('does not crash when optional or empty outcome arrays are omitted', async () => {
+    mocked.mockResolvedValue(PLAN([{
+      type: 'WORKDAY_APPLICATION_OUTCOME',
+      planType: 'WORKDAY',
+      step: 'APPLICATION_STEP',
+      cvUploadState: 'NO_ARTIFACT',
+      coverLetterUploadState: 'NO_FIELD',
+      applicationUrl: 'https://nvidia.wd5.myworkdayjobs.com/en-US/job/apply',
+    }], 'AWAITING_APPROVAL'));
+
+    renderPanel();
+
+    expect(await screen.findByText('Filled automatically (0)')).toBeTruthy();
+    expect(screen.getByText('Nothing was auto-filled.')).toBeTruthy();
+    expect(screen.getByText(/Not attached automatically/)).toBeTruthy();
   });
 
   it('approves a clean Workday application plan and calls approve-submit', async () => {
     mocked.mockResolvedValueOnce(PLAN([{
       type: 'WORKDAY_APPLICATION_OUTCOME',
       planType: 'WORKDAY',
-      currentStep: 'REVIEW',
-      filled: [{ label: 'Legal Name', category: 'STANDARD', value: 'Jane Doe' }],
+      step: 'REVIEW',
+      filledCategories: ['FIRST_NAME', 'EMAIL'],
       requiredGaps: [],
-      resumeUploadState: 'ATTACHED',
+      cvUploadState: 'ATTACHED',
+      coverLetterUploadState: 'NO_FIELD',
     }], 'AWAITING_APPROVAL')).mockResolvedValueOnce({ status: 'READY_TO_SUBMIT' });
 
     renderPanel();
@@ -251,12 +278,18 @@ describe('WorkdayReviewPanel', () => {
     mocked.mockResolvedValue(PLAN([{
       type: 'WORKDAY_APPLICATION_OUTCOME',
       planType: 'WORKDAY',
-      currentStep: 'APPLICATION_QUESTIONS',
-      filled: [{ label: 'Email', category: 'STANDARD', value: 'jane@example.com' }],
+      step: 'APPLICATION_QUESTIONS',
+      filledCategories: ['EMAIL'],
       requiredGaps: [
-        { label: 'Are you legally authorized to work in the UK?', category: 'REQUIRES_HUMAN', required: true },
+        {
+          id: 'uk_rtw',
+          label: 'Are you legally authorized to work in the UK?',
+          category: 'REQUIRES_HUMAN',
+          reason: 'Candidate confirmation required',
+        },
       ],
-      resumeUploadState: 'ATTACHED',
+      cvUploadState: 'ATTACHED',
+      coverLetterUploadState: 'NO_FIELD',
     }], 'AWAITING_APPROVAL'));
 
     renderPanel();
@@ -272,10 +305,11 @@ describe('WorkdayReviewPanel', () => {
     mocked.mockResolvedValueOnce(PLAN([{
       type: 'WORKDAY_APPLICATION_OUTCOME',
       planType: 'WORKDAY',
-      currentStep: 'REVIEW',
-      filled: [{ label: 'Full Name', category: 'STANDARD', value: 'Jane Doe' }],
+      step: 'REVIEW',
+      filledCategories: ['FIRST_NAME', 'LAST_NAME'],
       requiredGaps: [],
-      resumeUploadState: 'ATTACHED',
+      cvUploadState: 'ATTACHED',
+      coverLetterUploadState: 'ATTACHED',
     }], 'READY_TO_SUBMIT')).mockResolvedValueOnce({ status: 'PREPARED', submissionQueued: true });
 
     renderPanel();
@@ -292,10 +326,11 @@ describe('WorkdayReviewPanel', () => {
       {
         type: 'WORKDAY_APPLICATION_OUTCOME',
         planType: 'WORKDAY',
-        currentStep: 'REVIEW',
-        filled: [{ label: 'Full Name', category: 'STANDARD' }],
+        step: 'REVIEW',
+        filledCategories: ['FIRST_NAME'],
         requiredGaps: [],
-        resumeUploadState: 'ATTACHED',
+        cvUploadState: 'ATTACHED',
+        coverLetterUploadState: 'NO_FIELD',
       },
       {
         type: 'SUBMISSION_RECONCILIATION',
@@ -315,5 +350,104 @@ describe('WorkdayReviewPanel', () => {
     fireEvent.click(retryBtn);
 
     expect(mocked).toHaveBeenCalledWith('/automation/plans/plan-1/reconcile', { method: 'POST' });
+  });
+
+  it('fails closed without crashing when filledCategories is a non-array string', async () => {
+    mocked.mockResolvedValue(PLAN([{
+      type: 'WORKDAY_APPLICATION_OUTCOME',
+      planType: 'WORKDAY',
+      step: 'REVIEW',
+      filledCategories: 'FIRST_NAME',
+      requiredGaps: [],
+      cvUploadState: 'ATTACHED',
+      coverLetterUploadState: 'NO_FIELD',
+    }], 'AWAITING_APPROVAL'));
+
+    renderPanel();
+
+    expect(await screen.findByText(/malformed application outcome/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Approve for Submission' })).toBeNull();
+  });
+
+  it('fails closed without crashing when filledCategories contains null or non-string entries', async () => {
+    mocked.mockResolvedValue(PLAN([{
+      type: 'WORKDAY_APPLICATION_OUTCOME',
+      planType: 'WORKDAY',
+      step: 'REVIEW',
+      filledCategories: [null, 42, 'EMAIL'],
+      requiredGaps: [],
+      cvUploadState: 'ATTACHED',
+      coverLetterUploadState: 'NO_FIELD',
+    }], 'AWAITING_APPROVAL'));
+
+    renderPanel();
+
+    expect(await screen.findByText(/malformed application outcome/i)).toBeTruthy();
+    expect(screen.getByText('Email Address')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Approve for Submission' })).toBeNull();
+  });
+
+  it('never interprets non-array requiredGaps as ready to approve', async () => {
+    mocked.mockResolvedValue(PLAN([{
+      type: 'WORKDAY_APPLICATION_OUTCOME',
+      planType: 'WORKDAY',
+      step: 'REVIEW',
+      filledCategories: ['FIRST_NAME'],
+      requiredGaps: { workAuthorization: 'required' },
+      cvUploadState: 'ATTACHED',
+      coverLetterUploadState: 'NO_FIELD',
+    }], 'AWAITING_APPROVAL'));
+
+    renderPanel();
+
+    expect(await screen.findByText(/malformed application outcome/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Approve for Submission' })).toBeNull();
+  });
+
+  it('guards malformed or null items inside requiredGaps and blocks approval', async () => {
+    mocked.mockResolvedValue(PLAN([{
+      type: 'WORKDAY_APPLICATION_OUTCOME',
+      planType: 'WORKDAY',
+      step: 'APPLICATION_QUESTIONS',
+      filledCategories: ['FIRST_NAME'],
+      requiredGaps: [null, { id: 'q1' }, { id: 'uk_rtw', label: 'Right to work', category: 'REQUIRES_HUMAN' }],
+      cvUploadState: 'ATTACHED',
+      coverLetterUploadState: 'NO_FIELD',
+    }], 'AWAITING_APPROVAL'));
+
+    renderPanel();
+
+    expect(await screen.findByText(/malformed application outcome/i)).toBeTruthy();
+    expect(screen.getByText(/Right to work/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Approve for Submission' })).toBeNull();
+  });
+
+  it('guards non-array filled fallback and non-string step without crashing or approving', async () => {
+    mocked.mockResolvedValue(PLAN([{
+      type: 'WORKDAY_APPLICATION_OUTCOME',
+      planType: 'WORKDAY',
+      step: { invalid: true },
+      filled: 'email',
+      requiredGaps: [],
+      cvUploadState: 'ATTACHED',
+      coverLetterUploadState: 'NO_FIELD',
+    }], 'AWAITING_APPROVAL'));
+
+    renderPanel();
+
+    expect(await screen.findByText(/malformed application outcome/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Approve for Submission' })).toBeNull();
+  });
+
+  it('guards non-array plan.result and non-string step without crashing', async () => {
+    mocked.mockResolvedValue({
+      ...PLAN([], 'AWAITING_APPROVAL'),
+      result: { unexpected: true },
+    });
+
+    renderPanel();
+
+    expect(await screen.findByText(/malformed|has not yet reported/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Approve for Submission' })).toBeNull();
   });
 });

@@ -8,11 +8,24 @@ import { planZohoFormActions, ZohoFieldCategory, ZohoDocumentUploadState } from 
 import { planLeverFormActions, LeverFieldAction } from './lever.js';
 import { planAshbyFormActions, AshbyFieldCategory, AshbyDocumentUploadState, classifyAshbySubmission, AshbySubmissionCategory } from './ashby.js';
 import { classifyWorkdayField, planWorkdayFormActions, detectWorkdayStep, classifyWorkdaySubmission, isWorkdayHoneypot, WorkdayFieldCategory, WorkdayDocumentUploadState, WorkdaySubmissionCategory } from './workday.js';
+import {
+  universalPageIdentityMatches,
+  installUniversalNavigationGuard,
+  inspectLiveFormDom,
+  hydrateDynamicComboboxOptions,
+  planUniversalControls,
+  applyUniversalControlActions,
+} from './universal_form.js';
+import { executeAndVerifyUniversalSubmit, identityValuesOf, UniversalSubmitCategory } from './universal_confirmation.js';
+import { startEgressProxy } from './egress_proxy.js';
+import { assertArtifactAcceptable, ArtifactPolicyError, MAX_UNIVERSAL_UPLOAD_BYTES } from './artifact_policy.js';
+import { SessionVault } from './session_vault.js';
 
 const MAX_WORKDAY_UPLOAD_BYTES = 10 * 1024 * 1024;
 import { StateStore } from './store.js';
 import { MockMailboxClient, VerificationError } from './mailbox.js';
 import { sanitizeUrl, redactSecrets } from './secret_redaction.js';
+import { buildGreenhouseSubmissionEvidence, MAX_RESPONSE_SNIPPET_CHARS } from './greenhouse_evidence.js';
 
 // Robin x Tsenta continuation: shared between résumé and cover-letter
 // uploads on a Zoho Recruit form — a deliberately cautious default, not an
@@ -32,12 +45,86 @@ const MAX_ASHBY_UPLOAD_BYTES = 10 * 1024 * 1024;
 // uses to refuse ever clicking again automatically — see its own comment.
 const REAL_SUBMIT_ATTEMPTING = 'ATTEMPTING';
 
+/**
+ * Stage 3F: Chromium flags that keep WebRTC from opening UDP sockets outside
+ * the egress proxy (WebRTC media/ICE cannot be proxied over HTTP CONNECT).
+ */
+const EGRESS_CHROMIUM_ARGS = Object.freeze([
+  '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+  '--webrtc-ip-handling-policy=disable_non_proxied_udp',
+  '--disable-features=WebRtcHideLocalIpsWithMdns,DnsOverHttps',
+]);
+
+/** Stage 3F: removes WebRTC peer connections from every page before any page script runs. */
+const DISABLE_WEBRTC_INIT_SCRIPT = `(() => {
+  for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel']) {
+    try { Object.defineProperty(window, name, { value: undefined, configurable: false, writable: false }); } catch (e) {}
+  }
+})();`;
+
+
+/**
+ * Stage 3F: the one hardened way this worker opens Chromium. Exported so the
+ * adversarial tests exercise exactly the production configuration.
+ *
+ *  - starts the loopback egress proxy (connection-level DNS/IP enforcement);
+ *  - launches Chromium behind it, loopback included ('<-loopback>'), with
+ *    WebRTC prevented from using non-proxied UDP;
+ *  - creates an ephemeral context: Service Workers blocked, downloads refused,
+ *    WebRTC constructors removed before any page script, and only the given
+ *    (already decrypted, vault-checked) storageState — never a file path.
+ *
+ * Fails closed: if any part cannot be set up, everything started so far is
+ * torn down and the error propagates; no browser runs unguarded.
+ */
+export async function openHardenedBrowser({ chromiumImpl = chromium, headless = true, egressPolicy = {},
+  storageState = undefined, extraArgs = [] } = {}) {
+  const egress = await startEgressProxy(egressPolicy);
+  let browser;
+  let context;
+  try {
+    browser = await chromiumImpl.launch({
+      headless,
+      args: ['--disable-dev-shm-usage', '--no-sandbox', '--disable-gpu', ...EGRESS_CHROMIUM_ARGS, ...extraArgs],
+      proxy: { server: egress.url, bypass: '<-loopback>' },
+    });
+    context = await browser.newContext({ serviceWorkers: 'block', acceptDownloads: false,
+      ...(storageState ? { storageState } : {}) });
+    if (typeof context.addInitScript === 'function') await context.addInitScript(DISABLE_WEBRTC_INIT_SCRIPT);
+  } catch (error) {
+    await context?.close().catch(() => {});
+    await browser?.close().catch(() => {});
+    await egress.close();
+    throw error;
+  }
+  return { browser, context, egress };
+}
+
+/**
+ * Stage 3F (A3): closes every page except `mainPage` the moment it appears.
+ * Its first requests were already subject to the context guard and the
+ * egress proxy; this stops a popup from becoming a second browsing session.
+ */
+export function closeUnexpectedPages(context, mainPage, onClosed = () => {}) {
+  if (typeof context?.on !== 'function') return;
+  context.on('page', (extra) => {
+    if (extra === mainPage) return;
+    try { onClosed(extra.url?.() ?? ''); } catch { /* diagnostics only */ }
+    extra.close().catch(() => {});
+  });
+}
+
 export class HardStopError extends Error {
   constructor(reason, details = {}) { super(reason); this.name = 'HardStopError'; this.reason = reason; this.details = details; }
 }
 
 export class ApprovalRequiredError extends Error {
-  constructor(stepId) { super(`REQUIRES_APPROVAL:${stepId}`); this.name = 'ApprovalRequiredError'; this.stepId = stepId; }
+  constructor(stepId, reason = null) {
+    super(`REQUIRES_APPROVAL:${stepId}`);
+    this.name = 'ApprovalRequiredError';
+    this.stepId = stepId;
+    if (reason) this.reason = reason;
+  }
 }
 
 /** Raised when required fields/questions need human input before submission. */
@@ -46,18 +133,30 @@ export class HumanInputRequiredError extends Error {
 }
 
 export class BrowserWorker {
-  constructor({ statePath, artifactDir, eventSink = () => {}, verificationResolver = null, identityResolver = null,
-                credentialResolver = null, onPageCreated = null, chromium: customChromium = null } = {}) {
+  constructor({ statePath, artifactDir, eventSink = () => {}, verificationResolver = null,
+                verificationConfirmer = null, verificationReleaser = null,
+                identityResolver = null, identityConfirmer = null, credentialResolver = null,
+                stepsReporter = null, discoveredQuestionsReporter = null,
+                onPageCreated = null, chromium: customChromium = null, localTestNetwork = false,
+                sessionKey = null } = {}) {
     this.store = new StateStore(statePath);
     this.chromium = customChromium ?? chromium;
     this.artifactDir = artifactDir;
     this.eventSink = eventSink;
     this.verificationResolver = verificationResolver;
+    this.verificationConfirmer = verificationConfirmer;
+    this.verificationReleaser = verificationReleaser;
     /** Phase 8.5: asks the backend which address to register an employer account with. */
     this.identityResolver = identityResolver;
+    /** Stage 3I Phase 5: promotes a pending registration identity after real signup succeeds. */
+    this.identityConfirmer = identityConfirmer;
     /** Phase 8.5 continuation: asks the backend (EmployerCredentialService) for
      * this candidate's saved portal password for one employer domain. */
     this.credentialResolver = credentialResolver;
+    /** Stage 3B: synchronous checkpoint reporter to /plans/{id}/steps. */
+    this.stepsReporter = stepsReporter;
+    /** Stage 3B: persists newly discovered mandatory live-DOM questions to /plans/{id}/discovered-questions. */
+    this.discoveredQuestionsReporter = discoveredQuestionsReporter;
     /** Set by requestAbort(): the run stops at the next step boundary. */
     this.abortRequested = false;
     /** Phase 4: the last REAL_SUBMIT_CLICK step's {confirmed, evidence} result, if any. */
@@ -74,6 +173,12 @@ export class BrowserWorker {
     this.lastAshbySubmitResult = null;
     /** Phase 19: the last WORKDAY_SUBMIT_CLICK step's {confirmed, evidence} result, if any. */
     this.lastWorkdaySubmitResult = null;
+    /** Stage 3B: the last UNIVERSAL_APPLY step's execution summary, if any. */
+    this.lastUniversalResult = null;
+    /** Stage 3D: diagnostics captured by installUniversalNavigationGuard (redacted blocked resources). */
+    this.lastUniversalNavGuard = null;
+    /** Stage 3B: the last UNIVERSAL_SUBMIT_CLICK step's verification result, if any. */
+    this.lastUniversalSubmitResult = null;
     /**
      * Test seam only (never set in production: worker.js never passes it):
      * `async (page) => {}`, invoked once, right after the page is created and
@@ -87,6 +192,22 @@ export class BrowserWorker {
      * touching a real employer site.
      */
     this.onPageCreated = onPageCreated;
+    /**
+     * Stage 3F test seam (never set by worker.js): lets the dedicated-ATS test
+     * suites, which drive local mock servers, reach loopback on any port.
+     * Private, link-local and metadata ranges stay blocked even then. UNIVERSAL
+     * plans ignore this and use the backend-controlled
+     * `plan.package.allowLocalTestHosts` flag, restricted to the plan's own port.
+     */
+    this.localTestNetwork = Boolean(localTestNetwork);
+    /** Stage 3F: egress proxy diagnostics from the most recent run (host + reason only). */
+    this.lastEgressDiagnostics = null;
+    /**
+     * Stage 3F (Workstream B): encrypted, TTL-bound browser session at rest —
+     * disabled (purely in-memory sessions) unless a key is supplied. Never the
+     * plaintext storage.json earlier builds wrote.
+     */
+    this.sessionVault = new SessionVault({ artifactDir, key: sessionKey });
   }
 
   /**
@@ -127,6 +248,9 @@ export class BrowserWorker {
       this.#validateWorkdayPlan(plan);
     } else if (plan.planType === 'ASHBY') {
       this.#validateAshbyPlan(plan);
+    } else if (plan.planType === 'UNIVERSAL') {
+      this.#validateUniversalPlan(plan);
+      this.#validateUniversalArtifacts(plan);
     } else if (plan.planType !== 'INSPECTION' && plan.package) {
       validatePackage(plan.package);
     }
@@ -139,35 +263,53 @@ export class BrowserWorker {
     // renderer, and the hardened images run without the user-namespace
     // sandbox. Both flags are required for reliable headless execution in
     // the production container (worker/Dockerfile).
-    const browser = await (this.chromium || chromium).launch({
+    // Stage 3F (Workstream A): every connection Chromium (and Playwright's own
+    // route.fetch) makes goes through a loopback egress proxy that resolves DNS
+    // itself, rejects private/loopback/link-local/metadata/special addresses
+    // and pins the socket to the validated IP. Fail closed: no proxy, no run.
+    const applicationId = plan.correlation.applicationId;
+    // Removes any legacy plaintext storage.json; returns a decrypted session only
+    // when the vault is enabled and the entry is fresh, untampered and this application's.
+    const savedSession = this.sessionVault.load(applicationId);
+    let keepSession = false;
+    const { browser, context, egress } = await openHardenedBrowser({
+      chromiumImpl: this.chromium || chromium,
       headless,
-      args: ['--disable-dev-shm-usage', '--no-sandbox', '--disable-gpu'],
+      egressPolicy: this.#egressPolicyFor(plan),
+      storageState: savedSession,
     });
-    const sessionDir = path.join(this.artifactDir, 'sessions', plan.correlation.applicationId);
-    fs.mkdirSync(sessionDir, { recursive: true });
-    const context = await browser.newContext({ storageState: fs.existsSync(path.join(sessionDir, 'storage.json')) ? path.join(sessionDir, 'storage.json') : undefined });
+    this.lastUniversalNavGuard = null;
+    if (plan.planType === 'UNIVERSAL') {
+      // Context-level guard: covers popups, new tabs and frames from their
+      // first request, and WebSocket handshakes (routeWebSocket).
+      this.lastUniversalNavGuard = await installUniversalNavigationGuard(context, plan.targetUrl, {
+        allowLocalTestHosts: Boolean(plan.package?.allowLocalTestHosts),
+      });
+    }
     const page = await context.newPage();
+    if (plan.planType === 'UNIVERSAL') {
+      // Automation never needs a second page: popups and new tabs are closed and recorded.
+      closeUnexpectedPages(context, page,
+        (url) => this.lastUniversalNavGuard?.recordBlocked?.(url, 'popup', 'UNEXPECTED_PAGE_CLOSED'));
+    }
     if (this.onPageCreated) await this.onPageCreated(page);
+    const vaultedIdentity = (!state.identity?.email && this.sessionVault.enabled)
+      ? this.sessionVault.loadIdentity(applicationId)
+      : null;
     const values = {
       verification: state.verification,
       // The registration identity survives a restart, so a resumed run logs in
       // with the address it signed up with (and never asks for a new one).
-      identity: state.identity ?? null,
+      identity: state.identity?.email ? state.identity : (vaultedIdentity ?? state.identity ?? null),
       greenhouseExpected: new Map(state.greenhouseExpected ?? []),
     };
-    // A paused or crashed worker may have completed the navigation step but
-    // not yet completed the next step. Restore the last durable URL before
-    // resuming so a fresh browser process never attempts a form action on
-    // about:blank.
-    if (state.status !== 'COMPLETED' && state.lastUrl) {
-      await page.goto(state.lastUrl, { waitUntil: 'domcontentloaded' });
+    const backendPausedUrl = Array.isArray(plan.completedSteps)
+      ? plan.completedSteps.slice().reverse().find((s) => s?.result?.currentUrl)?.result?.currentUrl
+      : null;
+    const resumeUrl = state.lastUrl || (plan.planType === 'UNIVERSAL' ? backendPausedUrl : null);
+    if (state.status !== 'COMPLETED' && resumeUrl) {
+      await page.goto(resumeUrl, { waitUntil: 'domcontentloaded' });
       if (plan.planType === 'GREENHOUSE') {
-        // The one legitimate exception: a prior process's REAL_SUBMIT_CLICK
-        // genuinely completed and its own last known URL is Greenhouse's
-        // confirmation route, not plan.targetUrl itself. Recognise that
-        // specific, already-durable case the same way #runRealSubmitClick's
-        // own post-step check does — anything else still requires an exact
-        // match.
         const realSubmitStep = plan.steps.find((candidate) => candidate.type === StepType.REAL_SUBMIT_CLICK);
         const resumedAfterRealSubmit = realSubmitStep && state.steps?.[realSubmitStep.id]?.status === 'COMPLETED';
         this.#assertGreenhouseIdentity(page, plan, resumedAfterRealSubmit ? realSubmitStep : undefined);
@@ -176,6 +318,7 @@ export class BrowserWorker {
       if (plan.planType === 'LEVER') this.#assertLeverIdentity(page, plan);
       if (plan.planType === 'WORKDAY') this.#assertWorkdayIdentity(page, plan);
       if (plan.planType === 'ASHBY') this.#assertAshbyIdentity(page, plan);
+      if (plan.planType === 'UNIVERSAL') this.#assertUniversalIdentity(page, plan);
     }
     this.#emit(plan, { type: 'WORKER_STARTED', planId: plan.planId });
 
@@ -187,21 +330,13 @@ export class BrowserWorker {
         this.store.heartbeat(plan.planId);
         const prior = this.store.step(plan.planId, step.id);
         const otpSubmitCompleted = this.store.step(plan.planId, 'account-verify-otp-submit')?.status === 'COMPLETED';
+        const replayOtpResolve = step.id === 'account-verify-otp'
+          && !otpSubmitCompleted && !values.verification?.otp
+          && Boolean(state.verification?.hasOtp || state.verification?.verificationId);
         const replayOtpFill = step.id === 'account-verify-otp-fill'
-          && !otpSubmitCompleted && Boolean(state.verification?.otp);
-        if (prior?.status === 'COMPLETED' && !replayOtpFill) {
-          // Restoring, never reconstructing: a REAL_SUBMIT_CLICK step that
-          // already durably completed — in THIS process or an earlier one —
-          // is never re-run (no second click, ever). Its exact, previously
-          // persisted classification (confirmed or not) is restored verbatim
-          // so the final result reflects what genuinely happened, instead of
-          // silently reporting nothing (which outcome.js would otherwise
-          // treat as "no result recorded" — safe, but a needless loss of a
-          // real, already-verified outcome). A step completed before this
-          // fix shipped, with no `submitResult` ever persisted, correctly
-          // stays unrecoverable here — see the module comment on
-          // `#captureGreenhouseSubmissionDuringClick` for why that case must
-          // fall through to HUMAN_REQUIRED rather than guessing.
+          && !otpSubmitCompleted && Boolean(values.verification?.otp);
+        const replayUniversalPause = step.type === StepType.UNIVERSAL_APPLY && Boolean(prior?.universalPaused);
+        if (prior?.status === 'COMPLETED' && !replayOtpResolve && !replayOtpFill && !replayUniversalPause) {
           if (step.type === StepType.REAL_SUBMIT_CLICK && prior.submitResult) {
             this.lastSubmitResult = prior.submitResult;
           }
@@ -210,6 +345,12 @@ export class BrowserWorker {
           }
           if (step.type === StepType.WORKDAY_SUBMIT_CLICK && prior.submitResult) {
             this.lastWorkdaySubmitResult = prior.submitResult;
+          }
+          if (step.type === StepType.UNIVERSAL_SUBMIT_CLICK && prior.submitResult) {
+            this.lastUniversalSubmitResult = prior.submitResult;
+          }
+          if (step.type === StepType.UNIVERSAL_APPLY && prior.universalResult) {
+            this.lastUniversalResult = prior.universalResult;
           }
           continue;
         }
@@ -223,32 +364,44 @@ export class BrowserWorker {
         // received it, so this is never retried automatically — clicking
         // again could be a genuine duplicate submission. Treat it as
         // requiring human review and move on without touching the page.
-        if (step.type === StepType.REAL_SUBMIT_CLICK && prior?.status === REAL_SUBMIT_ATTEMPTING) {
+        if (step.type === StepType.REAL_SUBMIT_CLICK
+            && (prior?.status === REAL_SUBMIT_ATTEMPTING || this.#hasBackendPreSubmitAttempt(plan))) {
           this.lastSubmitResult = {
             category: ConfirmationCategory.PRIOR_ATTEMPT_UNVERIFIED,
             confirmed: false,
-            evidence: 'a previous process started this submission click but its outcome was never durably recorded before it stopped; '
+            evidence: 'a previous process started this submission click or recorded a backend PRE_SUBMIT_ATTEMPTING checkpoint; '
               + 'the employer may already have received the application, so this is never retried automatically — human review is required before any further action',
           };
           continue;
         }
         // Same duplicate-submission protection as REAL_SUBMIT_CLICK above,
         // for Ashby's own real submit action.
-        if (step.type === StepType.ASHBY_SUBMIT_CLICK && prior?.status === REAL_SUBMIT_ATTEMPTING) {
+        if (step.type === StepType.ASHBY_SUBMIT_CLICK
+            && (prior?.status === REAL_SUBMIT_ATTEMPTING || this.#hasBackendPreSubmitAttempt(plan))) {
           this.lastAshbySubmitResult = {
             confirmed: false,
             category: 'PRIOR_ATTEMPT_UNVERIFIED',
-            evidence: 'a previous process started this submission click but its outcome was never durably recorded before it stopped; '
+            evidence: 'a previous process started this submission click or recorded a backend PRE_SUBMIT_ATTEMPTING checkpoint; '
               + 'the employer may already have received the application, so this is never retried automatically — human review is required before any further action',
           };
           continue;
         }
-        if (step.type === StepType.WORKDAY_SUBMIT_CLICK && prior?.status === REAL_SUBMIT_ATTEMPTING) {
+        if (step.type === StepType.WORKDAY_SUBMIT_CLICK
+            && (prior?.status === REAL_SUBMIT_ATTEMPTING || this.#hasBackendPreSubmitAttempt(plan))) {
           this.lastWorkdaySubmitResult = {
             confirmed: false,
             category: 'PRIOR_ATTEMPT_UNVERIFIED',
-            evidence: 'a previous process started this submission click but its outcome was never durably recorded before it stopped; '
+            evidence: 'a previous process started this submission click or recorded a backend PRE_SUBMIT_ATTEMPTING checkpoint; '
               + 'the employer may already have received the application, so this is never retried automatically — human review is required before any further action',
+          };
+          continue;
+        }
+        if (step.type === StepType.UNIVERSAL_SUBMIT_CLICK
+            && (prior?.status === REAL_SUBMIT_ATTEMPTING || this.#hasBackendPreSubmitAttempt(plan))) {
+          this.lastUniversalSubmitResult = {
+            confirmed: false,
+            category: UniversalSubmitCategory.PRIOR_ATTEMPT_UNVERIFIED,
+            evidence: 'a prior PRE_SUBMIT_ATTEMPTING checkpoint exists for this plan; human reconciliation is required before any further action',
           };
           continue;
         }
@@ -290,30 +443,64 @@ export class BrowserWorker {
           if (plan.planType === 'LEVER') this.#assertLeverIdentity(page, plan);
           if (plan.planType === 'WORKDAY') this.#assertWorkdayIdentity(page, plan);
           if (plan.planType === 'ASHBY') this.#assertAshbyIdentity(page, plan);
+          if (plan.planType === 'UNIVERSAL') this.#assertUniversalIdentity(page, plan);
           const stepExtra = { currentUrl: sanitizeUrl(page.url()) };
-          // Durable evidence, not just a "this step ran" marker: a
-          // REAL_SUBMIT_CLICK step's own classification (confirmed or not,
-          // with its evidence) is persisted alongside COMPLETED so a later
-          // resume can restore the exact authentic outcome instead of
-          // reconstructing — or losing — it. See the restore logic above.
           if (step.type === StepType.REAL_SUBMIT_CLICK) stepExtra.submitResult = this.lastSubmitResult;
           if (step.type === StepType.ASHBY_SUBMIT_CLICK) stepExtra.submitResult = this.lastAshbySubmitResult;
           if (step.type === StepType.WORKDAY_SUBMIT_CLICK) stepExtra.submitResult = this.lastWorkdaySubmitResult;
-          this.store.markStep(plan.planId, step.id, 'COMPLETED', stepExtra);
+          if (step.type === StepType.UNIVERSAL_APPLY && this.lastUniversalResult) {
+            stepExtra.universalPaused = Boolean(this.lastUniversalResult.pausedForInput);
+            stepExtra.completedPages = this.lastUniversalResult.completedPages ?? [];
+            stepExtra.universalResult = this.lastUniversalResult;
+            if (this.lastUniversalResult.signupSucceeded) {
+              stepExtra.signupSucceeded = true;
+            }
+          }
+          if (step.type === StepType.UNIVERSAL_SUBMIT_CLICK && this.lastUniversalSubmitResult) {
+            stepExtra.submitResult = this.lastUniversalSubmitResult;
+          }
           if (step.id === 'account-verify-otp-submit') {
+            if (values.verification?.verificationId && values.verification?.leaseToken && this.verificationConfirmer) {
+              const confirmRes = await this.verificationConfirmer({
+                applicationId: plan.correlation.applicationId,
+                sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? plan.package?.sessionId ?? null,
+                verificationId: values.verification.verificationId,
+                leaseToken: values.verification.leaseToken,
+              });
+              if (confirmRes?.conflict) {
+                this.#emit(plan, {
+                  type: 'MAILBOX_VERIFICATION_CONFIRM_CONFLICT',
+                  stepId: step.id,
+                  verificationId: values.verification.verificationId,
+                });
+              }
+            }
             values.verification = null;
             this.store.verification(plan.planId, null);
           }
+          // Stage 3I Phase 5 (P2-6): persist SessionVault state BEFORE recording STEP_COMPLETED / completion.
+          if (this.sessionVault.enabled) {
+            this.sessionVault.save(applicationId, await context.storageState());
+          }
+          this.store.markStep(plan.planId, step.id, 'COMPLETED', stepExtra);
           this.#emit(plan, { type: 'STEP_COMPLETED', stepId: step.id, stepType: step.type });
           const businessEvent = this.#businessEvent(step.id);
           if (businessEvent) this.#emit(plan, { type: businessEvent });
-          await context.storageState({ path: path.join(sessionDir, 'storage.json') });
           if (failAfterStep === step.id) {
             // Simulate a process crash after durable commit. Do not convert
             // the already-completed step into FAILED; restart must skip it.
             throw new Error(`SIMULATED_WORKER_CRASH_AFTER:${step.id}`);
           }
         } catch (error) {
+          if (values.verification?.verificationId && values.verification?.leaseToken && this.verificationReleaser
+              && (step.id === 'account-verify-otp-fill' || step.id === 'account-verify-otp-submit')) {
+            await this.verificationReleaser({
+              applicationId: plan.correlation.applicationId,
+              verificationId: values.verification.verificationId,
+              leaseToken: values.verification.leaseToken,
+              reason: 'OTP_STEP_INTERRUPTED',
+            }).catch(() => {});
+          }
           if (error instanceof ApprovalRequiredError || error instanceof HardStopError || String(error?.message).startsWith('SIMULATED_WORKER_CRASH')) throw error;
           const screenshot = await this.#failureScreenshot(page, plan, step.id);
           this.store.markStep(plan.planId, step.id, 'FAILED', { error: this.#safeError(error), screenshot });
@@ -328,19 +515,56 @@ export class BrowserWorker {
           throw error;
         }
       }
+      // Keep encrypted cookies/session across Universal Pass-1 pauses (review,
+      // verification, discovered questions) until final submit or terminal error.
+      keepSession = plan.planType === 'UNIVERSAL'
+        && plan.steps.at(-1)?.type !== StepType.UNIVERSAL_SUBMIT_CLICK;
+      if (keepSession && this.sessionVault.enabled) {
+        const storageState = await context.storageState();
+        this.sessionVault.save(applicationId, storageState);
+      }
       this.store.complete(plan.planId);
       this.#emit(plan, { type: 'WORKER_COMPLETED', planId: plan.planId });
       return { status: 'COMPLETED', state: this.store.get(plan.planId), submitResult: this.lastSubmitResult ?? null,
         zohoRecruitResult: this.lastZohoRecruitResult ?? null, leverResult: this.lastLeverResult ?? null,
         workdayResult: this.lastWorkdayResult ?? null, ashbyResult: this.lastAshbyResult ?? null,
         ashbySubmitResult: this.lastAshbySubmitResult ?? null,
-        workdaySubmitResult: this.lastWorkdaySubmitResult ?? null };
+        workdaySubmitResult: this.lastWorkdaySubmitResult ?? null,
+        universalResult: this.lastUniversalResult ?? null,
+        universalSubmitResult: this.lastUniversalSubmitResult ?? null };
     } catch (error) {
       if (!(error instanceof ApprovalRequiredError) && !(error instanceof HardStopError) && !String(error.message).startsWith('SIMULATED_WORKER_CRASH')) {
         this.store.fail(plan.planId, this.#safeError(error));
       }
+      if (!String(error?.message).startsWith('SIMULATED_WORKER_CRASH')
+          && values?.verification?.verificationId && values?.verification?.leaseToken
+          && this.verificationReleaser) {
+        try {
+          await this.verificationReleaser({
+            applicationId,
+            sessionId: plan.correlation?.sessionId ?? plan.package?.sessionId ?? null,
+            verificationId: values.verification.verificationId,
+            leaseToken: values.verification.leaseToken,
+            reason: error instanceof ApprovalRequiredError ? String(error.reason || 'PAUSED') : 'STEP_FAILED',
+          });
+          values.verification = null;
+          this.store.verification(plan.planId, null);
+        } catch { /* lease release on unwind is best effort */ }
+      }
+      // The session survives only an approval pause (the same plan resumes) or a
+      // crash; completion, failure, hard stops, handoffs and shutdown delete it.
+      keepSession = error instanceof ApprovalRequiredError || String(error?.message).startsWith('SIMULATED_WORKER_CRASH');
+      if (keepSession && this.sessionVault.enabled && context) {
+        try {
+          const storageState = await context.storageState();
+          this.sessionVault.save(applicationId, storageState);
+        } catch { /* context might already be closed on crash */ }
+      }
       throw error;
     } finally {
+      try {
+        this.lastEgressDiagnostics = egress.getDiagnostics();
+      } catch { /* diagnostics are best effort */ }
       try {
         if (context) {
           await context.close();
@@ -362,9 +586,32 @@ export class BrowserWorker {
             target: 'browser',
             error: closeErr?.message || String(closeErr),
           }));
+        } finally {
+          await egress.close().catch(() => {});
+          try {
+            if (!keepSession) this.sessionVault.purge(applicationId);
+          } catch { /* best effort */ }
         }
       }
     }
+  }
+
+  /** Stage 3F: the egress policy for one plan. */
+  #egressPolicyFor(plan) {
+    if (plan.planType === 'UNIVERSAL') {
+      const allowLocalTestHosts = Boolean(plan.package?.allowLocalTestHosts);
+      let localTestPorts = [];
+      if (allowLocalTestHosts) {
+        try {
+          const target = new URL(plan.targetUrl);
+          localTestPorts = [Number(target.port || (target.protocol === 'https:' ? 443 : 80))];
+        } catch {
+          localTestPorts = [];
+        }
+      }
+      return { allowLocalTestHosts, localTestPorts };
+    }
+    return { allowLocalTestHosts: this.localTestNetwork, localTestPorts: null };
   }
 
   async #runStep(page, plan, step, values) {
@@ -384,6 +631,9 @@ export class BrowserWorker {
         }
         if (plan.planType === 'WORKDAY' && !workdayPageIdentityMatches(p.url, page.url())) {
           throw new HardStopError('WORKDAY_PAGE_IDENTITY_MISMATCH', { stepId: step.id });
+        }
+        if (plan.planType === 'UNIVERSAL' && !universalPageIdentityMatches(plan.targetUrl, page.url(), { allowLocalTestHosts: Boolean(plan.package?.allowLocalTestHosts) })) {
+          throw new HardStopError('UNIVERSAL_PAGE_IDENTITY_MISMATCH', { stepId: step.id });
         }
         break;
       case StepType.FILL_FIELD: {
@@ -431,26 +681,43 @@ export class BrowserWorker {
           await page.locator(p.selector).check({ force: false });
         }
         break;
-      case StepType.UPLOAD_FILE:
+      case StepType.UPLOAD_FILE: {
         assertSafeSelector(p.selector);
         if (plan.planType === 'GREENHOUSE' && (p.expectedJobId !== plan.correlation.jobId
             || p.expectedApplicationId !== plan.correlation.applicationId)) {
           throw new HardStopError('CROSS_JOB_FILE_CONTAMINATION', { stepId: step.id });
         }
-        if (!fs.existsSync(p.path)) throw new Error(`FILE_NOT_FOUND:${p.path}`);
         const artifact = plan.planType === 'GREENHOUSE'
           ? (p.artifact === 'coverLetter' ? plan.package.coverLetter : p.artifact === 'cv' ? plan.package.cv : null)
           : (p.selector.includes('cover_letter') ? plan.package.coverLetter : plan.package.cv);
-        if (!artifact?.versionId || p.expectedVersionId !== artifact.versionId) throw new HardStopError('CV_VERSION_LINK_MISMATCH', { stepId: step.id });
+        if (!artifact?.versionId || p.expectedVersionId !== artifact.versionId) {
+          throw new HardStopError('CV_VERSION_LINK_MISMATCH', { stepId: step.id });
+        }
         if (plan.planType === 'GREENHOUSE' && artifact.sha256 !== p.sha256) {
           throw new HardStopError('PACKAGE_CHECKSUM_MISMATCH', { stepId: step.id });
         }
+        if (artifact.path && p.path && path.resolve(artifact.path) !== path.resolve(p.path)) {
+          throw new HardStopError('GREENHOUSE_ARTIFACT_CORRELATION_MISMATCH', { stepId: step.id });
+        }
+        const filePath = artifact?.path ?? p.path;
+        if (!filePath) throw new Error('FILE_NOT_FOUND:missing');
+        if (this.artifactDir && artifact?.path) {
+          const allowedRoot = path.resolve(this.artifactDir);
+          const resolved = path.resolve(filePath);
+          if (!resolved.startsWith(allowedRoot + path.sep) && resolved !== allowedRoot) {
+            throw new HardStopError('ARTIFACT_PATH_OUTSIDE_SANDBOX_DIR', { stepId: step.id });
+          }
+        }
+        if (!fs.existsSync(filePath)) {
+          throw new Error(`FILE_NOT_FOUND:${path.basename(String(filePath))}`);
+        }
         if (artifact.sha256) {
-          const actual = crypto.createHash('sha256').update(fs.readFileSync(p.path)).digest('hex');
+          const actual = crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
           if (actual !== artifact.sha256) throw new HardStopError('PACKAGE_CHECKSUM_MISMATCH', { stepId: step.id });
         }
-        await page.locator(p.selector).setInputFiles(p.path);
+        await page.locator(p.selector).setInputFiles(filePath);
         break;
+      }
       case StepType.CLICK:
         if (p.onlyWhenVerificationOtp && !values.verification?.otp) break;
         assertSafeSelector(p.selector);
@@ -471,7 +738,7 @@ export class BrowserWorker {
         const pauseForHuman = (reason) => {
           this.store.pause(plan.planId, reason);
           this.#emit(plan, { type: reason, stepId: step.id });
-          throw new ApprovalRequiredError(step.id);
+          throw new ApprovalRequiredError(step.id, reason);
         };
         if (!this.identityResolver) pauseForHuman('REGISTRATION_IDENTITY_UNAVAILABLE');
         let identity;
@@ -489,8 +756,12 @@ export class BrowserWorker {
         if (!/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(email)) {
           pauseForHuman('REGISTRATION_IDENTITY_INVALID');
         }
-        values.identity = { email, mailbox: identity.mailbox ?? null };
-        this.store.identity(plan.planId, values.identity);
+        values.identity = { email, mailbox: identity.mailbox ?? null, existing: Boolean(identity.existing) };
+        this.store.identity(plan.planId, values.identity, {
+          vaultEnabled: this.sessionVault.enabled,
+          allowPlaintextEmail: this.localTestNetwork || Boolean(plan.package?.allowLocalTestHosts),
+        });
+        if (this.sessionVault.enabled) this.sessionVault.saveIdentity(plan.correlation.applicationId, values.identity);
         // The address itself is never put in an event: it routes the candidate's mail.
         this.#emit(plan, { type: 'REGISTRATION_IDENTITY_RESOLVED', stepId: step.id, mailbox: values.identity.mailbox });
         break;
@@ -506,7 +777,7 @@ export class BrowserWorker {
         const pauseForHuman = (reason) => {
           this.store.pause(plan.planId, reason);
           this.#emit(plan, { type: reason, stepId: step.id });
-          throw new ApprovalRequiredError(step.id);
+          throw new ApprovalRequiredError(step.id, reason);
         };
         if (!this.credentialResolver) pauseForHuman('EMPLOYER_CREDENTIAL_UNAVAILABLE');
         let credential;
@@ -531,7 +802,7 @@ export class BrowserWorker {
         const pauseForHuman = (reason) => {
           this.store.pause(plan.planId, reason);
           this.#emit(plan, { type: reason, stepId: step.id });
-          throw new ApprovalRequiredError(step.id);
+          throw new ApprovalRequiredError(step.id, reason);
         };
         if (!this.verificationResolver) pauseForHuman('VERIFICATION_PROVIDER_UNAVAILABLE');
         let resolution;
@@ -549,8 +820,23 @@ export class BrowserWorker {
         if (resolution.otp) {
           const otp = String(resolution.otp).trim();
           if (!/^\d{4,8}$/.test(otp)) pauseForHuman('VERIFICATION_CODE_INVALID');
-          values.verification = { otp, receivedAt: resolution.receivedAt ?? null };
-          this.store.verification(plan.planId, values.verification);
+          values.verification = {
+            otp,
+            receivedAt: resolution.receivedAt ?? null,
+            verificationId: resolution.verificationId ?? null,
+            leaseToken: resolution.leaseToken ?? null,
+            leaseExpiresAt: resolution.leaseExpiresAt ?? null,
+            provider: resolution.provider ?? null,
+          };
+          // Never write raw OTP or leaseToken to worker-state.json.
+          this.store.verification(plan.planId, {
+            provider: resolution.provider ?? 'managed',
+            verificationId: resolution.verificationId ?? null,
+            leaseExpiresAt: resolution.leaseExpiresAt ?? null,
+            receivedAt: resolution.receivedAt ?? null,
+            hasOtp: true,
+            hasLink: false,
+          });
           break;
         }
         let link;
@@ -560,10 +846,72 @@ export class BrowserWorker {
         const safeProtocol = link.protocol === 'https:'
           || (loopback && current.protocol === 'http:' && link.protocol === 'http:');
         if (!safeProtocol || link.origin !== current.origin || link.username || link.password) {
+          if (resolution.verificationId && resolution.leaseToken && this.verificationReleaser) {
+            await this.verificationReleaser({
+              applicationId: plan.correlation.applicationId,
+              sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? plan.package?.sessionId ?? null,
+              verificationId: resolution.verificationId,
+              leaseToken: resolution.leaseToken,
+              reason: 'VERIFICATION_LINK_REJECTED',
+            }).catch(() => {});
+          }
+          values.verification = null;
+          this.store.verification(plan.planId, null);
           pauseForHuman('VERIFICATION_LINK_REJECTED');
         }
-        await this.#retry(() => page.goto(link.href, { waitUntil: 'domcontentloaded' }));
-        await this.#assertSafePage(page);
+        let linkResponse = null;
+        try {
+          linkResponse = await this.#retry(() => page.goto(link.href, { waitUntil: 'domcontentloaded' }));
+          await this.#assertSafePage(page);
+        } catch (navErr) {
+          if (resolution.verificationId && resolution.leaseToken && this.verificationReleaser) {
+            await this.verificationReleaser({
+              applicationId: plan.correlation.applicationId,
+              sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? plan.package?.sessionId ?? null,
+              verificationId: resolution.verificationId,
+              leaseToken: resolution.leaseToken,
+              reason: 'VERIFICATION_LINK_NAVIGATION_FAILED',
+            }).catch(() => {});
+          }
+          values.verification = null;
+          this.store.verification(plan.planId, null);
+          throw navErr;
+        }
+        const finalLinkUrl = new URL(page.url());
+        const linkStatus = linkResponse?.status?.() ?? 200;
+        const linkBody = (await page.locator('body').innerText().catch(() => '')).toLowerCase();
+        const linkRejected = finalLinkUrl.origin !== current.origin
+          || linkStatus >= 400
+          || /\b(?:expired|invalid)\s+(?:verification\s+)?(?:link|token|code)\b/i.test(linkBody);
+        if (linkRejected) {
+          if (resolution.verificationId && resolution.leaseToken && this.verificationReleaser) {
+            await this.verificationReleaser({
+              applicationId: plan.correlation.applicationId,
+              sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? plan.package?.sessionId ?? null,
+              verificationId: resolution.verificationId,
+              leaseToken: resolution.leaseToken,
+              reason: 'VERIFICATION_LINK_FAILED',
+            }).catch(() => {});
+          }
+          values.verification = null;
+          this.store.verification(plan.planId, null);
+          pauseForHuman(finalLinkUrl.origin !== current.origin ? 'VERIFICATION_LINK_REJECTED' : 'VERIFICATION_LINK_FAILED');
+        }
+        if (resolution.verificationId && resolution.leaseToken && this.verificationConfirmer) {
+          const confirmRes = await this.verificationConfirmer({
+            applicationId: plan.correlation.applicationId,
+            sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? plan.package?.sessionId ?? null,
+            verificationId: resolution.verificationId,
+            leaseToken: resolution.leaseToken,
+          });
+          if (confirmRes?.conflict) {
+            this.#emit(plan, {
+              type: 'MAILBOX_VERIFICATION_CONFIRM_CONFLICT',
+              stepId: step.id,
+              verificationId: resolution.verificationId,
+            });
+          }
+        }
         values.verification = null;
         this.store.verification(plan.planId, null);
         break;
@@ -572,7 +920,14 @@ export class BrowserWorker {
         const mailbox = new MockMailboxClient(p.mailboxUrl);
         const verification = await mailbox.getVerification({ applicationId: p.applicationId, senderDomain: p.senderDomain, receivedAfter: Date.now() - 120000 });
         values.verification = verification;
-        this.store.verification(plan.planId, verification);
+        this.store.verification(plan.planId, {
+          messageId: verification.messageId,
+          applicationId: verification.applicationId,
+          senderDomain: verification.senderDomain,
+          receivedAt: verification.receivedAt,
+          hasOtp: Boolean(verification.otp),
+          hasLink: Boolean(verification.link),
+        });
         this.#emit(plan, { type: 'VERIFICATION_RECEIVED', messageId: verification.messageId });
         break;
       }
@@ -605,6 +960,12 @@ export class BrowserWorker {
         break;
       case StepType.ASHBY_SUBMIT_CLICK:
         this.lastAshbySubmitResult = await this.#runAshbySubmit(page, plan, step);
+        break;
+      case StepType.UNIVERSAL_APPLY:
+        this.lastUniversalResult = await this.#runUniversalApply(page, plan, step, values);
+        break;
+      case StepType.UNIVERSAL_SUBMIT_CLICK:
+        this.lastUniversalSubmitResult = await this.#runUniversalSubmitClick(page, plan, step);
         break;
       case StepType.MOCK_SUBMIT:
         await page.locator(p.selector).click();
@@ -713,21 +1074,14 @@ export class BrowserWorker {
       const bodyText = await page.locator('body').innerText().catch(() => '');
       const invalidFieldCount = await page.locator(':invalid').count().catch(() => 0);
       const formFieldsPresent = (await page.locator('#first_name, #email').count().catch(() => 0)) > 0;
-      // The platform-structural signal (see confirmation.js's module comment
-      // and plan.js's greenhouseConfirmationPageMatches for the live evidence
-      // this is built from): the client only reaches this URL+container pair
-      // after its own submission POST resolves 2xx, so this is computed from
-      // the real DOM/URL, never guessed, and needs no per-employer config —
-      // but URL+DOM alone can also be reached by a direct navigation, so
-      // `submissionRequestConfirmed` (the actual network evidence for this
-      // click, gathered below) is required alongside them.
       const confirmationUrlMatched = greenhouseConfirmationPageMatches(plan.targetUrl, page.url());
       const confirmationContainerPresent = (await page.locator('.confirmation').count().catch(() => 0)) > 0;
-      return classifySubmissionAttempt({
+      const classification = classifySubmissionAttempt({
         bodyText, invalidFieldCount, formFieldsPresent,
         expectedConfirmationText: p.expectedConfirmationText,
         confirmationUrlMatched, confirmationContainerPresent, submissionRequestConfirmed,
       });
+      return { classification, confirmationUrlMatched, confirmationContainerPresent };
     };
     const guardAgainstHardStops = (result) => {
       if (result.category === ConfirmationCategory.ANTI_BOT) {
@@ -742,9 +1096,17 @@ export class BrowserWorker {
     // No click has happened yet in this process, so there is no "this
     // attempt" network evidence to pass in at all — `false` is the honest
     // absence of evidence, not a guess.
-    const before = guardAgainstHardStops(await inspect(false));
-    if (before.confirmed) return before;
+    const before = await inspect(false);
+    guardAgainstHardStops(before.classification);
+    if (before.classification.confirmed) return before.classification;
     assertSafeSelector(p.selector);
+
+    const fence = await this.#acquireBackendPreSubmitFence(
+      page, plan, step, ConfirmationCategory.PRIOR_ATTEMPT_UNVERIFIED,
+    );
+    if (!fence.authorized) {
+      return fence.result;
+    }
 
     // Durable marker BEFORE the one real external side effect this codebase
     // ever performs: once this is written, a crash anywhere from here
@@ -758,52 +1120,67 @@ export class BrowserWorker {
     }
 
     const urlBeforeClick = page.url();
-    const submissionRequestConfirmed = await this.#captureGreenhouseSubmissionDuringClick(
+    const networkCapture = await this.#captureGreenhouseSubmissionDuringClick(
       page, plan, () => this.#retry(() => page.locator(p.selector).click()),
     );
-    if (submissionRequestConfirmed) {
-      // Greenhouse's own real handler is async — it awaits the submission
-      // response, then conditionally navigates — so the navigation can
-      // genuinely start after the click gesture itself has already
-      // finished. Only wait for it when a genuinely successful submission
-      // response was actually observed; a bounded wait here, not a guess.
+    if (networkCapture.confirmed) {
       await page.waitForURL((url) => url.href !== urlBeforeClick, { timeout: 2000 }).catch(() => {});
     }
     await page.waitForLoadState('domcontentloaded').catch(() => {});
-    return guardAgainstHardStops(await inspect(submissionRequestConfirmed));
+
+    const after = await inspect(networkCapture.confirmed);
+    const classification = guardAgainstHardStops(after.classification);
+    if (!classification.confirmed) {
+      return classification;
+    }
+
+    // Genuine confirmation observed for THIS click attempt: capture bounded, redacted confirmation
+    // container DOM evidence only (never applicant input controls, scripts, cookies, or full page).
+    const domCapture = await page.evaluate((useConfirmationContainer) => {
+      const root = useConfirmationContainer
+        ? document.querySelector('.confirmation')
+        : document.querySelector('main');
+      if (!root) {
+        return { containerHtml: '', containerText: '', confirmationIdAttr: null };
+      }
+      const attrOwner = root.hasAttribute('data-confirmation-id') || root.hasAttribute('data-confirmation-number')
+        ? root
+        : root.querySelector('[data-confirmation-id], [data-confirmation-number]');
+      const confirmationIdAttr = attrOwner
+        ? (attrOwner.getAttribute('data-confirmation-id') || attrOwner.getAttribute('data-confirmation-number'))
+        : null;
+      const clone = root.cloneNode(true);
+      clone.querySelectorAll('script, style, noscript, iframe, meta, input, textarea, select').forEach((el) => el.remove());
+      for (const el of [clone, ...clone.querySelectorAll('*')]) {
+        for (const attr of [...el.attributes]) {
+          const name = attr.name.toLowerCase();
+          if (name.startsWith('on') || /token|secret|cookie|password|auth|csrf|xsrf|session|api[_-]?key|credential/i.test(name)) {
+            el.removeAttribute(attr.name);
+          }
+        }
+      }
+      return {
+        containerHtml: (clone.outerHTML || '').slice(0, 40000),
+        containerText: (clone.innerText || clone.textContent || '').slice(0, 6000),
+        confirmationIdAttr,
+      };
+    }, after.confirmationContainerPresent).catch(() => ({}));
+
+    return buildGreenhouseSubmissionEvidence({
+      plan,
+      classification,
+      networkCapture,
+      confirmationUrlMatched: after.confirmationUrlMatched,
+      confirmationContainerPresent: after.confirmationContainerPresent,
+      expectedConfirmationText: p.expectedConfirmationText ?? null,
+      pageUrl: page.url(),
+      domCapture,
+    });
   }
 
   /**
-   * Phase 1 blocker fix (false-positive confirmation): registers a response
-   * listener for the exact duration of a single REAL_SUBMIT_CLICK click
-   * attempt (including its own internal {@link #retry} attempts, if any),
-   * so that only a request/response pair genuinely caused by THIS click can
-   * ever satisfy the structural confirmation signal — never a prior
-   * attempt's leftover state, a crash-then-resume with no click in this
-   * process at all, or a request unrelated to the real submission. The
-   * listener is removed again immediately after, so nothing captured here
-   * ever leaks into a later step or a later plan.
-   *
-   * <p>Matches the exact contract read from Greenhouse's own shipped source
-   * (`app/utils/submit_application.ts`): a `POST` to the job posting's own
-   * pathname — re-verified with the same host/scheme safety shape as
-   * {@link greenhousePageIdentityMatches}, so an unrelated cross-origin POST
-   * can never count — `Content-Type: application/json`, a body carrying a
-   * `job_application` key, and the response itself must be `ok()` (2xx). A
-   * matching request with a non-2xx response is observed and simply never
-   * sets `confirmed`, so a rejected submission can never pass just because a
-   * confirmation-looking page appears afterwards. Anything that doesn't
-   * match this exact shape (a different path, method, content type, or no
-   * `job_application` key — e.g. an unrelated analytics POST) is ignored.
-   *
-   * <p>Deliberately uses {@link Page.waitForResponse} (predicate-based,
-   * registered <em>before</em> the click) rather than a passive listener
-   * checked immediately after the click returns: Greenhouse's own real
-   * handler is {@code async} — it awaits the submission `fetch` before
-   * conditionally navigating — so the matching response can genuinely
-   * arrive after the click gesture itself has already finished. A short,
-   * bounded wait for that specific response is the correct way to observe
-   * it without racing it.
+   * Captures the exact submission request/response pair triggered by THIS click attempt only.
+   * Returns structured network observation data (never reused across attempts or steps).
    */
   async #captureGreenhouseSubmissionDuringClick(page, plan, performClick) {
     const matchesSubmissionRequest = (request) => {
@@ -824,7 +1201,29 @@ export class BrowserWorker {
       .catch(() => null);
     await performClick();
     const response = await responsePromise;
-    return Boolean(response && response.ok());
+    const observedAt = new Date().toISOString();
+    if (!response) {
+      return { confirmed: false, method: null, url: null, status: null, responseBodyText: null, observedAt };
+    }
+    const confirmed = Boolean(response.ok());
+    let responseBodyText = null;
+    if (confirmed) {
+      const rawBody = await Promise.race([
+        response.text().catch(() => null),
+        new Promise((resolve) => setTimeout(() => resolve(null), 500)),
+      ]);
+      if (typeof rawBody === 'string') {
+        responseBodyText = rawBody.slice(0, MAX_RESPONSE_SNIPPET_CHARS);
+      }
+    }
+    return {
+      confirmed,
+      method: response.request().method(),
+      url: sanitizeUrl(response.url()),
+      status: response.status(),
+      responseBodyText,
+      observedAt,
+    };
   }
 
   /**
@@ -1238,6 +1637,11 @@ export class BrowserWorker {
     const submitButton = page.locator('button.ashby-application-form-submit-button');
     if (await submitButton.count() === 0) {
       return { confirmed: false, category: 'FORM_NOT_FOUND', evidence: 'the Ashby submit button was not found on this page' };
+    }
+
+    const fence = await this.#acquireBackendPreSubmitFence(page, plan, step, 'PRIOR_ATTEMPT_UNVERIFIED');
+    if (!fence.authorized) {
+      return fence.result;
     }
 
     // Durable marker BEFORE the one real external side effect this step
@@ -1760,6 +2164,11 @@ export class BrowserWorker {
       return { confirmed: false, category: WorkdaySubmissionCategory.FORM_NOT_FOUND, evidence: 'the Workday submit button was not found on this page' };
     }
 
+    const fence = await this.#acquireBackendPreSubmitFence(page, plan, step, 'PRIOR_ATTEMPT_UNVERIFIED');
+    if (!fence.authorized) {
+      return fence.result;
+    }
+
     this.store.markStep(plan.planId, step.id, REAL_SUBMIT_ATTEMPTING, { currentUrl: sanitizeUrl(page.url()) });
     if (this.failAfterAttemptMarker === step.id) {
       throw new Error(`SIMULATED_WORKER_CRASH_BEFORE_CLICK:${step.id}`);
@@ -2230,6 +2639,806 @@ export class BrowserWorker {
     }
   }
 
+  #assertUniversalIdentity(page, plan) {
+    const allowLocalTestHosts = Boolean(plan.package?.allowLocalTestHosts);
+    if (!universalPageIdentityMatches(plan.targetUrl, page.url(), { allowLocalTestHosts })) {
+      throw new HardStopError('UNIVERSAL_PAGE_IDENTITY_MISMATCH');
+    }
+  }
+
+  #hasBackendPreSubmitAttempt(plan) {
+    return Array.isArray(plan.completedSteps) && plan.completedSteps.some((s) =>
+      s?.stepKey === 'pre-submit-attempting' || s?.result?.phase === 'PRE_SUBMIT_ATTEMPTING');
+  }
+
+  async #acquireBackendPreSubmitFence(page, plan, step, duplicateCategory = 'PRIOR_ATTEMPT_UNVERIFIED') {
+    if (this.#hasBackendPreSubmitAttempt(plan)) {
+      return {
+        authorized: false,
+        result: {
+          confirmed: false,
+          category: duplicateCategory,
+          evidence: 'backend already recorded PRE_SUBMIT_ATTEMPTING for this plan; human reconciliation is required before any further action',
+        },
+      };
+    }
+    if (typeof this.stepsReporter !== 'function') {
+      throw new HardStopError('PRE_SUBMIT_AUTHORIZATION_UNAVAILABLE', {
+        stepId: step.id,
+        reason: 'backend pre-submit authorization reporter is unavailable; failing closed without clicking submit',
+      });
+    }
+    const fenceResult = await this.stepsReporter(plan.planId, {
+      index: 99,
+      stepId: 'pre-submit-attempting',
+      status: 'RUNNING',
+      result: {
+        phase: 'PRE_SUBMIT_ATTEMPTING',
+        atsPlatform: plan.planType ?? null,
+        stepType: step.type,
+        currentUrl: sanitizeUrl(page.url()),
+      },
+      screenshotRef: null,
+    });
+    if (fenceResult?.conflict) {
+      const deniedCode = typeof fenceResult.code === 'string' && fenceResult.code.trim()
+        ? fenceResult.code.trim()
+        : null;
+      const preFenceDenial = Boolean(deniedCode && deniedCode !== 'DUPLICATE_PRE_SUBMIT_ATTEMPT');
+      return {
+        authorized: false,
+        result: {
+          confirmed: false,
+          category: preFenceDenial ? deniedCode : duplicateCategory,
+          authorizationDenied: preFenceDenial,
+          authorizationCode: deniedCode,
+          evidence: fenceResult.error || 'Backend refused PRE_SUBMIT_ATTEMPTING fence (409 conflict)',
+        },
+      };
+    }
+    if (fenceResult?.ok !== true) {
+      throw new HardStopError('PRE_SUBMIT_AUTHORIZATION_UNAVAILABLE', {
+        stepId: step.id,
+        reason: 'backend pre-submit authorization did not return an explicit ok authorization; failing closed',
+      });
+    }
+    return { authorized: true };
+  }
+
+  #validateUniversalPlan(plan) {
+    if (!plan.correlation?.applicationId || !plan.correlation?.jobId || !Array.isArray(plan.steps) || !plan.package) {
+      throw new HardStopError('INVALID_UNIVERSAL_PLAN_CORRELATION');
+    }
+    const allowLocalTestHosts = Boolean(plan.package?.allowLocalTestHosts);
+    const navigations = plan.steps.filter((step) => step.type === StepType.NAVIGATE);
+    const targetUrl = plan.targetUrl ?? navigations[0]?.params?.url;
+    if (navigations.length !== 1 || plan.steps[0] !== navigations[0]
+        || plan.package.expectedUrl !== targetUrl
+        || !universalPageIdentityMatches(targetUrl, navigations[0].params?.url, { allowLocalTestHosts })) {
+      throw new HardStopError('INVALID_UNIVERSAL_TARGET');
+    }
+    const ids = new Set();
+    for (const step of plan.steps) {
+      if (!step?.id || ids.has(step.id)) throw new HardStopError('INVALID_UNIVERSAL_STEP_ID');
+      ids.add(step.id);
+      if ([StepType.REAL_SUBMIT_CLICK, StepType.MOCK_SUBMIT, StepType.ASHBY_SUBMIT_CLICK, StepType.WORKDAY_SUBMIT_CLICK].includes(step.type)) {
+        throw new HardStopError('FORBIDDEN_UNIVERSAL_SUBMIT_STEP', { stepId: step.id });
+      }
+      if (![StepType.NAVIGATE, StepType.SCREENSHOT, StepType.UNIVERSAL_APPLY, StepType.UNIVERSAL_SUBMIT_CLICK].includes(step.type)) {
+        throw new HardStopError('FORBIDDEN_UNIVERSAL_STEP', { stepId: step.id });
+      }
+    }
+    const applySteps = plan.steps.filter((s) => s.type === StepType.UNIVERSAL_APPLY);
+    const submitSteps = plan.steps.filter((s) => s.type === StepType.UNIVERSAL_SUBMIT_CLICK);
+    if (applySteps.length !== 1) throw new HardStopError('UNIVERSAL_APPLY_STEP_COUNT_INVALID');
+    if (submitSteps.length > 1) throw new HardStopError('UNIVERSAL_SUBMIT_STEP_DUPLICATED');
+    if (submitSteps.length === 1 && plan.steps.at(-1).type !== StepType.UNIVERSAL_SUBMIT_CLICK) {
+      throw new HardStopError('UNIVERSAL_SUBMIT_STEP_MUST_BE_LAST');
+    }
+  }
+
+  #validateUniversalArtifacts(plan) {
+    const artifacts = plan.package?.artifacts ?? [];
+    if (!Array.isArray(artifacts)) throw new HardStopError('INVALID_UNIVERSAL_ARTIFACT_LIST');
+    const seen = new Set();
+    for (const artifact of artifacts) {
+      const expected = artifact.kind === 'cv' ? plan.package.cv : artifact.kind === 'coverLetter' ? plan.package.coverLetter : null;
+      if (!expected || seen.has(artifact.kind) || expected.versionId !== artifact.versionId || expected.sha256 !== artifact.sha256
+          || expected.jobId !== plan.correlation.jobId || expected.applicationId !== plan.correlation.applicationId
+          || !expected.path || !fs.existsSync(expected.path)) {
+        throw new HardStopError('UNIVERSAL_ARTIFACT_CORRELATION_MISMATCH');
+      }
+      const bytes = fs.readFileSync(expected.path);
+      const actual = crypto.createHash('sha256').update(bytes).digest('hex');
+      if (actual !== artifact.sha256) throw new HardStopError('UNIVERSAL_ARTIFACT_CHECKSUM_MISMATCH');
+      // Stage 3F (Workstream D): one 10 MiB cap, and the bytes must really be the declared type.
+      if (bytes.length > MAX_UNIVERSAL_UPLOAD_BYTES) throw new HardStopError('UNIVERSAL_ARTIFACT_TOO_LARGE');
+      try {
+        assertArtifactAcceptable(bytes, {
+          contentType: artifact.contentType ?? expected.contentType,
+          fileName: artifact.fileName ?? expected.fileName ?? expected.path,
+        });
+      } catch (error) {
+        if (error instanceof ArtifactPolicyError) throw new HardStopError(`UNIVERSAL_${error.reason}`);
+        throw error;
+      }
+      seen.add(artifact.kind);
+    }
+  }
+
+  async #reportUniversalPhase(plan, index, stepKey, phase, extra = {}) {
+    if (!this.stepsReporter) return;
+    await this.stepsReporter(plan.planId, {
+      index,
+      stepId: stepKey,
+      status: phase === 'FAILED' ? 'FAILED' : 'COMPLETED',
+      result: { phase, ...extra },
+      screenshotRef: null,
+    });
+  }
+
+  #pauseUniversal(plan, stepId, reason, currentUrl = null, extra = {}) {
+    this.store.pause(plan.planId, reason, { ...(extra ?? {}), ...(currentUrl ? { currentUrl } : {}) });
+    this.#emit(plan, { type: reason, stepId });
+    throw new ApprovalRequiredError(stepId, reason);
+  }
+
+  async #runUniversalApply(page, plan, step, values = {}) {
+    const pkg = plan.package ?? {};
+    const prior = this.store.step(plan.planId, step.id);
+    const planState = this.store.get(plan.planId);
+    const completedPages = new Set(prior?.completedPages ?? []);
+    if (Array.isArray(plan.completedSteps)) {
+      for (const s of plan.completedSteps) {
+        if (s?.result?.completedPage) completedPages.add(Number(s.result.completedPage));
+      }
+    }
+    const allFilled = new Set(prior?.filled ?? []);
+    const allUnsupported = new Map();
+    const allClosedShadowHosts = new Set();
+    let resumeUploadState = 'NO_FIELD';
+    let coverLetterUploadState = 'NO_FIELD';
+    let loginSucceeded = Boolean(prior?.loginSucceeded);
+    let signupSucceeded = Boolean(
+      prior?.universalResult?.signupSucceeded
+      ?? prior?.signupSucceeded
+      ?? planState?.universalSignupSucceeded
+      ?? planState?.identity?.signupSucceeded
+      ?? values.identity?.signupSucceeded
+    );
+    let emailVerified = Boolean(prior?.universalResult?.emailVerified ?? prior?.emailVerified);
+    const maxPages = 6;
+    const maxAuthSteps = 6;
+    const maxRevealPassesPerPage = 4;
+
+    const persistUniversalIdentity = (identityValue) => {
+      if (!identityValue) return;
+      values.identity = { ...identityValue, signupSucceeded };
+      this.store.identity(plan.planId, values.identity, {
+        vaultEnabled: this.sessionVault.enabled,
+        allowPlaintextEmail: this.localTestNetwork || Boolean(pkg.allowLocalTestHosts),
+      });
+      if (this.sessionVault.enabled) this.sessionVault.saveIdentity(plan.correlation.applicationId, values.identity);
+    };
+
+    const pauseUniversalApply = (reason, extra = {}) => {
+      if (values.identity) persistUniversalIdentity(values.identity);
+      let safeUrl = null;
+      try {
+        safeUrl = page.url();
+      } catch {
+        safeUrl = null;
+      }
+      this.#pauseUniversal(plan, step.id, reason, safeUrl, { signupSucceeded, ...extra });
+    };
+
+    const recordUnsupported = (inspected, planned) => {
+      for (const hostTag of inspected.closedShadowHosts ?? []) {
+        allClosedShadowHosts.add(hostTag);
+        allUnsupported.set(`closed-shadow:${hostTag}`, {
+          key: `closed-shadow:${hostTag}`,
+          label: `<${hostTag}>`,
+          reason: 'Closed Shadow DOM cannot be inspected or automated reliably',
+        });
+      }
+      for (const item of planned.unsupported ?? []) {
+        allUnsupported.set(item.key || item.label, item);
+      }
+    };
+
+    const navBlockedResources = () => this.lastUniversalNavGuard?.getDiagnostics?.().blockedResources ?? [];
+
+    const currentEmployerDomain = () => {
+      if (step.params?.employerDomain) return String(step.params.employerDomain).toLowerCase();
+      if (plan.correlation?.employerDomain) return String(plan.correlation.employerDomain).toLowerCase();
+      if (pkg.employerDomain) return String(pkg.employerDomain).toLowerCase();
+      try {
+        return new URL(page.url()).hostname.toLowerCase();
+      } catch {
+        return '';
+      }
+    };
+
+    const resolveUniversalIdentity = async () => {
+      if (values.identity?.email) return values.identity;
+      if (!this.identityResolver) pauseUniversalApply('REGISTRATION_IDENTITY_UNAVAILABLE');
+      const employerDomain = currentEmployerDomain();
+      let identity;
+      try {
+        identity = await this.identityResolver({
+          applicationId: plan.correlation.applicationId,
+          employerDomain,
+          sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? pkg.sessionId ?? null,
+        });
+      } catch (error) {
+        pauseUniversalApply(String(error?.message ?? '').endsWith(':409')
+          ? 'MANAGED_MAILBOX_NOT_READY' : 'REGISTRATION_IDENTITY_UNAVAILABLE');
+      }
+      const email = String(identity?.email ?? '').trim().toLowerCase();
+      if (!/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(email)) {
+        pauseUniversalApply('REGISTRATION_IDENTITY_INVALID');
+      }
+      persistUniversalIdentity({ email, mailbox: identity?.mailbox ?? null, existing: Boolean(identity?.existing) });
+      this.#emit(plan, { type: 'REGISTRATION_IDENTITY_RESOLVED', stepId: step.id, mailbox: values.identity.mailbox });
+      return values.identity;
+    };
+
+    let pageLoop = 1;
+    let authSteps = 0;
+    while (pageLoop <= maxPages) {
+      await page.waitForLoadState('domcontentloaded').catch(() => {});
+      let inspected = await inspectLiveFormDom(page);
+
+      // Reveal application form when landing on a job description view with an explicit "Apply Now" button
+      if (inspected.controls.length === 0 && inspected.applyRevealButton?.selector
+          && !inspected.securitySignals?.loginWallPresent && !inspected.securitySignals?.signupWallPresent
+          && !inspected.securitySignals?.emailVerificationPresent) {
+        await this.#retry(() => page.locator(inspected.applyRevealButton.selector).click());
+        await page.waitForLoadState('domcontentloaded').catch(() => {});
+        await page.waitForTimeout(150);
+        this.#assertUniversalIdentity(page, plan);
+        inspected = await inspectLiveFormDom(page);
+      }
+
+      const sec = inspected.securitySignals ?? {};
+      if (sec.captchaPresent) throw new HardStopError('BLOCKED_ANTI_BOT', { stepId: step.id });
+      if (sec.mfaPresent) throw new HardStopError('UNIVERSAL_MFA_REQUIRED', { stepId: step.id });
+
+      // Stage 3I Phase 3: handle email OTP / same-origin link verification BEFORE or AFTER signup/login.
+      if (sec.emailVerificationPresent) {
+        authSteps += 1;
+        if (authSteps > maxAuthSteps) throw new HardStopError('UNIVERSAL_AUTH_STEP_LIMIT_EXCEEDED', { stepId: step.id });
+        const ev = inspected.emailVerification ?? {};
+        if (ev.ambiguous) pauseUniversalApply('UNIVERSAL_EMAIL_VERIFICATION_REQUIRED');
+        if (!this.verificationResolver) pauseUniversalApply('UNIVERSAL_EMAIL_VERIFICATION_REQUIRED');
+        const employerDomain = currentEmployerDomain();
+        let resolution;
+        try {
+          resolution = await this.verificationResolver({
+            applicationId: plan.correlation.applicationId,
+            employerDomain,
+            sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? pkg.sessionId ?? null,
+            mailboxAddress: values.identity?.email ?? plan.correlation?.mailboxAddress ?? pkg.profileFacts?.email ?? null,
+          });
+        } catch {
+          pauseUniversalApply('UNIVERSAL_EMAIL_VERIFICATION_REQUIRED');
+        }
+        if (!resolution || (!resolution.otp && !resolution.link)) {
+          pauseUniversalApply('UNIVERSAL_EMAIL_VERIFICATION_REQUIRED');
+        }
+        const releaseLease = async (reason) => {
+          if (resolution.verificationId && resolution.leaseToken && this.verificationReleaser) {
+            await this.verificationReleaser({
+              applicationId: plan.correlation.applicationId,
+              sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? pkg.sessionId ?? null,
+              verificationId: resolution.verificationId,
+              leaseToken: resolution.leaseToken,
+              reason,
+            }).catch(() => {});
+          }
+          values.verification = null;
+          this.store.verification(plan.planId, null);
+        };
+        const confirmLease = async () => {
+          if (resolution.verificationId && resolution.leaseToken && this.verificationConfirmer) {
+            const confirmRes = await this.verificationConfirmer({
+              applicationId: plan.correlation.applicationId,
+              sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? pkg.sessionId ?? null,
+              verificationId: resolution.verificationId,
+              leaseToken: resolution.leaseToken,
+            });
+            if (confirmRes?.conflict) {
+              this.#emit(plan, {
+                type: 'MAILBOX_VERIFICATION_CONFIRM_CONFLICT',
+                stepId: step.id,
+                verificationId: resolution.verificationId,
+              });
+            }
+          }
+          values.verification = null;
+          this.store.verification(plan.planId, null);
+        };
+
+        if (resolution.otp) {
+          const otp = String(resolution.otp).trim();
+          if (!/^\d{4,8}$/.test(otp) || !ev.hasOtpInput || !ev.verified) {
+            await releaseLease('OTP_INPUT_UNAVAILABLE');
+            pauseUniversalApply('UNIVERSAL_EMAIL_VERIFICATION_REQUIRED');
+          }
+          values.verification = {
+            otp,
+            receivedAt: resolution.receivedAt ?? null,
+            verificationId: resolution.verificationId ?? null,
+            leaseToken: resolution.leaseToken ?? null,
+            leaseExpiresAt: resolution.leaseExpiresAt ?? null,
+            provider: resolution.provider ?? null,
+          };
+          this.store.verification(plan.planId, {
+            provider: resolution.provider ?? 'managed',
+            verificationId: resolution.verificationId ?? null,
+            leaseExpiresAt: resolution.leaseExpiresAt ?? null,
+            receivedAt: resolution.receivedAt ?? null,
+            hasOtp: true,
+            hasLink: false,
+          });
+          await page.locator('[data-robin-email-otp-role="input"]').fill(otp);
+          await this.#retry(() => page.locator('[data-robin-email-otp-role="submit"]').click());
+          await page.waitForLoadState('domcontentloaded').catch(() => {});
+          await page.waitForTimeout(200);
+          this.#assertUniversalIdentity(page, plan);
+          const postOtp = await inspectLiveFormDom(page);
+          const postOtpSec = postOtp.securitySignals ?? {};
+          const errsText = (postOtp.validationErrors ?? []).join(' ').toLowerCase();
+          if (postOtpSec.captchaPresent) throw new HardStopError('BLOCKED_ANTI_BOT', { stepId: step.id });
+          if (postOtpSec.mfaPresent) throw new HardStopError('UNIVERSAL_MFA_REQUIRED', { stepId: step.id });
+          if (postOtpSec.emailVerificationPresent || /invalid|incorrect|expired|wrong\s*code/.test(errsText)) {
+            await releaseLease('OTP_REJECTED');
+            pauseUniversalApply('UNIVERSAL_EMAIL_VERIFICATION_FAILED');
+          }
+          await confirmLease();
+          emailVerified = true;
+          this.#emit(plan, { type: 'UNIVERSAL_EMAIL_VERIFIED', stepId: step.id });
+          continue;
+        }
+
+        let link;
+        try {
+          link = new URL(resolution.link);
+        } catch {
+          await releaseLease('VERIFICATION_LINK_REJECTED');
+          pauseUniversalApply('VERIFICATION_LINK_REJECTED');
+        }
+        const current = new URL(page.url());
+        const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(current.hostname);
+        const safeProtocol = link.protocol === 'https:'
+          || (loopback && Boolean(pkg.allowLocalTestHosts) && current.protocol === 'http:' && link.protocol === 'http:');
+        if (!safeProtocol || link.origin !== current.origin || link.username || link.password) {
+          await releaseLease('VERIFICATION_LINK_REJECTED');
+          pauseUniversalApply('VERIFICATION_LINK_REJECTED');
+        }
+        let linkNavResponse = null;
+        try {
+          linkNavResponse = await this.#retry(() => page.goto(link.href, { waitUntil: 'domcontentloaded' }));
+          await page.waitForTimeout(150);
+          this.#assertUniversalIdentity(page, plan);
+        } catch (navError) {
+          await releaseLease('VERIFICATION_LINK_NAVIGATION_FAILED');
+          if (navError instanceof HardStopError || navError instanceof ApprovalRequiredError) throw navError;
+          pauseUniversalApply('VERIFICATION_LINK_REJECTED');
+        }
+        const finalLinkOrigin = (() => {
+          try {
+            return new URL(page.url()).origin;
+          } catch {
+            return '';
+          }
+        })();
+        if (finalLinkOrigin !== current.origin) {
+          await releaseLease('VERIFICATION_LINK_REDIRECTED');
+          pauseUniversalApply('VERIFICATION_LINK_REJECTED');
+        }
+        const navStatus = linkNavResponse?.status?.() ?? 200;
+        const postLink = await inspectLiveFormDom(page);
+        const postLinkSec = postLink.securitySignals ?? {};
+        const postLinkBody = (await page.locator('body').innerText().catch(() => '')).toLowerCase();
+        if (postLinkSec.captchaPresent) throw new HardStopError('BLOCKED_ANTI_BOT', { stepId: step.id });
+        if (postLinkSec.mfaPresent) throw new HardStopError('UNIVERSAL_MFA_REQUIRED', { stepId: step.id });
+        if (navStatus >= 400 || postLinkSec.emailVerificationPresent || /expired|invalid\s*(?:verification\s*)?(?:link|token)/i.test(postLinkBody)) {
+          await releaseLease('VERIFICATION_LINK_FAILED');
+          pauseUniversalApply('UNIVERSAL_EMAIL_VERIFICATION_FAILED');
+        }
+        await confirmLease();
+        emailVerified = true;
+        this.#emit(plan, { type: 'UNIVERSAL_EMAIL_VERIFIED', stepId: step.id });
+        continue;
+      }
+
+      // Stage 3I Phase 3: explicit employer sign-up flow using Robin's private application email.
+      if (sec.signupWallPresent) {
+        authSteps += 1;
+        if (authSteps > maxAuthSteps) throw new HardStopError('UNIVERSAL_AUTH_STEP_LIMIT_EXCEEDED', { stepId: step.id });
+        const accountAuthorized = Boolean(step.params?.accountCreationAuthorized || pkg.accountCreationAuthorized);
+        if (!accountAuthorized) {
+          if ((step.params?.hasSavedCredential || pkg.hasSavedCredential) && inspected.authSwitchLoginSelector) {
+            await this.#retry(() => page.locator(inspected.authSwitchLoginSelector).click());
+            await page.waitForLoadState('domcontentloaded').catch(() => {});
+            await page.waitForTimeout(150);
+            this.#assertUniversalIdentity(page, plan);
+            continue;
+          }
+          pauseUniversalApply('UNIVERSAL_ACCOUNT_CREATION_AUTHORIZATION_REQUIRED');
+        }
+        if (!inspected.signupControls?.verified || inspected.signupControls?.ambiguous) {
+          throw new HardStopError('UNIVERSAL_SIGNUP_SELECTOR_UNVERIFIED', { stepId: step.id });
+        }
+        const identity = await resolveUniversalIdentity();
+        if (identity.existing || signupSucceeded) {
+          if (inspected.authSwitchLoginSelector) {
+            await this.#retry(() => page.locator(inspected.authSwitchLoginSelector).click());
+            await page.waitForLoadState('domcontentloaded').catch(() => {});
+            await page.waitForTimeout(150);
+            this.#assertUniversalIdentity(page, plan);
+            continue;
+          }
+          pauseUniversalApply('UNIVERSAL_ACCOUNT_ALREADY_EXISTS');
+        }
+        if (!this.credentialResolver) pauseUniversalApply('UNIVERSAL_CREDENTIAL_REQUIRED');
+        const employerDomain = currentEmployerDomain();
+        let credential;
+        try {
+          credential = await this.credentialResolver({
+            applicationId: plan.correlation.applicationId,
+            employerDomain,
+            planId: plan.planId,
+          });
+        } catch {
+          pauseUniversalApply('UNIVERSAL_CREDENTIAL_REQUIRED');
+        }
+        const password = String(credential?.password ?? '');
+        if (!password) pauseUniversalApply('UNIVERSAL_CREDENTIAL_REQUIRED');
+
+        await page.locator('[data-robin-signup-role="email"]').fill(identity.email);
+        await page.locator('[data-robin-signup-role="password"]').fill(password);
+        if (inspected.signupControls.hasConfirmPassword) {
+          await page.locator('[data-robin-signup-role="confirm-password"]').fill(password);
+        }
+        const facts = pkg.profileFacts ?? {};
+        if (inspected.signupControls.hasFirstName && facts.firstName) {
+          await page.locator('[data-robin-signup-role="first-name"]').fill(String(facts.firstName));
+        }
+        if (inspected.signupControls.hasLastName && facts.lastName) {
+          await page.locator('[data-robin-signup-role="last-name"]').fill(String(facts.lastName));
+        }
+        if (inspected.signupControls.hasFullName && facts.fullName) {
+          await page.locator('[data-robin-signup-role="full-name"]').fill(String(facts.fullName));
+        }
+        await this.#retry(() => page.locator('[data-robin-signup-role="submit"]').click());
+        await page.waitForLoadState('domcontentloaded').catch(() => {});
+        await page.waitForTimeout(200);
+        this.#assertUniversalIdentity(page, plan);
+        signupSucceeded = true;
+        persistUniversalIdentity(values.identity ?? identity);
+        if (this.sessionVault.enabled) {
+          this.sessionVault.save(plan.correlation.applicationId, await page.context().storageState());
+        }
+        if (this.identityConfirmer) {
+          await this.identityConfirmer({
+            applicationId: plan.correlation.applicationId,
+            employerDomain,
+            sessionId: step.params?.sessionId ?? plan.correlation?.sessionId ?? pkg.sessionId ?? null,
+          }).catch(() => {});
+        }
+        this.#emit(plan, { type: 'UNIVERSAL_SIGNUP_SUBMITTED', stepId: step.id });
+        continue;
+      }
+
+      if (sec.loginWallPresent) {
+        authSteps += 1;
+        if (authSteps > maxAuthSteps) throw new HardStopError('UNIVERSAL_AUTH_STEP_LIMIT_EXCEEDED', { stepId: step.id });
+        const employerDomain = currentEmployerDomain();
+        const hasSavedCred = Boolean(step.params?.hasSavedCredential || pkg.hasSavedCredential);
+        const accountAuthorized = Boolean(step.params?.accountCreationAuthorized || pkg.accountCreationAuthorized);
+        if (!hasSavedCred) {
+          if (accountAuthorized && inspected.authSwitchSignupSelector && !signupSucceeded) {
+            const identity = await resolveUniversalIdentity();
+            if (!identity.existing) {
+              await this.#retry(() => page.locator(inspected.authSwitchSignupSelector).click());
+              await page.waitForLoadState('domcontentloaded').catch(() => {});
+              await page.waitForTimeout(150);
+              this.#assertUniversalIdentity(page, plan);
+              continue;
+            }
+          }
+          throw new HardStopError('UNIVERSAL_LOGIN_REQUIRED', { stepId: step.id });
+        }
+        if (!this.credentialResolver) {
+          throw new HardStopError('UNIVERSAL_LOGIN_REQUIRED', { stepId: step.id });
+        }
+        if (!inspected.loginControls?.verified || inspected.loginControls?.ambiguous) {
+          throw new HardStopError('UNIVERSAL_LOGIN_SELECTOR_UNVERIFIED', { stepId: step.id });
+        }
+        let credential;
+        try {
+          credential = await this.credentialResolver({
+            applicationId: plan.correlation.applicationId,
+            employerDomain,
+            planId: plan.planId,
+          });
+        } catch {
+          throw new HardStopError('UNIVERSAL_LOGIN_REQUIRED', { stepId: step.id });
+        }
+        const username = String(credential?.username || values.identity?.email || '');
+        const password = String(credential?.password ?? '');
+        if (!username || !password) {
+          throw new HardStopError('UNIVERSAL_LOGIN_REQUIRED', { stepId: step.id });
+        }
+        // Fill credentials strictly in-memory against verified login inputs — never persist or log.
+        await page.locator('[data-robin-login-role="username"]').fill(username);
+        await page.locator('[data-robin-login-role="password"]').fill(password);
+        await this.#retry(() => page.locator('[data-robin-login-role="submit"]').click());
+        await page.waitForLoadState('domcontentloaded').catch(() => {});
+        await page.waitForTimeout(200);
+        this.#assertUniversalIdentity(page, plan);
+        inspected = await inspectLiveFormDom(page);
+        const postLoginSec = inspected.securitySignals ?? {};
+        if (postLoginSec.captchaPresent) throw new HardStopError('BLOCKED_ANTI_BOT', { stepId: step.id });
+        if (postLoginSec.mfaPresent) throw new HardStopError('UNIVERSAL_MFA_REQUIRED', { stepId: step.id });
+        if (postLoginSec.emailVerificationPresent) {
+          loginSucceeded = true;
+          continue;
+        }
+        if (postLoginSec.loginWallPresent) throw new HardStopError('UNIVERSAL_LOGIN_FAILED', { stepId: step.id });
+        loginSucceeded = true;
+      }
+
+      if (inspected.crossOriginFrames > 0 && inspected.controls.length === 0) {
+        throw new HardStopError('UNIVERSAL_CROSS_ORIGIN_IFRAME_UNSUPPORTED', { stepId: step.id });
+      }
+
+      await this.#reportUniversalPhase(plan, pageLoop * 10, `phase-inspecting-p${pageLoop}`, 'INSPECTING', {
+        currentUrl: sanitizeUrl(page.url()),
+        pageIndex: pageLoop,
+      });
+
+      const pageAlreadyCompleted = completedPages.has(pageLoop);
+      let planned = null;
+      const appliedControlSignatures = new Set();
+
+      for (let revealPass = 1; revealPass <= maxRevealPassesPerPage; revealPass += 1) {
+        await hydrateDynamicComboboxOptions(page, inspected);
+        planned = planUniversalControls(inspected, pkg);
+        recordUnsupported(inspected, planned);
+
+        if (!pageAlreadyCompleted) {
+          const freshActions = (planned.actions ?? []).filter((a) => {
+            const ctrl = inspected.controls.find((c) => c.controlId === a.controlId);
+            const sig = `${ctrl?.nameAttr || ctrl?.idAttr || a.label}::${a.kind}::${a.value ?? a.checked}`;
+            if (appliedControlSignatures.has(sig)) return false;
+            appliedControlSignatures.add(sig);
+            return true;
+          });
+          const freshUploads = (planned.uploads ?? []).filter((u) => u.filesAttached === 0 || u.rejectedByAccept);
+          if (freshActions.length > 0 || freshUploads.length > 0) {
+            const upStates = await applyUniversalControlActions(
+              page,
+              { actions: freshActions, uploads: freshUploads },
+              pkg,
+              { artifactDir: this.artifactDir }
+            );
+            for (const label of planned.filled) allFilled.add(label);
+            if (upStates.cv !== 'NO_FIELD') resumeUploadState = upStates.cv;
+            if (upStates.coverLetter !== 'NO_FIELD') coverLetterUploadState = upStates.coverLetter;
+            if (revealPass === 1) {
+              await this.#reportUniversalPhase(plan, pageLoop * 10 + 1, `phase-filling-p${pageLoop}`, 'FILLING', {
+                currentUrl: sanitizeUrl(page.url()),
+                pageIndex: pageLoop,
+                filledCount: planned.filled.length,
+              });
+            }
+            if (upStates.cv === 'ATTACHED' || upStates.coverLetter === 'ATTACHED') {
+              await this.#reportUniversalPhase(plan, pageLoop * 10 + 2, `phase-uploading-p${pageLoop}`, 'UPLOADING', {
+                pageIndex: pageLoop,
+                cv: upStates.cv,
+                coverLetter: upStates.coverLetter,
+              });
+            }
+            await page.waitForTimeout(150);
+            const nextInspected = await inspectLiveFormDom(page);
+            const prevControlKeys = new Set(inspected.controls.map((c) => `${c.nameAttr}:${c.idAttr}:${c.label}`));
+            const hasNewlyRevealedControls = nextInspected.controls.some(
+              (c) => !prevControlKeys.has(`${c.nameAttr}:${c.idAttr}:${c.label}`)
+            );
+            inspected = nextInspected;
+            if (hasNewlyRevealedControls && revealPass < maxRevealPassesPerPage) {
+              continue;
+            }
+          }
+        } else {
+          // On resumed passes, never overwrite already completed text inputs,
+          // only re-attach missing file inputs that browsers drop across reloads.
+          const missingFileUploads = { actions: [], uploads: planned.uploads.filter((u) => u.filesAttached === 0) };
+          if (missingFileUploads.uploads.length > 0) {
+            const upStates = await applyUniversalControlActions(page, missingFileUploads, pkg, { artifactDir: this.artifactDir });
+            if (upStates.cv !== 'NO_FIELD') resumeUploadState = upStates.cv;
+            if (upStates.coverLetter !== 'NO_FIELD') coverLetterUploadState = upStates.coverLetter;
+          }
+        }
+        break;
+      }
+
+      // Final plan check after any conditional reveals settled
+      await hydrateDynamicComboboxOptions(page, inspected);
+      planned = planUniversalControls(inspected, pkg);
+      recordUnsupported(inspected, planned);
+
+      const postSec = inspected.securitySignals ?? {};
+      if (postSec.captchaPresent) throw new HardStopError('BLOCKED_ANTI_BOT', { stepId: step.id });
+      if (postSec.mfaPresent) throw new HardStopError('UNIVERSAL_MFA_REQUIRED', { stepId: step.id });
+
+      const visibleValidationErrors = inspected.validationErrors ?? [];
+      if (planned.requiredGaps.length > 0 || (inspected.nextButton?.selector && visibleValidationErrors.length > 0)) {
+        if (this.discoveredQuestionsReporter && planned.requiredGaps.length > 0) {
+          await this.discoveredQuestionsReporter(plan.planId, {
+            formUrl: sanitizeUrl(page.url()),
+            pageIndex: pageLoop,
+            questions: planned.requiredGaps,
+          });
+        }
+        await this.#reportUniversalPhase(plan, pageLoop * 10 + 8, `phase-paused-p${pageLoop}`, 'PAUSED', {
+          currentUrl: sanitizeUrl(page.url()),
+          pageIndex: pageLoop,
+          gapCount: planned.requiredGaps.length,
+        });
+        return {
+          pausedForInput: true,
+          pageIndex: pageLoop,
+          completedPages: [...completedPages],
+          filled: [...allFilled],
+          requiredGaps: planned.requiredGaps,
+          skippedOptional: planned.skippedOptional,
+          unsupported: Array.from(allUnsupported.values()),
+          resumeUploadState,
+          coverLetterUploadState,
+          currentUrl: sanitizeUrl(page.url()),
+          blockedResources: navBlockedResources(),
+          closedShadowHosts: Array.from(allClosedShadowHosts),
+          validationErrors: visibleValidationErrors,
+          loginSucceeded,
+          signupSucceeded,
+          emailVerified,
+        };
+      }
+
+      if (inspected.nextButton?.selector) {
+        completedPages.add(pageLoop);
+        await this.#reportUniversalPhase(plan, pageLoop * 10 + 3, `phase-completed-p${pageLoop}`, 'COMPLETED', {
+          completedPage: pageLoop,
+          currentUrl: sanitizeUrl(page.url()),
+        });
+        await this.#retry(() => page.locator(inspected.nextButton.selector).click());
+        await page.waitForLoadState('domcontentloaded').catch(() => {});
+        await page.waitForTimeout(200);
+        this.#assertUniversalIdentity(page, plan);
+        pageLoop += 1;
+        continue;
+      }
+
+      await this.#reportUniversalPhase(plan, pageLoop * 10 + 9, `phase-ready-p${pageLoop}`, 'PAUSED', {
+        currentUrl: sanitizeUrl(page.url()),
+        pageIndex: pageLoop,
+        gapCount: 0,
+      });
+      return {
+        pausedForInput: false,
+        pageIndex: pageLoop,
+        completedPages: [...completedPages],
+        filled: [...allFilled],
+        requiredGaps: [],
+        skippedOptional: planned.skippedOptional,
+        unsupported: Array.from(allUnsupported.values()),
+        resumeUploadState,
+        coverLetterUploadState,
+        currentUrl: sanitizeUrl(page.url()),
+        blockedResources: navBlockedResources(),
+        closedShadowHosts: Array.from(allClosedShadowHosts),
+        validationErrors: visibleValidationErrors,
+        loginSucceeded,
+        signupSucceeded,
+        emailVerified,
+      };
+    }
+    throw new HardStopError('UNIVERSAL_MULTI_STEP_LIMIT_EXCEEDED');
+  }
+
+  async #runUniversalSubmitClick(page, plan, step) {
+    const pkg = plan.package ?? {};
+    const allowLocalTestHosts = Boolean(pkg.allowLocalTestHosts);
+    if (this.#hasBackendPreSubmitAttempt(plan)) {
+      return {
+        confirmed: false,
+        category: UniversalSubmitCategory.PRIOR_ATTEMPT_UNVERIFIED,
+        evidence: 'backend already recorded PRE_SUBMIT_ATTEMPTING for this plan',
+      };
+    }
+
+    const inspected = await inspectLiveFormDom(page);
+    const sec = inspected.securitySignals ?? {};
+    if (sec.captchaPresent) throw new HardStopError('BLOCKED_ANTI_BOT', { stepId: step.id });
+    if (sec.mfaPresent) throw new HardStopError('UNIVERSAL_MFA_REQUIRED', { stepId: step.id });
+    if (sec.loginWallPresent) {
+      return { confirmed: false, category: UniversalSubmitCategory.LOGIN_WALL, evidence: 'Sign-in wall intercepted submit' };
+    }
+
+    const planned = planUniversalControls(inspected, pkg);
+    if (planned.requiredGaps.length > 0) {
+      return {
+        confirmed: false,
+        category: UniversalSubmitCategory.VALIDATION_ERROR,
+        evidence: `Required fields remain unresolved before submit (${planned.requiredGaps.length})`,
+      };
+    }
+    const missingInputs = {
+      actions: planned.actions.filter((a) => {
+        const ctrl = inspected.controls.find((c) => c.controlId === a.controlId);
+        return !ctrl?.currentValue;
+      }),
+      uploads: planned.uploads.filter((u) => u.filesAttached === 0),
+    };
+    // Stage 3I Phase 2: upload states recorded when the documents were attached (apply pass), refined
+    // by anything attached now; the evidence reports them without ever claiming an upload.
+    const uploadStates = {
+      cv: this.lastUniversalResult?.resumeUploadState ?? 'NOT_ATTEMPTED',
+      coverLetter: this.lastUniversalResult?.coverLetterUploadState ?? 'NOT_ATTEMPTED',
+    };
+    // A multi-page form attaches documents on an earlier page, in an earlier pass: the DOM-verified
+    // UPLOADING checkpoint that pass reported is the record of it.
+    for (const kind of ['cv', 'coverLetter']) {
+      const attachedEarlier = (plan.completedSteps ?? []).some((s) => s?.result?.phase === 'UPLOADING' && s.result[kind] === 'ATTACHED');
+      if (attachedEarlier && ['NO_FIELD', 'NOT_ATTEMPTED'].includes(uploadStates[kind])) uploadStates[kind] = 'ATTACHED';
+    }
+    if (missingInputs.actions.length > 0 || missingInputs.uploads.length > 0) {
+      const applied = await applyUniversalControlActions(page, missingInputs, pkg, { artifactDir: this.artifactDir });
+      for (const kind of ['cv', 'coverLetter']) {
+        if (applied?.[kind] && applied[kind] !== 'NO_FIELD') uploadStates[kind] = applied[kind];
+      }
+    }
+
+    const refreshed = await inspectLiveFormDom(page);
+    if (!refreshed.submitButton?.selector) {
+      return {
+        confirmed: false,
+        category: UniversalSubmitCategory.FORM_STILL_PRESENT,
+        evidence: 'Submit button not found on active universal application step',
+      };
+    }
+
+    const fence = await this.#acquireBackendPreSubmitFence(
+      page, plan, step, UniversalSubmitCategory.PRIOR_ATTEMPT_UNVERIFIED,
+    );
+    if (!fence.authorized) {
+      return fence.result;
+    }
+
+    this.store.markStep(plan.planId, step.id, REAL_SUBMIT_ATTEMPTING, { currentUrl: sanitizeUrl(page.url()) });
+    if (this.failAfterAttemptMarker === step.id) {
+      throw new Error(`SIMULATED_WORKER_CRASH_BEFORE_CLICK:${step.id}`);
+    }
+
+    return executeAndVerifyUniversalSubmit({
+      page,
+      submitSelector: refreshed.submitButton.selector,
+      expectedUrl: plan.targetUrl,
+      allowLocalTestHosts,
+      jobId: plan?.correlation?.jobId ?? null,
+      applicationId: plan?.correlation?.applicationId ?? null,
+      planId: plan?.planId ?? null,
+      retryFn: (fn) => this.#retry(fn),
+      pkg,
+      uploadStates,
+      identityValues: identityValuesOf(pkg),
+    });
+  }
+
   #validateGreenhouseArtifacts(plan) {
     const artifacts = plan.package?.artifacts ?? [];
     if (!Array.isArray(artifacts)) throw new HardStopError('INVALID_GREENHOUSE_ARTIFACT_LIST');
@@ -2294,14 +3503,20 @@ export class BrowserWorker {
 
   async #failureScreenshot(page, plan, stepId) {
     const dir = path.join(this.artifactDir, 'failures');
-    fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, `${plan.planId}-${stepId}.png`);
-    await page.screenshot({ path: file, fullPage: true }).catch(() => {});
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = path.join(dir, `${String(plan.planId).replace(/[^A-Za-z0-9_-]/g, '_')}-${String(stepId).replace(/[^A-Za-z0-9_-]/g, '_')}.png`);
+    // Stage 3F: diagnostics must not capture credentials or personal data —
+    // every form control's contents are masked in the screenshot.
+    const mask = typeof page.locator === 'function'
+      ? [page.locator('input, textarea, select, [contenteditable="true"]')]
+      : undefined;
+    await page.screenshot({ path: file, fullPage: true, mask }).catch(() => {});
+    try { if (fs.existsSync(file)) fs.chmodSync(file, 0o600); } catch { /* best effort */ }
     return file;
   }
 
   #safeError(error) {
-    return error instanceof VerificationError ? error.message : redactSecrets(error?.message ?? error);
+    return redactSecrets(error?.message ?? error);
   }
 
   #emit(plan, event) {

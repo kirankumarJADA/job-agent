@@ -23,6 +23,10 @@ class CloudflareInboundParserTest {
                   "date": "Sat, 24 Oct 2026 01:00:00 +0000",
                   "spf": "pass",
                   "dkim": "pass",
+                  "dkimDomain": "acme.example",
+                  "dmarc": "pass",
+                  "authServId": "mx.cloudflare.net",
+                  "authTrusted": true,
                   "spam": "no"
                 }
                 """;
@@ -42,9 +46,80 @@ class CloudflareInboundParserTest {
         assertThat(msg.messageId()).isEqualTo("msg-42@acme.example");
         assertThat(msg.spfResult()).isEqualTo("pass");
         assertThat(msg.dkimResult()).isEqualTo("pass");
+        assertThat(msg.dkimDomain()).isEqualTo("acme.example");
+        assertThat(msg.dmarcResult()).isEqualTo("pass");
+        assertThat(msg.authServId()).isEqualTo("mx.cloudflare.net");
+        assertThat(msg.authConflict()).isFalse();
         assertThat(msg.spamFlagged()).isFalse();
         assertThat(msg.authenticationFailed()).isFalse();
         assertThat(msg.threadReferences()).isEmpty();
+    }
+
+    @Test
+    void dropsUnverifiedDkimPassWhenDomainOrReceiverIsMissingOrUntrusted() {
+        String missingDomainPayload = """
+                {
+                  "envelopeRecipient": "robin+u7kq2m9x4vb3tn5p@mail.aplivenosi.com",
+                  "from": "hr@acme.example",
+                  "spf": "pass",
+                  "dkim": "pass",
+                  "authServId": "mx.cloudflare.net",
+                  "spam": "no"
+                }
+                """;
+        InboundMailMessage noDomain = CloudflareInboundParser.parse(missingDomainPayload, json).message();
+        assertThat(noDomain.dkimResult()).isNull();
+        assertThat(noDomain.dkimDomain()).isNull();
+
+        String untrustedPayload = """
+                {
+                  "envelopeRecipient": "robin+u7kq2m9x4vb3tn5p@mail.aplivenosi.com",
+                  "from": "hr@acme.example",
+                  "spf": "pass",
+                  "dkim": "pass",
+                  "dkimDomain": "acme.example",
+                  "authServId": "spoofed.example",
+                  "authTrusted": false,
+                  "spam": "no"
+                }
+                """;
+        InboundMailMessage untrusted = CloudflareInboundParser.parse(untrustedPayload, json).message();
+        assertThat(untrusted.dkimResult()).isNull();
+        assertThat(untrusted.dkimDomain()).isNull();
+
+        String omittedTrustPayload = """
+                {
+                  "envelopeRecipient": "robin+u7kq2m9x4vb3tn5p@mail.aplivenosi.com",
+                  "from": "hr@acme.example",
+                  "spf": "pass",
+                  "dkim": "pass",
+                  "dkimDomain": "acme.example",
+                  "dmarc": "pass",
+                  "authServId": "mx.cloudflare.net",
+                  "spam": "no"
+                }
+                """;
+        InboundMailMessage omittedTrust = CloudflareInboundParser.parse(omittedTrustPayload, json).message();
+        assertThat(omittedTrust.dkimResult()).isNull();
+        assertThat(omittedTrust.dkimDomain()).isNull();
+        assertThat(omittedTrust.dmarcResult()).isNull();
+
+        String conflictPayload = """
+                {
+                  "envelopeRecipient": "robin+u7kq2m9x4vb3tn5p@mail.aplivenosi.com",
+                  "from": "hr@acme.example",
+                  "spf": "pass",
+                  "dkim": "pass",
+                  "dkimDomain": "acme.example",
+                  "authServId": "mx.cloudflare.net",
+                  "authConflict": true,
+                  "spam": "no"
+                }
+                """;
+        InboundMailMessage conflict = CloudflareInboundParser.parse(conflictPayload, json).message();
+        assertThat(conflict.authenticationFailed()).isTrue();
+        assertThat(conflict.dkimDomain()).isNull();
+        assertThat(conflict.dkimResult()).isEqualTo("fail");
     }
 
     @Test

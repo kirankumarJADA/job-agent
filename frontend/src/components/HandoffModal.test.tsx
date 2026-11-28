@@ -8,6 +8,7 @@ import type { HandoffSession } from '../types';
 vi.mock('../api/client', () => ({
   completeHandoff: vi.fn(),
   cancelHandoff: vi.fn(),
+  resumeHandoff: vi.fn(),
 }));
 
 describe('HandoffModal', () => {
@@ -195,5 +196,25 @@ describe('HandoffModal', () => {
     // Attestation checkbox must be disabled
     const attestationCheckbox = screen.getByRole('checkbox', { name: /attest external submission/i });
     expect(attestationCheckbox.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('calls resumeHandoff cleanly when candidate chooses Resume Automation instead of external submission', async () => {
+    vi.mocked(client.resumeHandoff).mockResolvedValueOnce({
+      sessionId: 'test-session-123',
+      planId: 'test-plan-456',
+      status: 'COMPLETED',
+      planStatus: 'PREPARED',
+      message: 'Resumed',
+    });
+
+    render(<HandoffModal session={mockSession} onClose={onClose} onResumed={onResumed} />);
+    fireEvent.click(screen.getByRole('button', { name: /Resume Automation/i }));
+
+    await waitFor(() => {
+      expect(client.resumeHandoff).toHaveBeenCalledWith('test-session-123');
+      expect(client.completeHandoff).not.toHaveBeenCalled();
+      expect(onResumed).toHaveBeenCalledTimes(1);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
   });
 });

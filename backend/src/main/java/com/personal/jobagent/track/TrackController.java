@@ -34,6 +34,7 @@ import java.util.function.Supplier;
  * GET  /api/v1/applications/{id}/receipt                     durable submission receipt (latest attempt)
  * GET  /api/v1/applications/{id}/receipts/{attemptId}        durable receipt for specific attempt
  * GET  /api/v1/applications/{id}/receipts                    attempt history list for application
+ * GET  /api/v1/applications/{id}/receipts/{attemptId}/evidence  decrypted worker-recorded raw evidence (owner only)
  * POST /api/v1/applications/{id}/track/reports               candidate report (e.g. "I applied myself")
  * POST /api/v1/applications/{id}/track/receipts/{rid}/review confirm/reject a piece of evidence
  * GET  /api/v1/track/reviews                                 employer messages awaiting the candidate
@@ -99,6 +100,23 @@ public class TrackController {
                 .orElseGet(() -> notFound(request, "No receipt attempt with that id")));
     }
 
+    /**
+     * The decrypted raw DOM/screenshot evidence the authenticated worker
+     * recorded for one attempt. Owner-scoped (another candidate's attempt is
+     * 404), digest re-checked on read (a tampered record is 409), and never
+     * cached by intermediaries.
+     */
+    @GetMapping("/applications/{id}/receipts/{attemptId}/evidence")
+    public ResponseEntity<?> receiptEvidence(@PathVariable UUID id, @PathVariable UUID attemptId,
+                                             HttpServletRequest request) {
+        UUID profileId = ownerContext.profileIdOrNull();
+        return run(request, () -> receipts.getRawEvidence(profileId, id, attemptId)
+                .<ResponseEntity<?>>map(e -> ResponseEntity.ok()
+                        .header("Cache-Control", "no-store")
+                        .body(e))
+                .orElseGet(() -> notFound(request, "No stored evidence for that attempt")));
+    }
+
     @GetMapping("/applications/{id}/receipts")
     public ResponseEntity<?> receiptsList(@PathVariable UUID id, HttpServletRequest request) {
         UUID profileId = ownerContext.profileIdOrNull();
@@ -152,7 +170,8 @@ public class TrackController {
             return notFound(request, e.getMessage());
         } catch (IllegalArgumentException e) {
             return badRequest(request, e.getMessage());
-        } catch (ApplicationTrackingService.TrackConflictException | IllegalStateException e) {
+        } catch (ApplicationTrackingService.TrackConflictException | IllegalStateException
+                 | com.personal.jobagent.track.receipt.EvidenceIntegrityException e) {
             return ResponseEntity.status(HttpStatus.CONFLICT).body(ApiError.of(409, "Conflict", e.getMessage(),
                     request.getRequestURI(), correlationId()));
         } catch (DataAccessException e) {

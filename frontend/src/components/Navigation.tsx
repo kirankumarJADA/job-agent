@@ -133,6 +133,16 @@ const MAIN_NAV: NavItem[] = [
       </svg>
     ),
   },
+  {
+    name: 'Sandbox Postings',
+    path: '/sandbox-registrations',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" className={iconClass} aria-hidden="true">
+        <rect x="4" y="4" width="16" height="16" rx="2" stroke="currentColor" strokeWidth="1.6" />
+        <path d="M8.5 12l2.5 2.5 4.5-5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    ),
+  },
 ];
 
 const SYSTEM_NAV: NavItem[] = [

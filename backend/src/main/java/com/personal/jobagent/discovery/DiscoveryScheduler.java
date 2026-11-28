@@ -2,6 +2,7 @@ package com.personal.jobagent.discovery;
 
 import com.personal.jobagent.common.AutomationMetrics;
 import com.personal.jobagent.common.MaintenanceModeService;
+import com.personal.jobagent.common.SchedulerDatabaseGuard;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -55,6 +56,9 @@ public class DiscoveryScheduler {
     private final boolean enabled;
     private final MaintenanceModeService maintenanceMode;
 
+    @Autowired(required = false)
+    private SchedulerDatabaseGuard databaseGuard;
+
     @Autowired
     public DiscoveryScheduler(JdbcTemplate db, BoardDiscoveryService boards, PlatformRegistry registry,
                               @Value("${app.discovery.circuit-open-after-failures:10}") int circuitOpenAfterFailures,
@@ -80,7 +84,7 @@ public class DiscoveryScheduler {
 
     @Scheduled(fixedDelayString = "${app.discovery.schedule-sweep-interval-ms:60000}")
     public void runDueSources() {
-        if (!enabled) {
+        if (!enabled || (databaseGuard != null && !databaseGuard.isReady())) {
             return; // integration tests disable live board polling entirely
         }
         if (maintenanceMode.isMaintenanceMode()) {
@@ -89,15 +93,27 @@ public class DiscoveryScheduler {
         }
         List<String> kinds = registry.supportedKinds().stream().map(Enum::name).toList();
         if (kinds.isEmpty()) return;
-        List<Map<String, Object>> rows = db.queryForList("""
-                select id, kind, org_identifier, schedule_cron, rate_limit_per_min, last_run_at
-                from job_sources
-                where enabled = true and policy <> 'DISABLED'
-                  and kind in (%s)
-                  and coalesce(org_identifier, '') <> ''
-                  and coalesce(schedule_cron, '') <> ''
-                """.formatted(String.join(",", java.util.Collections.nCopies(kinds.size(), "?"))), kinds.toArray());
+        List<Map<String, Object>> rows;
+        try {
+            rows = db.queryForList("""
+                    select id, kind, org_identifier, schedule_cron, rate_limit_per_min, last_run_at
+                    from job_sources
+                    where enabled = true and policy <> 'DISABLED'
+                      and kind in (%s)
+                      and coalesce(org_identifier, '') <> ''
+                      and coalesce(schedule_cron, '') <> ''
+                    """.formatted(String.join(",", java.util.Collections.nCopies(kinds.size(), "?"))), kinds.toArray());
+        } catch (RuntimeException e) {
+            if (databaseGuard != null && !databaseGuard.isReady()) {
+                log.debug("Skipping discovery sweep error during shutdown: {}", e.getClass().getSimpleName());
+                return;
+            }
+            throw e;
+        }
         for (Map<String, Object> row : rows) {
+            if (databaseGuard != null && !databaseGuard.isReady()) {
+                return;
+            }
             SchedulableSource source = new SchedulableSource(
                     (UUID) row.get("id"),
                     (String) row.get("kind"),
@@ -110,6 +126,9 @@ public class DiscoveryScheduler {
                 if (rateLimited(source)) continue;
                 run(source);
             } catch (Exception e) {
+                if (databaseGuard != null && !databaseGuard.isReady()) {
+                    return;
+                }
                 // One broken source must never starve the others in the sweep.
                 metrics.scheduledDiscoveryRun("failed");
                 log.warn("Scheduled discovery for source {} failed: {}", source.id(), e.getMessage());

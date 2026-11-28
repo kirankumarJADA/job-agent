@@ -1,6 +1,7 @@
 package com.personal.jobagent.discovery;
 
 import com.personal.jobagent.common.MaintenanceModeService;
+import com.personal.jobagent.common.SchedulerDatabaseGuard;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.discovery.plan.ExecutionFencedException;
 import com.personal.jobagent.discovery.plan.SearchPlanRepository;
@@ -35,6 +36,12 @@ public class JobDiscoveryService {
     private final OutboxWriter outboxWriter;
     private final MaintenanceModeService maintenanceMode;
     private final SearchPlanRepository searchPlanRepository;
+
+    @Autowired(required = false)
+    private SchedulerDatabaseGuard databaseGuard;
+
+    @Autowired(required = false)
+    private org.springframework.transaction.PlatformTransactionManager transactionManager;
 
     @Autowired
     public JobDiscoveryService(JdbcTemplate jdbcTemplate,
@@ -465,10 +472,32 @@ public class JobDiscoveryService {
      * <p>Only one sweep runs at a time. A second concurrent sweep (another instance) returns immediately instead
      * of queueing behind the first. The whole sweep is one transaction: any failure rolls back every step.
      */
-    @Transactional(isolation = Isolation.READ_COMMITTED)
     @Scheduled(cron = "0 0 * * * *") // hourly scheduled refresh for source health and stale jobs
     public void scheduledDiscoveryMaintenance() {
-        if (!maintenanceEnabled || maintenanceMode.isMaintenanceMode()) {
+        if (!maintenanceEnabled || maintenanceMode.isMaintenanceMode()
+                || (databaseGuard != null && !databaseGuard.isReady())) {
+            return;
+        }
+        try {
+            if (transactionManager != null) {
+                var template = new org.springframework.transaction.support.TransactionTemplate(transactionManager);
+                template.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_READ_COMMITTED);
+                template.executeWithoutResult(status -> executeDiscoveryMaintenance());
+            } else {
+                executeDiscoveryMaintenance();
+            }
+        } catch (RuntimeException e) {
+            if (databaseGuard != null && !databaseGuard.isReady()) {
+                log.debug("Suppressing discovery maintenance error during shutdown: {}", e.getClass().getSimpleName());
+                return;
+            }
+            throw e;
+        }
+    }
+
+    private void executeDiscoveryMaintenance() {
+        if (!maintenanceEnabled || maintenanceMode.isMaintenanceMode()
+                || (databaseGuard != null && !databaseGuard.isReady())) {
             return;
         }
         Boolean acquired = jdbcTemplate.queryForObject(

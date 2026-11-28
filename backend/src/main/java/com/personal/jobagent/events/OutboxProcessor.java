@@ -2,6 +2,7 @@ package com.personal.jobagent.events;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.common.MaintenanceModeService;
+import com.personal.jobagent.common.SchedulerDatabaseGuard;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.notifications.NotificationRecord;
 import com.personal.jobagent.notifications.NotificationRepository;
@@ -133,6 +134,9 @@ public class OutboxProcessor {
     private final AtomicBoolean pausedLogged = new AtomicBoolean(false);
     private final AtomicLong loggedWatermark = new AtomicLong(0);
 
+    @Autowired(required = false)
+    private SchedulerDatabaseGuard databaseGuard;
+
     @Autowired
     public OutboxProcessor(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper, EventPublisher eventPublisher,
                            NotificationRepository notificationRepository,
@@ -170,17 +174,31 @@ public class OutboxProcessor {
             logPausedOnce();
             return;
         }
-        // Read first, every round, so an exclusion or a revert applies from the
-        // next round. If it cannot be read, the round fails and nothing is
-        // dispatched: the unfiltered query is never a fallback.
-        long watermark = exclusionWatermark();
-        List<PendingRow> rows = watermark > 0
-                ? jdbcTemplate.query(PENDING_WITH_EXCLUSION_SQL, ROW_MAPPER,
-                        MAX_ATTEMPTS, watermark, BATCH_SIZE, MAX_ATTEMPTS, watermark, BATCH_SIZE, BATCH_SIZE)
-                : jdbcTemplate.query(PENDING_SQL, ROW_MAPPER, MAX_ATTEMPTS, BATCH_SIZE);
+        if (databaseGuard != null && !databaseGuard.isReady()) {
+            return;
+        }
+        try {
+            // Read first, every round, so an exclusion or a revert applies from the
+            // next round. If it cannot be read, the round fails and nothing is
+            // dispatched: the unfiltered query is never a fallback.
+            long watermark = exclusionWatermark();
+            List<PendingRow> rows = watermark > 0
+                    ? jdbcTemplate.query(PENDING_WITH_EXCLUSION_SQL, ROW_MAPPER,
+                            MAX_ATTEMPTS, watermark, BATCH_SIZE, MAX_ATTEMPTS, watermark, BATCH_SIZE, BATCH_SIZE)
+                    : jdbcTemplate.query(PENDING_SQL, ROW_MAPPER, MAX_ATTEMPTS, BATCH_SIZE);
 
-        for (PendingRow row : rows) {
-            dispatchOne(row);
+            for (PendingRow row : rows) {
+                if (databaseGuard != null && !databaseGuard.isReady()) {
+                    return;
+                }
+                dispatchOne(row);
+            }
+        } catch (RuntimeException e) {
+            if (databaseGuard != null && !databaseGuard.isReady()) {
+                log.debug("Skipping outbox dispatch error during shutdown: {}", e.getClass().getSimpleName());
+                return;
+            }
+            throw e;
         }
     }
 
@@ -195,10 +213,23 @@ public class OutboxProcessor {
 
             jdbcTemplate.update("update outbox_events set published_at = now() where id = ?", row.id());
         } catch (Exception e) {
+            if (databaseGuard != null && !databaseGuard.isReady()) {
+                log.debug("Skipping outbox failure update for event {} during shutdown: {}",
+                        row.id(), e.getClass().getSimpleName());
+                return;
+            }
             log.warn("Outbox dispatch failed for event {} (attempt {}): {}", row.id(), row.attemptCount() + 1, e.getMessage());
-            jdbcTemplate.update(
-                    "update outbox_events set attempt_count = attempt_count + 1, last_error = ? where id = ?",
-                    truncate(e.getMessage(), 2000), row.id());
+            try {
+                jdbcTemplate.update(
+                        "update outbox_events set attempt_count = attempt_count + 1, last_error = ? where id = ?",
+                        truncate(e.getMessage(), 2000), row.id());
+            } catch (RuntimeException dbErr) {
+                if (databaseGuard != null && !databaseGuard.isReady()) {
+                    log.debug("Suppressed outbox retry write during shutdown: {}", dbErr.getClass().getSimpleName());
+                    return;
+                }
+                throw dbErr;
+            }
         }
     }
 
@@ -208,12 +239,28 @@ public class OutboxProcessor {
             logPausedOnce();
             return;
         }
-        long watermark = exclusionWatermark();
-        List<Map<String, Object>> stuck = watermark > 0
-                ? jdbcTemplate.queryForList(DEAD_LETTER_WITH_EXCLUSION_SQL, MAX_ATTEMPTS, watermark)
-                : jdbcTemplate.queryForList(DEAD_LETTER_SQL, MAX_ATTEMPTS);
+        if (databaseGuard != null && !databaseGuard.isReady()) {
+            return;
+        }
+        long watermark;
+        List<Map<String, Object>> stuck;
+        try {
+            watermark = exclusionWatermark();
+            stuck = watermark > 0
+                    ? jdbcTemplate.queryForList(DEAD_LETTER_WITH_EXCLUSION_SQL, MAX_ATTEMPTS, watermark)
+                    : jdbcTemplate.queryForList(DEAD_LETTER_SQL, MAX_ATTEMPTS);
+        } catch (RuntimeException e) {
+            if (databaseGuard != null && !databaseGuard.isReady()) {
+                log.debug("Skipping outbox DLQ reconcile error during shutdown: {}", e.getClass().getSimpleName());
+                return;
+            }
+            throw e;
+        }
 
         for (Map<String, Object> row : stuck) {
+            if (databaseGuard != null && !databaseGuard.isReady()) {
+                return;
+            }
             UUID eventId = (UUID) row.get("id");
             // Feature 8: DLQ notifications go through the same idempotent
             // seam as everything else. dedup_key keyed on the failed event
@@ -238,10 +285,18 @@ public class OutboxProcessor {
                     // table is not its system of record — the outbox row is.
                     null);
 
-            NotificationRecord stored = notificationRepository.insertIfAbsent(dlqNotification);
-            if (stored != null) {
-                log.error("Outbox event {} exceeded {} attempts, moving to DLQ. Last error: {}",
-                        eventId, MAX_ATTEMPTS, row.get("last_error"));
+            try {
+                NotificationRecord stored = notificationRepository.insertIfAbsent(dlqNotification);
+                if (stored != null) {
+                    log.error("Outbox event {} exceeded {} attempts, moving to DLQ. Last error: {}",
+                            eventId, MAX_ATTEMPTS, row.get("last_error"));
+                }
+            } catch (RuntimeException e) {
+                if (databaseGuard != null && !databaseGuard.isReady()) {
+                    log.debug("Skipping DLQ notification insert during shutdown: {}", e.getClass().getSimpleName());
+                    return;
+                }
+                throw e;
             }
         }
     }

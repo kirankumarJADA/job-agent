@@ -8,6 +8,7 @@ import com.personal.jobagent.automation.ExecutionPackageBlockedException;
 import com.personal.jobagent.automation.GreenhouseExecutionPlanService;
 import com.personal.jobagent.automation.InspectionPlanService;
 import com.personal.jobagent.automation.LeverExecutionPlanService;
+import com.personal.jobagent.automation.UniversalBrowserPlanService;
 import com.personal.jobagent.automation.WorkdayExecutionPlanService;
 import com.personal.jobagent.automation.ZohoRecruitExecutionPlanService;
 import com.personal.jobagent.common.UuidV7;
@@ -17,6 +18,8 @@ import com.personal.jobagent.mailbox.RegistrationIdentityService;
 import com.personal.jobagent.security.OwnerContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -49,6 +52,8 @@ public class ApplyController {
     private final WorkdayExecutionPlanService workdayPlans;
     private final AshbyExecutionPlanService ashbyPlans;
     private final InspectionPlanService inspectionPlans;
+    private final UniversalBrowserPlanService universalPlans;
+    private final boolean universalEnabled;
     private final JobRepository jobs;
     private final AuditLogWriter audit;
 
@@ -57,6 +62,18 @@ public class ApplyController {
                            LeverExecutionPlanService leverPlans, WorkdayExecutionPlanService workdayPlans,
                            AshbyExecutionPlanService ashbyPlans,
                            InspectionPlanService inspectionPlans, JobRepository jobs, AuditLogWriter audit) {
+        this(ownerContext, readiness, greenhousePlans, zohoRecruitPlans, leverPlans, workdayPlans, ashbyPlans,
+                inspectionPlans, jobs, audit, null, true);
+    }
+
+    @Autowired
+    public ApplyController(OwnerContext ownerContext, ApplyReadinessService readiness,
+                           GreenhouseExecutionPlanService greenhousePlans, ZohoRecruitExecutionPlanService zohoRecruitPlans,
+                           LeverExecutionPlanService leverPlans, WorkdayExecutionPlanService workdayPlans,
+                           AshbyExecutionPlanService ashbyPlans,
+                           InspectionPlanService inspectionPlans, JobRepository jobs, AuditLogWriter audit,
+                           @Autowired(required = false) UniversalBrowserPlanService universalPlans,
+                           @Value("${app.automation.universal-enabled:true}") boolean universalEnabled) {
         this.ownerContext = ownerContext;
         this.readiness = readiness;
         this.greenhousePlans = greenhousePlans;
@@ -65,6 +82,8 @@ public class ApplyController {
         this.workdayPlans = workdayPlans;
         this.ashbyPlans = ashbyPlans;
         this.inspectionPlans = inspectionPlans;
+        this.universalPlans = universalPlans;
+        this.universalEnabled = universalEnabled;
         this.jobs = jobs;
         this.audit = audit;
     }
@@ -93,7 +112,8 @@ public class ApplyController {
      * blocker, and a refusal names the blockers instead of a generic error.
      */
     @PostMapping("/applications/{id}/package")
-    public ResponseEntity<?> createPackage(@PathVariable UUID id) {
+    public ResponseEntity<?> createPackage(@PathVariable UUID id,
+                                           @RequestParam(name = "planType", required = false) String requestedPlanType) {
         UUID profileId = ownerContext.profileIdOrNull();
         if (profileId == null) return ResponseEntity.badRequest().body(Map.of("error", "a profile is required"));
         Map<String, Object> state;
@@ -123,7 +143,10 @@ public class ApplyController {
                 ((Map<?, ?>) state.get("application")).get("applicationUrl"));
         try {
             String jobApplicationUrl = jobs.findById(jobId).map(JobRecord::applicationUrl).orElse(null);
-            var planId = jobApplicationUrl != null && greenhousePlans.handles(jobApplicationUrl)
+            boolean forceInspection = "INSPECTION".equalsIgnoreCase(requestedPlanType);
+            var planId = forceInspection
+                    ? inspectionPlans.createInspectionPlan(profileId, id, jobId)
+                    : jobApplicationUrl != null && greenhousePlans.handles(jobApplicationUrl)
                     ? greenhousePlans.createExecutionPlan(profileId, id, jobId)
                     : jobApplicationUrl != null && zohoRecruitPlans.handles(jobApplicationUrl)
                     ? zohoRecruitPlans.createExecutionPlan(profileId, id, jobId)
@@ -133,6 +156,8 @@ public class ApplyController {
                     ? workdayPlans.createExecutionPlan(profileId, id, jobId)
                     : jobApplicationUrl != null && ashbyPlans.handles(jobApplicationUrl)
                     ? ashbyPlans.createExecutionPlan(profileId, id, jobId)
+                    : universalEnabled && universalPlans != null && jobApplicationUrl != null
+                    ? universalPlans.createExecutionPlan(profileId, id, jobId)
                     : inspectionPlans.createInspectionPlan(profileId, id, jobId);
             if (planId.isEmpty()) {
                 return ResponseEntity.status(409).body(Map.of(
@@ -141,7 +166,8 @@ public class ApplyController {
             }
             audit.write(new AuditEntry(ownerContext.actorOr("user"), "APPLY_PACKAGE_CREATED", "APPLICATION", id,
                     null, Map.of("planId", planId.get().toString(), "jobId", jobId.toString(),
-                            "applicationUrl", applicationUrl), null, UuidV7.generate()));
+                            "applicationUrl", com.personal.jobagent.common.SafeUrls.redactForLog(applicationUrl)),
+                    null, UuidV7.generate()));
             return ResponseEntity.ok(Map.of("planId", planId.get().toString(), "status", "PREPARED"));
         } catch (ExecutionPackageBlockedException blocked) {
             audit.write(new AuditEntry(ownerContext.actorOr("user"), "APPLY_PACKAGE_REFUSED", "APPLICATION", id,
@@ -150,6 +176,14 @@ public class ApplyController {
                     "error", "the exact document versions for this application cannot be selected",
                     "code", "EXECUTION_PACKAGE_BLOCKED",
                     "blockers", blocked.blockers()));
+        } catch (RegistrationIdentityService.ManagedMailboxNotReadyException notReady) {
+            audit.write(new AuditEntry(ownerContext.actorOr("user"), "APPLY_PACKAGE_REFUSED", "APPLICATION", id,
+                    null, Map.of("reason", "MANAGED_MAILBOX_NOT_READY", "managedMailbox", notReady.reason()),
+                    null, UuidV7.generate()));
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "Robin-managed email is not ready, so this application cannot use private email yet",
+                    "code", "MANAGED_MAILBOX_NOT_READY",
+                    "managedMailbox", notReady.reason()));
         } catch (IllegalStateException e) {
             log.warn("Package creation failed for application {}: {}", id, e.getMessage());
             return ResponseEntity.status(503).body(Map.of(
@@ -159,6 +193,72 @@ public class ApplyController {
     }
 
     public record WorkdayAccountRequest(boolean acceptWorkdayTerms) {}
+
+    public record UniversalAccountRequest(boolean acceptTerms) {}
+
+    /**
+     * Explicit, candidate-initiated authorization to create a new employer portal account
+     * on an ordinary employer website (Universal browser engine) using Robin's private
+     * application email and a freshly generated random password.
+     */
+    @PostMapping("/applications/{id}/universal-account")
+    public ResponseEntity<?> createUniversalAccount(@PathVariable UUID id,
+                                                      @RequestBody(required = false) UniversalAccountRequest r) {
+        UUID profileId = ownerContext.profileIdOrNull();
+        if (profileId == null) return ResponseEntity.badRequest().body(Map.of("error", "a profile is required"));
+        boolean acceptTerms = r != null && r.acceptTerms();
+        UUID jobId;
+        try {
+            Map<String, Object> state = readiness.evaluate(profileId, id);
+            jobId = UUID.fromString(String.valueOf(((Map<?, ?>) state.get("application")).get("jobId")));
+        } catch (NoSuchElementException e) {
+            return ResponseEntity.notFound().build();
+        } catch (ApplyReadinessService.ReadinessUnavailableException e) {
+            return ResponseEntity.status(503).body(Map.of(
+                    "availability", ApplyReadinessService.UNAVAILABLE,
+                    "reason", e.getMessage(),
+                    "message", "Preparation state could not be verified, so account creation was not attempted."));
+        }
+        if (universalPlans == null || !universalEnabled) {
+            return ResponseEntity.status(503).body(Map.of(
+                    "error", "universal browser engine is unavailable",
+                    "code", "UNIVERSAL_UNAVAILABLE"));
+        }
+        try {
+            UniversalBrowserPlanService.AccountCreationResult result =
+                    universalPlans.authorizeAccountCreation(profileId, id, jobId, acceptTerms);
+            audit.write(new AuditEntry(ownerContext.actorOr("user"), "UNIVERSAL_ACCOUNT_CREATION_AUTHORIZED",
+                    "APPLICATION", id, null,
+                    Map.of("planId", result.planId().toString(), "reusedExisting", result.reusedExisting()),
+                    null, UuidV7.generate()));
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("planId", result.planId().toString());
+            body.put("sessionId", result.sessionId() == null ? null : result.sessionId().toString());
+            body.put("reusedExisting", result.reusedExisting());
+            body.put("status", "PREPARED");
+            return ResponseEntity.ok(body);
+        } catch (UniversalBrowserPlanService.AccountCreationRefusedException refused) {
+            audit.write(new AuditEntry(ownerContext.actorOr("user"), "UNIVERSAL_ACCOUNT_CREATION_REFUSED",
+                    "APPLICATION", id, null, Map.of("reason", refused.reason()), null, UuidV7.generate()));
+            return ResponseEntity.status(409).body(Map.of("error", refused.getMessage(), "code", refused.reason()));
+        } catch (ExecutionPackageBlockedException blocked) {
+            audit.write(new AuditEntry(ownerContext.actorOr("user"), "UNIVERSAL_ACCOUNT_CREATION_REFUSED",
+                    "APPLICATION", id, null, Map.of("reason", "EXECUTION_PACKAGE_BLOCKED",
+                            "blockers", blocked.blockers()), null, UuidV7.generate()));
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "the exact document versions for this application cannot be selected",
+                    "code", "EXECUTION_PACKAGE_BLOCKED",
+                    "blockers", blocked.blockers()));
+        } catch (RegistrationIdentityService.ManagedMailboxNotReadyException notReady) {
+            return ResponseEntity.status(409).body(Map.of(
+                    "error", "Robin-managed email is not ready, so no employer account was registered",
+                    "code", "MANAGED_MAILBOX_NOT_READY", "managedMailbox", notReady.reason()));
+        } catch (RegistrationIdentityService.SessionMismatchException mismatch) {
+            return ResponseEntity.status(409).body(Map.of("error", mismatch.getMessage(), "code", "SESSION_MISMATCH"));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(409).body(Map.of("error", e.getMessage(), "code", "ACCOUNT_CREATION_UNAVAILABLE"));
+        }
+    }
 
     /**
      * Phase 11: an explicit, candidate-initiated request to create a NEW

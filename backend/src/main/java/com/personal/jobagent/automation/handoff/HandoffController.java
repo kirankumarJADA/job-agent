@@ -2,6 +2,7 @@ package com.personal.jobagent.automation.handoff;
 
 import com.personal.jobagent.security.OwnerContext;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -19,11 +20,20 @@ public class HandoffController {
 
     private final AtsHandoffService handoffService;
     private final OwnerContext ownerContext;
+    private final boolean allowLocalTestHosts;
 
     @Autowired
-    public HandoffController(AtsHandoffService handoffService, OwnerContext ownerContext) {
+    public HandoffController(
+            AtsHandoffService handoffService,
+            OwnerContext ownerContext,
+            @Value("${app.sandbox.allow-local-test-hosts:false}") boolean allowLocalTestHosts) {
         this.handoffService = handoffService;
         this.ownerContext = ownerContext;
+        this.allowLocalTestHosts = allowLocalTestHosts;
+    }
+
+    public HandoffController(AtsHandoffService handoffService, OwnerContext ownerContext) {
+        this(handoffService, ownerContext, false);
     }
 
     public record InitiateRequest(
@@ -175,6 +185,48 @@ public class HandoffController {
     }
 
     /**
+     * Stage 3D: Candidate asks Robin to resume the paused pre-submit automation plan
+     * after updating employer credentials or addressing a pre-submit blocker.
+     */
+    @PostMapping("/{sessionId}/resume")
+    public ResponseEntity<?> resumeAfterHandoff(@PathVariable UUID sessionId) {
+        if (ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Worker tokens may not resume handoff sessions"));
+        }
+
+        UUID profileId = ownerContext.profileIdOrNull();
+        if (profileId == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+
+        Optional<HandoffSessionRecord> any = handoffService.findSessionAnyOwner(sessionId);
+        if (any.isEmpty()) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Handoff session not found"));
+        }
+        if (!profileId.equals(any.get().profileId())) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "Access denied: session belongs to another profile"));
+        }
+
+        try {
+            UUID resumedPlanId = handoffService.resumeAfterHandoff(profileId, sessionId);
+            if (resumedPlanId == null) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Handoff session not found"));
+            }
+            return ResponseEntity.ok(Map.of(
+                    "sessionId", sessionId,
+                    "planId", resumedPlanId,
+                    "status", "COMPLETED",
+                    "planStatus", "PREPARED",
+                    "message", "Handoff resolved and automation plan re-queued for execution."
+            ));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of(
+                    "error", "Handoff resume refused: " + e.getMessage()
+            ));
+        }
+    }
+
+    /**
      * Worker or internal trigger to initiate handoff when security boundary is reached.
      */
     @PostMapping("/initiate")
@@ -184,7 +236,7 @@ public class HandoffController {
         }
 
         try {
-            AtsHandoffService.validateTargetUrl(req.targetUrl());
+            AtsHandoffService.validateTargetUrl(req.targetUrl(), allowLocalTestHosts);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", "Invalid target URL: " + e.getMessage()));
         }

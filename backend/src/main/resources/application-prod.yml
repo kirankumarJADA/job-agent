@@ -98,3 +98,10 @@ app:
     # can read it on the Vercel origin.
     cookie-same-site: none
     cookie-secure: true
+
+  sandbox:
+    allowed-domains: ${APP_SANDBOX_ALLOWED_DOMAINS:}
+    allowed-path-prefixes: ${APP_SANDBOX_ALLOWED_PATH_PREFIXES:}
+    # Production never accepts plain HTTP or loopback/private SSRF sandbox targets.
+    require-https: true
+    allow-local-test-hosts: false

@@ -331,4 +331,76 @@ describe('ApplyWorkspace', () => {
     const readinessCalls = mocked.mock.calls.filter(([url]) => String(url).includes('/readiness'));
     expect(readinessCalls.length).toBeGreaterThanOrEqual(2);
   });
+
+  it('edits a NEEDS_USER_INPUT discovered question inline, submits edited text, and surfaces DocumentFactValidator 400 errors cleanly', async () => {
+    mocked
+      .mockResolvedValueOnce(
+        readiness({
+          packageReady: false,
+          questions: {
+            formCaptured: true,
+            formUrl: 'https://careers.acme.com/apply',
+            items: [
+              {
+                questionKey: 'notice_period',
+                questionText: 'What is your notice period?',
+                requiredState: 'REQUIRED',
+                answerType: 'text',
+                options: [],
+                answerState: 'NEEDS_USER_INPUT',
+                answerOrigin: null,
+                answerId: 'ans-u-1',
+                answerText: '',
+                formUrl: 'https://careers.acme.com/apply',
+              },
+            ],
+            storedAnswerCount: 1,
+            confirmedCount: 0,
+          },
+        }),
+      )
+      .mockRejectedValueOnce(new ApiError(400, 'Answer contains unverified factual claims: unknown credential'))
+      .mockResolvedValueOnce({ id: 'ans-u-1', status: 'ANSWERED', humanConfirmed: true })
+      .mockResolvedValueOnce(
+        readiness({
+          packageReady: true,
+          questions: {
+            formCaptured: true,
+            formUrl: 'https://careers.acme.com/apply',
+            items: [
+              {
+                questionKey: 'notice_period',
+                questionText: 'What is your notice period?',
+                requiredState: 'REQUIRED',
+                answerType: 'text',
+                options: [],
+                answerState: 'CONFIRMED',
+                answerOrigin: 'CANDIDATE_CONFIRMED',
+                answerId: 'ans-u-1',
+                answerText: '4 weeks',
+                formUrl: 'https://careers.acme.com/apply',
+              },
+            ],
+            storedAnswerCount: 1,
+            confirmedCount: 1,
+          },
+        }),
+      );
+
+    renderWorkspace();
+    const input = (await screen.findByLabelText('Answer for What is your notice period?')) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'I hold an unverified PhD' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save & confirm answer/ }));
+
+    expect(await screen.findByText(/Answer contains unverified factual claims: unknown credential/)).toBeTruthy();
+
+    fireEvent.change(input, { target: { value: '4 weeks' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save & confirm answer/ }));
+
+    expect(mocked).toHaveBeenCalledWith('/application-answers/ans-u-1', {
+      method: 'PUT',
+      body: JSON.stringify({ status: 'ANSWERED', answerText: '4 weeks', confirmForAutofill: true }),
+    });
+    expect(await screen.findByText(/Answer: 4 weeks/)).toBeTruthy();
+  });
 });

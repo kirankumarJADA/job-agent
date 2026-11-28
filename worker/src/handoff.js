@@ -25,7 +25,7 @@ export const HandoffReason = Object.freeze({
 });
 
 /**
- * Checks whether an error represents a handoff-eligible security checkpoint.
+ * Checks whether an error represents a handoff-eligible security checkpoint or unresolved login wall.
  */
 export function isHandoffEligibleError(error) {
   if (!error) return false;
@@ -34,28 +34,37 @@ export function isHandoffEligibleError(error) {
     || reason === 'LEVER_CAPTCHA_PRESENT'
     || reason === 'WORKDAY_MFA_REQUIRED'
     || reason === 'WORKDAY_CAPTCHA_PRESENT'
-    || reason === 'BLOCKED_ANTI_BOT';
+    || reason === 'BLOCKED_ANTI_BOT'
+    || reason === 'UNIVERSAL_MFA_REQUIRED'
+    || reason === 'UNIVERSAL_LOGIN_REQUIRED'
+    || reason === 'UNIVERSAL_LOGIN_FAILED'
+    || reason === 'UNIVERSAL_LOGIN_SELECTOR_UNVERIFIED';
 }
 
 /**
- * Normalizes an error reason into a standard platform handoff reason.
+ * Normalizes an error reason into a standard backend HandoffBlockReason string.
+ * Generic MFA challenges map cleanly to MFA rather than WORKDAY_MFA_REQUIRED.
  */
 export function normalizeHandoffReason(error, planType) {
   const reason = String(error?.reason || error?.message || '');
+  const isWorkday = planType === 'WORKDAY' || /WORKDAY/i.test(reason);
   if (/MFA|TWO[- ]FACTOR|OTP|AUTHENTICATOR/i.test(reason)) {
-    return 'WORKDAY_MFA_REQUIRED';
+    return isWorkday ? 'WORKDAY_MFA_REQUIRED' : 'MFA';
   }
   if (planType === 'LEVER' || /LEVER/i.test(reason)) {
     return 'LEVER_CAPTCHA_PRESENT';
   }
-  if (/WORKDAY/i.test(reason)) {
+  if (isWorkday) {
     return 'WORKDAY_CAPTCHA_PRESENT';
   }
   if (/TURNSTILE|CLOUDFLARE/i.test(reason)) {
     return 'CLOUDFLARE_TURNSTILE';
   }
-  if (/ANTI[-_ ]BOT|SECURITY/i.test(reason)) {
+  if (/ANTI[-_ ]BOT|SECURITY|LOGIN|CREDENTIAL|SIGN[-_ ]IN/i.test(reason)) {
     return 'EMPLOYER_SECURITY_CHECK';
+  }
+  if (planType === 'UNIVERSAL' && /CAPTCHA/i.test(reason)) {
+    return 'CAPTCHA';
   }
   return reason || 'CAPTCHA';
 }

@@ -4,13 +4,16 @@ import com.personal.jobagent.application.ApplicationStatusService;
 import com.personal.jobagent.audit.AuditEntry;
 import com.personal.jobagent.audit.AuditLogWriter;
 import com.personal.jobagent.automation.AutomationPlanRepository;
+import com.personal.jobagent.automation.UniversalBrowserPlanService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.net.InetAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.time.Instant;
@@ -34,32 +37,87 @@ public class AtsHandoffService {
     private final AuditLogWriter audit;
     private final TransactionTemplate transactionTemplate;
     private final ApplicationStatusService applicationStatus;
+    private final UniversalBrowserPlanService universalPlans;
+    private final boolean allowLocalTestHosts;
 
     @Autowired
     public AtsHandoffService(HandoffSessionRepository handoffRepository,
                              AutomationPlanRepository planRepository,
                              @Autowired(required = false) AuditLogWriter audit,
                              @Autowired(required = false) TransactionTemplate transactionTemplate,
-                             @Autowired(required = false) ApplicationStatusService applicationStatus) {
+                             @Autowired(required = false) ApplicationStatusService applicationStatus,
+                             @Autowired(required = false) UniversalBrowserPlanService universalPlans,
+                             @Value("${app.sandbox.allow-local-test-hosts:false}") boolean allowLocalTestHosts) {
         this.handoffRepository = handoffRepository;
         this.planRepository = planRepository;
         this.audit = audit;
         this.transactionTemplate = transactionTemplate;
         this.applicationStatus = applicationStatus;
+        this.universalPlans = universalPlans;
+        this.allowLocalTestHosts = allowLocalTestHosts;
+    }
+
+    public AtsHandoffService(HandoffSessionRepository handoffRepository,
+                             AutomationPlanRepository planRepository,
+                             AuditLogWriter audit,
+                             TransactionTemplate transactionTemplate,
+                             ApplicationStatusService applicationStatus,
+                             UniversalBrowserPlanService universalPlans) {
+        this(handoffRepository, planRepository, audit, transactionTemplate, applicationStatus, universalPlans, false);
+    }
+
+    public AtsHandoffService(HandoffSessionRepository handoffRepository,
+                             AutomationPlanRepository planRepository,
+                             AuditLogWriter audit,
+                             TransactionTemplate transactionTemplate,
+                             ApplicationStatusService applicationStatus) {
+        this(handoffRepository, planRepository, audit, transactionTemplate, applicationStatus, null, false);
     }
 
     public AtsHandoffService(HandoffSessionRepository handoffRepository,
                              AutomationPlanRepository planRepository,
                              AuditLogWriter audit,
                              TransactionTemplate transactionTemplate) {
-        this(handoffRepository, planRepository, audit, transactionTemplate, null);
+        this(handoffRepository, planRepository, audit, transactionTemplate, null, null, false);
     }
 
     /**
      * Validates that the target URL is an absolute HTTPS URL with a valid host,
      * no embedded user credentials, and no protocol-relative or dangerous schemes.
      */
+    /**
+     * Dedicated ATS platforms that serve one posting from several of their own hosts
+     * (e.g. {@code boards.greenhouse.io} and {@code job-boards.greenhouse.io}).
+     */
+    private static final java.util.Set<String> ATS_PLATFORM_DOMAINS = java.util.Set.of(
+            "greenhouse.io", "myworkdayjobs.com", "myworkday.com", "lever.co", "ashbyhq.com",
+            "zohorecruit.com", "zohorecruit.in");
+
+    /**
+     * Stage 3F: a handoff link is on "the same employer host" when it is the plan's own host,
+     * or when both hosts belong to the same dedicated ATS platform domain. Any other domain —
+     * including look-alikes such as {@code greenhouse.io.evil.example} — is refused.
+     */
+    public static boolean sameEmployerHost(String handoffHost, String planHost) {
+        if (handoffHost.equals(planHost)) return true;
+        for (String platform : ATS_PLATFORM_DOMAINS) {
+            if (com.personal.jobagent.common.SafeUrls.hostIsOrIsSubdomainOf(handoffHost, platform)
+                    && com.personal.jobagent.common.SafeUrls.hostIsOrIsSubdomainOf(planHost, platform)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public void validateConfiguredTargetUrl(String targetUrl) {
+        validateTargetUrl(targetUrl, allowLocalTestHosts);
+    }
+
     public static void validateTargetUrl(String targetUrl) {
+        validateTargetUrl(targetUrl, false);
+    }
+
+    public static void validateTargetUrl(String targetUrl, boolean allowLocalTestHosts) {
         if (targetUrl == null || targetUrl.isBlank()) {
             throw new IllegalArgumentException("Target URL must not be null or blank");
         }
@@ -76,15 +134,34 @@ public class AtsHandoffService {
         if (!uri.isAbsolute()) {
             throw new IllegalArgumentException("Target URL must be absolute");
         }
-        if (!"https".equalsIgnoreCase(uri.getScheme())) {
-            throw new IllegalArgumentException("Target URL scheme must be HTTPS (got: " + uri.getScheme() + ")");
-        }
         String host = uri.getHost();
         if (host == null || host.isBlank()) {
             throw new IllegalArgumentException("Target URL must contain a valid host");
         }
+        String scheme = uri.getScheme();
+        if (!"https".equalsIgnoreCase(scheme)) {
+            if (!(allowLocalTestHosts && "http".equalsIgnoreCase(scheme) && isExplicitLoopbackHost(host))) {
+                throw new IllegalArgumentException("Target URL scheme must be HTTPS (got: " + scheme + ")");
+            }
+        }
         if (uri.getUserInfo() != null || (uri.getRawAuthority() != null && uri.getRawAuthority().contains("@"))) {
             throw new IllegalArgumentException("Target URL must not contain embedded credentials");
+        }
+    }
+
+    private static boolean isExplicitLoopbackHost(String host) {
+        String normalized = host.toLowerCase(java.util.Locale.ROOT);
+        if (normalized.startsWith("[") && normalized.endsWith("]")) {
+            normalized = normalized.substring(1, normalized.length() - 1);
+        }
+        if (!"localhost".equals(normalized) && !"127.0.0.1".equals(normalized) && !"::1".equals(normalized)) {
+            return false;
+        }
+        try {
+            InetAddress addr = InetAddress.getByName(normalized);
+            return addr.isLoopbackAddress() && !addr.isLinkLocalAddress() && !addr.isSiteLocalAddress();
+        } catch (Exception e) {
+            return false;
         }
     }
 
@@ -98,7 +175,7 @@ public class AtsHandoffService {
         if (ownerProfileId == null || planId == null || applicationId == null) {
             throw new IllegalArgumentException("ownerProfileId, planId, and applicationId are required");
         }
-        validateTargetUrl(targetUrl);
+        validateTargetUrl(targetUrl, allowLocalTestHosts);
 
         // Invariant: automation_plans.application_id == requested applicationId
         AutomationPlanRepository.PlanRow plan = planRepository.findById(planId)
@@ -106,6 +183,14 @@ public class AtsHandoffService {
         if (!applicationId.equals(plan.applicationId())) {
             throw new IllegalArgumentException("Mismatched plan and application: plan " + planId
                     + " belongs to application " + plan.applicationId() + ", but requested application was " + applicationId);
+        }
+
+        // Stage 3F: the link handed to the candidate must stay on this plan's own employer host —
+        // never a worker- or page-supplied redirect to some other (possibly phishing) domain.
+        String handoffHost = com.personal.jobagent.common.SafeUrls.canonicalHost(targetUrl).orElse(null);
+        String planHost = com.personal.jobagent.common.SafeUrls.canonicalHost(plan.targetUrl()).orElse(null);
+        if (handoffHost == null || planHost == null || !sameEmployerHost(handoffHost, planHost)) {
+            throw new IllegalArgumentException("Handoff target must be on the application's own employer host");
         }
 
         // Invariant: plan owner must match supplied ownerProfileId
@@ -416,5 +501,76 @@ public class AtsHandoffService {
             }
         }
         return cancelled;
+    }
+
+    /**
+     * Stage 3D: Resumes the same pre-submit automation plan after candidate intervention on
+     * a handoff blocker (e.g. saving employer credentials or clearing login/security gate),
+     * transitioning {@code HANDOFF_REQUIRED -> PREPARED} without falsely marking external
+     * submission and refusing if any submission attempt has already occurred.
+     */
+    @Transactional
+    public UUID resumeAfterHandoff(UUID ownerProfileId, UUID sessionId) {
+        Optional<HandoffSessionRecord> sessionOpt = handoffRepository.findById(ownerProfileId, sessionId);
+        if (sessionOpt.isEmpty()) {
+            return null;
+        }
+        HandoffSessionRecord session = sessionOpt.get();
+        if (session.status() != HandoffStatus.PENDING) {
+            throw new IllegalStateException("Handoff session is not active (status: " + session.status() + ")");
+        }
+        if (session.isExpired()) {
+            expireStaleSessions();
+            throw new IllegalStateException("Handoff session expired; re-prepare the plan instead");
+        }
+
+        AutomationPlanRepository.PlanRow plan = planRepository.find(ownerProfileId, session.planId())
+                .orElseThrow(() -> new IllegalStateException("Automation plan not found or not owned"));
+        if (!"HANDOFF_REQUIRED".equals(plan.status()) || plan.submitApproved()
+                || planRepository.hasPreSubmitAttemptCheckpoint(plan.id())) {
+            throw new IllegalStateException("Plan cannot resume from handoff after submit approval or submit attempt");
+        }
+        Map<String, Object> stored = plan.plan() == null ? Map.of() : plan.plan();
+        if (stored.get("steps") instanceof List<?> steps) {
+            for (Object o : steps) {
+                if (o instanceof Map<?, ?> step) {
+                    Object type = step.get("type");
+                    if ("UNIVERSAL_SUBMIT_CLICK".equals(type) || "REAL_SUBMIT_CLICK".equals(type)
+                            || "ASHBY_SUBMIT_CLICK".equals(type) || "WORKDAY_SUBMIT_CLICK".equals(type)
+                            || "MOCK_SUBMIT".equals(type)) {
+                        throw new IllegalStateException("Plan already contains a submit step and cannot resume via handoff");
+                    }
+                }
+            }
+        }
+
+        if (!handoffRepository.completeSession(ownerProfileId, sessionId)) {
+            throw new IllegalStateException("Failed to complete active handoff session atomically");
+        }
+
+        Map<String, Object> nextPlanPayload = stored;
+        if ("UNIVERSAL".equals(stored.get("planType")) && universalPlans != null) {
+            nextPlanPayload = universalPlans.rebuildForResume(ownerProfileId, session.planId());
+        }
+
+        if (!planRepository.resumeFromHandoff(session.planId(), nextPlanPayload)) {
+            throw new IllegalStateException("Plan state changed concurrently and could not return to PREPARED");
+        }
+
+        if (audit != null) {
+            audit.write(new AuditEntry(
+                    "CANDIDATE",
+                    "ATS_HANDOFF_RESUMED",
+                    "AUTOMATION_PLAN",
+                    session.planId(),
+                    "HANDOFF_REQUIRED",
+                    Map.of("mode", "RESUME_AUTOMATION", "sessionId", sessionId.toString(),
+                            "blockReason", session.blockReason().name()),
+                    null,
+                    null
+            ));
+        }
+
+        return session.planId();
     }
 }

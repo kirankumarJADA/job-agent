@@ -166,7 +166,16 @@ public class SearchPlanExecutionCoordinator implements DisposableBean {
 
     @Override
     public void destroy() {
-        heartbeatExecutor.shutdownNow();
+        heartbeatExecutor.shutdown();
+        try {
+            if (!heartbeatExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                heartbeatExecutor.shutdownNow();
+                heartbeatExecutor.awaitTermination(2, TimeUnit.SECONDS);
+            }
+        } catch (InterruptedException ie) {
+            heartbeatExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 
     /**

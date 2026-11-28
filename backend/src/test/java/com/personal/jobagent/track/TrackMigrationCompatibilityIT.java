@@ -119,6 +119,11 @@ class TrackMigrationCompatibilityIT {
         assertThat(email.get("channel")).isEqualTo("CANDIDATE_FORWARDED");
         assertThat(email.get("body_retained")).isEqualTo(true);
 
+        // The application code below always runs against the full migration chain in
+        // production (it reads tables added after V038, e.g. V069 submission_receipts),
+        // so finish migrating before exercising it. The V038 assertions above stand.
+        flyway("latest").migrate();
+
         // Reconciled from those records, the inferred legacy status needs the candidate's review.
         TrackRepository repository = new TrackRepository(jdbc, new ObjectMapper());
         TrackRepository.SnapshotParts parts = repository.snapshotParts(profile, app);

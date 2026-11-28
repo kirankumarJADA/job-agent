@@ -6,6 +6,8 @@ import path from 'node:path';
 import { startMockEnvironment } from '../src/mock_environment.js';
 import { BrowserWorker, ApprovalRequiredError, HardStopError } from '../src/browser_worker.js';
 import { buildApplicationPlan, Policy, StepType } from '../src/plan.js';
+// Stage 3F: test-only AES-256 key for the encrypted session vault (cross-run resume after approval/crash).
+const TEST_SESSION_KEY = Buffer.alloc(32, 7).toString('base64');
 
 function fixture(root, jobId, suffix) {
   const file = path.join(root, `${suffix}-${jobId}.txt`);
@@ -32,7 +34,7 @@ async function setup() {
   const mock = await startMockEnvironment({ jobId, applicationId });
   const pkg = packageFor(root, jobId, applicationId);
   const plan = buildApplicationPlan({ baseUrl: mock.baseUrl, mailboxUrl: mock.mailboxUrl, package: pkg });
-  const worker = new BrowserWorker({ statePath: path.join(root, 'state.json'), artifactDir: root, eventSink: (event) => fs.appendFileSync(path.join(root, 'events.jsonl'), `${JSON.stringify(event)}\n`) });
+  const worker = new BrowserWorker({ localTestNetwork: true, sessionKey: TEST_SESSION_KEY, statePath: path.join(root, 'state.json'), artifactDir: root, eventSink: (event) => fs.appendFileSync(path.join(root, 'events.jsonl'), `${JSON.stringify(event)}\n`) });
   return { root, mock, pkg, plan, worker };
 }
 
@@ -81,7 +83,7 @@ test('crash and restart recover from durable completed steps', async () => {
   const env = await setup();
   try {
     await assert.rejects(() => env.worker.execute(env.plan, { approve: true, failAfterStep: 'application-step-one' }), /SIMULATED_WORKER_CRASH/);
-    const restarted = new BrowserWorker({ statePath: path.join(env.root, 'state.json'), artifactDir: env.root });
+    const restarted = new BrowserWorker({ localTestNetwork: true, sessionKey: TEST_SESSION_KEY, statePath: path.join(env.root, 'state.json'), artifactDir: env.root });
     const result = await restarted.execute(env.plan, { approve: true });
     assert.equal(result.status, 'COMPLETED');
     assert.equal(env.mock.events.filter((x) => x.type === 'SIGNUP_COMPLETED').length, 1);
@@ -123,7 +125,7 @@ test('invalid OTP does not reach the verified terminal state', async () => {
   const mock = await startMockEnvironment({ jobId, applicationId, otp: '654321', mailboxOtp: '999999' });
   const pkg = packageFor(root, jobId, applicationId);
   const plan = buildApplicationPlan({ baseUrl: mock.baseUrl, mailboxUrl: mock.mailboxUrl, package: pkg });
-  const worker = new BrowserWorker({ statePath: path.join(root, 'state.json'), artifactDir: root });
+  const worker = new BrowserWorker({ localTestNetwork: true, sessionKey: TEST_SESSION_KEY, statePath: path.join(root, 'state.json'), artifactDir: root });
   try {
     await assert.rejects(() => worker.execute(plan, { approve: true }), /TERMINAL_STATE_NOT_REACHED:Mock Employer Login/);
     assert.equal(mock.submission, null);
@@ -143,7 +145,7 @@ test('INSPECTION plan with REAL_SUBMIT triggers HardStopError and cannot bypass 
       { id: 'safety-check', type: StepType.POLICY_CHECK, policy: Policy.AUTO, params: { action: 'REAL_SUBMIT' } },
     ],
   };
-  const worker = new BrowserWorker({
+  const worker = new BrowserWorker({ localTestNetwork: true, sessionKey: TEST_SESSION_KEY,
     statePath: path.join(root, 'state.json'),
     artifactDir: root,
   });
@@ -172,7 +174,7 @@ test('INSPECTION plan with INSPECT_ONLY executes navigation and screenshot witho
       { id: 'safety-check', type: StepType.POLICY_CHECK, policy: Policy.AUTO, params: { action: 'INSPECT_ONLY' } },
     ],
   };
-  const worker = new BrowserWorker({
+  const worker = new BrowserWorker({ localTestNetwork: true, sessionKey: TEST_SESSION_KEY,
     statePath: path.join(root, 'state.json'),
     artifactDir: root,
   });

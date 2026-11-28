@@ -128,9 +128,16 @@ class AutomationLifecycleIT {
     @Autowired private PasswordEncoder passwordEncoder;
     @Autowired private ObjectMapper json;
     @Autowired private AutomationPlanRepository planRepository;
+    @Autowired private GreenhouseExecutionPlanService greenhousePlanService;
 
+    private static MockHttpSession cachedSession;
     private MockHttpSession session;
     private static final Map<String, UUID> PLAN_IDS = new ConcurrentHashMap<>();
+
+    @org.junit.jupiter.api.AfterAll
+    static void clearCachedSession() {
+        cachedSession = null;
+    }
 
     @BeforeEach
     void seedAndLogin() throws Exception {
@@ -162,14 +169,15 @@ class AutomationLifecycleIT {
                 on conflict (kind, org_identifier) do nothing
                 """, SOURCE);
 
-        if (session == null) {
+        if (cachedSession == null) {
             MvcResult login = mockMvc.perform(post("/api/v1/auth/login")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("{\"email\":\"lifecycle@example.com\",\"password\":\"PasswordA1!\"}"))
                     .andExpect(status().isOk())
                     .andReturn();
-            session = (MockHttpSession) login.getRequest().getSession(false);
+            cachedSession = (MockHttpSession) login.getRequest().getSession(false);
         }
+        session = cachedSession;
     }
 
     /**
@@ -698,7 +706,7 @@ class AutomationLifecycleIT {
      * is the control: left completely untouched, since {@code
      * requeueFailedPlan} never matches its status.
      *
-     * <p>Phase 14: moved to run LAST ({@code @Order(19)}, was originally 9).
+     * <p>Phase 14: moved to run LAST ({@code @Order(25)}, was originally 9).
      * This scenario calls {@code planRepository.claimNext()} directly and
      * deliberately leaves ONE of its two requeued PREPARED plans unclaimed —
      * a stray row that would otherwise sit in the claim queue indefinitely.
@@ -710,7 +718,7 @@ class AutomationLifecycleIT {
      * that risk for every scenario before it.
      */
     @Test
-    @Order(19)
+    @Order(25)
     void scenarioJ_aFailedOrBlockedPlanIsRequeuedForRetryButAnInFlightPlanIsNever() throws Exception {
         // automation_plans.application_id is a real foreign key — reuse any
         // already-seeded application for this profile (an earlier scenario's)
@@ -1149,6 +1157,212 @@ class AutomationLifecycleIT {
                 "update automation_plans set status = 'SUBMITTED' where id = ?", secondPlanId))
                 .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
         assertThat(planStatus(secondPlanId)).isEqualTo("RUNNING");
+    }
+
+    @Test
+    @Order(19)
+    void scenarioP_recoverStaleNeverReturnsSubmitCapablePlansToPreparedAndManualRequeueTracksCount() throws Exception {
+        UUID approvedPlanId = seedApprovedPlan("life-stale-submit-1", "Staff Security Engineer");
+        mockMvc.perform(post("/api/v1/automation/plans/{id}/prepare-submit", approvedPlanId)
+                        .with(csrf()).session(session))
+                .andExpect(status().isOk());
+        MvcResult claimedSubmit = mockMvc.perform(post("/api/v1/automation/plans/claim-next")
+                        .with(csrf()).session(session))
+                .andExpect(status().isOk())
+                .andReturn();
+        assertThat(claimedSubmit.getResponse().getContentAsString()).contains(approvedPlanId.toString());
+        assertThat(planStatus(approvedPlanId)).isEqualTo("RUNNING");
+
+        // Also seed a stale RUNNING plan carrying ASHBY_SUBMIT_CLICK even if submit_approved somehow turned false.
+        UUID anyAppId = jdbc.queryForObject(
+                "select application_id from automation_plans where id = ?", UUID.class, approvedPlanId);
+        UUID ashbySubmitStaleId = UUID.randomUUID();
+        jdbc.update("""
+                insert into automation_plans (id, application_id, profile_id, target_url, status, plan, result,
+                                              submit_approved, heartbeat_at, idempotency_key, created_at, updated_at)
+                values (?, ?, ?, 'https://jobs.ashbyhq.com/acme/1', 'RUNNING',
+                        '{"planType":"ASHBY","steps":[{"type":"ASHBY_APPLY"},{"type":"ASHBY_SUBMIT_CLICK"}]}'::jsonb,
+                        '[]'::jsonb, false, now() - interval '1 hour', ?, now(), now())
+                """, ashbySubmitStaleId, anyAppId, PROFILE, "stale-ashby-submit:" + ashbySubmitStaleId);
+
+        // Age the approved submit plan heartbeat past stale cutoff.
+        jdbc.update("update automation_plans set heartbeat_at = now() - interval '1 hour' where id = ?", approvedPlanId);
+
+        mockMvc.perform(post("/api/v1/automation/plans/recover-stale")
+                        .param("minutes", "15").with(csrf()).session(session))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.recovered").value(0));
+
+        assertThat(planStatus(approvedPlanId)).isEqualTo("RECONCILIATION_REQUIRED");
+        assertThat(planStatus(ashbySubmitStaleId)).isEqualTo("RECONCILIATION_REQUIRED");
+        assertThat(jdbc.queryForObject("select submit_approved from automation_plans where id = ?",
+                Boolean.class, approvedPlanId)).isFalse();
+        // Neither quarantined plan may ever be re-served by claim-next.
+        mockMvc.perform(post("/api/v1/automation/plans/claim-next").with(csrf()).session(session))
+                .andExpect(status().isNoContent());
+
+        // Verify manual requeue records PLAN_MANUAL_REQUEUE and exposes incrementing requeueCount on claim-next.
+        UUID failedPlanId = seedRunningPlan("life-manual-requeue-1", "Staff Infra Engineer");
+        mockMvc.perform(post("/api/v1/automation/plans/{id}/complete", failedPlanId).with(csrf()).session(session)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"outcome\":\"FAILED\",\"detail\":\"form timed out\"}"))
+                .andExpect(status().isNoContent());
+        assertThat(planStatus(failedPlanId)).isEqualTo("FAILED");
+        assertThat(planRepository.requeueFailedPlan(failedPlanId)).isTrue();
+        assertThat(planRepository.manualRequeueCount(failedPlanId)).isEqualTo(1);
+
+        MvcResult requeuedClaim = mockMvc.perform(post("/api/v1/automation/plans/claim-next")
+                        .with(csrf()).session(session))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(failedPlanId.toString()))
+                .andExpect(jsonPath("$.requeueCount").value(1))
+                .andReturn();
+        assertThat(requeuedClaim.getResponse().getContentAsString()).contains("\"requeueCount\":1");
+        // Clean up failedPlanId back to COMPLETED so scenarioJ sees an empty queue.
+        mockMvc.perform(post("/api/v1/automation/plans/{id}/complete", failedPlanId).with(csrf()).session(session)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"outcome\":\"COMPLETED\",\"detail\":\"clean retry\"}"))
+                .andExpect(status().isNoContent());
+    }
+
+    @Test
+    @Order(20)
+    void scenarioQ_genericClickStepsReclaimToPreparedWhileExplicitSubmitPlansQuarantine() throws Exception {
+        UUID anyAppId = jdbc.queryForObject(
+                "select application_id from automation_plans where profile_id = ? limit 1", UUID.class, PROFILE);
+
+        UUID navClickId = UUID.randomUUID();
+        UUID accountClickId = UUID.randomUUID();
+        UUID uploadAndClickId = UUID.randomUUID();
+        UUID greenhouseSubmitId = UUID.randomUUID();
+        UUID ashbySubmitId = UUID.randomUUID();
+        UUID workdaySubmitId = UUID.randomUUID();
+        UUID mockSubmitId = UUID.randomUUID();
+        UUID approvedNoSubmitStepId = UUID.randomUUID();
+
+        String[][] fixtures = new String[][] {
+                { navClickId.toString(), "https://jobs.example/nav",
+                  "{\"planType\":\"NAVIGATION\",\"policy\":\"NO_SUBMIT\",\"steps\":[{\"type\":\"NAVIGATE\"},{\"type\":\"CLICK\",\"params\":{\"selector\":\"a.next\"}}]}",
+                  "false" },
+                { accountClickId.toString(), "https://jobs.example/account",
+                  "{\"planType\":\"WORKDAY\",\"policy\":\"NO_SUBMIT\",\"steps\":[{\"id\":\"signup-submit\",\"type\":\"CLICK\"},{\"id\":\"account-verify-otp-submit\",\"type\":\"CLICK\"},{\"id\":\"login-submit\",\"type\":\"CLICK\"}]}",
+                  "false" },
+                { uploadAndClickId.toString(), "https://jobs.example/upload",
+                  "{\"planType\":\"GREENHOUSE\",\"policy\":\"NO_SUBMIT\",\"steps\":[{\"type\":\"FILL_FIELD\"},{\"type\":\"UPLOAD_FILE\"},{\"type\":\"CLICK\",\"params\":{\"selector\":\"button[data-next]\"}}]}",
+                  "false" },
+                { greenhouseSubmitId.toString(), "https://boards.greenhouse.io/acme/1",
+                  "{\"planType\":\"GREENHOUSE\",\"steps\":[{\"type\":\"FILL_FIELD\"},{\"type\":\"REAL_SUBMIT_CLICK\"}]}",
+                  "false" },
+                { ashbySubmitId.toString(), "https://jobs.ashbyhq.com/acme/2",
+                  "{\"planType\":\"ASHBY\",\"steps\":[{\"type\":\"ASHBY_APPLY\"},{\"type\":\"ASHBY_SUBMIT_CLICK\"}]}",
+                  "false" },
+                { workdaySubmitId.toString(), "https://acme.wd5.myworkdayjobs.com/en/job/3",
+                  "{\"planType\":\"WORKDAY\",\"steps\":[{\"type\":\"WORKDAY_APPLY\"},{\"type\":\"WORKDAY_SUBMIT_CLICK\"}]}",
+                  "false" },
+                { mockSubmitId.toString(), "https://mock.local/jobs/4",
+                  "{\"planType\":\"MOCK\",\"steps\":[{\"type\":\"MOCK_SUBMIT\"}]}",
+                  "false" },
+                { approvedNoSubmitStepId.toString(), "https://boards.greenhouse.io/acme/5",
+                  "{\"planType\":\"GREENHOUSE\",\"steps\":[{\"type\":\"NAVIGATE\"},{\"type\":\"CLICK\"}]}",
+                  "true" },
+        };
+
+        for (String[] row : fixtures) {
+            UUID id = UUID.fromString(row[0]);
+            jdbc.update("""
+                    insert into automation_plans (id, application_id, profile_id, target_url, status, plan, result,
+                                                  submit_approved, heartbeat_at, idempotency_key, created_at, updated_at)
+                    values (?, ?, ?, ?, 'RUNNING', ?::jsonb, '[]'::jsonb, ?, now() - interval '1 hour', ?, now(), now())
+                    """, id, anyAppId, PROFILE, row[1], row[2], Boolean.parseBoolean(row[3]), "scenarioQ:" + id);
+        }
+
+        mockMvc.perform(post("/api/v1/automation/plans/recover-stale")
+                        .param("minutes", "15").with(csrf()).session(session))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.recovered").value(3))
+                .andExpect(jsonPath("$.quarantined").value(5));
+
+        // Safe non-submit CLICK plans must be reclaimed to PREPARED (re-servable)
+        assertThat(planStatus(navClickId)).isEqualTo("PREPARED");
+        assertThat(planStatus(accountClickId)).isEqualTo("PREPARED");
+        assertThat(planStatus(uploadAndClickId)).isEqualTo("PREPARED");
+
+        // All submit-capable or approved plans must quarantine to RECONCILIATION_REQUIRED
+        for (UUID quarantinedId : List.of(greenhouseSubmitId, ashbySubmitId, workdaySubmitId, mockSubmitId, approvedNoSubmitStepId)) {
+            assertThat(planStatus(quarantinedId)).isEqualTo("RECONCILIATION_REQUIRED");
+            assertThat(jdbc.queryForObject("select submit_approved from automation_plans where id = ?",
+                    Boolean.class, quarantinedId)).isFalse();
+        }
+
+        // Drain the 3 reclaimed PREPARED plans cleanly so scenarioJ (@Order(25)) still sees an empty queue
+        for (int i = 0; i < 3; i++) {
+            MvcResult claimed = mockMvc.perform(post("/api/v1/automation/plans/claim-next").with(csrf()).session(session))
+                    .andExpect(status().isOk())
+                    .andReturn();
+            String claimedId = new ObjectMapper().readTree(claimed.getResponse().getContentAsString()).get("id").asText();
+            mockMvc.perform(post("/api/v1/automation/plans/{id}/complete", claimedId).with(csrf()).session(session)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"outcome\":\"COMPLETED\",\"detail\":\"drained in scenarioQ\"}"))
+                    .andExpect(status().isNoContent());
+        }
+    }
+
+    @Test
+    @Order(21)
+    void scenarioR_greenhouseExecutionPlanRequeuesFailedAndBlockedAntiBotOnRePrepare() throws Exception {
+        UUID planId = seedRunningPlan("life-gh-requeue-1", "Greenhouse Requeue Engineer");
+        UUID applicationId = jdbc.queryForObject(
+                "select application_id from automation_plans where id = ?", UUID.class, planId);
+        UUID jobId = jdbc.queryForObject(
+                "select job_id from applications where id = ?", UUID.class, applicationId);
+        mockMvc.perform(post("/api/v1/automation/plans/{id}/complete", planId).with(csrf()).session(session)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"outcome\":\"FAILED\",\"detail\":\"initial worker timeout\"}"))
+                .andExpect(status().isNoContent());
+        jdbc.update("delete from automation_plans where id = ?", planId);
+
+        UUID servicePlanId = greenhousePlanService.createExecutionPlan(PROFILE, applicationId, jobId).orElseThrow();
+        assertThat(planStatus(servicePlanId)).isEqualTo("PREPARED");
+
+        // 1. Worker claims and marks it FAILED -> createExecutionPlan must requeue it cleanly to PREPARED
+        MvcResult firstClaim = mockMvc.perform(post("/api/v1/automation/plans/claim-next").with(csrf()).session(session))
+                .andExpect(status().isOk()).andReturn();
+        assertThat(firstClaim.getResponse().getContentAsString()).contains(servicePlanId.toString());
+        mockMvc.perform(post("/api/v1/automation/plans/{id}/complete", servicePlanId).with(csrf()).session(session)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"outcome\":\"FAILED\",\"detail\":\"form selector timeout\"}"))
+                .andExpect(status().isNoContent());
+        assertThat(planStatus(servicePlanId)).isEqualTo("FAILED");
+
+        UUID requeuedId = greenhousePlanService.createExecutionPlan(PROFILE, applicationId, jobId).orElseThrow();
+        assertThat(requeuedId).isEqualTo(servicePlanId);
+        assertThat(planStatus(servicePlanId)).isEqualTo("PREPARED");
+        assertThat(planRepository.manualRequeueCount(servicePlanId)).isEqualTo(1);
+        assertThat(resultOf(servicePlanId)).isEqualTo("[]");
+
+        // 2. Worker claims and hits BLOCKED_ANTI_BOT -> createExecutionPlan also requeues cleanly
+        MvcResult secondClaim = mockMvc.perform(post("/api/v1/automation/plans/claim-next").with(csrf()).session(session))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.requeueCount").value(1))
+                .andReturn();
+        assertThat(secondClaim.getResponse().getContentAsString()).contains(servicePlanId.toString());
+        mockMvc.perform(post("/api/v1/automation/plans/{id}/complete", servicePlanId).with(csrf()).session(session)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"outcome\":\"BLOCKED_ANTI_BOT\",\"detail\":\"captcha challenge\"}"))
+                .andExpect(status().isNoContent());
+        assertThat(planStatus(servicePlanId)).isEqualTo("BLOCKED_ANTI_BOT");
+
+        greenhousePlanService.createExecutionPlan(PROFILE, applicationId, jobId);
+        assertThat(planStatus(servicePlanId)).isEqualTo("PREPARED");
+        assertThat(planRepository.manualRequeueCount(servicePlanId)).isEqualTo(2);
+
+        // Drain back to COMPLETED so scenarioJ (@Order(25)) sees an empty queue
+        mockMvc.perform(post("/api/v1/automation/plans/claim-next").with(csrf()).session(session))
+                .andExpect(status().isOk());
+        mockMvc.perform(post("/api/v1/automation/plans/{id}/complete", servicePlanId).with(csrf()).session(session)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"outcome\":\"COMPLETED\",\"detail\":\"greenhouse retry verified\"}"))
+                .andExpect(status().isNoContent());
     }
 
     private String resultOf(UUID planId) {

@@ -90,8 +90,11 @@ class RateLimitServiceTest {
         assertThat(limiter.bucketFor("POST", "/api/v1/applications/abc/track/reports")).isEqualTo("track");
         assertThat(limiter.bucketFor("POST", "/api/v1/applications/abc/track/receipts/def/review")).isEqualTo("track");
         assertThat(limiter.bucketFor("POST", "/api/v1/track/emails/abc/review")).isEqualTo("track");
+        assertThat(limiter.bucketFor("POST", "/api/v1/sandbox-registrations")).isEqualTo("track");
+        assertThat(limiter.bucketFor("POST", "/api/v1/sandbox-registrations/abc-123/revoke")).isEqualTo("track");
         // Reads stay unthrottled, and nothing outside TRACK moved bucket.
         assertThat(limiter.bucketFor("GET", "/api/v1/applications/abc/track")).isNull();
+        assertThat(limiter.bucketFor("GET", "/api/v1/sandbox-registrations")).isNull();
         assertThat(limiter.bucketFor("GET", "/api/v1/track/reviews")).isNull();
         assertThat(limiter.bucketFor("POST", "/api/v1/applications/abc/status")).isNull();
         assertThat(limiter.bucketFor("POST", "/api/v1/applications/abc/track/reports/extra")).isNull();

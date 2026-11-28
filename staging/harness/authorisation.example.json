@@ -1,0 +1,18 @@
+{
+  "_comment": "TEMPLATE ONLY. Every value is a placeholder and this file deliberately FAILS validation. The real record is created by the operator, kept outside the repository, and must never contain a password or secret.",
+  "version": 1,
+  "hostname": "REPLACE-with-operator-owned-non-production-hostname",
+  "pathPrefix": "/robin-fixture/",
+  "nonProduction": false,
+  "syntheticDataOnly": false,
+  "window": { "start": "REPLACE-ISO-8601", "end": "REPLACE-ISO-8601" },
+  "operator": { "name": "REPLACE", "contact": "REPLACE" },
+  "approval": { "approvedBy": "REPLACE", "approvedAt": "REPLACE-ISO-8601" },
+  "syntheticCandidate": { "label": "REPLACE", "realPersonalData": true },
+  "syntheticDocuments": { "cv": "REPLACE", "coverLetter": "REPLACE", "generatedFromSyntheticProfile": false },
+  "testAccount": { "host": "REPLACE", "storedVia": "employer-credentials-api" },
+  "mailbox": { "address": "REPLACE" },
+  "teardown": { "mechanism": "REPLACE", "retentionDeadline": "REPLACE-ISO-8601" },
+  "stagingDatabaseFingerprint": "REPLACE-sha256-prefix-of-the-staging-jdbc-url",
+  "scenariosAuthorised": []
+}

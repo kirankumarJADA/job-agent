@@ -66,36 +66,34 @@ class AtsCapabilityRegistryTest {
     }
 
     @Test
-    void workdaySummarisesAsSignInReadinessOnlyNeverFormFillOrSubmission() {
-        // WorkdayExecutionPlanService's own module comment is explicit: the real,
-        // multi-step Workday APPLICATION form was never observed and is never
-        // reached, inspected, or filled. This service only verifies that a
-        // candidate's saved credential still signs in on Workday's real sign-in
-        // page. Crediting formInspection/formFilling/documentAttachment/
-        // finalSubmission with FULL here (as this test previously did) was a
-        // registry bug that made the candidate-facing /api/v1/ats-capabilities
-        // endpoint overstate Workday's real capability — fixed in this phase.
+    void workdayReflectsLiveSignInReadinessAndFixtureOnlyMultiStepApplyTruthfully() {
+        // Sign-in and account-creation readiness are verified on public Workday sign-in markup,
+        // while Phase 19 multi-step apply (WORKDAY_APPLY / WORKDAY_SUBMIT_CLICK) is implemented
+        // and fixture-tested ONLY — never live-verified against a real employer tenant.
+        // Therefore inspection/filling/attachment/submission stay PARTIAL (never FULL) and
+        // custom question answering stays NONE.
         var workday = AtsCapabilityRegistry.byPlanType("WORKDAY");
         assertThat(workday.signInReadiness()).isEqualTo(AtsCapabilityLevel.FULL);
-        assertThat(workday.formInspection()).isEqualTo(AtsCapabilityLevel.NONE);
-        assertThat(workday.requiredFieldValidation()).isEqualTo(AtsCapabilityLevel.NONE);
+        assertThat(workday.accountCreationReadiness()).isEqualTo(AtsCapabilityLevel.PARTIAL);
+        assertThat(workday.formInspection()).isEqualTo(AtsCapabilityLevel.PARTIAL);
+        assertThat(workday.requiredFieldValidation()).isEqualTo(AtsCapabilityLevel.PARTIAL);
         assertThat(workday.questionAnswering()).isEqualTo(AtsCapabilityLevel.NONE);
-        assertThat(workday.documentAttachment()).isEqualTo(AtsCapabilityLevel.NONE);
-        assertThat(workday.formFilling()).isEqualTo(AtsCapabilityLevel.NONE);
-        assertThat(workday.finalSubmission()).isEqualTo(AtsCapabilityLevel.NONE);
-        assertThat(workday.submissionConfirmation()).isEqualTo(AtsCapabilityLevel.NONE);
-        assertThat(workday.summary()).isEqualTo(AtsCapabilitySummary.SIGN_IN_READINESS_ONLY);
+        assertThat(workday.documentAttachment()).isEqualTo(AtsCapabilityLevel.PARTIAL);
+        assertThat(workday.formFilling()).isEqualTo(AtsCapabilityLevel.PARTIAL);
+        assertThat(workday.finalSubmission()).isEqualTo(AtsCapabilityLevel.PARTIAL);
+        assertThat(workday.submissionConfirmation()).isEqualTo(AtsCapabilityLevel.PARTIAL);
+        assertThat(workday.summary()).isEqualTo(AtsCapabilitySummary.FORM_FILL_AVAILABLE);
+        assertThat(workday.verificationNote()).containsIgnoringCase("fixture");
     }
 
     @Test
-    void workdayAccountCreationIsPartialNeverFullBecauseThePostCreationVerificationMechanismIsUnestablished() {
-        var workday = AtsCapabilityRegistry.byPlanType("WORKDAY");
-        // Phase 11 implemented account creation itself; Phase 11A established that what
-        // happens after it (OTP? link? neither?) is unknown — PARTIAL says both facts honestly.
-        // Account-creation readiness does not change the top-line summary: the form itself
-        // is still never reached, so the summary stays SIGN_IN_READINESS_ONLY.
-        assertThat(workday.accountCreationReadiness()).isEqualTo(AtsCapabilityLevel.PARTIAL);
-        assertThat(workday.summary()).isEqualTo(AtsCapabilitySummary.SIGN_IN_READINESS_ONLY);
+    void byApplicationUrlMatchesDnsHostBoundariesAndRejectsPathSpoofs() {
+        assertThat(AtsCapabilityRegistry.byApplicationUrl("https://nvidia.wd5.myworkdayjobs.com/en-US/Site/job/x/apply").kind())
+                .isEqualTo("WORKDAY");
+        assertThat(AtsCapabilityRegistry.byApplicationUrl("https://evil.example/myworkdayjobs.com/fake/apply").kind())
+                .isEqualTo("GENERIC");
+        assertThat(AtsCapabilityRegistry.byApplicationUrl("https://notgreenhouse.io/jobs/1").kind())
+                .isEqualTo("GENERIC");
     }
 
     @Test
@@ -135,5 +133,15 @@ class AtsCapabilityRegistryTest {
         for (AtsCapabilities row : AtsCapabilityRegistry.all()) {
             assertThat(row.recoveryAndDuplicatePrevention()).as(row.kind()).isEqualTo(AtsCapabilityLevel.FULL);
         }
+    }
+
+    @Test
+    void universalEngineReportsFormFillAvailableWithFixtureOnlyPartialSubmission() {
+        var universal = AtsCapabilityRegistry.byPlanType("UNIVERSAL");
+        assertThat(universal.kind()).isEqualTo("UNIVERSAL");
+        assertThat(universal.formInspection()).isEqualTo(AtsCapabilityLevel.FULL);
+        assertThat(universal.documentAttachment()).isEqualTo(AtsCapabilityLevel.FULL);
+        assertThat(universal.finalSubmission()).isEqualTo(AtsCapabilityLevel.PARTIAL);
+        assertThat(universal.summary()).isEqualTo(AtsCapabilitySummary.FORM_FILL_AVAILABLE);
     }
 }

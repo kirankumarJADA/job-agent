@@ -57,7 +57,7 @@ describe('account lifecycle plan (Phase 8.5)', () => {
   it('resolves and enters OTP, submits verification, then continues to login', async () => {
     const url=await startMock(), root=fs.mkdtempSync(path.join(os.tmpdir(),'lifecycle-otp-'));
     submittedOtp=null; const resolutions=[]; const events=[];
-    const worker=new BrowserWorker({statePath:path.join(root,'state.json'),artifactDir:root,eventSink:e=>events.push(e),
+    const worker=new BrowserWorker({ localTestNetwork: true, statePath:path.join(root,'state.json'),artifactDir:root,eventSink:e=>events.push(e),
       verificationResolver:async b=>{resolutions.push(b);return {otp:'123456',receivedAt:new Date().toISOString()};}});
     const p=buildAccountLifecyclePlan({baseUrl:url,employerDomain:new URL(url).hostname,applicationId:'app-x',
       accountEmail:'c@x.test',accountPassword:'pw',verifyOtp:true});
@@ -71,7 +71,7 @@ describe('account lifecycle plan (Phase 8.5)', () => {
   });
   it('follows same-origin loopback verification link and skips OTP submission', async () => {
     const url=await startMock(), root=fs.mkdtempSync(path.join(os.tmpdir(),'lifecycle-link-')); submittedOtp=null;
-    const worker=new BrowserWorker({statePath:path.join(root,'state.json'),artifactDir:root,
+    const worker=new BrowserWorker({ localTestNetwork: true, statePath:path.join(root,'state.json'),artifactDir:root,
       verificationResolver:async()=>({link:url+'/verified?token=local-test'})});
     const p=buildAccountLifecyclePlan({baseUrl:url,employerDomain:new URL(url).hostname,applicationId:'app-link',
       accountEmail:'c@x.test',accountPassword:'pw',verifyOtp:true});
@@ -82,7 +82,7 @@ describe('account lifecycle plan (Phase 8.5)', () => {
     const url=await startMock(), root=fs.mkdtempSync(path.join(os.tmpdir(),'lifecycle-pause-'));
     const p=buildAccountLifecyclePlan({baseUrl:url,employerDomain:new URL(url).hostname,applicationId:'app-y',
       accountEmail:'c@x.test',accountPassword:'pw',verifyOtp:true});
-    const w=new BrowserWorker({statePath:path.join(root,'state.json'),artifactDir:root,
+    const w=new BrowserWorker({ localTestNetwork: true, statePath:path.join(root,'state.json'),artifactDir:root,
       verificationResolver:async()=>{throw Error('VERIFICATION_RESOLVE_FAILED:404');}});
     await assert.rejects(()=>w.execute(p),e=>e.name==='ApprovalRequiredError');
     const state=JSON.parse(fs.readFileSync(path.join(root,'state.json'),'utf8')).plans[p.planId];
@@ -93,7 +93,7 @@ describe('account lifecycle plan (Phase 8.5)', () => {
     const url=await startMock(), root=fs.mkdtempSync(path.join(os.tmpdir(),'lifecycle-none-'));
     const p=buildAccountLifecyclePlan({baseUrl:url,employerDomain:new URL(url).hostname,applicationId:'app-z',
       accountEmail:'c@x.test',accountPassword:'pw',verifyOtp:true});
-    const w=new BrowserWorker({statePath:path.join(root,'state.json'),artifactDir:root});
+    const w=new BrowserWorker({ localTestNetwork: true, statePath:path.join(root,'state.json'),artifactDir:root});
     await assert.rejects(()=>w.execute(p),e=>e.name==='ApprovalRequiredError');
     const state=JSON.parse(fs.readFileSync(path.join(root,'state.json'),'utf8')).plans[p.planId];
     assert.equal(state.status,'PAUSED'); assert.equal(state.pauseReason,'VERIFICATION_PROVIDER_UNAVAILABLE');
@@ -103,7 +103,7 @@ describe('account lifecycle plan (Phase 8.5)', () => {
     const url=await startMock(), root=fs.mkdtempSync(path.join(os.tmpdir(),'lifecycle-untrusted-'));
     const p=buildAccountLifecyclePlan({baseUrl:url,employerDomain:new URL(url).hostname,applicationId:'app-link-bad',
       accountEmail:'c@x.test',accountPassword:'pw',verifyOtp:true});
-    const w=new BrowserWorker({statePath:path.join(root,'state.json'),artifactDir:root,
+    const w=new BrowserWorker({ localTestNetwork: true, statePath:path.join(root,'state.json'),artifactDir:root,
       verificationResolver:async()=>({link:'https://example.invalid/verify?token=secret'})});
     await assert.rejects(()=>w.execute(p),e=>e.name==='ApprovalRequiredError');
     const state=JSON.parse(fs.readFileSync(path.join(root,'state.json'),'utf8')).plans[p.planId];
@@ -135,7 +135,7 @@ describe('account lifecycle with the Robin-managed address (Phase 8.5)', () => {
     const url = await startMock(); resetEmployer();
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lifecycle-managed-'));
     const identityCalls = []; const verificationCalls = []; const events = [];
-    const worker = new BrowserWorker({ statePath: path.join(root, 'state.json'), artifactDir: root, eventSink: (e) => events.push(e),
+    const worker = new BrowserWorker({ localTestNetwork: true, statePath: path.join(root, 'state.json'), artifactDir: root, eventSink: (e) => events.push(e),
       identityResolver: async (b) => { identityCalls.push(b); return { email: MANAGED.toUpperCase(), mailbox: 'managed' }; },
       verificationResolver: async (b) => { verificationCalls.push(b); return { otp: '482913', provider: 'managed' }; } });
     const p = buildAccountLifecyclePlan({ baseUrl: url, employerDomain: new URL(url).hostname, applicationId: 'app-managed',
@@ -160,7 +160,7 @@ describe('account lifecycle with the Robin-managed address (Phase 8.5)', () => {
   it('pauses before touching the employer when the managed mailbox is not ready', async () => {
     const url = await startMock(); resetEmployer();
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lifecycle-notready-'));
-    const worker = new BrowserWorker({ statePath: path.join(root, 'state.json'), artifactDir: root,
+    const worker = new BrowserWorker({ localTestNetwork: true, statePath: path.join(root, 'state.json'), artifactDir: root,
       identityResolver: async () => { throw new Error('REGISTRATION_IDENTITY_FAILED:409'); },
       verificationResolver: async () => { throw new Error('must not be asked'); } });
     const p = buildAccountLifecyclePlan({ baseUrl: url, employerDomain: new URL(url).hostname, applicationId: 'app-notready', accountPassword: 'pw' });
@@ -182,7 +182,7 @@ describe('account lifecycle with the Robin-managed address (Phase 8.5)', () => {
     ]) {
       resetEmployer();
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lifecycle-identity-'));
-      const worker = new BrowserWorker({ statePath: path.join(root, 'state.json'), artifactDir: root, identityResolver });
+      const worker = new BrowserWorker({ localTestNetwork: true, statePath: path.join(root, 'state.json'), artifactDir: root, identityResolver });
       const p = buildAccountLifecyclePlan({ baseUrl: url, employerDomain: new URL(url).hostname, applicationId: 'app-identity', accountPassword: 'pw' });
       await assert.rejects(() => worker.execute(p), (e) => e.name === 'ApprovalRequiredError');
       const state = JSON.parse(fs.readFileSync(path.join(root, 'state.json'), 'utf8')).plans[p.planId];
@@ -196,7 +196,7 @@ describe('account lifecycle with the Robin-managed address (Phase 8.5)', () => {
     const url = await startMock(); resetEmployer();
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lifecycle-restart-'));
     let identityCalls = 0;
-    const options = () => ({ statePath: path.join(root, 'state.json'), artifactDir: root,
+    const options = () => ({ localTestNetwork: true, statePath: path.join(root, 'state.json'), artifactDir: root,
       identityResolver: async () => { identityCalls += 1; return { email: identityCalls === 1 ? MANAGED : 'different@mail.robin.example', mailbox: 'managed' }; },
       verificationResolver: async () => ({ otp: '482913' }) });
     const p = buildAccountLifecyclePlan({ baseUrl: url, employerDomain: new URL(url).hostname, applicationId: 'app-restart', accountPassword: 'pw' });
@@ -235,7 +235,7 @@ describe('account lifecycle with a backend-resolved portal password (Phase 8.5 c
     const url = await startMock(); resetEmployer();
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lifecycle-credential-'));
     const credentialCalls = []; const events = [];
-    const worker = new BrowserWorker({ statePath: path.join(root, 'state.json'), artifactDir: root, eventSink: (e) => events.push(e),
+    const worker = new BrowserWorker({ localTestNetwork: true, statePath: path.join(root, 'state.json'), artifactDir: root, eventSink: (e) => events.push(e),
       credentialResolver: async (b) => { credentialCalls.push(b); return { username: 'candidate@example.com', password: 'resolved-secret-pw' }; } });
     const p = buildAccountLifecyclePlan({ baseUrl: url, employerDomain: new URL(url).hostname, applicationId: 'app-cred-run',
       accountEmail: 'candidate@example.com', verifyOtp: false });
@@ -272,7 +272,7 @@ describe('account lifecycle with a backend-resolved portal password (Phase 8.5 c
   it('pauses when no credential resolver is configured, without touching the employer', async () => {
     const url = await startMock(); resetEmployer();
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lifecycle-cred-none-'));
-    const worker = new BrowserWorker({ statePath: path.join(root, 'state.json'), artifactDir: root });
+    const worker = new BrowserWorker({ localTestNetwork: true, statePath: path.join(root, 'state.json'), artifactDir: root });
     const p = buildAccountLifecyclePlan({ baseUrl: url, employerDomain: new URL(url).hostname, applicationId: 'app-cred-none',
       accountEmail: 'c@x.test', verifyOtp: false });
     await assert.rejects(() => worker.execute(p), (e) => e.name === 'ApprovalRequiredError');
@@ -292,7 +292,7 @@ describe('account lifecycle with a backend-resolved portal password (Phase 8.5 c
     ]) {
       resetEmployer();
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lifecycle-cred-fail-'));
-      const worker = new BrowserWorker({ statePath: path.join(root, 'state.json'), artifactDir: root, credentialResolver });
+      const worker = new BrowserWorker({ localTestNetwork: true, statePath: path.join(root, 'state.json'), artifactDir: root, credentialResolver });
       const p = buildAccountLifecyclePlan({ baseUrl: url, employerDomain: new URL(url).hostname, applicationId: 'app-cred-fail',
         accountEmail: 'c@x.test', verifyOtp: false });
       await assert.rejects(() => worker.execute(p), (e) => e.name === 'ApprovalRequiredError');

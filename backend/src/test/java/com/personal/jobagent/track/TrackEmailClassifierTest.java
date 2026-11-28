@@ -129,4 +129,88 @@ class TrackEmailClassifierTest {
         assertThat(classifier.classify("Hello", "Following up on next steps.").confidence()).isEqualTo(0.6);
         assertThat(classifier.classify("Hello", "Nothing relevant here.").confidence()).isEqualTo(0.3);
     }
+
+    @Test
+    void classifiesSchedulingLinkAsInterviewInvitation() {
+        var c = classifier.classify("Next steps", "Please use this link to schedule our conversation: https://calendly.com/recruiter/chat");
+        assertThat(c.category()).isEqualTo(EmailCategory.INTERVIEW_INVITATION);
+        assertThat(c.confidence()).isGreaterThanOrEqualTo(0.6);
+    }
+
+    @Test
+    void classifiesSelectTimeSlotAsInterviewInvitation() {
+        var c = classifier.classify("Interview availability", "Please select a time slot that works for you on my calendar.");
+        assertThat(c.category()).isEqualTo(EmailCategory.INTERVIEW_INVITATION);
+        assertThat(c.confidence()).isEqualTo(0.9);
+    }
+
+    @Test
+    void classifiesSelfScheduleAsInterviewInvitation() {
+        var c = classifier.classify("Schedule your interview", "Please self-schedule your interview using the portal below.");
+        assertThat(c.category()).isEqualTo(EmailCategory.INTERVIEW_INVITATION);
+        assertThat(c.confidence()).isEqualTo(0.9);
+    }
+
+    @Test
+    void classifiesInterviewConfirmedAsInterviewInvitation() {
+        var c = classifier.classify("Confirmation", "Your interview has been confirmed for Tuesday at 2 PM.");
+        assertThat(c.category()).isEqualTo(EmailCategory.INTERVIEW_INVITATION);
+        assertThat(c.confidence()).isEqualTo(0.9);
+    }
+
+    @Test
+    void classifiesAdvancingToNextRoundAsInterviewInvitation() {
+        var c = classifier.classify("Great news", "We were impressed with your application and would like to move you forward to the next round.");
+        assertThat(c.category()).isEqualTo(EmailCategory.INTERVIEW_INVITATION);
+        assertThat(c.confidence()).isEqualTo(0.9);
+    }
+
+    @Test
+    void classifiesTakeHomeProjectAsAssessmentInvitation() {
+        var c = classifier.classify("Technical evaluation", "Please complete the take-home project within 7 days.");
+        assertThat(c.category()).isEqualTo(EmailCategory.ASSESSMENT_INVITATION);
+        assertThat(c.confidence()).isEqualTo(0.9);
+    }
+
+    @Test
+    void classifiesAssessmentLinkAndPlatform() {
+        var c = classifier.classify("Coding challenge", "Here is the link to your assessment on HackerEarth.");
+        assertThat(c.category()).isEqualTo(EmailCategory.ASSESSMENT_INVITATION);
+        assertThat(c.confidence()).isEqualTo(0.9);
+    }
+
+    @Test
+    void classifiesUnableToProceedAsRejection() {
+        var c = classifier.classify("Application update", "After reviewing your profile, we are unable to move forward with your application.");
+        assertThat(c.category()).isEqualTo(EmailCategory.REJECTION);
+        assertThat(c.confidence()).isEqualTo(0.9);
+    }
+
+    @Test
+    void classifiesMovingForwardWithOtherCandidatesAsRejection() {
+        var c = classifier.classify("Update regarding your application", "At this stage we are pursuing other candidates whose qualifications are a closer match.");
+        assertThat(c.category()).isEqualTo(EmailCategory.REJECTION);
+        assertThat(c.confidence()).isEqualTo(0.9);
+    }
+
+    @Test
+    void classifiesNotAFitAsRejection() {
+        var c = classifier.classify("Status update", "We appreciate your time, but decided you are not the right fit for this role at this time.");
+        assertThat(c.category()).isEqualTo(EmailCategory.REJECTION);
+        assertThat(c.confidence()).isEqualTo(0.9);
+    }
+
+    @Test
+    void classifiesJobSearchWishesAsRejection() {
+        var c = classifier.classify("Thank you for your interest", "We wish you the best in your job search and future endeavors.");
+        assertThat(c.category()).isEqualTo(EmailCategory.REJECTION);
+        assertThat(c.confidence()).isEqualTo(0.9);
+    }
+
+    @Test
+    void classifiesPositionClosedAsRejection() {
+        var c = classifier.classify("Opening update", "Due to restructuring, the opening has been cancelled.");
+        assertThat(c.category()).isEqualTo(EmailCategory.REJECTION);
+        assertThat(c.confidence()).isEqualTo(0.9);
+    }
 }

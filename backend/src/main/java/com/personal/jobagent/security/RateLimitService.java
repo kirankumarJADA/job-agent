@@ -104,6 +104,8 @@ public class RateLimitService {
         // and message reviews) are cheap but write durable, audited history, so a
         // single account cannot flood them.
         if (path.equals("/api/v1/emails/ingest")
+                || path.equals("/api/v1/sandbox-registrations")
+                || path.matches("/api/v1/sandbox-registrations/[^/]+/revoke")
                 || path.matches("/api/v1/applications/[^/]+/track/reports")
                 || path.matches("/api/v1/applications/[^/]+/track/receipts/[^/]+/review")
                 || path.matches("/api/v1/track/emails/[^/]+/review")) return "track";

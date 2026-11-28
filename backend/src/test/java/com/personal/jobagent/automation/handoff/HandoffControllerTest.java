@@ -504,4 +504,28 @@ class HandoffControllerTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         verify(handoffService, never()).initiateHandoff(any(), any(), any(), any(), any(), anyInt());
     }
+
+    @Test
+    @DisplayName("resumeAfterHandoff rejects worker tokens with 403 Forbidden and returns 200 for owning candidate")
+    void testResumeAfterHandoffEnforcesCandidateOwnership() {
+        UUID sessionId = UUID.randomUUID();
+        when(ownerContext.isWorkerRequest()).thenReturn(true);
+        ResponseEntity<?> workerResponse = controller.resumeAfterHandoff(sessionId);
+        assertThat(workerResponse.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+
+        when(ownerContext.isWorkerRequest()).thenReturn(false);
+        when(ownerContext.profileIdOrNull()).thenReturn(profileId);
+        when(handoffService.findSessionAnyOwner(sessionId)).thenReturn(Optional.of(new HandoffSessionRecord(
+                sessionId, planId, applicationId, profileId,
+                HandoffStatus.PENDING, HandoffBlockReason.EMPLOYER_SECURITY_CHECK,
+                "https://careers.example.com/apply", UUID.randomUUID(),
+                java.time.Instant.now().plusSeconds(600), null, null,
+                java.time.Instant.now(), java.time.Instant.now()
+        )));
+        when(handoffService.resumeAfterHandoff(profileId, sessionId)).thenReturn(planId);
+
+        ResponseEntity<?> okResponse = controller.resumeAfterHandoff(sessionId);
+        assertThat(okResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(String.valueOf(okResponse.getBody())).contains("PREPARED");
+    }
 }

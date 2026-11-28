@@ -1,0 +1,6 @@
+{
+  "name": "robin-staging",
+  "private": true,
+  "type": "module",
+  "description": "Stage 3G synthetic employer portal package and authorisation-gated external validation harness. Not deployed. Tests run in the worker suite (worker/test/staging_*.test.js)."
+}

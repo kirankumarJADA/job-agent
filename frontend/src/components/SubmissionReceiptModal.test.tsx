@@ -4,168 +4,26 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { apiFetch } from '../api/client';
 import { SubmissionReceiptModal } from './SubmissionReceiptModal';
 import type { SubmissionReceipt } from '../types';
+import rawFixtures from '../test/fixtures/submissionReceiptFixtures.json';
 
 vi.mock('../api/client', () => ({ apiFetch: vi.fn() }));
 const mockedApiFetch = vi.mocked(apiFetch);
 
-const CONFIRMED_RECEIPT: SubmissionReceipt = {
-  receiptId: 'rcpt-confirmed-123',
-  applicationId: 'app-1',
-  attemptId: 'att-2',
-  idempotencyKey: 'idemp-2',
-  companyName: 'Acme Corp',
-  jobTitle: 'Senior Platform Engineer',
-  applicationUrl: 'https://careers.acme.example/jobs/42',
-  status: 'SUBMITTED',
-  failureStage: null,
-  failureReason: null,
-  generatedAt: '2026-10-22T12:00:00Z',
-  submittedAt: '2026-10-22T11:59:00Z',
-  identity: {
-    fullName: 'Jane Doe',
-    email: 'jane@example.com',
-    phone: '+44 7700 900123',
-    city: 'London',
-    country: 'United Kingdom',
-    rightToWorkUk: true,
-    requiresVisaSponsorship: false,
-  },
-  documents: {
-    cvId: 'cv-1',
-    cvVersion: 3,
-    cvFilename: 'Jane_Doe_Platform_CV.pdf',
-    cvSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-    coverLetterId: 'cl-1',
-    coverLetterTitle: 'Acme Senior Platform Engineer Cover Letter',
-    coverLetterSha256: 'ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb',
-    coverLetterProvided: true,
-  },
-  answers: [
-    {
-      key: 'years_experience',
-      questionText: 'How many years of experience do you have with Kubernetes?',
-      answerText: '7 years managing enterprise production clusters',
-    },
-  ],
-  confirmation: {
-    confirmed: true,
-    confirmationNumber: 'ACM-CONF-98765',
-    receiptToken: 'tok-abc-xyz',
-    detectedAt: '2026-10-22T11:59:05Z',
-    pageTitle: 'Thank You For Applying | Acme Careers',
-    observedSignals: ['CONFIRMATION_HEADING', 'SUBMISSION_REFERENCE_TOKEN'],
-  },
-  reconciliation: {
-    needed: false,
-    reason: null,
-    lastReconciledAt: null,
-    attemptCount: 2,
-  },
-  failure: {
-    failed: false,
-    failureStage: null,
-    errorMessage: null,
-    occurredAt: null,
-  },
-  authorization: {
-    authorized: true,
-    authorizedBy: 'Jane Doe',
-    authorizedAt: '2026-10-22T11:55:00Z',
-    consentSummary: 'Explicit candidate consent verified',
-  },
-  attempts: [
-    {
-      attemptId: 'att-2',
-      idempotencyKey: 'idemp-2',
-      status: 'SUBMITTED',
-      stage: 'CONFIRMATION',
-      createdAt: '2026-10-22T11:58:00Z',
-      completedAt: '2026-10-22T11:59:00Z',
-      isCurrent: true,
-    },
-    {
-      attemptId: 'att-1',
-      idempotencyKey: 'idemp-1',
-      status: 'RECONCILIATION_REQUIRED',
-      stage: 'SUBMIT',
-      createdAt: '2026-10-22T10:00:00Z',
-      completedAt: '2026-10-22T10:02:00Z',
-      isCurrent: false,
-    },
-  ],
-};
+const contractFixtures: {
+  confirmed: SubmissionReceipt;
+  reconciliation: SubmissionReceipt;
+  submittedUnverified: SubmissionReceipt;
+  failed: SubmissionReceipt;
+  empty: SubmissionReceipt;
+  browserObserved: SubmissionReceipt;
+} = rawFixtures;
 
-const RECONCILIATION_RECEIPT: SubmissionReceipt = {
-  receiptId: 'rcpt-recon-456',
-  applicationId: 'app-1',
-  attemptId: 'att-1',
-  idempotencyKey: 'idemp-1',
-  companyName: 'Acme Corp',
-  jobTitle: 'Senior Platform Engineer',
-  applicationUrl: 'https://careers.acme.example/jobs/42',
-  status: 'RECONCILIATION_REQUIRED',
-  failureStage: null,
-  failureReason: null,
-  generatedAt: '2026-10-22T10:02:00Z',
-  submittedAt: null,
-  identity: {
-    fullName: 'Jane Doe',
-    email: 'jane@example.com',
-    phone: '+44 7700 900123',
-    city: 'London',
-    country: 'United Kingdom',
-    rightToWorkUk: true,
-    requiresVisaSponsorship: false,
-  },
-  documents: {
-    cvId: 'cv-1',
-    cvVersion: 2,
-    cvFilename: 'Jane_Doe_CV.pdf',
-    cvSha256: 'a1b2c3d4e5f6',
-    coverLetterId: null,
-    coverLetterTitle: null,
-    coverLetterSha256: null,
-    coverLetterProvided: false,
-  },
-  answers: [],
-  confirmation: {
-    confirmed: false,
-    confirmationNumber: null,
-    receiptToken: null,
-    detectedAt: null,
-    pageTitle: null,
-    observedSignals: [],
-  },
-  reconciliation: {
-    needed: true,
-    reason: 'Submission dispatched but confirmation screen was not detected.',
-    lastReconciledAt: '2026-10-22T10:05:00Z',
-    attemptCount: 1,
-  },
-  failure: {
-    failed: false,
-    failureStage: null,
-    errorMessage: null,
-    occurredAt: null,
-  },
-  authorization: {
-    authorized: true,
-    authorizedBy: 'Jane Doe',
-    authorizedAt: '2026-10-22T09:55:00Z',
-    consentSummary: 'Explicit candidate consent verified',
-  },
-  attempts: [
-    {
-      attemptId: 'att-1',
-      idempotencyKey: 'idemp-1',
-      status: 'RECONCILIATION_REQUIRED',
-      stage: 'SUBMIT',
-      createdAt: '2026-10-22T10:00:00Z',
-      completedAt: '2026-10-22T10:02:00Z',
-      isCurrent: true,
-    },
-  ],
-};
+const CONFIRMED_RECEIPT = contractFixtures.confirmed;
+const RECONCILIATION_RECEIPT = contractFixtures.reconciliation;
+const SUBMITTED_UNVERIFIED_RECEIPT = contractFixtures.submittedUnverified;
+const FAILED_RECEIPT = contractFixtures.failed;
+const EMPTY_RECEIPT = contractFixtures.empty;
+const BROWSER_OBSERVED_RECEIPT = contractFixtures.browserObserved;
 
 describe('SubmissionReceiptModal', () => {
   afterEach(() => {
@@ -202,9 +60,10 @@ describe('SubmissionReceiptModal', () => {
     expect(mockedApiFetch).toHaveBeenCalledWith('/applications/app-1/receipt');
 
     expect(await screen.findByText('Confirmed Submission Proof')).toBeTruthy();
-    expect(screen.getByText('ACM-CONF-98765')).toBeTruthy();
-    expect(screen.getByText('tok-abc-xyz')).toBeTruthy();
-    expect(screen.getByText(/Jane_Doe_Platform_CV\.pdf/)).toBeTruthy();
+    expect(screen.getByText('GH-CONF-98765')).toBeTruthy();
+    expect(screen.getByText(/cv-44444444-4444-7444-8444-444444444444\.pdf/)).toBeTruthy();
+    expect(screen.getByText(/cover-letter-55555555-5555-7555-8555-555555555555\.txt/)).toBeTruthy();
+    expect(screen.getByText(/Acme Senior Platform Engineer Cover Letter/)).toBeTruthy();
     expect(screen.getByText(/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855/)).toBeTruthy();
     expect(screen.getByText(/How many years of experience do you have with Kubernetes\?/)).toBeTruthy();
     expect(screen.getByText(/7 years managing enterprise production clusters/)).toBeTruthy();
@@ -219,13 +78,62 @@ describe('SubmissionReceiptModal', () => {
       <SubmissionReceiptModal
         isOpen={true}
         onClose={vi.fn()}
-        applicationId="app-1"
+        applicationId="22222222-2222-7222-8222-222222222222"
       />
     );
 
     expect(await screen.findByText('Unconfirmed Submission — Reconciliation Required')).toBeTruthy();
-    expect(screen.getByText(/Submission dispatched but confirmation screen was not detected/)).toBeTruthy();
+    expect(screen.getByText(/\[UNKNOWN\] Submit click ran but employer confirmation response timed out\./)).toBeTruthy();
     expect(screen.queryByText('Confirmed Submission Proof')).toBeNull();
+  });
+
+  it('displays failed attempt reason and code from real PLAN_ERROR serialization', async () => {
+    mockedApiFetch.mockResolvedValueOnce(FAILED_RECEIPT);
+
+    render(
+      <SubmissionReceiptModal
+        isOpen={true}
+        onClose={vi.fn()}
+        applicationId="22222222-2222-7222-8222-222222222222"
+      />
+    );
+
+    expect(await screen.findByText(/Repeated crashes \(3\/3\): Wait timeout Authorization: \[REDACTED\]/)).toBeTruthy();
+    expect(screen.getByText(/DEAD_LETTER_POISON_PILL/)).toBeTruthy();
+    expect(screen.queryByText('Confirmed Submission Proof')).toBeNull();
+  });
+
+  it('refuses to display Confirmed Submission Proof when status is SUBMITTED but evidence is unverified', async () => {
+    mockedApiFetch.mockResolvedValueOnce(SUBMITTED_UNVERIFIED_RECEIPT);
+
+    render(
+      <SubmissionReceiptModal
+        isOpen={true}
+        onClose={vi.fn()}
+        applicationId="22222222-2222-7222-8222-222222222222"
+      />
+    );
+
+    expect(await screen.findByText('Unconfirmed Submission — Reconciliation Required')).toBeTruthy();
+    expect(screen.getByText('SUBMITTED — UNVERIFIED')).toBeTruthy();
+    expect(screen.queryByText('Confirmed Submission Proof')).toBeNull();
+    expect(screen.queryByText('CLAIMED-ONLY-999')).toBeNull();
+  });
+
+  it('handles unattempted empty receipt with null receiptId and missing documents cleanly', async () => {
+    mockedApiFetch.mockResolvedValueOnce(EMPTY_RECEIPT);
+
+    render(
+      <SubmissionReceiptModal
+        isOpen={true}
+        onClose={vi.fn()}
+        applicationId="22222222-2222-7222-8222-222222222222"
+      />
+    );
+
+    expect(await screen.findByText('No Submission Executed Yet')).toBeTruthy();
+    expect(screen.getByText('No CV checksum recorded')).toBeTruthy();
+    expect(screen.getByText('None requested/provided')).toBeTruthy();
   });
 
   it('permits navigating through attempt history', async () => {
@@ -237,7 +145,7 @@ describe('SubmissionReceiptModal', () => {
       <SubmissionReceiptModal
         isOpen={true}
         onClose={vi.fn()}
-        applicationId="app-1"
+        applicationId="22222222-2222-7222-8222-222222222222"
       />
     );
 
@@ -247,7 +155,9 @@ describe('SubmissionReceiptModal', () => {
     const attempt1Btn = screen.getByRole('button', { name: /Attempt #1/ });
     fireEvent.click(attempt1Btn);
 
-    expect(mockedApiFetch).toHaveBeenCalledWith('/applications/app-1/receipts/att-1');
+    expect(mockedApiFetch).toHaveBeenCalledWith(
+      '/applications/22222222-2222-7222-8222-222222222222/receipts/66666666-6666-7666-8666-666666666661'
+    );
     expect(await screen.findByText('Unconfirmed Submission — Reconciliation Required')).toBeTruthy();
   });
 
@@ -268,5 +178,76 @@ describe('SubmissionReceiptModal', () => {
     fireEvent.click(closeBtn);
 
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders clean UNIVERSAL browser-observed submission distinctly from confirmed proof and reconciliation errors', async () => {
+    mockedApiFetch.mockResolvedValueOnce(BROWSER_OBSERVED_RECEIPT);
+
+    render(
+      <SubmissionReceiptModal
+        isOpen={true}
+        onClose={vi.fn()}
+        applicationId="22222222-2222-7222-8222-222222222222"
+      />
+    );
+
+    expect(await screen.findByText('Browser-Observed Submission — Awaiting Employer Verification')).toBeTruthy();
+    expect(screen.getByText('SUBMITTED — BROWSER OBSERVED')).toBeTruthy();
+    expect(screen.getByText('APP-98765')).toBeTruthy();
+    expect(screen.queryByText('Confirmed Submission Proof')).toBeNull();
+    expect(screen.queryByText('Unconfirmed Submission — Reconciliation Required')).toBeNull();
+  });
+
+  it('shows upload proof without ever claiming a document was received, for historical and v2 evidence', async () => {
+    // The shared contract fixture: v1 evidence, so upload proof was never recorded.
+    mockedApiFetch.mockResolvedValueOnce(BROWSER_OBSERVED_RECEIPT);
+    render(<SubmissionReceiptModal isOpen={true} onClose={vi.fn()} applicationId="22222222-2222-7222-8222-222222222222" />);
+    expect((await screen.findByTestId('upload-proof-cv')).textContent).toContain('Upload proof not recorded');
+    expect(screen.getByTestId('browser-evidence').textContent).toContain('Browser-observed — not employer verified');
+    cleanup();
+
+    const v2: SubmissionReceipt = {
+      ...BROWSER_OBSERVED_RECEIPT,
+      browserEvidence: {
+        schemaVersion: 'robin-submission-evidence-v2', schemaKind: 'V2', browserObserved: true,
+        assessment: 'BROWSER_OBSERVED_V2',
+        assessmentReason: 'Browser observed the submission; evidence v2 integrity, correlation and host policy checks passed.',
+        redirectChain: [{ host: 'careers.acme.example', status: 303 }, { host: 'careers.acme.example', status: 200 }],
+        finalOrigin: 'https://careers.acme.example',
+        documents: [
+          { kind: 'cv', uploadVerification: 'ATTACHED_NOT_CONFIRMED', label: 'CV was attached to the form, but Robin could not confirm it was included when the form was submitted.', attachedSha256: 'b'.repeat(64), bytesObserved: false },
+          { kind: 'coverLetter', uploadVerification: 'FILE_PART_OBSERVED', label: 'Cover letter was attached and included in the submitted form; a browser cannot confirm the employer received the file itself.', attachedSha256: 'c'.repeat(64), bytesObserved: false },
+        ],
+        observedAt: '2026-11-26T10:00:00.000Z', identifierSource: 'RESPONSE_JSON', employerVerification: 'NOT_VERIFIED_BY_BROWSER',
+      },
+    };
+    mockedApiFetch.mockResolvedValueOnce(v2);
+    render(<SubmissionReceiptModal isOpen={true} onClose={vi.fn()} applicationId="22222222-2222-7222-8222-222222222222" />);
+    const cv = await screen.findByTestId('upload-proof-cv');
+    expect(cv.textContent).toContain('Attached — inclusion not confirmed');
+    expect(cv.innerHTML).not.toContain('emerald');
+    const cl = screen.getByTestId('upload-proof-coverLetter');
+    expect(cl.textContent).toContain('Included in the submitted form');
+    expect(cl.textContent).toContain('cannot confirm the employer received the file');
+    expect(cl.innerHTML).not.toContain('emerald');
+    expect(screen.getByTestId('browser-evidence').textContent).toContain('careers.acme.example (303) → careers.acme.example (200)');
+    expect(screen.queryByText(/uploaded and confirmed/i)).toBeNull();
+  });
+
+  it('labels a Universal receipt identity as prepared from the verified profile, never as the employer copy', async () => {
+    const prepared: SubmissionReceipt = {
+      ...BROWSER_OBSERVED_RECEIPT,
+      submittedIdentity: {
+        name: 'Ada Lovelace', firstName: 'Ada', lastName: 'Lovelace', email: 'robin+ada@mail.example',
+        phone: '+44 7700 900077', addressLine1: 'London, UK', linkedIn: 'https://linkedin.com/in/ada',
+        source: 'PREPARED_PACKAGE_PROFILE_FACTS',
+      },
+    };
+    mockedApiFetch.mockResolvedValueOnce(prepared);
+    render(<SubmissionReceiptModal isOpen={true} onClose={vi.fn()} applicationId="22222222-2222-7222-8222-222222222222" />);
+    expect((await screen.findByTestId('identity-provenance')).textContent).toContain('prepared by Robin from your verified profile');
+    expect(screen.getByText('Ada Lovelace')).toBeTruthy();
+    expect(screen.getByText('robin+ada@mail.example')).toBeTruthy();
+    expect(screen.getByText('SUBMITTED — BROWSER OBSERVED')).toBeTruthy();
   });
 });

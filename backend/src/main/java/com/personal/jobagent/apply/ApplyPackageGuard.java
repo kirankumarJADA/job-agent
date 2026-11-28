@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -51,9 +52,26 @@ public class ApplyPackageGuard {
     }
 
     public void answerChanged(UUID profileId, UUID answerId) {
-        resolveAndInvalidate(profileId,
-                "select application_id from application_answers where id = ? and profile_id = ?",
-                answerId, "application answer changed");
+        UUID applicationId = db.query(
+                        "select application_id from application_answers where id = ? and profile_id = ?",
+                        (rs, n) -> (UUID) rs.getObject(1), answerId, profileId)
+                .stream().findFirst().orElse(null);
+        if (applicationId != null) {
+            invalidateForApplication(profileId, applicationId, "application answer changed");
+            return;
+        }
+        // A job-scoped answer (application_id IS NULL) can feed any active application for this job/profile.
+        UUID jobId = db.query(
+                        "select job_id from application_answers where id = ? and profile_id = ? and application_id is null",
+                        (rs, n) -> (UUID) rs.getObject(1), answerId, profileId)
+                .stream().findFirst().orElse(null);
+        if (jobId == null) return;
+        List<UUID> appIds = db.query(
+                "select id from applications where profile_id = ? and job_id = ? and status not in ('FAILED','WITHDRAWN')",
+                (rs, n) -> (UUID) rs.getObject(1), profileId, jobId);
+        for (UUID id : appIds) {
+            invalidateForApplication(profileId, id, "job-scoped application answer changed");
+        }
     }
 
     private void resolveAndInvalidate(UUID profileId, String sql, UUID entityId, String reason) {
@@ -61,6 +79,23 @@ public class ApplyPackageGuard {
                 .stream().findFirst().orElse(null);
         if (applicationId == null) return;
         invalidateForApplication(profileId, applicationId, reason);
+    }
+
+    public void invalidateForProfile(UUID profileId, String reason) {
+        if (profileId == null) return;
+        int invalidated;
+        try {
+            invalidated = plans.invalidateApprovalsForProfile(profileId);
+        } catch (Exception e) {
+            log.warn("Could not invalidate profile approvals for profile {}: {}", profileId, e.getMessage());
+            return;
+        }
+        if (invalidated <= 0) return;
+        audit.write(new AuditEntry("SYSTEM", "PACKAGE_APPROVAL_INVALIDATED", "PROFILE", profileId,
+                Map.of("submitApproved", true),
+                Map.of("reason", reason == null ? "" : reason, "invalidatedCount", invalidated),
+                null, UuidV7.generate()));
+        log.info("Invalidated {} approval(s) for profile {} ({})", invalidated, profileId, reason);
     }
 
     /** Withdraws any approved package for this application; audited. */

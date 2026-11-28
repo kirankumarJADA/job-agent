@@ -34,8 +34,10 @@ import java.util.Map;
  *   <li><b>VERIFIED</b> — all of: retrieved by an authorised mailbox connector;
  *       DKIM pass for a domain aligned with the From address and no SPF/DMARC
  *       failure, as reported by the mail provider; delivered to the connected
- *       mailbox; strong identity evidence for exactly this application; and an
- *       explicit receipt phrase ("we have received your application").</li>
+ *       mailbox; strong identity evidence for exactly this application; an
+ *       explicit receipt phrase ("we have received your application"); and
+ *       (v2) a provider-assigned arrival time that does not predate the
+ *       submission beyond the clock-skew allowance ({@link ReceiptTemporalPolicy}).</li>
  * </ol>
  *
  * <p>Preparing, approving, queueing or attempting an application is never
@@ -45,7 +47,7 @@ import java.util.Map;
  */
 public final class ReceiptVerificationPolicy {
 
-    public static final String VERSION = "track-receipt-policy-v1";
+    public static final String VERSION = "track-receipt-policy-v2";
     private static final Duration FUTURE_TOLERANCE = Duration.ofDays(1);
 
     /** Sender authentication as reported by a mail provider (never by a request body). */
@@ -65,10 +67,33 @@ public final class ReceiptVerificationPolicy {
         }
     }
 
+    /**
+     * @param timing the server-side temporal assessment ({@link ReceiptTemporalPolicy}); when null, the
+     *     evidence time alone is checked: an unknown time can never be verified
+     */
     public record Evidence(EvidenceType type, Channel channel, boolean identifiesThisApplication,
                            boolean identifiesOtherApplication, boolean explicitReceiptPhrase,
                            String fromDomain, SenderAuthentication authentication,
-                           boolean deliveredToConnectedMailbox, Instant evidenceTime, Instant now) {
+                           boolean deliveredToConnectedMailbox, Instant evidenceTime, Instant now,
+                           EmployerDomainPolicy.DomainBinding domainBinding,
+                           ReceiptTemporalPolicy.Assessment timing) {
+        public Evidence(EvidenceType type, Channel channel, boolean identifiesThisApplication,
+                        boolean identifiesOtherApplication, boolean explicitReceiptPhrase,
+                        String fromDomain, SenderAuthentication authentication,
+                        boolean deliveredToConnectedMailbox, Instant evidenceTime, Instant now,
+                        EmployerDomainPolicy.DomainBinding domainBinding) {
+            this(type, channel, identifiesThisApplication, identifiesOtherApplication, explicitReceiptPhrase,
+                    fromDomain, authentication, deliveredToConnectedMailbox, evidenceTime, now, domainBinding, null);
+        }
+
+        /** Convenience constructor without an explicit employer-domain binding (fails closed for external emails). */
+        public Evidence(EvidenceType type, Channel channel, boolean identifiesThisApplication,
+                        boolean identifiesOtherApplication, boolean explicitReceiptPhrase,
+                        String fromDomain, SenderAuthentication authentication,
+                        boolean deliveredToConnectedMailbox, Instant evidenceTime, Instant now) {
+            this(type, channel, identifiesThisApplication, identifiesOtherApplication, explicitReceiptPhrase,
+                    fromDomain, authentication, deliveredToConnectedMailbox, evidenceTime, now, null, null);
+        }
     }
 
     public record Outcome(Verification status, List<Map<String, String>> reasons) {
@@ -84,7 +109,8 @@ public final class ReceiptVerificationPolicy {
             return new Outcome(Verification.UNVERIFIED, reasons);
         }
 
-        if (e.evidenceTime() != null && e.evidenceTime().isAfter(now.plus(FUTURE_TOLERANCE))) {
+        if ((e.evidenceTime() != null && e.evidenceTime().isAfter(now.plus(FUTURE_TOLERANCE)))
+                || (e.timing() != null && e.timing().status() == ReceiptTemporalPolicy.Status.FUTURE_DATED)) {
             reasons.add(reason("FUTURE_DATED", "The evidence is dated in the future, which is contradictory."));
             return new Outcome(Verification.REJECTED, reasons);
         }
@@ -122,9 +148,36 @@ public final class ReceiptVerificationPolicy {
             } else {
                 reasons.add(reason("SENDER_AUTHENTICATED", "The mail provider reported a passing signature for the sender's domain."));
             }
+            EmployerDomainPolicy.DomainBinding binding = e.domainBinding() == null
+                    ? EmployerDomainPolicy.DomainBinding.unknown()
+                    : e.domainBinding();
+            if (!binding.isBound()) {
+                verified = false;
+                if (binding.status() == EmployerDomainPolicy.BindingStatus.UNBOUND_MISMATCH) {
+                    reasons.add(reason("SENDER_DOMAIN_NOT_BOUND_TO_EMPLOYER",
+                            "The authenticated sender domain is not bound to this employer's corporate domain or a vetted ATS notification domain."));
+                } else {
+                    reasons.add(reason("EMPLOYER_TARGET_DOMAIN_UNKNOWN",
+                            "The employer's verified target domain for this application is unknown or ambiguous."));
+                }
+            } else {
+                reasons.add(reason("EMPLOYER_DOMAIN_BOUND",
+                        "The authenticated sender domain matches the employer's corporate domain or a vetted ATS notification domain."));
+            }
             if (!e.deliveredToConnectedMailbox()) {
                 verified = false;
                 reasons.add(reason("NOT_DELIVERED_TO_YOUR_MAILBOX", "The message was not delivered to your connected mailbox."));
+            }
+            ReceiptTemporalPolicy.Assessment timing = e.timing();
+            if (e.evidenceTime() == null || (timing != null && timing.status() == ReceiptTemporalPolicy.Status.EVIDENCE_TIME_UNKNOWN)) {
+                verified = false;
+                reasons.add(reason("EVIDENCE_TIME_UNKNOWN",
+                        "The mail provider did not record when the message arrived, so it cannot be checked against the submission."));
+            } else if (timing != null && timing.status() == ReceiptTemporalPolicy.Status.BEFORE_SUBMISSION) {
+                verified = false;
+                reasons.add(reason("RECEIPT_PREDATES_SUBMISSION", timing.message()));
+            } else if (timing != null) {
+                reasons.add(reason(timing.code(), timing.message()));
             }
         }
         if (!e.explicitReceiptPhrase()) {

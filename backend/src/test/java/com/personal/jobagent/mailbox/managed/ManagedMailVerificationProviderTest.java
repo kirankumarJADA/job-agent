@@ -47,14 +47,26 @@ class ManagedMailVerificationProviderTest {
     }
 
     @Test
-    void connectedChecksUsableAddress() {
-        when(mailboxes.usableAddress(PROFILE_ID)).thenReturn(Optional.empty());
+    void connectedChecksUsableAddressForAutomatedVerification() {
+        when(mailboxes.usableAddressForAutomatedVerification(PROFILE_ID)).thenReturn(Optional.empty());
         assertThat(provider.connected(PROFILE_ID)).isFalse();
 
-        when(mailboxes.usableAddress(PROFILE_ID)).thenReturn(Optional.of(
+        when(mailboxes.usableAddressForAutomatedVerification(PROFILE_ID)).thenReturn(Optional.of(
                 new ManagedMailboxService.ManagedAddress(ADDRESS_ID, PROFILE_ID, "robin+test", DOMAIN, "ACTIVE")
         ));
         assertThat(provider.connected(PROFILE_ID)).isTrue();
+    }
+
+    @Test
+    void refusesVerificationWhenAddressIsOnlyRegistrationUsable() {
+        when(mailboxes.usableAddressForAutomatedVerification(PROFILE_ID)).thenReturn(Optional.of(
+                new ManagedMailboxService.ManagedAddress(ADDRESS_ID, PROFILE_ID, "robin+test123456789", DOMAIN, "ACTIVE")
+        ));
+        when(mailboxes.usableAddressForAutomatedVerification(PROFILE_ID)).thenReturn(Optional.empty());
+
+        assertThat(provider.connected(PROFILE_ID)).isFalse();
+        assertThat(provider.findVerification(PROFILE_ID, "employer.example", ALIAS_ADDRESS, Instant.now().minusSeconds(60)))
+                .isEmpty();
     }
 
     @Test
@@ -72,7 +84,7 @@ class ManagedMailVerificationProviderTest {
         UUID msgId = UUID.randomUUID();
         Instant now = Instant.now();
 
-        when(mailboxes.usableAddress(PROFILE_ID)).thenReturn(Optional.of(
+        when(mailboxes.usableAddressForAutomatedVerification(PROFILE_ID)).thenReturn(Optional.of(
                 new ManagedMailboxService.ManagedAddress(ADDRESS_ID, PROFILE_ID, "robin+test123456789", DOMAIN, "ACTIVE")
         ));
 
@@ -106,7 +118,7 @@ class ManagedMailVerificationProviderTest {
         UUID msgId = UUID.randomUUID();
         Instant now = Instant.now();
 
-        when(mailboxes.usableAddress(PROFILE_ID)).thenReturn(Optional.of(
+        when(mailboxes.usableAddressForAutomatedVerification(PROFILE_ID)).thenReturn(Optional.of(
                 new ManagedMailboxService.ManagedAddress(ADDRESS_ID, PROFILE_ID, "robin+test123456789", DOMAIN, "ACTIVE")
         ));
 
@@ -141,7 +153,7 @@ class ManagedMailVerificationProviderTest {
         UUID msgId = UUID.randomUUID();
         Instant now = Instant.now();
 
-        when(mailboxes.usableAddress(PROFILE_ID)).thenReturn(Optional.of(
+        when(mailboxes.usableAddressForAutomatedVerification(PROFILE_ID)).thenReturn(Optional.of(
                 new ManagedMailboxService.ManagedAddress(ADDRESS_ID, PROFILE_ID, "robin+test123456789", DOMAIN, "ACTIVE")
         ));
 
@@ -173,7 +185,7 @@ class ManagedMailVerificationProviderTest {
         UUID msg2 = UUID.randomUUID();
         Instant now = Instant.now();
 
-        when(mailboxes.usableAddress(PROFILE_ID)).thenReturn(Optional.of(
+        when(mailboxes.usableAddressForAutomatedVerification(PROFILE_ID)).thenReturn(Optional.of(
                 new ManagedMailboxService.ManagedAddress(ADDRESS_ID, PROFILE_ID, "robin+test123456789", DOMAIN, "ACTIVE")
         ));
 
@@ -213,7 +225,7 @@ class ManagedMailVerificationProviderTest {
         UUID msgId = UUID.randomUUID();
         Instant now = Instant.now();
 
-        when(mailboxes.usableAddress(PROFILE_ID)).thenReturn(Optional.of(
+        when(mailboxes.usableAddressForAutomatedVerification(PROFILE_ID)).thenReturn(Optional.of(
                 new ManagedMailboxService.ManagedAddress(ADDRESS_ID, PROFILE_ID, "robin+test123456789", DOMAIN, "ACTIVE")
         ));
 

@@ -32,10 +32,19 @@ public class ProfileController {
 
     private final ProfileRepository profileRepository;
     private final AuditLogWriter auditLogWriter;
+    private final com.personal.jobagent.apply.ApplyPackageGuard packageGuard;
 
-    public ProfileController(ProfileRepository profileRepository, AuditLogWriter auditLogWriter) {
+    @org.springframework.beans.factory.annotation.Autowired
+    public ProfileController(ProfileRepository profileRepository,
+                             AuditLogWriter auditLogWriter,
+                             org.springframework.beans.factory.ObjectProvider<com.personal.jobagent.apply.ApplyPackageGuard> packageGuard) {
         this.profileRepository = profileRepository;
         this.auditLogWriter = auditLogWriter;
+        this.packageGuard = packageGuard == null ? null : packageGuard.getIfAvailable();
+    }
+
+    public ProfileController(ProfileRepository profileRepository, AuditLogWriter auditLogWriter) {
+        this(profileRepository, auditLogWriter, null);
     }
 
     public record ProfileUpdateRequest(String headline, String phone, String location,
@@ -123,6 +132,9 @@ public class ProfileController {
         ProfileRecord before = existing.get();
         profileRepository.updateProfile(before.id(), request.headline(), request.phone(), request.location(),
                 request.workEligibility(), request.careerGoals(), request.professionalSummary(), request.links());
+        if (packageGuard != null && !java.util.Objects.equals(before.workEligibility(), request.workEligibility())) {
+            packageGuard.invalidateForProfile(before.id(), "profile work eligibility changed");
+        }
 
         auditLogWriter.write(new AuditEntry(actorEmail(), "PROFILE_UPDATED", "PROFILE", before.id(),
                 Map.of("headline", String.valueOf(before.headline())),

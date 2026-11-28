@@ -18,9 +18,13 @@ import {
   TrackReviewCard,
   classifyTrackError,
   describeWhen,
+  evidenceTimeSourceLabel,
   eventTone,
   newClientId,
+  receiptLinkIssue,
   stageTone,
+  submissionLevelLabel,
+  submissionLevelTone,
   submissionSummary,
   submissionTone,
   verificationTone,
@@ -140,9 +144,26 @@ export const ApplicationTrackPanel: React.FC<{
   };
 
   const headerStatus = track
-    ? { label: track.label, tone: stageTone(track.status, track.basis), submission: track.submission.state }
+    ? {
+        label: track.label,
+        // A conflict between evidence sources is shown in red, and sandbox is never styled green.
+        tone: stageTone(track.status, track.basis, {
+          conflicting: track.conflicts.length > 0,
+          sandbox: Boolean(track.submission.sandbox),
+        }),
+        submission: track.submission.state,
+        sandbox: Boolean(track.submission.sandbox),
+      }
     : summary && summary.availability === 'AVAILABLE'
-      ? { label: summary.label ?? 'Status unknown', tone: stageTone(summary.status, summary.basis), submission: summary.submission }
+      ? {
+          label: summary.label ?? 'Status unknown',
+          tone: stageTone(summary.status, summary.basis, {
+            conflicting: summary.submission === 'CONFLICTING',
+            sandbox: Boolean(summary.sandbox),
+          }),
+          submission: summary.submission,
+          sandbox: Boolean(summary.sandbox),
+        }
       : null;
 
   return (
@@ -152,12 +173,20 @@ export const ApplicationTrackPanel: React.FC<{
         {headerStatus ? (
           <>
             <StatusPill tone={headerStatus.tone}>{headerStatus.label}</StatusPill>
-            <StatusPill tone={submissionTone(headerStatus.submission)}>{submissionSummary(headerStatus.submission)}</StatusPill>
+            <StatusPill tone={submissionTone(headerStatus.submission, headerStatus.sandbox)}>
+              {submissionSummary(headerStatus.submission, headerStatus.sandbox)}
+            </StatusPill>
           </>
         ) : (
           <StatusPill tone="slate">Status unavailable</StatusPill>
         )}
-        {!track && summary?.needsReview && <span className="text-xs font-medium text-amber-800">Needs your review</span>}
+        {!track && summary?.needsReview && (
+          <span
+            className={`text-xs font-medium ${summary.submission === 'CONFLICTING' ? 'text-red-800' : 'text-amber-800'}`}
+          >
+            Needs your review
+          </span>
+        )}
         <button
           type="button"
           aria-expanded={open}
@@ -247,7 +276,14 @@ const StatusSection: React.FC<{ track: ApplicationTrack; onOpenReceipt: () => vo
   <section aria-label="Current status">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <div className="flex flex-wrap items-center gap-2">
-        <StatusPill tone={stageTone(track.status, track.basis)}>{track.label}</StatusPill>
+        <StatusPill
+          tone={stageTone(track.status, track.basis, {
+            conflicting: track.conflicts.length > 0,
+            sandbox: Boolean(track.submission.sandbox),
+          })}
+        >
+          {track.label}
+        </StatusPill>
         {track.since && (
           <span className="text-xs text-ink-muted">
             since {describeWhen(track.since, track.since, track.sincePrecision ?? 'EXACT')}
@@ -325,8 +361,23 @@ const StatusSection: React.FC<{ track: ApplicationTrack; onOpenReceipt: () => vo
       <div>
         <dt className="text-xs text-ink-muted">Submission</dt>
         <dd>
-          <StatusPill tone={submissionTone(track.submission.state)}>{track.submission.label}</StatusPill>
+          <span className="flex flex-wrap items-center gap-1">
+            <StatusPill tone={submissionTone(track.submission.state)}>{track.submission.label}</StatusPill>
+            {track.submission.sandbox && (
+              <span data-testid="sandbox-tag">
+                <StatusPill tone="sky">SANDBOX — not a live employer</StatusPill>
+              </span>
+            )}
+          </span>
+          {submissionLevelLabel(track.submission.verificationLevel) && (
+            <span className="mt-1 block" data-testid="submission-level">
+              <StatusPill tone={submissionLevelTone(track.submission.verificationLevel)}>
+                {submissionLevelLabel(track.submission.verificationLevel)}
+              </StatusPill>
+            </span>
+          )}
           <span className="mt-1 block text-xs text-ink-muted">{track.submission.reason}</span>
+          <SubmissionRecordNote track={track} />
         </dd>
       </div>
       <div>
@@ -350,6 +401,24 @@ const StatusSection: React.FC<{ track: ApplicationTrack; onOpenReceipt: () => vo
   </section>
 );
 
+/** Robin's own submission record and its time source; never presented as employer verification. */
+const SubmissionRecordNote: React.FC<{ track: ApplicationTrack }> = ({ track }) => {
+  const record = track.submissionEvidence;
+  if (!record?.recorded) return null;
+  return (
+    <span className="mt-1 block text-xs text-ink-muted" data-testid="submission-record">
+      {record.sandboxVerified
+        ? 'Recorded by Robin with a verified sandbox receipt'
+        : record.browserObserved
+          ? "Robin's browser saw the employer's confirmation page"
+          : "Robin's worker reported a submission whose evidence could not be verified"}
+      {record.recordedAt ? ` · recorded ${describeWhen(record.recordedAt, record.recordedAt, 'EXACT')} (Robin server time)` : ''}
+      {record.confirmationReference ? ` · reference seen: ${record.confirmationReference}` : ''}
+      {' · a browser observation is not employer verification'}
+    </span>
+  );
+};
+
 const AttentionSection: React.FC<{ track: ApplicationTrack }> = ({ track }) => (
   <section aria-label="What needs you and what is unknown" className="space-y-3 text-sm">
     {track.pending && (
@@ -363,7 +432,14 @@ const AttentionSection: React.FC<{ track: ApplicationTrack }> = ({ track }) => (
         <h3 className="text-xs font-semibold uppercase tracking-wide text-red-700">Conflicting evidence</h3>
         <ul className="mt-1 list-disc space-y-1 pl-5 text-red-800">
           {track.conflicts.map((conflict) => (
-            <li key={`${conflict.code}-${conflict.message}`}>{conflict.message}</li>
+            <li key={`${conflict.code}-${conflict.message}`}>
+              {conflict.message}
+              {conflict.references && conflict.references.some((r) => !r.startsWith('receipt:')) && (
+                <span className="block text-xs text-red-700" data-testid="conflict-references">
+                  Kept as recorded: {conflict.references.filter((r) => !r.startsWith('receipt:')).join(' · ')}
+                </span>
+              )}
+            </li>
           ))}
         </ul>
       </div>
@@ -443,12 +519,22 @@ const EvidenceSection: React.FC<{
             <li key={receipt.id} className="rounded-lg border border-line px-3 py-2 text-sm" data-testid="track-receipt">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-medium text-ink">{receipt.evidenceLabel}</span>
-                <StatusPill tone={verificationTone(receipt.verification)}>{receipt.verificationLabel}</StatusPill>
+                {receiptLinkIssue(receipt) ? (
+                  <StatusPill tone="red">Conflicts with the submission</StatusPill>
+                ) : (
+                  <StatusPill tone={verificationTone(receipt.verification)}>{receipt.verificationLabel}</StatusPill>
+                )}
                 <span className="text-xs text-ink-muted">{receipt.channelLabel}</span>
               </div>
+              {receiptLinkIssue(receipt) && (
+                <p className="mt-1 text-xs font-medium text-red-800" data-testid="receipt-link-issue">
+                  {receiptLinkIssue(receipt)}. Confirm it if it is about this application, or reject it.
+                </p>
+              )}
               {receipt.summary && <p className="mt-1 text-ink-body">{receipt.summary}</p>}
               <p className="mt-1 text-xs text-ink-muted">
                 Evidence dated {describeWhen(receipt.evidenceAt, receipt.evidenceAt, receipt.evidenceAtPrecision)}
+                {evidenceTimeSourceLabel(receipt.evidenceAtSource) ? ` (${evidenceTimeSourceLabel(receipt.evidenceAtSource)})` : ''}
                 {receipt.externalReference ? ` · reference quoted: ${receipt.externalReference}` : ''}
               </p>
               {receipt.reasons.length > 0 && (

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '../api/client';
-import { Profile } from '../types';
+import { EmployerCredentialSummary, Profile } from '../types';
 import {
   Alert,
   EmptyState,
@@ -272,6 +272,8 @@ export const ProfilePage: React.FC = () => {
           onDelete={(id) => remove('/profile/certifications', id)}
         />
 
+        <EmployerCredentialsSection onNotify={(msg) => setMessage(msg)} />
+
         <div className="flex justify-end">
           <button
             type="button"
@@ -538,3 +540,129 @@ function EvidenceSection({ title, items, fields, values, setValues, onAdd, onUpd
     </SectionCard>
   );
 }
+
+const EmployerCredentialsSection: React.FC<{ onNotify: (msg: string) => void }> = ({ onNotify }) => {
+  const [credentials, setCredentials] = useState<EmployerCredentialSummary[]>([]);
+  const [domain, setDomain] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [credError, setCredError] = useState<string | null>(null);
+
+  const loadCredentials = () => {
+    apiFetch<{ credentials?: EmployerCredentialSummary[] }>('/employer-credentials')
+      .then((res) => {
+        setCredentials(Array.isArray(res?.credentials) ? res.credentials : []);
+      })
+      .catch(() => {
+        setCredentials([]);
+      });
+  };
+
+  useEffect(() => {
+    loadCredentials();
+  }, []);
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (saving || !domain.trim() || !username.trim() || !password) return;
+    setSaving(true);
+    setCredError(null);
+    try {
+      await apiFetch('/employer-credentials', {
+        method: 'POST',
+        body: JSON.stringify({
+          employerDomain: domain.trim(),
+          username: username.trim(),
+          password,
+        }),
+      });
+      setDomain('');
+      setUsername('');
+      setPassword('');
+      loadCredentials();
+      onNotify('Saved encrypted employer sign-in credential.');
+    } catch (err) {
+      setCredError(err instanceof Error ? err.message : 'Could not save employer credential.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (employerDomain: string) => {
+    setCredError(null);
+    try {
+      await apiFetch(`/employer-credentials/${encodeURIComponent(employerDomain)}`, {
+        method: 'DELETE',
+      });
+      loadCredentials();
+      onNotify(`Removed saved credential for ${employerDomain}.`);
+    } catch (err) {
+      setCredError(err instanceof Error ? err.message : 'Could not disable credential.');
+    }
+  };
+
+  return (
+    <SectionCard
+      title="Employer site credentials (optional)"
+      hint="Encrypted at rest; used only when an employer career site presents a saved-account sign-in wall"
+      bodyClassName="space-y-4"
+    >
+      <p className="text-xs text-ink-muted">
+        Passwords are encrypted on the server and are never shown again once saved. CAPTCHAs and MFA prompts always pause for your handoff.
+      </p>
+      {credError && <Alert tone="error">{credError}</Alert>}
+      <form onSubmit={handleSave} className="grid gap-2 md:grid-cols-4">
+        <TextInput
+          placeholder="careers.acme.com"
+          aria-label="Employer domain"
+          value={domain}
+          onChange={(e) => setDomain(e.target.value)}
+        />
+        <TextInput
+          placeholder="Username or email"
+          aria-label="Employer username"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+        />
+        <input
+          type="password"
+          autoComplete="new-password"
+          placeholder="Portal password"
+          aria-label="Employer password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          className="w-full rounded-lg border border-line bg-surface px-3.5 py-2 text-sm text-ink focus:border-forest-600 focus:outline-none focus:ring-2 focus:ring-forest-600/20"
+        />
+        <SecondaryButton type="submit" disabled={saving || !domain.trim() || !username.trim() || !password}>
+          {saving ? 'Saving…' : 'Save credential'}
+        </SecondaryButton>
+      </form>
+
+      {credentials.length === 0 ? (
+        <p className="rounded-lg border border-dashed border-line bg-cream-50 px-4 py-3 text-xs text-ink-muted">
+          No saved employer portal credentials yet.
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {credentials.map((cred) => (
+            <li key={cred.employerDomain} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-cream-50/70 px-3.5 py-2 text-xs">
+              <div>
+                <span className="font-semibold text-ink">{cred.employerDomain}</span>
+                <span className="ml-2 text-ink-muted">user: {cred.username}</span>
+                <span className="ml-2 text-ink-faint">({cred.status})</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleDelete(cred.employerDomain)}
+                className="font-semibold text-red-600 hover:text-red-700"
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </SectionCard>
+  );
+};

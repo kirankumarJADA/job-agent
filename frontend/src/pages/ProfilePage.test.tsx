@@ -242,4 +242,45 @@ describe('ProfilePage date precision editing and persistence', () => {
       expect(body.issuedOnPrecision).toBe('YEAR');
     });
   });
+
+  it('saves, lists without exposing passwords, and disables employer portal credentials', async () => {
+    let savedList: Array<{ employerDomain: string; username: string; status: string }> = [];
+    mockedApiFetch.mockImplementation(async (path: string, opts?: RequestInit) => {
+      if (path === '/profile') return SAMPLE_PROFILE;
+      if (path === '/employer-credentials' && (!opts?.method || opts.method === 'GET')) {
+        return { credentials: savedList };
+      }
+      if (path === '/employer-credentials' && opts?.method === 'POST') {
+        const body = JSON.parse(String(opts.body));
+        savedList = [{ employerDomain: body.employerDomain, username: body.username, status: 'ACTIVE' }];
+        return { employerDomain: body.employerDomain, saved: true };
+      }
+      if (path === '/employer-credentials/careers.acme.com' && opts?.method === 'DELETE') {
+        savedList = [];
+        return { employerDomain: 'careers.acme.com', disabled: true };
+      }
+      return {};
+    });
+
+    const user = userEvent.setup();
+    render(React.createElement(ProfilePage));
+    await waitFor(() => {
+      expect(screen.getByLabelText('Employer domain')).toBeTruthy();
+    });
+
+    await user.type(screen.getByLabelText('Employer domain'), 'careers.acme.com');
+    await user.type(screen.getByLabelText('Employer username'), 'ada@inbox.example');
+    await user.type(screen.getByLabelText('Employer password'), 'TopSecret!Pass99');
+    await user.click(screen.getByRole('button', { name: /Save credential/ }));
+
+    expect(await screen.findByText('careers.acme.com')).toBeTruthy();
+    expect(screen.getByText(/user: ada@inbox\.example/)).toBeTruthy();
+    expect((screen.getByLabelText('Employer password') as HTMLInputElement).value).toBe('');
+    expect(document.body.textContent?.includes('TopSecret!Pass99')).toBe(false);
+
+    await user.click(screen.getByRole('button', { name: 'Remove' }));
+    await waitFor(() => {
+      expect(screen.queryByText('careers.acme.com')).toBeNull();
+    });
+  });
 });

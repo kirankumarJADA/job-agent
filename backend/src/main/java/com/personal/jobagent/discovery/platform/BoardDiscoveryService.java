@@ -84,6 +84,7 @@ public class BoardDiscoveryService {
     private final int maxDetails;
     private final int tsentaMaxPages;
     private final int circuitOpenAfter;
+    private final DomainRateLimiter rateLimiter;
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private com.personal.jobagent.discovery.DiscoveryMetrics metrics;
     @org.springframework.beans.factory.annotation.Autowired(required = false)
@@ -200,6 +201,38 @@ public class BoardDiscoveryService {
         this.maxDetails = maxDetails;
         this.tsentaMaxPages = tsentaMaxPages;
         this.circuitOpenAfter = circuitOpenAfter;
+        this.rateLimiter = new DomainRateLimiter();
+    }
+
+    public BoardDiscoveryService(JdbcTemplate db, JobDiscoveryService ingestion, PlatformRegistry registry,
+                                 Function<PlatformKind, SafeHttpClient> httpFactory,
+                                 int maxPages, int maxDetails, int tsentaMaxPages, int circuitOpenAfter,
+                                 DomainRateLimiter rateLimiter) {
+        this.db = db;
+        this.ingestion = ingestion;
+        this.registry = registry;
+        this.httpFactory = httpFactory;
+        this.maxPages = maxPages;
+        this.maxDetails = maxDetails;
+        this.tsentaMaxPages = tsentaMaxPages;
+        this.circuitOpenAfter = circuitOpenAfter;
+        this.rateLimiter = rateLimiter != null ? rateLimiter : new DomainRateLimiter();
+    }
+
+    public DomainRateLimiter getRateLimiter() {
+        return rateLimiter;
+    }
+
+    public void configureDomainRateLimit(String domainOrHost, double requestsPerSec, int burstCapacity) {
+        rateLimiter.configureDomain(domainOrHost, requestsPerSec, burstCapacity);
+    }
+
+    public void configureDomainRateLimit(PlatformKind kind, double requestsPerSec, int burstCapacity) {
+        rateLimiter.configureDomain(kind, requestsPerSec, burstCapacity);
+    }
+
+    public void setRateLimiterSleeper(SafeHttpClient.Sleeper sleeper) {
+        rateLimiter.setSleeper(sleeper);
     }
 
     /** Whether this persisted kind is a board platform with a registered adapter. */
@@ -265,6 +298,7 @@ public class BoardDiscoveryService {
         long started = System.nanoTime();
         Instant runStart = dbNow();
         PlatformKind kind = adapter.kind();
+        String domain = rateLimiter.canonicalDomain(kind);
         Map<String, Object> counts = newCounts();
         List<JobDiscoveryService.IngestResult> ingested = new ArrayList<>();
 
@@ -302,10 +336,30 @@ public class BoardDiscoveryService {
                     FailureCategory.TIMEOUT, "Execution timed out before listing request (" + timeoutMs + "ms)", mode, searchPlanId);
         }
 
+        // Proactive token bucket rate limiting before listing
+        try {
+            rateLimiter.acquire(domain, deadlineNanos);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return finish(sourceId, kind, correlationId, started, counts, ingested, false,
+                    FailureCategory.TIMEOUT, "Execution interrupted during rate limiting delay", mode, searchPlanId);
+        } catch (SafeHttpClient.FetchException e) {
+            return finish(sourceId, kind, correlationId, started, counts, ingested, false,
+                    e.category(), e.getMessage(), mode, searchPlanId);
+        }
+
         BoardAdapter.ListingResult listing;
         try {
             listing = adapter.list(board, context);
+            if (listing.failure() == FailureCategory.RATE_LIMITED) {
+                rateLimiter.onRateLimited(domain);
+            } else if (listing.failure() == null) {
+                rateLimiter.onSuccess(domain);
+            }
         } catch (SafeHttpClient.FetchException e) {
+            if (e.category() == FailureCategory.RATE_LIMITED) {
+                rateLimiter.onRateLimited(domain);
+            }
             log.warn("Adapter {} fetch failed for source {}: category={} message={}", kind, sourceId, e.category(), e.getMessage());
             listing = BoardAdapter.ListingResult.failed(e.category(), e.getMessage());
         } catch (RuntimeException e) {
@@ -401,7 +455,21 @@ public class BoardDiscoveryService {
                         break;
                     }
                     detailsUsed++;
+                    try {
+                        rateLimiter.acquire(domain, deadlineNanos);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        truncatedByTimeout = true;
+                        break;
+                    } catch (SafeHttpClient.FetchException e) {
+                        if (e.category() == FailureCategory.TIMEOUT) {
+                            truncatedByTimeout = true;
+                            break;
+                        }
+                        throw e;
+                    }
                     NormalizedJob job = adapter.detail(board, entry, context);
+                    rateLimiter.onSuccess(domain);
                     if (System.nanoTime() >= deadlineNanos) {
                         truncatedByTimeout = true;
                         break;
@@ -421,6 +489,9 @@ public class BoardDiscoveryService {
                 if (e.category() == FailureCategory.TIMEOUT) {
                     truncatedByTimeout = true;
                     break;
+                }
+                if (e.category() == FailureCategory.RATE_LIMITED) {
+                    rateLimiter.onRateLimited(domain);
                 }
                 if (e.category() == FailureCategory.BUDGET_EXHAUSTED || e.category() == FailureCategory.RATE_LIMITED
                         || e.category() == FailureCategory.ACCESS_DENIED) {

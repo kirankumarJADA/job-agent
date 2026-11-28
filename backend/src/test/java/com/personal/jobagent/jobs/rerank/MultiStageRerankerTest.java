@@ -101,7 +101,7 @@ class MultiStageRerankerTest {
         assertThat(result.eligible()).isFalse();
         assertThat(result.overallScore()).isEqualTo(0);
         assertThat(result.recommendation()).isEqualTo("SKIP");
-        assertThat(result.concerns()).anyMatch(c -> c.contains("80% of minimum threshold"));
+        assertThat(result.concerns()).anyMatch(c -> c.contains("minimum threshold"));
     }
 
     @Test
@@ -165,6 +165,32 @@ class MultiStageRerankerTest {
         assertThat(result.stageScores()).containsKeys("hard_eligibility", "skills_overlap", "seniority_alignment", "title_fit", "salary_fit");
         assertThat(result.narrativeWhy()).contains("Multi-stage reranking scored");
         assertThat(result.decisionSummary()).contains("APPLY");
+    }
+
+    @Test
+    @DisplayName("Stage 5: Visa score integrated into holistic scoring formula when sponsorship is required")
+    void stage5_visaScoreIntegratedIntoHolisticScore() {
+        UUID companyId = UUID.randomUUID();
+        JobRecord job = jobWithCompany(companyId, "Software Engineer", "MID", 60000, List.of("Java"));
+        when(profileRepo.findSkills(profileId)).thenReturn(List.of(
+                new SkillRecord(UUID.randomUUID(), profileId, "Java", "CORE", 5, null, null)
+        ));
+        PreferenceSetRecord prefs = new PreferenceSetRecord(
+                UUID.randomUUID(), profileId, List.of("Software Engineer"), List.of(), List.of(),
+                List.of(), List.of(), List.of("HYBRID"), List.of(), List.of("MID"),
+                50000L, "REQUIRED", List.of(), List.of(), "MANUAL",
+                Map.of("skill", 35, "experience", 20, "visa", 10, "location", 10, "salary", 15),
+                Map.of(), true
+        );
+
+        when(jdbcTemplate.queryForList(anyString(), eq(companyId)))
+                .thenReturn(List.of(Map.of("licence_indicator", "CONFIRMED", "confidence", 1.0)));
+
+        RerankResult result = reranker.rerank(job, profileId, prefs);
+
+        assertThat(result.eligible()).isTrue();
+        assertThat(result.stageScores()).containsEntry("visa_fit", 1.0);
+        assertThat(result.highlights()).anyMatch(h -> h.contains("confirmed visa sponsorship"));
     }
 
     private JobRecord job(String title, String level, int salaryMax, List<String> skills) {

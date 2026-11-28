@@ -9,11 +9,13 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpTimeoutException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import com.sun.net.httpserver.HttpServer;
 
 import static com.personal.jobagent.discovery.platform.FixtureHttp.*;
@@ -322,6 +324,50 @@ class SafeHttpClientTest {
             assertThat(e.category()).isEqualTo(FailureCategory.TIMEOUT);
             // Proves strict deadline terminates consumption far before the 3000ms delay
             assertThat(elapsedMs).isLessThan(1500L);
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void dnsRebindingHostnameResolvesOnceAndPinsSocketTcpTargetWithoutSecondLookup() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/pinned", exchange -> {
+            String hostHeader = exchange.getRequestHeaders().getFirst("Host");
+            byte[] body = ("{\"pinned\":true,\"host\":\"" + hostHeader + "\"}").getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+        AtomicInteger dnsResolveCount = new AtomicInteger();
+        try {
+            // Unresolvable hostname "rebind.invalid": succeeds ONLY because JdkTransport tunnels
+            // TCP directly to the single resolved 127.0.0.1 IP while sending Host: rebind.invalid.
+            AddressGuard singleLookupGuard = new AddressGuard() {
+                @Override
+                public List<InetAddress> checkAndResolve(URI uri) {
+                    if (dnsResolveCount.incrementAndGet() > 1) {
+                        throw new AssertionError("DNS must never be queried twice for one hop (would rebind to metadata IP)");
+                    }
+                    try {
+                        return List.of(InetAddress.getByAddress(uri.getHost(), new byte[]{127, 0, 0, 1}));
+                    } catch (Exception e) {
+                        throw new IllegalStateException(e);
+                    }
+                }
+            };
+            SafeHttpClient client = new SafeHttpClient(
+                    new SafeHttpClient.JdkTransport(),
+                    singleLookupGuard,
+                    SafeHttpClient.Settings.defaults().withTimeout(Duration.ofSeconds(5)).withMinInterval(0),
+                    ms -> {});
+            String response = client.get(URI.create("http://rebind.invalid:" + port + "/pinned"), SafeHttpClient.Accept.JSON);
+            assertThat(dnsResolveCount.get()).isEqualTo(1);
+            assertThat(response).contains("\"pinned\":true").contains("rebind.invalid:" + port);
         } finally {
             server.stop(0);
         }

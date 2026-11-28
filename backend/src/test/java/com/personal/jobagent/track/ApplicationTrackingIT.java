@@ -212,9 +212,9 @@ class ApplicationTrackingIT {
         String body = "Thank you. We have received your application for Backend Engineer. " + url;
 
         var verified = emails.ingestFromMailboxConnector(devProfile, new ConnectorMessage("fixture-provider",
-                "conn-" + UUID.randomUUID(), "Fixture Co Talent <talent@mail.fixture.example>", "dev@example.local",
+                "conn-" + UUID.randomUUID(), "Fixture Co via Greenhouse <no-reply@us.greenhouse-mail.io>", "dev@example.local",
                 "Application received", body, Instant.now().minus(1, ChronoUnit.HOURS), "dev@example.local",
-                new SenderAuthentication("pass", "fixture.example", "pass", "pass")));
+                new SenderAuthentication("pass", "greenhouse-mail.io", "pass", "pass")));
         assertThat(verified.receiptVerification()).isEqualTo("VERIFIED");
 
         JsonNode track = track(app);
@@ -223,14 +223,25 @@ class ApplicationTrackingIT {
         assertThat(track.at("/submission/state").asText()).isEqualTo("CONFIRMED");
         assertThat(track.at("/acknowledgement/state").asText()).isEqualTo("VERIFIED");
 
+        // Unrelated domain quoting the same Greenhouse URL: even with valid DKIM for itself, fails domain binding -> UNVERIFIED.
+        String unboundUrl = greenhouseUrl("conn-unbound", 7004);
+        UUID unboundApp = application(seedJob("conn-unbound", "Fixture Co", "Backend Engineer", unboundUrl, null));
+        var unbound = emails.ingestFromMailboxConnector(devProfile, new ConnectorMessage("fixture-provider",
+                "conn-" + UUID.randomUUID(), "Spoofer <hr@unrelated.example>", "dev@example.local",
+                "Application received", "We have received your application. " + unboundUrl,
+                Instant.now().minus(1, ChronoUnit.HOURS), "dev@example.local",
+                new SenderAuthentication("pass", "unrelated.example", "pass", "pass")));
+        assertThat(unbound.receiptVerification()).isEqualTo("UNVERIFIED");
+        assertThat(track(unboundApp).at("/acknowledgement/state").asText()).isEqualTo("UNVERIFIED");
+
         // Same connector, failing signature: recorded, but never verified.
         String otherUrl = greenhouseUrl("conn2", 7003);
         UUID other = application(seedJob("conn2", "Fixture Co", "Software Engineer", otherUrl, null));
         var failed = emails.ingestFromMailboxConnector(devProfile, new ConnectorMessage("fixture-provider",
-                "conn-" + UUID.randomUUID(), "Fixture Co Talent <talent@mail.fixture.example>", "dev@example.local",
+                "conn-" + UUID.randomUUID(), "Fixture Co via Greenhouse <no-reply@us.greenhouse-mail.io>", "dev@example.local",
                 "Application received", "We have received your application. " + otherUrl,
                 Instant.now().minus(1, ChronoUnit.HOURS), "dev@example.local",
-                new SenderAuthentication("fail", "fixture.example", "pass", "pass")));
+                new SenderAuthentication("fail", "greenhouse-mail.io", "pass", "pass")));
         assertThat(failed.receiptVerification()).isEqualTo("UNVERIFIED");
         assertThat(track(other).at("/submission/state").asText()).isEqualTo("UNVERIFIED");
         // The schema refuses a VERIFIED receipt from any other channel, whatever the code says.
@@ -686,6 +697,7 @@ class ApplicationTrackingIT {
     void mailboxVerificationResolveRequiresWorkerTokenAndRefusesSourceReplay() throws Exception {
         UUID app = application(seedJob("mailbox-verify", "Verification Co", "Backend Engineer",
                 greenhouseUrl("mailbox-verify", 8151), null));
+        seedRunningPlan(app, "https://verification.fixture.example/jobs/1");
         JsonNode source = ingestHttp(Map.of("messageId", "verify-" + UUID.randomUUID(),
                 "from", "security@verification.fixture.example", "to", "dev@example.local",
                 "subject", "Your verification code", "body", "Use 482913 to verify your account"));
@@ -705,7 +717,27 @@ class ApplicationTrackingIT {
                 .contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isOk()).andReturn();
         JsonNode response = json.readTree(result.getResponse().getContentAsString(StandardCharsets.UTF_8));
         assertThat(response.get("otp").asText()).isEqualTo("482913");
+        String verificationId = response.get("verificationId").asText();
+        String leaseToken = response.get("leaseToken").asText();
+        assertThat(verificationId).isNotBlank();
+        assertThat(leaseToken).isNotBlank();
         assertThat(count("select count(*) from mailbox_verifications where source_email_id = ?", emailId)).isEqualTo(1);
+        // Crash recovery replay for the same application returns the active RESERVED lease idempotently and rotates leaseToken.
+        MvcResult replay = mvc.perform(post("/api/v1/mailbox-verification/resolve")
+                .header("Authorization", "Bearer phase85-test-token")
+                .contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isOk()).andReturn();
+        JsonNode replayNode = json.readTree(replay.getResponse().getContentAsString(StandardCharsets.UTF_8));
+        assertThat(replayNode.get("verificationId").asText()).isEqualTo(verificationId);
+        String activeLeaseToken = replayNode.get("leaseToken").asText();
+        // Once confirmed by the worker using the current active lease token, the lease transitions to CONSUMED and future resolves return 404.
+        String confirmBody = json.writeValueAsString(Map.of(
+                "applicationId", app.toString(),
+                "verificationId", verificationId,
+                "leaseToken", activeLeaseToken));
+        mvc.perform(post("/api/v1/mailbox-verification/confirm")
+                .header("Authorization", "Bearer phase85-test-token")
+                .contentType(MediaType.APPLICATION_JSON).content(confirmBody))
+                .andExpect(status().isOk());
         mvc.perform(post("/api/v1/mailbox-verification/resolve").header("Authorization", "Bearer phase85-test-token")
                 .contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isNotFound());
     }
@@ -714,6 +746,7 @@ class ApplicationTrackingIT {
     void mailboxVerificationMissReturns404ForManualPause() throws Exception {
         UUID app = application(seedJob("mailbox-miss", "Verification Co", "Platform Engineer",
                 greenhouseUrl("mailbox-miss", 8152), null));
+        seedRunningPlan(app, "https://verification.fixture.example/jobs/2");
         Mockito.when(mailboxVerificationProvider.findVerification(Mockito.eq(devProfile),
                 Mockito.eq("verification.fixture.example"), Mockito.isNull(), Mockito.any(Instant.class)))
                 .thenReturn(Optional.empty());
@@ -824,6 +857,60 @@ class ApplicationTrackingIT {
         assertThat(count("select count(*) from email_application_links where profile_id = ?", otherProfile)).isZero();
     }
 
+    @Test
+    void corporateWebsiteDomainBindingActiveManagedMailboxAndUniversalTimelineProjectionWorkEndToEnd() throws Exception {
+        // 1. Direct corporate site binds aligned corporate sender domain (Gate 0A)
+        String corpUrl = "https://careers.directfixture.example/jobs/7005";
+        UUID corpApp = application(seedJob("corp7005", "Direct Fixture", "Backend Engineer", corpUrl, "REQ-CORP-7005"));
+        var corpAck = emails.ingestFromMailboxConnector(devProfile, new ConnectorMessage("fixture-provider",
+                "conn-" + UUID.randomUUID(), "Direct Fixture Talent <hr@mail.directfixture.example>", "dev@example.local",
+                "Application received", "We have received your application for " + corpUrl,
+                Instant.now().minus(1, ChronoUnit.HOURS), "dev@example.local",
+                new SenderAuthentication("pass", "directfixture.example", "pass", "pass")));
+        assertThat(corpAck.receiptVerification()).isEqualTo("VERIFIED");
+        assertThat(track(corpApp).get("status").asText()).isEqualTo("ACKNOWLEDGED");
+
+        // 2. Managed Mail active row promotes mailboxConnected unless disabled/other-profile/misconfigured (Gate 0D)
+        String otherEmail = "other-mb-" + UUID.randomUUID() + "@test.local";
+        UUID otherProfileId = otherProfile();
+        String configuredDomain = ""; // app.managed-mail.domain is blank in ApplicationTrackingIT -> fails closed
+        UUID addrId = UuidV7.generate();
+        jdbc.update("""
+                insert into managed_mail_addresses (id, profile_id, local_part, domain, status)
+                values (?, ?, ?, 'mail.example.invalid', 'ACTIVE')
+                """, addrId, devProfile, "robin+" + UUID.randomUUID().toString().substring(0, 8));
+        // Still false when domain is not configured in ManagedMailSettings
+        assertThat(mvc.perform(get("/api/v1/track/reviews").session(session))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString())
+                .contains("\"mailboxConnected\":false");
+
+        // 3. Universal lifecycle audit actions appear neutrally on the timeline (Gate 0E)
+        UUID planId = UuidV7.generate();
+        jdbc.update("""
+                insert into automation_plans (id, profile_id, application_id, target_url, status, idempotency_key, plan, submit_approved)
+                values (?, ?, ?, ?, 'SUBMITTED', ?, '{"planType":"UNIVERSAL","steps":[]}'::jsonb, true)
+                """, planId, devProfile, corpApp, corpUrl, "universal:" + corpApp);
+        Instant now = Instant.now();
+        for (String action : List.of("UNIVERSAL_FORM_REVIEWED", "UNIVERSAL_SUBMIT_APPROVED",
+                "UNIVERSAL_SUBMIT_QUEUED", "AUTOMATION_PLAN_SUBMITTED", "AUTOMATION_PLAN_RECONCILIATION_REQUIRED")) {
+            jdbc.update("""
+                    insert into audit_logs (id, actor, action, entity_type, entity_id, after_state, created_at)
+                    values (?, 'dev@example.local', ?, 'AUTOMATION_PLAN', ?, '{"approvedForSubmission":true}'::jsonb, ?)
+                    """, UuidV7.generate(), action, planId, java.sql.Timestamp.from(now));
+            now = now.plusSeconds(1);
+        }
+        JsonNode items = timeline(corpApp, "", 50).get("items");
+        List<String> types = new ArrayList<>();
+        for (JsonNode item : items) {
+            types.add(item.get("type").asText());
+            assertThat(item.toString().toLowerCase()).doesNotContain("universal").doesNotContain("dev@example.local");
+        }
+        assertThat(types).contains("FORM_REVIEWED", "PACKAGE_APPROVED", "SUBMISSION_QUEUED",
+                "SUBMISSION_RECORDED", "SUBMISSION_RECONCILIATION_REQUIRED");
+        assertThat(configuredDomain).isEmpty();
+        assertThat(otherProfileId).isNotNull();
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────
 
     private static String greenhouseUrl(String board, int id) {
@@ -854,6 +941,14 @@ class ApplicationTrackingIT {
                     UuidV7.generate(), app, "{\"step\":\"" + step + "\",\"status\":\"OK\"}");
         }
         return app;
+    }
+
+    private void seedRunningPlan(UUID appId, String targetUrl) {
+        jdbc.update("""
+                insert into automation_plans (id, profile_id, application_id, target_url, status, idempotency_key, plan)
+                select ?, profile_id, id, ?, 'RUNNING', ?, '{"planType":"UNIVERSAL","steps":[]}'::jsonb
+                from applications where id = ?
+                """, UuidV7.generate(), targetUrl, "it-track-" + UUID.randomUUID(), appId);
     }
 
     private JsonNode ingestHttp(Map<String, Object> body) throws Exception {
