@@ -252,42 +252,48 @@ class CrossProcessAutonomousApplyE2EIT {
 
     @Test
     void scenarioA_standingAutoApplySubmitsOnceWithRealWorkerAndChromiumAndHaltsOnDeclarationOrUnknownQuestion() throws Exception {
-        String targetUrl = fixtureA.origin + "/careers/apply";
-
         // 1. Prohibited declaration checkbox stops standing automation cleanly in AWAITING_APPROVAL (0 clicks)
+        String declUrl = fixtureA.origin + "/careers/apply?role=xproc-decl";
         fixtureA.configure(Map.of("includeProhibitedDeclaration", true, "includeUnknownQuestion", false));
-        SeededApp declApp = seedEligibleApplication("xproc-decl", targetUrl, true);
+        SeededApp declApp = seedEligibleApplication("xproc-decl", declUrl, true);
         UUID declPlanId = createPackage(declApp.appId());
         Process declWorker = startWorkerProcess(backendBaseUrl() + "/api/v1/automation/plans/claim-next");
         awaitPlanStatus(declPlanId, "AWAITING_APPROVAL", Duration.ofSeconds(25));
+        awaitCondition(() -> {
+            Integer n = jdbc.queryForObject(
+                    "select count(*) from audit_logs where entity_id = ? and action = 'STANDING_SUBMIT_DEFERRED' and details->>'reasonCode' = 'PROHIBITED_DECLARATION'",
+                    Integer.class, declPlanId);
+            return n != null && n >= 1;
+        }, Duration.ofSeconds(5), "STANDING_SUBMIT_DEFERRED audit entry");
         declWorker.destroyForcibly();
 
         assertThat(submitApproved(declPlanId)).isFalse();
         assertThat(fixtureA.diagnostics().get("acceptedSubmissions")).isEqualTo(0);
-        assertThat(jdbc.queryForObject(
-                "select count(*) from audit_logs where entity_id = ? and action = 'STANDING_SUBMIT_DEFERRED' and details->>'reasonCode' = 'PROHIBITED_DECLARATION'",
-                Integer.class, declPlanId)).isGreaterThanOrEqualTo(1);
 
         // 2. Unknown mandatory question pauses in AWAITING_APPROVAL until human answers; then pre-confirmed app runs standing Pass1 -> auto-authorize -> Pass2 -> 1 click!
         fixtureA.reset();
         fixtureA.configure(Map.of("includeProhibitedDeclaration", false, "includeUnknownQuestion", true));
 
-        SeededApp gapApp = seedEligibleApplication("xproc-gap", targetUrl, false);
+        String gapUrl = fixtureA.origin + "/careers/apply?role=xproc-gap";
+        SeededApp gapApp = seedEligibleApplication("xproc-gap", gapUrl, false);
         UUID gapPlanId = createPackage(gapApp.appId());
         Process gapWorker = startWorkerProcess(backendBaseUrl() + "/api/v1/automation/plans/claim-next");
         awaitPlanStatus(gapPlanId, "AWAITING_APPROVAL", Duration.ofSeconds(25));
+        awaitCondition(() -> {
+            Integer n = jdbc.queryForObject(
+                    "select count(*) from application_answers where application_id = ? and status = 'NEEDS_USER_INPUT'",
+                    Integer.class, gapApp.appId());
+            return n != null && n >= 1;
+        }, Duration.ofSeconds(5), "NEEDS_USER_INPUT answer recorded");
         gapWorker.destroyForcibly();
 
         assertThat(submitApproved(gapPlanId)).isFalse();
         assertThat(fixtureA.diagnostics().get("acceptedSubmissions")).isEqualTo(0);
-        assertThat(jdbc.queryForObject(
-                "select count(*) from application_answers where application_id = ? and status = 'NEEDS_USER_INPUT'",
-                Integer.class, gapApp.appId())).isGreaterThanOrEqualTo(1);
         retirePlan(gapPlanId);
 
         // 3. Full verified standing autonomous apply: all mandatory Q&As pre-confirmed -> Pass 1 -> auto STANDING_AUTO_SUBMIT -> Pass 2 -> 1 click -> SUBMITTED -> TRACK receipt!
         fixtureA.reset();
-        SeededApp happyApp = seedEligibleApplication("xproc-happy", targetUrl, true);
+        SeededApp happyApp = seedEligibleApplication("xproc-happy", fixtureA.origin + "/careers/apply?role=xproc-happy", true);
         UUID happyPlanId = createPackage(happyApp.appId());
         Process happyWorker = startWorkerProcess(backendBaseUrl() + "/api/v1/automation/plans/claim-next");
         awaitPlanStatus(happyPlanId, "SUBMITTED", Duration.ofSeconds(35));
@@ -960,7 +966,10 @@ class CrossProcessAutonomousApplyE2EIT {
         interface Interceptor { Action intercept(RequestInfo req) throws Exception; }
 
         private final com.sun.net.httpserver.HttpServer server;
-        private final HttpClient upstream = HttpClient.newHttpClient();
+        private final HttpClient upstream = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(5))
+                .build();
 
         private ProxyServer(com.sun.net.httpserver.HttpServer server) {
             this.server = server;
@@ -993,7 +1002,9 @@ class CrossProcessAutonomousApplyE2EIT {
                     });
                     HttpResponse<byte[]> upRes = ps.upstream.send(rb.build(), HttpResponse.BodyHandlers.ofByteArray());
                     upRes.headers().map().forEach((k, vals) -> {
-                        if (!"transfer-encoding".equalsIgnoreCase(k)) {
+                        if (!"transfer-encoding".equalsIgnoreCase(k)
+                                && !"content-length".equalsIgnoreCase(k)
+                                && !k.startsWith(":")) {
                             ex.getResponseHeaders().put(k, vals);
                         }
                     });

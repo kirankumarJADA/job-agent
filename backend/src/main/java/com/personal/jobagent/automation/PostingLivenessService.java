@@ -105,7 +105,7 @@ public class PostingLivenessService {
         }
         List<Map<String, Object>> rows = db.queryForList("""
                 select j.id as job_id, j.status as job_status, j.deleted_at,
-                       coalesce(nullif(p.target_url, ''), j.application_url, j.url) as check_url
+                       coalesce(nullif(p.target_url, ''), j.application_url, j.canonical_url) as check_url
                 from automation_plans p
                 join applications a on a.id = p.application_id
                 join jobs j on j.id = a.job_id

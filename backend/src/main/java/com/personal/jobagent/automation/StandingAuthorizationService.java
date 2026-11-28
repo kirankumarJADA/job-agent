@@ -210,7 +210,7 @@ public class StandingAuthorizationService {
                     "Package readiness could not be verified: " + e.getMessage());
         }
         if (!Boolean.TRUE.equals(readinessState.get("packageReady"))
-                || hasNonEmptyList(readinessState.get("duplicates"))) {
+                || hasDuplicates(readinessState.get("duplicates"))) {
             return defer(planId, plan.applicationId(), "PACKAGE_NOT_READY",
                     "Application package blockers or duplicates prevent standing submission.");
         }
@@ -502,6 +502,20 @@ public class StandingAuthorizationService {
 
     private static boolean hasNonEmptyList(Object raw) {
         return raw instanceof List<?> list && !list.isEmpty();
+    }
+
+    private static boolean hasDuplicates(Object raw) {
+        if (raw instanceof List<?> list) {
+            return !list.isEmpty();
+        }
+        if (raw instanceof Map<?, ?> map) {
+            Object status = map.get("status");
+            if (status != null && "DUPLICATE".equalsIgnoreCase(status.toString())) {
+                return true;
+            }
+            return hasNonEmptyList(map.get("items")) || hasNonEmptyList(map.get("matches"));
+        }
+        return false;
     }
 
     private static String asString(Object raw) {
