@@ -855,7 +855,7 @@ class UniversalBrowserE2EIT {
                 ps.executeQuery().close();
             }
             var fenceCall = pool.submit(() -> mvc.perform(fenceRequest(planA)).andReturn().getResponse().getStatus());
-            awaitLockWait("pre-submit-attempting");
+            awaitLockWait("pre-submit-authorization-lock");
             try (var ps = c.prepareStatement("update automation_plans set submit_approved = false where id = ?")) {
                 ps.setObject(1, planA);
                 ps.executeUpdate();

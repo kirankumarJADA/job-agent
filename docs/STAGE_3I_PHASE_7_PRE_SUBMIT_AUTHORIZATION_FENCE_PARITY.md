@@ -101,15 +101,20 @@ Implemented in `backend/src/main/java/com/personal/jobagent/automation/PreSubmit
 | Suite | Command | Result |
 |---|---|---|
 | Migrations immutability | `git diff ab854de -- backend/src/main/resources/db/migration` | **0 diff** (`V001`–`V073` byte-identical; no `V074`) |
-| Backend unit & ArchUnit | `mvn -f backend/pom.xml -B test` | **2,141 run, 0 failures, 0 errors, 6 skipped** (baseline Redis-env skips) |
-| Backend PostgreSQL ITs | `mvn -B verify` | **Not run locally** (Docker Desktop Linux Engine unavailable on host); executed in GitHub Actions CI |
+| Backend unit & ArchUnit | `mvn -f backend/pom.xml -B test` | **2,141 run, 0 failures, 0 errors, 6 skipped** (including targeted **88/88** across `PreSubmitAuthorizationServiceTest`, `UniversalAutomationControllerTest`, `AutomationControllerReviewTest`, `AutomationPlanClaimTest`) |
+| Backend PostgreSQL ITs | `mvn -B verify` | **Not run locally** (Docker Desktop Linux Engine unavailable on Windows host); executed on `ubuntu-latest` in GitHub Actions CI |
 | Worker Playwright & unit | `npm --prefix worker test` | **410 total: 409 passed, 0 failed, 1 skipped** (`POSIX SIGTERM` test skipped on Windows; runs on Linux CI) |
-| Worker 4-adapter fence parity | `node --test worker/test/pre_submit_fence_parity.test.js` | **4/4 passed** (covering 24 adapter × scenario checks) |
-| Frontend build & Vitest | `npm --prefix frontend run build` + `cd frontend && npm test` | **49 files, 492/492 passed**, `tsc -b && vite build` clean |
+| Frontend build & Vitest | `cd frontend && npm run build && npm test` | **49 files, 492/492 passed**, `tsc -b && vite build` clean |
 | Cloudflare email worker | `npm --prefix cloudflare-email-worker test` | **25/25 passed** |
 | Phase 20 probe tests | `node --test scripts/phase20/*.test.mjs` | **8/8 passed** |
 
-### 4.2 External Validation & Gate Status — **NO-GO**
+### 4.2 CI Failure Repair on Baseline `d7662f0` (Run `46099578732`)
+GitHub Actions run `46099578732` on commit `d7662f0b5866197526c50c8fe81f627590e08ab3` passed `cloudflare-email-worker`, `worker`, and `frontend`, and failed `backend` Failsafe (`Tests run: 505, Failures: 23, Errors: 0, Skipped: 7`) due to two test/contract mismatches without any production authorization defect:
+
+1. **Finding A — Worker auth header mismatch (22 failures in `PreSubmitFenceParityIT`):** `WorkerEventTokenFilter` requires `Authorization: Bearer <token>`, whereas `PreSubmitFenceParityIT` sent legacy `X-Worker-Token`, causing `/claim` and `/steps` to receive HTTP `403`. Repaired strictly in `PreSubmitFenceParityIT` by switching all 26 worker calls to `Authorization: Bearer <WORKER_TOKEN>` and adding explicit negative assertions verifying missing `Authorization`, `Authorization: Bearer wrong-worker-token`, and legacy `X-Worker-Token` all return `401`/`403` with `0` `pre-submit-attempting` rows recorded. Production `WorkerEventTokenFilter` was not weakened and remains Bearer-only.
+2. **Finding B — Row-lock wait marker alignment (1 failure in `UniversalBrowserE2EIT:858`):** `PreSubmitAuthorizationService#loadAndLockContext` acquires `SELECT ... FROM automation_plans p ... WHERE p.id = ? FOR UPDATE OF p` before inserting `pre-submit-attempting`, so a racing second fence thread blocks on that `loadAndLockContext` query rather than `pre-submit-attempting`. Added an explicit `/* pre-submit-authorization-lock */` SQL comment to `PreSubmitAuthorizationService#loadAndLockContext` and updated `UniversalBrowserE2EIT` to `awaitLockWait("pre-submit-authorization-lock")` while preserving every concurrent race, withdrawal-first (`409`), and fence-first (`invalidateApproval == 0`, `submit_approved == true`) invariant intact.
+
+### 4.3 External Validation & Gate Status — **NO-GO**
 - External validation, production database access, and real-employer submissions remain **blocked / `NO-GO`** pending Stage 3G preconditions.
 - PR `#21` remains **`OPEN` and `DRAFT`**, unmerged into `master`.
 

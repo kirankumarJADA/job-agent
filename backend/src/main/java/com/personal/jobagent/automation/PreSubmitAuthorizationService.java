@@ -650,6 +650,7 @@ public class PreSubmitAuthorizationService {
 
     private LockedContext loadAndLockContext(UUID planId) {
         List<LockedContext> rows = db.query("""
+                /* pre-submit-authorization-lock */
                 select p.id as plan_id, p.profile_id as plan_profile_id, p.application_id,
                        p.target_url, p.status as plan_status, p.submit_approved, p.plan::text as plan_json,
                        a.id as app_id, a.profile_id as app_profile_id, a.status as app_status, a.mode as app_mode,

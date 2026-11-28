@@ -110,7 +110,7 @@ class PreSubmitFenceParityIT {
         SeededPlan s = seedApprovedPreparedRunningPlan(adapter, "ASSISTED");
 
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", s.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody(adapter, s.expectedSubmitStep(), s.targetUrl()))))
                 .andExpect(status().isNoContent());
@@ -118,7 +118,7 @@ class PreSubmitFenceParityIT {
         assertThat(fenceCount(s.planId())).isEqualTo(1);
 
         mvc.perform(post("/api/v1/automation/plans/{id}/complete", s.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(Map.of(
                                 "outcome", "SUBMITTED",
@@ -156,7 +156,7 @@ class PreSubmitFenceParityIT {
 
         // Even if a stale worker attempts the pre-submit fence against that withdrawn plan, it is refused 409
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", queued.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody(adapter, queued.expectedSubmitStep(), queued.targetUrl()))))
                 .andExpect(status().isConflict());
@@ -170,7 +170,7 @@ class PreSubmitFenceParityIT {
         assertThat(submitApproved(runningWithdraw.planId())).isFalse();
 
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", runningWithdraw.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody(adapter, runningWithdraw.expectedSubmitStep(), runningWithdraw.targetUrl()))))
                 .andExpect(status().isConflict())
@@ -178,7 +178,7 @@ class PreSubmitFenceParityIT {
         assertThat(fenceCount(runningWithdraw.planId())).isZero();
 
         mvc.perform(post("/api/v1/automation/plans/{id}/complete", runningWithdraw.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(Map.of(
                                 "outcome", "SUBMITTED",
@@ -199,7 +199,7 @@ class PreSubmitFenceParityIT {
         assertThat(invalidated).isEqualTo(1);
         assertThat(submitApproved(runningRevoked.planId())).isFalse();
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", runningRevoked.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody(adapter, runningRevoked.expectedSubmitStep(), runningRevoked.targetUrl()))))
                 .andExpect(status().isConflict())
@@ -208,7 +208,7 @@ class PreSubmitFenceParityIT {
         // Case D: Once fence IS crossed, explicit withdrawal is refused 409 PRE_SUBMIT_ATTEMPT_ALREADY_STARTED
         SeededPlan alreadyFenced = seedApprovedPreparedRunningPlan(adapter, "ASSISTED");
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", alreadyFenced.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody(adapter, alreadyFenced.expectedSubmitStep(), alreadyFenced.targetUrl()))))
                 .andExpect(status().isNoContent());
@@ -234,7 +234,7 @@ class PreSubmitFenceParityIT {
                 ready.countDown();
                 start.await(5, TimeUnit.SECONDS);
                 return mvc.perform(post("/api/v1/automation/plans/{id}/steps", s.planId())
-                                .header("X-Worker-Token", WORKER_TOKEN)
+                                .header("Authorization", "Bearer " + WORKER_TOKEN)
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(body))
                         .andReturn().getResponse().getStatus();
@@ -260,7 +260,7 @@ class PreSubmitFenceParityIT {
         // Crash BEFORE fence -> FAILED leaves zero checkpoint
         SeededPlan crashBefore = seedApprovedPreparedRunningPlan(adapter, "ASSISTED");
         mvc.perform(post("/api/v1/automation/plans/{id}/complete", crashBefore.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(Map.of(
                                 "outcome", "FAILED", "detail", "crashed prior to pre-submit fence"))))
@@ -268,7 +268,7 @@ class PreSubmitFenceParityIT {
         assertThat(fenceCount(crashBefore.planId())).isZero();
         assertThat(planStatus(crashBefore.planId())).isEqualTo("FAILED");
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", crashBefore.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody(adapter, crashBefore.expectedSubmitStep(), crashBefore.targetUrl()))))
                 .andExpect(status().isConflict());
@@ -276,7 +276,7 @@ class PreSubmitFenceParityIT {
         // Crash AFTER fence -> stale recovery quarantines into RECONCILIATION_REQUIRED, never auto-requeued
         SeededPlan crashAfter = seedApprovedPreparedRunningPlan(adapter, "ASSISTED");
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", crashAfter.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody(adapter, crashAfter.expectedSubmitStep(), crashAfter.targetUrl()))))
                 .andExpect(status().isNoContent());
@@ -292,7 +292,7 @@ class PreSubmitFenceParityIT {
                         .with(csrf()).session(crashAfter.session()))
                 .andExpect(status().isConflict());
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", crashAfter.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody(adapter, crashAfter.expectedSubmitStep(), crashAfter.targetUrl()))))
                 .andExpect(status().isConflict())
@@ -306,7 +306,7 @@ class PreSubmitFenceParityIT {
         SeededPlan scoreDrift = seedApprovedPreparedRunningPlan(adapter, "CONTROLLED_AUTO");
         jdbc.update("update user_approval_rules set min_score = 98 where profile_id = ?", scoreDrift.profileId());
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", scoreDrift.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody(adapter, scoreDrift.expectedSubmitStep(), scoreDrift.targetUrl()))))
                 .andExpect(status().isConflict())
@@ -317,7 +317,7 @@ class PreSubmitFenceParityIT {
         SeededPlan salaryDrift = seedApprovedPreparedRunningPlan(adapter, "ASSISTED");
         jdbc.update("update preference_sets set salary_min_gbp = 150000 where profile_id = ?", salaryDrift.profileId());
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", salaryDrift.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody(adapter, salaryDrift.expectedSubmitStep(), salaryDrift.targetUrl()))))
                 .andExpect(status().isConflict())
@@ -328,7 +328,7 @@ class PreSubmitFenceParityIT {
         SeededPlan visaDrift = seedApprovedPreparedRunningPlan(adapter, "ASSISTED");
         jdbc.update("update profiles set work_eligibility = '{\"rightToWork\":false}'::jsonb where id = ?", visaDrift.profileId());
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", visaDrift.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody(adapter, visaDrift.expectedSubmitStep(), visaDrift.targetUrl()))))
                 .andExpect(status().isConflict())
@@ -338,7 +338,7 @@ class PreSubmitFenceParityIT {
         SeededPlan jobDeleted = seedApprovedPreparedRunningPlan(adapter, "ASSISTED");
         jdbc.update("update jobs set deleted_at = now() where id = ?", jobDeleted.jobId());
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", jobDeleted.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody(adapter, jobDeleted.expectedSubmitStep(), jobDeleted.targetUrl()))))
                 .andExpect(status().isConflict())
@@ -347,7 +347,7 @@ class PreSubmitFenceParityIT {
         // 5. Live browser URL drifted to attacker domain -> TARGET_DOMAIN_MISMATCH
         SeededPlan domainMismatch = seedApprovedPreparedRunningPlan(adapter, "ASSISTED");
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", domainMismatch.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody(
                                 adapter, domainMismatch.expectedSubmitStep(), "https://attacker.evil.example/submit"))))
@@ -358,7 +358,7 @@ class PreSubmitFenceParityIT {
         SeededPlan cvRevoked = seedApprovedPreparedRunningPlan(adapter, "ASSISTED");
         jdbc.update("update cv_version_reviews set approved = false where cv_version_id = ?", cvRevoked.cvVersionId());
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", cvRevoked.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody(adapter, cvRevoked.expectedSubmitStep(), cvRevoked.targetUrl()))))
                 .andExpect(status().isConflict())
@@ -368,7 +368,7 @@ class PreSubmitFenceParityIT {
         SeededPlan appWithdrawn = seedApprovedPreparedRunningPlan(adapter, "ASSISTED");
         jdbc.update("update applications set status = 'WITHDRAWN' where id = ?", appWithdrawn.applicationId());
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", appWithdrawn.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody(adapter, appWithdrawn.expectedSubmitStep(), appWithdrawn.targetUrl()))))
                 .andExpect(status().isConflict())
@@ -387,6 +387,24 @@ class PreSubmitFenceParityIT {
                         .content(json.writeValueAsString(fenceStepBody("GREENHOUSE", "REAL_SUBMIT_CLICK", gh.targetUrl()))))
                 .andExpect(status().isForbidden());
 
+        // Missing Authorization header, invalid Bearer token, and legacy X-Worker-Token header are all rejected (401/403)
+        String validFenceJson = json.writeValueAsString(fenceStepBody("GREENHOUSE", "REAL_SUBMIT_CLICK", gh.targetUrl()));
+        int missingStatus = mvc.perform(post("/api/v1/automation/plans/{id}/steps", gh.planId())
+                        .contentType(MediaType.APPLICATION_JSON).content(validFenceJson))
+                .andReturn().getResponse().getStatus();
+        assertThat(missingStatus).isIn(401, 403);
+        int wrongBearerStatus = mvc.perform(post("/api/v1/automation/plans/{id}/steps", gh.planId())
+                        .header("Authorization", "Bearer wrong-worker-token")
+                        .contentType(MediaType.APPLICATION_JSON).content(validFenceJson))
+                .andReturn().getResponse().getStatus();
+        assertThat(wrongBearerStatus).isIn(401, 403);
+        int xHeaderStatus = mvc.perform(post("/api/v1/automation/plans/{id}/steps", gh.planId())
+                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON).content(validFenceJson))
+                .andReturn().getResponse().getStatus();
+        assertThat(xHeaderStatus).isIn(401, 403);
+        assertThat(fenceCount(gh.planId())).isZero();
+
         // Candidate B cannot withdraw Candidate A's plan (404)
         mvc.perform(post("/api/v1/automation/plans/{id}/withdraw-approval", gh.planId())
                         .with(csrf()).session(other.session()))
@@ -394,7 +412,7 @@ class PreSubmitFenceParityIT {
 
         // Cross-adapter spoofing on worker fence request is refused (409 ADAPTER_MISMATCH)
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", gh.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody("UNIVERSAL", "UNIVERSAL_SUBMIT_CLICK", gh.targetUrl()))))
                 .andExpect(status().isConflict())
@@ -408,7 +426,7 @@ class PreSubmitFenceParityIT {
                 where id = ?
                 """, nonSubmit.planId());
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", nonSubmit.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(Map.of(
                                 "index", 99, "stepId", "pre-submit-attempting", "status", "RUNNING",
@@ -442,7 +460,7 @@ class PreSubmitFenceParityIT {
                 .andExpect(status().isOk());
         assertThat(submitApproved(gh.planId())).isFalse();
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", gh.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody("GREENHOUSE", "REAL_SUBMIT_CLICK", gh.targetUrl()))))
                 .andExpect(status().isConflict());
@@ -456,7 +474,7 @@ class PreSubmitFenceParityIT {
                 .andExpect(status().isOk());
         assertThat(submitApproved(ashby.planId())).isFalse();
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", ashby.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody("ASHBY", "ASHBY_SUBMIT_CLICK", ashby.targetUrl()))))
                 .andExpect(status().isConflict());
@@ -470,7 +488,7 @@ class PreSubmitFenceParityIT {
                 .andExpect(status().isOk());
         assertThat(submitApproved(workday.planId())).isFalse();
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", workday.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody("WORKDAY", "WORKDAY_SUBMIT_CLICK", workday.targetUrl()))))
                 .andExpect(status().isConflict());
@@ -486,7 +504,7 @@ class PreSubmitFenceParityIT {
                 .andExpect(status().isOk());
         assertThat(submitApproved(univ.planId())).isFalse();
         mvc.perform(post("/api/v1/automation/plans/{id}/steps", univ.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN)
+                        .header("Authorization", "Bearer " + WORKER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(json.writeValueAsString(fenceStepBody("UNIVERSAL", "UNIVERSAL_SUBMIT_CLICK", univ.targetUrl()))))
                 .andExpect(status().isConflict());
@@ -501,7 +519,7 @@ class PreSubmitFenceParityIT {
                         .with(csrf()).session(s.session()))
                 .andExpect(status().isOk());
         mvc.perform(post("/api/v1/automation/plans/{id}/claim", s.planId())
-                        .header("X-Worker-Token", WORKER_TOKEN))
+                        .header("Authorization", "Bearer " + WORKER_TOKEN))
                 .andExpect(status().isOk());
         assertThat(planStatus(s.planId())).isEqualTo("RUNNING");
         assertThat(submitApproved(s.planId())).isTrue();
