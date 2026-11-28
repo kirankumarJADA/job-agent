@@ -73,6 +73,7 @@ function worker(root, { credentialResolver = null } = {}) {
 function routedWorker(root, routeHandler, opts = {}) {
   return new BrowserWorker({
     statePath: path.join(root, 'state.json'), artifactDir: root,
+    stepsReporter: async () => ({ ok: true }),
     onPageCreated: async (page) => { await page.route(`${URL}**`, routeHandler); },
     ...opts,
   });

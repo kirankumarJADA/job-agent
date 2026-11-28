@@ -82,6 +82,7 @@ test('full Greenhouse sandbox fixture capture produces valid DOM/network evidenc
   const worker = new BrowserWorker({
     statePath: path.join(root, 'state.json'),
     artifactDir: root,
+    stepsReporter: async () => ({ ok: true }),
     onPageCreated: fixture.attachToPage,
   });
 
@@ -135,6 +136,7 @@ test('negative: missing matching POST submission request keeps outcome RECONCILI
   const worker = new BrowserWorker({
     statePath: path.join(root, 'state.json'),
     artifactDir: root,
+    stepsReporter: async () => ({ ok: true }),
     onPageCreated: fixture.attachToPage,
   });
 
@@ -157,6 +159,7 @@ test('negative: unrelated POST without job_application payload cannot confirm su
   const worker = new BrowserWorker({
     statePath: path.join(root, 'state.json'),
     artifactDir: root,
+    stepsReporter: async () => ({ ok: true }),
     onPageCreated: fixture.attachToPage,
   });
 
@@ -177,6 +180,7 @@ test('negative: non-2xx submission response (422/500) cannot confirm even when c
   const worker = new BrowserWorker({
     statePath: path.join(root, 'state.json'),
     artifactDir: root,
+    stepsReporter: async () => ({ ok: true }),
     onPageCreated: fixture.attachToPage,
   });
 
@@ -197,6 +201,7 @@ test('negative: missing .confirmation container fails structural confirmation', 
   const worker = new BrowserWorker({
     statePath: path.join(root, 'state.json'),
     artifactDir: root,
+    stepsReporter: async () => ({ ok: true }),
     onPageCreated: fixture.attachToPage,
   });
 
@@ -220,6 +225,7 @@ test('negative: missing confirmation ID or requisition ID leaves confirmationNum
   const worker = new BrowserWorker({
     statePath: path.join(root, 'state.json'),
     artifactDir: root,
+    stepsReporter: async () => ({ ok: true }),
     onPageCreated: fixture.attachToPage,
   });
 
@@ -259,6 +265,7 @@ test('negative: CAPTCHA on page triggers HardStopError before submit attempt', a
   const worker = new BrowserWorker({
     statePath: path.join(root, 'state.json'),
     artifactDir: root,
+    stepsReporter: async () => ({ ok: true }),
     onPageCreated: fixture.attachToPage,
   });
 
@@ -279,6 +286,7 @@ test('negative: crash before click and crash after click refuse automatic retry 
     const firstWorker = new BrowserWorker({
       statePath: path.join(root, 'state.json'),
       artifactDir: root,
+      stepsReporter: async () => ({ ok: true }),
       onPageCreated: fixture.attachToPage,
     });
 
@@ -293,6 +301,7 @@ test('negative: crash before click and crash after click refuse automatic retry 
       const secondWorker = new BrowserWorker({
         statePath: path.join(root, 'state.json'),
         artifactDir: root,
+        stepsReporter: async () => ({ ok: true }),
         onPageCreated: fixture.attachToPage,
       });
       const resumed = await secondWorker.execute(plan, { approve: true });
@@ -358,6 +367,7 @@ test('executePollCycle materializes backend Greenhouse artifacts and POSTs captu
   };
 
   let completionBody = null;
+  let preSubmitFenceBody = null;
   const backendServer = http.createServer(async (req, res) => {
     const reqUrl = new URL(req.url, 'http://127.0.0.1');
     const chunks = [];
@@ -390,6 +400,16 @@ test('executePollCycle materializes backend Greenhouse artifacts and POSTs captu
       return;
     }
     if (req.method === 'POST' && reqUrl.pathname === `/api/v1/automation/plans/${planId}/heartbeat`) {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    if (req.method === 'POST' && reqUrl.pathname === `/api/v1/automation/plans/${planId}/steps`) {
+      const stepBody = JSON.parse(bodyText);
+      if (stepBody?.result?.phase === 'PRE_SUBMIT_ATTEMPTING') {
+        assert.equal(fixture.submissions.length, 0, 'PRE_SUBMIT_ATTEMPTING fence must be requested before browser click');
+        preSubmitFenceBody = stepBody;
+      }
       res.writeHead(204);
       res.end();
       return;
@@ -437,6 +457,9 @@ test('executePollCycle materializes backend Greenhouse artifacts and POSTs captu
     });
 
     assert.equal(cycleResult.status, 'COMPLETED');
+    assert.ok(preSubmitFenceBody, 'GREENHOUSE executePollCycle must call /steps PRE_SUBMIT_ATTEMPTING before clicking');
+    assert.equal(preSubmitFenceBody.result.atsPlatform, 'GREENHOUSE');
+    assert.equal(preSubmitFenceBody.result.stepType, 'REAL_SUBMIT_CLICK');
     assert.equal(completionBody.outcome, 'SUBMITTED');
     assert.equal(completionBody.result.length, 1);
     const entry = completionBody.result[0];
@@ -476,6 +499,7 @@ test('negative: login wall after submit triggers HardStopError and mismatched po
   const worker1 = new BrowserWorker({
     statePath: path.join(root1, 'state.json'),
     artifactDir: root1,
+    stepsReporter: async () => ({ ok: true }),
     onPageCreated: loginFixture.attachToPage,
   });
 
@@ -492,6 +516,7 @@ test('negative: login wall after submit triggers HardStopError and mismatched po
   const worker2 = new BrowserWorker({
     statePath: path.join(root2, 'state.json'),
     artifactDir: root2,
+    stepsReporter: async () => ({ ok: true }),
     onPageCreated: wrongPathFixture.attachToPage,
   });
 
@@ -515,6 +540,7 @@ test('negative: hidden inline script in confirmation DOM is stripped from contai
   const worker = new BrowserWorker({
     statePath: path.join(root, 'state.json'),
     artifactDir: root,
+    stepsReporter: async () => ({ ok: true }),
     onPageCreated: fixture.attachToPage,
   });
 
@@ -532,6 +558,7 @@ test('negative: hidden inline script in confirmation DOM is stripped from contai
     const workerTamper = new BrowserWorker({
       statePath: path.join(root, 'state-tamper.json'),
       artifactDir: root,
+      stepsReporter: async () => ({ ok: true }),
       onPageCreated: fixture.attachToPage,
     });
     await assert.rejects(

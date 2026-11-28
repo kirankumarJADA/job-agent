@@ -81,6 +81,23 @@ public class ApplyPackageGuard {
         invalidateForApplication(profileId, applicationId, reason);
     }
 
+    public void invalidateForProfile(UUID profileId, String reason) {
+        if (profileId == null) return;
+        int invalidated;
+        try {
+            invalidated = plans.invalidateApprovalsForProfile(profileId);
+        } catch (Exception e) {
+            log.warn("Could not invalidate profile approvals for profile {}: {}", profileId, e.getMessage());
+            return;
+        }
+        if (invalidated <= 0) return;
+        audit.write(new AuditEntry("SYSTEM", "PACKAGE_APPROVAL_INVALIDATED", "PROFILE", profileId,
+                Map.of("submitApproved", true),
+                Map.of("reason", reason == null ? "" : reason, "invalidatedCount", invalidated),
+                null, UuidV7.generate()));
+        log.info("Invalidated {} approval(s) for profile {} ({})", invalidated, profileId, reason);
+    }
+
     /** Withdraws any approved package for this application; audited. */
     public void invalidateForApplication(UUID profileId, UUID applicationId, String reason) {
         int invalidated;

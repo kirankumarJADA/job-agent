@@ -616,7 +616,19 @@ async function reportPlanStep(planId, body, { pollUrl, authHeadersFn }) {
     headers: { 'Content-Type': 'application/json', ...authHeadersFn() },
     body: JSON.stringify(body),
   });
-  if (res.status === 409) return { conflict: true };
+  if (res.status === 409) {
+    let payload = null;
+    try {
+      payload = await res.json();
+    } catch {
+      payload = null;
+    }
+    return {
+      conflict: true,
+      code: typeof payload?.code === 'string' ? payload.code : null,
+      error: typeof payload?.error === 'string' ? payload.error : null,
+    };
+  }
   if (!res.ok) throw new Error(`STEP_REPORT_FAILED:${res.status}`);
   return { ok: true };
 }
@@ -787,6 +799,9 @@ export async function executePollCycle({
       discoveredQuestionsReporter: activeQuestionsReporter,
       sessionKey,
     });
+    if (!runnerInstance.stepsReporter && activeStepsReporter) {
+      runnerInstance.stepsReporter = activeStepsReporter;
+    }
     runtimeObj.runner = runnerInstance;
     let missedHeartbeats = 0;
     heartbeat = setInterval(() => {

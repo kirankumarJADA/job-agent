@@ -364,31 +364,34 @@ export class BrowserWorker {
         // received it, so this is never retried automatically — clicking
         // again could be a genuine duplicate submission. Treat it as
         // requiring human review and move on without touching the page.
-        if (step.type === StepType.REAL_SUBMIT_CLICK && prior?.status === REAL_SUBMIT_ATTEMPTING) {
+        if (step.type === StepType.REAL_SUBMIT_CLICK
+            && (prior?.status === REAL_SUBMIT_ATTEMPTING || this.#hasBackendPreSubmitAttempt(plan))) {
           this.lastSubmitResult = {
             category: ConfirmationCategory.PRIOR_ATTEMPT_UNVERIFIED,
             confirmed: false,
-            evidence: 'a previous process started this submission click but its outcome was never durably recorded before it stopped; '
+            evidence: 'a previous process started this submission click or recorded a backend PRE_SUBMIT_ATTEMPTING checkpoint; '
               + 'the employer may already have received the application, so this is never retried automatically — human review is required before any further action',
           };
           continue;
         }
         // Same duplicate-submission protection as REAL_SUBMIT_CLICK above,
         // for Ashby's own real submit action.
-        if (step.type === StepType.ASHBY_SUBMIT_CLICK && prior?.status === REAL_SUBMIT_ATTEMPTING) {
+        if (step.type === StepType.ASHBY_SUBMIT_CLICK
+            && (prior?.status === REAL_SUBMIT_ATTEMPTING || this.#hasBackendPreSubmitAttempt(plan))) {
           this.lastAshbySubmitResult = {
             confirmed: false,
             category: 'PRIOR_ATTEMPT_UNVERIFIED',
-            evidence: 'a previous process started this submission click but its outcome was never durably recorded before it stopped; '
+            evidence: 'a previous process started this submission click or recorded a backend PRE_SUBMIT_ATTEMPTING checkpoint; '
               + 'the employer may already have received the application, so this is never retried automatically — human review is required before any further action',
           };
           continue;
         }
-        if (step.type === StepType.WORKDAY_SUBMIT_CLICK && prior?.status === REAL_SUBMIT_ATTEMPTING) {
+        if (step.type === StepType.WORKDAY_SUBMIT_CLICK
+            && (prior?.status === REAL_SUBMIT_ATTEMPTING || this.#hasBackendPreSubmitAttempt(plan))) {
           this.lastWorkdaySubmitResult = {
             confirmed: false,
             category: 'PRIOR_ATTEMPT_UNVERIFIED',
-            evidence: 'a previous process started this submission click but its outcome was never durably recorded before it stopped; '
+            evidence: 'a previous process started this submission click or recorded a backend PRE_SUBMIT_ATTEMPTING checkpoint; '
               + 'the employer may already have received the application, so this is never retried automatically — human review is required before any further action',
           };
           continue;
@@ -1098,6 +1101,13 @@ export class BrowserWorker {
     if (before.classification.confirmed) return before.classification;
     assertSafeSelector(p.selector);
 
+    const fence = await this.#acquireBackendPreSubmitFence(
+      page, plan, step, ConfirmationCategory.PRIOR_ATTEMPT_UNVERIFIED,
+    );
+    if (!fence.authorized) {
+      return fence.result;
+    }
+
     // Durable marker BEFORE the one real external side effect this codebase
     // ever performs: once this is written, a crash anywhere from here
     // through "outcome durably COMPLETED" leaves the step at this status
@@ -1629,6 +1639,11 @@ export class BrowserWorker {
       return { confirmed: false, category: 'FORM_NOT_FOUND', evidence: 'the Ashby submit button was not found on this page' };
     }
 
+    const fence = await this.#acquireBackendPreSubmitFence(page, plan, step, 'PRIOR_ATTEMPT_UNVERIFIED');
+    if (!fence.authorized) {
+      return fence.result;
+    }
+
     // Durable marker BEFORE the one real external side effect this step
     // ever performs: once this is written, a crash anywhere from here
     // through "outcome durably COMPLETED" leaves the step at this status
@@ -2149,6 +2164,11 @@ export class BrowserWorker {
       return { confirmed: false, category: WorkdaySubmissionCategory.FORM_NOT_FOUND, evidence: 'the Workday submit button was not found on this page' };
     }
 
+    const fence = await this.#acquireBackendPreSubmitFence(page, plan, step, 'PRIOR_ATTEMPT_UNVERIFIED');
+    if (!fence.authorized) {
+      return fence.result;
+    }
+
     this.store.markStep(plan.planId, step.id, REAL_SUBMIT_ATTEMPTING, { currentUrl: sanitizeUrl(page.url()) });
     if (this.failAfterAttemptMarker === step.id) {
       throw new Error(`SIMULATED_WORKER_CRASH_BEFORE_CLICK:${step.id}`);
@@ -2629,6 +2649,60 @@ export class BrowserWorker {
   #hasBackendPreSubmitAttempt(plan) {
     return Array.isArray(plan.completedSteps) && plan.completedSteps.some((s) =>
       s?.stepKey === 'pre-submit-attempting' || s?.result?.phase === 'PRE_SUBMIT_ATTEMPTING');
+  }
+
+  async #acquireBackendPreSubmitFence(page, plan, step, duplicateCategory = 'PRIOR_ATTEMPT_UNVERIFIED') {
+    if (this.#hasBackendPreSubmitAttempt(plan)) {
+      return {
+        authorized: false,
+        result: {
+          confirmed: false,
+          category: duplicateCategory,
+          evidence: 'backend already recorded PRE_SUBMIT_ATTEMPTING for this plan; human reconciliation is required before any further action',
+        },
+      };
+    }
+    if (typeof this.stepsReporter !== 'function') {
+      throw new HardStopError('PRE_SUBMIT_AUTHORIZATION_UNAVAILABLE', {
+        stepId: step.id,
+        reason: 'backend pre-submit authorization reporter is unavailable; failing closed without clicking submit',
+      });
+    }
+    const fenceResult = await this.stepsReporter(plan.planId, {
+      index: 99,
+      stepId: 'pre-submit-attempting',
+      status: 'RUNNING',
+      result: {
+        phase: 'PRE_SUBMIT_ATTEMPTING',
+        atsPlatform: plan.planType ?? null,
+        stepType: step.type,
+        currentUrl: sanitizeUrl(page.url()),
+      },
+      screenshotRef: null,
+    });
+    if (fenceResult?.conflict) {
+      const deniedCode = typeof fenceResult.code === 'string' && fenceResult.code.trim()
+        ? fenceResult.code.trim()
+        : null;
+      const preFenceDenial = Boolean(deniedCode && deniedCode !== 'DUPLICATE_PRE_SUBMIT_ATTEMPT');
+      return {
+        authorized: false,
+        result: {
+          confirmed: false,
+          category: preFenceDenial ? deniedCode : duplicateCategory,
+          authorizationDenied: preFenceDenial,
+          authorizationCode: deniedCode,
+          evidence: fenceResult.error || 'Backend refused PRE_SUBMIT_ATTEMPTING fence (409 conflict)',
+        },
+      };
+    }
+    if (fenceResult?.ok !== true) {
+      throw new HardStopError('PRE_SUBMIT_AUTHORIZATION_UNAVAILABLE', {
+        stepId: step.id,
+        reason: 'backend pre-submit authorization did not return an explicit ok authorization; failing closed',
+      });
+    }
+    return { authorized: true };
   }
 
   #validateUniversalPlan(plan) {
@@ -3338,23 +3412,14 @@ export class BrowserWorker {
       };
     }
 
-    this.store.markStep(plan.planId, step.id, REAL_SUBMIT_ATTEMPTING, { currentUrl: sanitizeUrl(page.url()) });
-    if (this.stepsReporter) {
-      const fenceResult = await this.stepsReporter(plan.planId, {
-        index: 99,
-        stepId: 'pre-submit-attempting',
-        status: 'RUNNING',
-        result: { phase: 'PRE_SUBMIT_ATTEMPTING', currentUrl: sanitizeUrl(page.url()) },
-        screenshotRef: null,
-      });
-      if (fenceResult?.conflict) {
-        return {
-          confirmed: false,
-          category: UniversalSubmitCategory.PRIOR_ATTEMPT_UNVERIFIED,
-          evidence: 'Backend refused PRE_SUBMIT_ATTEMPTING fence (409 conflict)',
-        };
-      }
+    const fence = await this.#acquireBackendPreSubmitFence(
+      page, plan, step, UniversalSubmitCategory.PRIOR_ATTEMPT_UNVERIFIED,
+    );
+    if (!fence.authorized) {
+      return fence.result;
     }
+
+    this.store.markStep(plan.planId, step.id, REAL_SUBMIT_ATTEMPTING, { currentUrl: sanitizeUrl(page.url()) });
     if (this.failAfterAttemptMarker === step.id) {
       throw new Error(`SIMULATED_WORKER_CRASH_BEFORE_CLICK:${step.id}`);
     }

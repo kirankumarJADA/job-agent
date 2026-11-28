@@ -57,7 +57,22 @@ public class ApplicationStatusService {
     private final ObjectMapper json;
     private final AuditLogWriter audit;
     private final NotificationService notifications;
-    public ApplicationStatusService(JdbcTemplate db, ObjectMapper json, AuditLogWriter audit, NotificationService notifications) { this.db=db; this.json=json; this.audit=audit; this.notifications=notifications; }
+    private final com.personal.jobagent.apply.ApplyPackageGuard packageGuard;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public ApplicationStatusService(JdbcTemplate db, ObjectMapper json, AuditLogWriter audit,
+                                    NotificationService notifications,
+                                    org.springframework.beans.factory.ObjectProvider<com.personal.jobagent.apply.ApplyPackageGuard> packageGuard) {
+        this.db = db;
+        this.json = json;
+        this.audit = audit;
+        this.notifications = notifications;
+        this.packageGuard = packageGuard == null ? null : packageGuard.getIfAvailable();
+    }
+
+    public ApplicationStatusService(JdbcTemplate db, ObjectMapper json, AuditLogWriter audit, NotificationService notifications) {
+        this(db, json, audit, notifications, null);
+    }
 
     @Transactional
     public TransitionResult apply(UUID ownerProfileId, UUID applicationId, String target, String eventKey, String actor, Map<String,Object> context) {
@@ -86,6 +101,10 @@ public class ApplicationStatusService {
             db.update("insert into application_events(id,application_id,type,payload,actor) values(?,?,?,?::jsonb,?)", UuidV7.generate(), applicationId, "STATUS_CHANGED", json.writeValueAsString(payload), actor == null ? "SYSTEM" : actor);
         } catch (Exception e) { throw new IllegalStateException("could not persist application transition: " + e.getMessage(), e); }
         audit.write(new AuditEntry(actor == null ? "SYSTEM" : actor, "APPLICATION_STATUS_CHANGED", "APPLICATION", applicationId, Map.of("status",current), Map.of("status",target,"event_key",eventKey), null, UuidV7.generate()));
+        if (packageGuard != null && ("WITHDRAWN".equals(target) || "FAILED".equals(target))) {
+            packageGuard.invalidateForApplication(ownerProfileId, applicationId,
+                    "application status changed to " + target);
+        }
         String event = notificationEvent(target);
         if (event != null) notifications.emit(new NotificationService.NotificationCommand(event,"APPLICATION",applicationId,Map.of("event_key",eventKey,"from",current,"to",target,"profile_id",ownerProfileId.toString()),UuidV7.generate(),null));
         return new TransitionResult(applicationId,current,target,true,false);

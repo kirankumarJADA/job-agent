@@ -875,7 +875,7 @@ class UniversalBrowserE2EIT {
                 ps.executeQuery().close();
             }
             var withdrawal = pool.submit(() -> planRepository.invalidateApproval(fencedFirst.appId()));
-            awaitLockWait("plan->>'planType' = 'UNIVERSAL'");
+            awaitLockWait("/* invalidate-running */");
             try (var ps = c.prepareStatement("""
                     insert into automation_steps(id, plan_id, step_key, step_index, status, result)
                     values (?, ?, 'pre-submit-attempting', 99, 'RUNNING', '{"phase":"PRE_SUBMIT_ATTEMPTING"}'::jsonb)

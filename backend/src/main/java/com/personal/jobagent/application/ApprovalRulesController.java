@@ -57,15 +57,26 @@ public class ApprovalRulesController {
     private final AuditLogWriter audit;
     private final OwnerContext ownerContext;
     private final QuotaService quotas;
+    private final com.personal.jobagent.apply.ApplyPackageGuard packageGuard;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public ApprovalRulesController(ApplicationDecisionService decisions,
+                                   AuditLogWriter audit,
+                                   OwnerContext ownerContext,
+                                   QuotaService quotas,
+                                   org.springframework.beans.factory.ObjectProvider<com.personal.jobagent.apply.ApplyPackageGuard> packageGuard) {
+        this.decisions = decisions;
+        this.audit = audit;
+        this.ownerContext = ownerContext;
+        this.quotas = quotas;
+        this.packageGuard = packageGuard == null ? null : packageGuard.getIfAvailable();
+    }
 
     public ApprovalRulesController(ApplicationDecisionService decisions,
                                    AuditLogWriter audit,
                                    OwnerContext ownerContext,
                                    QuotaService quotas) {
-        this.decisions = decisions;
-        this.audit = audit;
-        this.ownerContext = ownerContext;
-        this.quotas = quotas;
+        this(decisions, audit, ownerContext, quotas, null);
     }
 
     public record RuleRequest(Boolean autoApproveEnabled, Integer minScore) {}
@@ -131,8 +142,14 @@ public class ApprovalRulesController {
             return ResponseEntity.badRequest().body(Map.of("error", "a profile is required"));
         }
         try {
+            ApplicationDecisionService.RuleState before = decisions.ruleState(profileId);
             ApplicationDecisionService.UserApprovalRule saved =
                     decisions.saveRule(profileId, request.autoApproveEnabled(), request.minScore());
+            if (packageGuard != null && (!saved.autoApproveEnabled()
+                    || (before.availability() == ApplicationDecisionService.RuleAvailability.CONFIGURED
+                        && before.rule() != null && saved.minScore() > before.rule().minScore()))) {
+                packageGuard.invalidateForProfile(profileId, "approval rule disabled or threshold raised");
+            }
             audit.write(new AuditEntry(ownerContext.actorOr("user"), "APPROVAL_RULE_UPDATED", "PROFILE",
                     profileId, null,
                     Map.of("autoApproveEnabled", saved.autoApproveEnabled(), "minScore", saved.minScore()),

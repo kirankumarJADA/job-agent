@@ -30,13 +30,23 @@ public class PreferencesController {
     private final PreferenceSetRepository preferenceSetRepository;
     private final JdbcTemplate jdbcTemplate;
     private final AuditLogWriter auditLogWriter;
+    private final com.personal.jobagent.apply.ApplyPackageGuard packageGuard;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public PreferencesController(PreferenceSetRepository preferenceSetRepository,
-                                  JdbcTemplate jdbcTemplate,
-                                  AuditLogWriter auditLogWriter) {
+                                 JdbcTemplate jdbcTemplate,
+                                 AuditLogWriter auditLogWriter,
+                                 org.springframework.beans.factory.ObjectProvider<com.personal.jobagent.apply.ApplyPackageGuard> packageGuard) {
         this.preferenceSetRepository = preferenceSetRepository;
         this.jdbcTemplate = jdbcTemplate;
         this.auditLogWriter = auditLogWriter;
+        this.packageGuard = packageGuard == null ? null : packageGuard.getIfAvailable();
+    }
+
+    public PreferencesController(PreferenceSetRepository preferenceSetRepository,
+                                 JdbcTemplate jdbcTemplate,
+                                 AuditLogWriter auditLogWriter) {
+        this(preferenceSetRepository, jdbcTemplate, auditLogWriter, null);
     }
 
     @GetMapping("/api/v1/preferences")
@@ -72,6 +82,9 @@ public class PreferencesController {
 
         Map<String, Object> before = existing.get().scoringWeights();
         preferenceSetRepository.update(existing.get().id(), request);
+        if (packageGuard != null) {
+            packageGuard.invalidateForProfile(profileId, "preferences updated");
+        }
 
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String actor = authentication != null ? authentication.getName() : "UNKNOWN";

@@ -389,7 +389,11 @@ test('real Chromium validation 422 rejection and fake DOM banner without POST ne
     // A. Real Chromium HTTP 422 validation error during submit click -> VALIDATION_ERROR -> RECONCILIATION_REQUIRED
     const rejectFixture = await startUniversalEmployerFixture({ validationErrorOnSubmit: true });
     try {
-      const worker = new BrowserWorker({ statePath: path.join(root, 's-422.json'), artifactDir: root });
+      const worker = new BrowserWorker({
+        statePath: path.join(root, 's-422.json'),
+        artifactDir: root,
+        stepsReporter: async () => ({ ok: true }),
+      });
       const submitPlan = createUniversalPlan(root, rejectFixture.targetUrl, {
         planId: 'plan-422',
         withSubmit: true,
@@ -416,7 +420,11 @@ test('real Chromium validation 422 rejection and fake DOM banner without POST ne
     // B. Real Chromium fake confirmation banner with zero POST -> CONFIRMATION_UNOBSERVED -> RECONCILIATION_REQUIRED
     const fakeFixture = await startUniversalEmployerFixture({ fakeBannerWithoutPost: true });
     try {
-      const worker = new BrowserWorker({ statePath: path.join(root, 's-fake.json'), artifactDir: root });
+      const worker = new BrowserWorker({
+        statePath: path.join(root, 's-fake.json'),
+        artifactDir: root,
+        stepsReporter: async () => ({ ok: true }),
+      });
       const confirmed = [
         { answerId: 'a1', questionText: 'Are you legally authorized to work in the United Kingdom?', answerText: 'Yes' },
         { answerId: 'a2', questionText: 'What is your current notice period?', answerText: '4 weeks' },

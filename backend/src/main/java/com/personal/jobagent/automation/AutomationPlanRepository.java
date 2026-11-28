@@ -600,12 +600,14 @@ public class AutomationPlanRepository {
     public int invalidateApproval(UUID applicationId) {
         if (applicationId == null) return 0;
         int withdrawn = withdrawQueuedApproval(applicationId);
+        // Stage 3I Phase 7: enforce symmetrically across ALL submit-capable ATS adapters
+        // (GREENHOUSE, ASHBY, WORKDAY, UNIVERSAL), not only UNIVERSAL.
         // Row lock first, then the fence check in a new statement (READ COMMITTED: it sees a
         // fence committed by a concurrent recordPreSubmitAttemptIfAbsent that held the lock).
         List<UUID> running = db.query("""
+                /* invalidate-running */
                 select id from automation_plans
                 where application_id = ? and status = 'RUNNING' and submit_approved = true
-                  and plan->>'planType' = 'UNIVERSAL'
                 for update
                 """, (rs, n) -> (UUID) rs.getObject(1), applicationId);
         for (UUID planId : running) {
@@ -616,6 +618,96 @@ public class AutomationPlanRepository {
                     """, planId);
         }
         return withdrawn;
+    }
+
+    /** Invalidates queued and un-fenced RUNNING approvals across every plan owned by a profile. */
+    @Transactional
+    public int invalidateApprovalsForProfile(UUID profileId) {
+        if (profileId == null) return 0;
+        int withdrawn = db.update("""
+                update automation_plans
+                set submit_approved = false,
+                    status = 'AWAITING_APPROVAL',
+                    plan = case
+                        when jsonb_typeof(plan->'steps') = 'array' then
+                            jsonb_set(plan, '{steps}',
+                                coalesce((
+                                    select jsonb_agg(s order by ord)
+                                    from jsonb_array_elements(plan->'steps') with ordinality as t(s, ord)
+                                    where s->>'type' not in ('REAL_SUBMIT_CLICK', 'ASHBY_SUBMIT_CLICK', 'WORKDAY_SUBMIT_CLICK', 'UNIVERSAL_SUBMIT_CLICK', 'MOCK_SUBMIT')
+                                ), '[]'::jsonb))
+                        else plan
+                    end,
+                    updated_at = now()
+                where profile_id = ? and submit_approved = true and status in ('READY_TO_SUBMIT', 'PREPARED')
+                """, profileId);
+        List<UUID> running = db.query("""
+                select id from automation_plans
+                where profile_id = ? and status = 'RUNNING' and submit_approved = true
+                for update
+                """, (rs, n) -> (UUID) rs.getObject(1), profileId);
+        for (UUID planId : running) {
+            if (hasPreSubmitAttemptCheckpoint(planId)) continue;
+            withdrawn += db.update("""
+                    update automation_plans set submit_approved = false, updated_at = now()
+                    where id = ? and status = 'RUNNING' and submit_approved = true
+                    """, planId);
+        }
+        return withdrawn;
+    }
+
+    public enum WithdrawalStatus {
+        WITHDRAWN,
+        ALREADY_FENCED,
+        NOT_WITHDRAWABLE,
+        NOT_FOUND
+    }
+
+    /**
+     * Explicit candidate withdrawal of a plan's submit approval under plan-row lock.
+     * Queued plans return to {@code AWAITING_APPROVAL} with submit steps removed; running
+     * pre-fence plans clear {@code submit_approved=false}; plans already past the fence
+     * return {@link WithdrawalStatus#ALREADY_FENCED}.
+     */
+    @Transactional
+    public WithdrawalStatus withdrawPlanApproval(UUID planId, UUID profileId) {
+        if (planId == null || profileId == null) return WithdrawalStatus.NOT_FOUND;
+        List<PlanRow> locked = db.query(
+                "select " + PLAN_COLUMNS + " from automation_plans where id = ? and profile_id = ? for update",
+                (rs, n) -> mapRow(rs), planId, profileId);
+        if (locked.isEmpty()) return WithdrawalStatus.NOT_FOUND;
+        PlanRow plan = locked.get(0);
+        if (hasPreSubmitAttemptCheckpoint(planId) || "SUBMITTED".equals(plan.status())) {
+            return WithdrawalStatus.ALREADY_FENCED;
+        }
+        if ("READY_TO_SUBMIT".equals(plan.status()) || "PREPARED".equals(plan.status())) {
+            int updated = db.update("""
+                    update automation_plans
+                    set submit_approved = false,
+                        status = 'AWAITING_APPROVAL',
+                        plan = case
+                            when jsonb_typeof(plan->'steps') = 'array' then
+                                jsonb_set(plan, '{steps}',
+                                    coalesce((
+                                        select jsonb_agg(s order by ord)
+                                        from jsonb_array_elements(plan->'steps') with ordinality as t(s, ord)
+                                        where s->>'type' not in ('REAL_SUBMIT_CLICK', 'ASHBY_SUBMIT_CLICK', 'WORKDAY_SUBMIT_CLICK', 'UNIVERSAL_SUBMIT_CLICK', 'MOCK_SUBMIT')
+                                    ), '[]'::jsonb))
+                            else plan
+                        end,
+                        updated_at = now()
+                    where id = ? and profile_id = ? and submit_approved = true and status in ('READY_TO_SUBMIT', 'PREPARED')
+                    """, planId, profileId);
+            return updated == 1 ? WithdrawalStatus.WITHDRAWN : WithdrawalStatus.NOT_WITHDRAWABLE;
+        }
+        if ("RUNNING".equals(plan.status()) && plan.submitApproved()) {
+            int updated = db.update("""
+                    update automation_plans set submit_approved = false, updated_at = now()
+                    where id = ? and profile_id = ? and status = 'RUNNING' and submit_approved = true
+                    """, planId, profileId);
+            return updated == 1 ? WithdrawalStatus.WITHDRAWN : WithdrawalStatus.NOT_WITHDRAWABLE;
+        }
+        return WithdrawalStatus.NOT_WITHDRAWABLE;
     }
 
     private int withdrawQueuedApproval(UUID applicationId) {

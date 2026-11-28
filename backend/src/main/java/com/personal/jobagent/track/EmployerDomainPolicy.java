@@ -236,7 +236,7 @@ public class EmployerDomainPolicy {
         return candidate.equals(allowed) || candidate.endsWith("." + allowed);
     }
 
-    static String registrableDomain(String host) {
+    public static String registrableDomain(String host) {
         String clean = normalizeDomain(host);
         if (clean == null) return null;
         if (MULTI_TENANT_HOSTING_SUFFIXES.contains(clean)) return null;

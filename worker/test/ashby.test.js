@@ -90,6 +90,7 @@ function worker(root) {
 function routedWorker(root, pageHandler, apiHandler = null, opts = {}) {
   return new BrowserWorker({
     statePath: path.join(root, 'state.json'), artifactDir: root,
+    stepsReporter: async () => ({ ok: true }),
     onPageCreated: async (page) => {
       await page.route(`${APPLICATION_URL}**`, pageHandler);
       if (apiHandler) await page.route('https://api.ashbyhq.com/**', apiHandler);

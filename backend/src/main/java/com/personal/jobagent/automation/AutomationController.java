@@ -65,6 +65,7 @@ public class AutomationController {
     private final com.personal.jobagent.qa.ApplicationAnswerRepository answerRepository;
     private final MaintenanceModeService maintenanceMode;
     private final SubmissionCompletionService submissions;
+    private final PreSubmitAuthorizationService preSubmitAuthorization;
 
     @Autowired
     public AutomationController(AutomationPlanRepository plans,
@@ -83,7 +84,8 @@ public class AutomationController {
                                 @Autowired(required = false) MaintenanceModeService maintenanceMode,
                                 @Autowired(required = false) SubmissionCompletionService submissions,
                                 @Autowired(required = false) UniversalBrowserPlanService universalPlans,
-                                @Autowired(required = false) com.personal.jobagent.qa.ApplicationAnswerRepository answerRepository) {
+                                @Autowired(required = false) com.personal.jobagent.qa.ApplicationAnswerRepository answerRepository,
+                                @Autowired(required = false) PreSubmitAuthorizationService preSubmitAuthorization) {
         this.plans = plans;
         this.audit = audit;
         this.ownerContext = ownerContext;
@@ -101,6 +103,29 @@ public class AutomationController {
         this.submissions = submissions;
         this.universalPlans = universalPlans;
         this.answerRepository = answerRepository;
+        this.preSubmitAuthorization = preSubmitAuthorization;
+    }
+
+    public AutomationController(AutomationPlanRepository plans,
+                                AuditLogWriter audit,
+                                OwnerContext ownerContext,
+                                String workerToken,
+                                ExecutionPackageService executionPackages,
+                                NotificationService notifications,
+                                AutomationMetrics metrics,
+                                com.personal.jobagent.apply.ApplyReadinessService applyReadiness,
+                                ApplyDocumentSelector documentSelector,
+                                com.personal.jobagent.application.ApplicationStatusService applicationStatus,
+                                GreenhouseExecutionPlanService greenhousePlans,
+                                AshbyExecutionPlanService ashbyPlans,
+                                WorkdayExecutionPlanService workdayPlans,
+                                MaintenanceModeService maintenanceMode,
+                                SubmissionCompletionService submissions,
+                                UniversalBrowserPlanService universalPlans,
+                                com.personal.jobagent.qa.ApplicationAnswerRepository answerRepository) {
+        this(plans, audit, ownerContext, workerToken, executionPackages, notifications, metrics,
+                applyReadiness, documentSelector, applicationStatus, greenhousePlans, ashbyPlans, workdayPlans,
+                maintenanceMode, submissions, universalPlans, answerRepository, null);
     }
 
     public AutomationController(AutomationPlanRepository plans,
@@ -336,27 +361,61 @@ public class AutomationController {
         boolean isPreSubmitFence = phase == UniversalExecutionPhase.PRE_SUBMIT_ATTEMPTING
                 || "pre-submit-attempting".equals(r.stepId());
         if (isPreSubmitFence) {
-            // Stage 3F (Workstream G): one atomic insert-if-absent under the fixed fence key, so
-            // two concurrent reports can never both be accepted (the unique (plan_id, step_key)
-            // index decides), and a plan that is not RUNNING can never record one.
-            boolean recorded = plans.recordPreSubmitAttemptIfAbsent(id, r.index(), r.status(), resultMap, r.screenshotRef());
-            if (recorded) {
+            if (preSubmitAuthorization == null) {
+                return ResponseEntity.status(503).body(Map.of(
+                        "error", "pre-submit authorization service is unavailable",
+                        "code", "PRE_SUBMIT_AUTH_UNAVAILABLE"));
+            }
+            PreSubmitAuthorizationService.AuthorizationOutcome auth =
+                    preSubmitAuthorization.authorizeAndFence(id, r.index(), r.status(), resultMap, r.screenshotRef());
+            if (auth.authorized()) {
                 return ResponseEntity.noContent().build();
             }
-            // Stage 3I Phase 6: the fence also needs the human submit approval to still stand. Any
-            // 409 stops the worker before the click; the code only says which precondition failed.
-            boolean approvalWithdrawn = plans.findById(id)
-                    .map(p -> "RUNNING".equals(p.status()) && !p.submitApproved())
-                    .orElse(false) && !plans.hasPreSubmitAttemptCheckpoint(id);
-            return ResponseEntity.status(409).body(approvalWithdrawn
-                    ? Map.of("error", "the submit approval was withdrawn before the submission click",
-                             "code", "SUBMIT_APPROVAL_WITHDRAWN")
-                    : Map.of("error", "a pre-submit attempt checkpoint already exists or plan is not RUNNING",
-                             "code", "DUPLICATE_PRE_SUBMIT_ATTEMPT"));
+            if (auth.httpStatus() == 404) {
+                return notFound();
+            }
+            return ResponseEntity.status(auth.httpStatus()).body(Map.of(
+                    "error", auth.error(),
+                    "code", auth.code()));
         }
         return plans.appendStep(id, r.index(), r.stepId(), r.status(), resultMap, r.screenshotRef())
                 ? ResponseEntity.noContent().build()
                 : ResponseEntity.notFound().build();
+    }
+
+    /**
+     * Explicit candidate action to withdraw submit approval from either a queued
+     * ({@code READY_TO_SUBMIT}/{@code PREPARED}) plan or an in-flight ({@code RUNNING})
+     * pre-fence plan across any submit-capable ATS adapter.
+     */
+    @PostMapping("/plans/{id}/withdraw-approval")
+    public ResponseEntity<?> withdrawApproval(@PathVariable UUID id) {
+        if (!mayActOnPlan(id)) {
+            return notFound();
+        }
+        if (ownerContext.isWorkerRequest()) {
+            return ResponseEntity.status(403).body(Map.of("error", "candidate authentication required"));
+        }
+        UUID profileId = ownerContext.profileIdOrNull();
+        if (profileId == null) {
+            return ResponseEntity.status(403).body(Map.of("error", "a profile is required"));
+        }
+        AutomationPlanRepository.WithdrawalStatus outcome = plans.withdrawPlanApproval(id, profileId);
+        return switch (outcome) {
+            case WITHDRAWN -> {
+                audit.write(new AuditEntry(ownerContext.actorOr("user"), "SUBMIT_APPROVAL_WITHDRAWN",
+                        "AUTOMATION_PLAN", id, Map.of("submitApproved", true),
+                        Map.of("submitApproved", false), null, UuidV7.generate()));
+                yield ResponseEntity.ok(Map.of("withdrawn", true, "planId", id.toString()));
+            }
+            case ALREADY_FENCED -> ResponseEntity.status(409).body(Map.of(
+                    "error", "submission attempt has already crossed the pre-submit fence or completed",
+                    "code", "PRE_SUBMIT_ATTEMPT_ALREADY_STARTED"));
+            case NOT_WITHDRAWABLE -> ResponseEntity.status(409).body(Map.of(
+                    "error", "plan does not have an active withdrawable submit approval",
+                    "code", "APPROVAL_NOT_WITHDRAWABLE"));
+            case NOT_FOUND -> notFound();
+        };
     }
 
     /**
@@ -909,6 +968,9 @@ public class AutomationController {
      * human-readable rejection reason.
      */
     private String approvalPrecondition(AutomationPlanRepository.PlanRow plan) {
+        if (plans.hasPreSubmitAttemptCheckpoint(plan.id())) {
+            return "a pre-submit attempt checkpoint already exists for this plan";
+        }
         Map<String, Object> stored = plan.plan() == null ? Map.of() : plan.plan();
         if ("ASHBY".equals(stored.get("planType"))) {
             return ashbyApprovalPrecondition(plan, stored);
@@ -1130,41 +1192,11 @@ public class AutomationController {
      */
     private String packageDrift(AutomationPlanRepository.PlanRow plan, UUID profileId) {
         Map<String, Object> stored = plan.plan() == null ? Map.of() : plan.plan();
-        Map<String, Object> pkg = asObjectMap(stored.get("package"));
         Map<String, Object> correlation = asObjectMap(stored.get("correlation"));
         UUID applicationId = uuid(correlation.get("applicationId"));
         UUID jobId = uuid(correlation.get("jobId"));
-        if (applicationId == null || jobId == null) return "plan correlation is incomplete";
-        ApplyDocumentSelector.DocumentSelection selection = documentSelector.select(profileId, jobId, applicationId);
-        if (selection.blocked()) {
-            Object first = selection.blockers().isEmpty() ? null : selection.blockers().get(0).get("message");
-            return "the package's documents are no longer usable: " + first;
-        }
-        Map<String, Object> cv = asObjectMap(pkg.get("cv"));
-        if (!cv.isEmpty()) {
-            if (selection.cv() == null) {
-                return "the CV in this package is no longer selected for this application; rebuild the package";
-            }
-            if (!String.valueOf(selection.cv().versionId()).equals(cv.get("versionId"))) {
-                return "the CV attached to this package is no longer the reviewed version; rebuild the package";
-            }
-        }
-        Map<String, Object> cover = asObjectMap(pkg.get("coverLetter"));
-        if (!cover.isEmpty()) {
-            if (selection.coverLetter() == null) {
-                return "the cover letter in this package is no longer approved for this application; rebuild the package";
-            }
-            if (!String.valueOf(selection.coverLetter().versionId()).equals(cover.get("versionId"))) {
-                return "the cover letter in this package is no longer the approved version; rebuild the package";
-            }
-        }
-        List<Map<String, Object>> packagedAnswers = pkg.get("answers") instanceof List<?> list
-                ? list.stream().filter(o -> o instanceof Map).map(this::asObjectMap).toList()
-                : List.of();
-        if (!executionPackages.answersStillCurrent(profileId, applicationId, jobId, packagedAnswers)) {
-            return "an answer in this package has changed since it was built; rebuild the package";
-        }
-        return null;
+        return PreSubmitAuthorizationService.detectPackageDrift(
+                profileId, applicationId, jobId, stored, documentSelector, executionPackages);
     }
 
     @SuppressWarnings("unchecked")

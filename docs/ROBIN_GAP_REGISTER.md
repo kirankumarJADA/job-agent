@@ -2,11 +2,23 @@
 
 Each entry records evidence and status. Severity: **P0** user-facing truthfulness/safety defect; **P1** blocks a core promise or phase exit; **P2** genuine but not a current phase blocker.
 
-**Updated 2026-11-17** after PR #11 merged (`199e051`); appended **2026-11-26** with Stage 3G preparation, Stage 3H receipt architecture audit findings, Stage 3I Phase 0 security remediation, Stage 3I Phase 1 Cloudflare `message.headers` trust-boundary hardening + multi-channel receipt architecture, Stage 3I Phase 2 durable receipt linking & reconciliation (V071), and **2026-11-27** Stage 3I Phase 3 (`V072`), Phase 4 independent audit (`2a762af`), **Stage 3I Phase 5 critical remediation (`V073`)**, and **Stage 3I Phase 6 independent verification** on `integration/wave-3`. Dated production observations below are historical evidence, not a statement of current production state.
+**Updated 2026-11-17** after PR #11 merged (`199e051`); appended **2026-11-26** with Stage 3G preparation, Stage 3H receipt architecture audit findings, Stage 3I Phase 0 security remediation, Stage 3I Phase 1 Cloudflare `message.headers` trust-boundary hardening + multi-channel receipt architecture, Stage 3I Phase 2 durable receipt linking & reconciliation (V071), and **2026-11-27/28** Stage 3I Phase 3 (`V072`), Phase 4 independent audit (`2a762af`), **Stage 3I Phase 5 critical remediation (`V073`)**, **Stage 3I Phase 6 independent verification**, and **Stage 3I Phase 7 universal pre-submit authorization fence parity** on `integration/wave-3`. Dated production observations below are historical evidence, not a statement of current production state.
 
 ---
 
-## P1 — Stage 3I Phase 6 Independent Verification (2026-11-27) — **P1 FIXES REPRODUCED; 1 NEW P1 FOUND & FIXED (UNIVERSAL); LEGACY-ADAPTER P1 OPEN; EXTERNAL VALIDATION `NO-GO`**
+## P1 — Stage 3I Phase 7 Pre-Submit Authorization Fence Parity (2026-11-28) — **LEGACY-ADAPTER P1 FENCE GAP REMEDIATED ON `integration/wave-3` (UNMERGED); EXTERNAL VALIDATION `NO-GO`**
+
+**Evidence:** `docs/STAGE_3I_PHASE_7_PRE_SUBMIT_AUTHORIZATION_FENCE_PARITY.md` (`integration/wave-3`, PR `#21` `OPEN` / `DRAFT`).
+
+- **Shared backend pre-submit authority (`PreSubmitAuthorizationService` + `AutomationController#step`):** All four submit-capable adapters (`GREENHOUSE`, `ASHBY`, `WORKDAY`, `UNIVERSAL`) now converge on one transactional, row-locked backend authorization fence (`PRE_SUBMIT_ATTEMPTING`) immediately before irreversible browser submission, enforcing worker authentication (`machineOrLocalDev`), plan/application/job/profile binding, employer domain / `currentUrl` origin consistency, non-submit adapter rejection (`ZOHO_RECRUIT`, `LEVER`, `INSPECTION`), live `ApplyReadinessService` + `ApplyDocumentSelector` + `ExecutionPackageService` package integrity, standing auto-apply / eligibility rules (`HardFilterService`, `user_approval_rules`, `work_eligibility`), and fail-closed `503` behavior when backend verification dependencies are unavailable or in maintenance mode.
+- **Symmetric invalidation & candidate withdrawal (`AutomationPlanRepository` + `ApplyPackageGuard`):** Removed the `planType = 'UNIVERSAL'` filter on `invalidateApproval` so running pre-fence plans across `GREENHOUSE`, `ASHBY`, `WORKDAY`, and `UNIVERSAL` all withdraw `submit_approved=false` atomically. Added candidate `POST /api/v1/automation/plans/{id}/withdraw-approval` plus `ApplyPackageGuard` invalidation hooks on `ApplicationStatusService` (`WITHDRAWN`/`FAILED`), `PreferencesController#update`, `ApprovalRulesController#put` (disabled/tightened threshold), and `ProfileController#updateProfile` (`workEligibility` changes).
+- **Worker fence parity (`BrowserWorker.#acquireBackendPreSubmitFence` + `worker.js`):** Extracted one shared pre-click fence helper invoked before browser click across `#runRealSubmitClick` (`GREENHOUSE`), `#runAshbySubmit` (`ASHBY`), `#runWorkdaySubmitClick` (`WORKDAY`), and `#runUniversalSubmitClick` (`UNIVERSAL`), plus `#hasBackendPreSubmitAttempt(plan)` crash-recovery short-circuiting in the execution loop for all four adapters, `reportPlanStep` 409 error code forwarding, automatic `stepsReporter` attachment on injected runners in `executePollCycle`, and fail-closed `PRE_SUBMIT_AUTHORIZATION_UNAVAILABLE` whenever `stepsReporter` is omitted.
+- **Migrations:** `V001`–`V073` are byte-identical (`0` diff); no `V074` migration required.
+- **Residual & Gate:** No real employer portal has been exercised. External validation remains **`BLOCKED / NO-GO`** until Stage 3G operator authorization, synthetic staging, and secrets are provisioned.
+
+---
+
+## P1 — Stage 3I Phase 6 Independent Verification (2026-11-27) — **P1 FIXES REPRODUCED; 1 NEW P1 FOUND & FIXED (UNIVERSAL); LEGACY-ADAPTER P1 REMEDIATED IN PHASE 7; EXTERNAL VALIDATION `NO-GO`**
 
 **Evidence:** `docs/STAGE_3I_PHASE_6_INDEPENDENT_VERIFICATION_AND_INTEGRATION_AUDIT.md` (`integration/wave-3`, not merged; PR `#21` `OPEN` / `DRAFT`). PostgreSQL 16 `*IT` suites were run locally in this phase as well as in CI.
 
@@ -20,8 +32,8 @@ Each entry records evidence and status. Severity: **P0** user-facing truthfulnes
 - **P2-7 FIXED:** Universal `submittedIdentity` now comes from the prepared package's `profileFacts`, carries a `source` provenance and keeps `BROWSER_OBSERVED`. **P2-8 FIXED:** a SUBMITTED plan always represents the application in TRACK (`TrackPlanSelectionIT`).
 - **NEW P1 FOUND & FIXED (UNIVERSAL):** an approval withdrawn after the worker claimed the submit pass, but before the `PRE_SUBMIT_ATTEMPTING` fence, did not stop the click. The fence now requires `submit_approved` under a plan-row lock, and `invalidateApproval` withdraws RUNNING pre-fence approvals. Proven on real PostgreSQL in both lock orders, with a mutation check.
 - **Worker navigation race FOUND BY CI & FIXED:** `inspectLiveFormDom` threw `Execution context was destroyed` when a navigation committed mid-inspection, which aborted the run. It now retries the read-only inspection on the settled page, at most 3 times and for navigation errors only.
-- **Still open:**
-  - **P1** — Greenhouse, Ashby and Workday have no backend pre-submit fence, so the same window remains for those adapters.
+- **Still open (as of Phase 6 baseline; legacy-adapter P1 resolved in Phase 7 above):**
+  - **P1 (Resolved in Phase 7)** — Greenhouse, Ashby and Workday lacked a backend pre-submit fence; now enforced across all four submit-capable adapters (`GREENHOUSE`, `ASHBY`, `WORKDAY`, `UNIVERSAL`).
   - **P2** — no cross-process worker-plus-backend end-to-end test; no apply-time posting liveness check; hard filters are lenient on missing data; employer status comes from email only.
   - **P3** — a withdrawn-approval fence is reported as reconciliation.
 - **Gate:** auto-apply never submits; every real submission needs `approve-submit` plus `prepare-submit` for that application. No real employer site has been exercised. External validation remains **`BLOCKED / NO-GO`**. No migration was added; `V001`–`V073` are untouched.
