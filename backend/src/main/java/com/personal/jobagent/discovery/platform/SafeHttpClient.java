@@ -140,6 +140,15 @@ public class SafeHttpClient {
         return new SafeHttpClient(new JdkTransport(), new AddressGuard(), settings, Thread::sleep);
     }
 
+    /**
+     * Constructs a live client with an explicit {@link AddressGuard} (e.g. permitting
+     * local loopback test fixtures when {@code app.sandbox.allow-local-test-hosts=true}
+     * while continuing to block private, metadata, and link-local addresses).
+     */
+    public static SafeHttpClient forGuard(AddressGuard guard, Settings settings) {
+        return new SafeHttpClient(new JdkTransport(), guard, settings, Thread::sleep);
+    }
+
     public int requestsMade() {
         return requestsMade;
     }

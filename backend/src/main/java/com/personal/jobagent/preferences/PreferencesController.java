@@ -80,8 +80,30 @@ public class PreferencesController {
             return notFound(httpRequest, "No active preference set exists for this profile.");
         }
 
+        // Preserve any existing explicit standingAutoSubmit policy unless the caller supplied one;
+        // if supplied, normalize through StandingAutoApplyPolicy so out-of-range/malformed values fail closed.
+        Map<String, Object> mergedExtraFilters = new java.util.LinkedHashMap<>(
+                request.extraFilters() != null ? request.extraFilters() : java.util.Map.of());
+        if (request.extraFilters() != null && request.extraFilters().containsKey(StandingAutoApplyPolicy.EXTRA_FILTERS_KEY)) {
+            mergedExtraFilters.put(
+                    StandingAutoApplyPolicy.EXTRA_FILTERS_KEY,
+                    StandingAutoApplyPolicy.fromExtraFilters(request.extraFilters()).toMap());
+        } else if (existing.get().extraFilters() != null
+                && existing.get().extraFilters().containsKey(StandingAutoApplyPolicy.EXTRA_FILTERS_KEY)) {
+            mergedExtraFilters.put(
+                    StandingAutoApplyPolicy.EXTRA_FILTERS_KEY,
+                    existing.get().extraFilters().get(StandingAutoApplyPolicy.EXTRA_FILTERS_KEY));
+        }
+        PreferenceSetRecord effectiveRequest = new PreferenceSetRecord(
+                request.id(), request.profileId(), request.titles(), request.keywordsInclude(),
+                request.keywordsExclude(), request.requiredSkills(), request.locationsAllowed(),
+                request.remoteTypes(), request.employmentTypes(), request.experienceLevels(),
+                request.salaryMinGbp(), request.sponsorshipPolicy(), request.companySizePref(),
+                request.industryPref(), request.applicationMode(), request.scoringWeights(),
+                mergedExtraFilters, request.isActive());
+
         Map<String, Object> before = existing.get().scoringWeights();
-        preferenceSetRepository.update(existing.get().id(), request);
+        preferenceSetRepository.update(existing.get().id(), effectiveRequest);
         if (packageGuard != null) {
             packageGuard.invalidateForProfile(profileId, "preferences updated");
         }

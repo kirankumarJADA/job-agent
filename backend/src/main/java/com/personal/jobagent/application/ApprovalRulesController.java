@@ -2,8 +2,13 @@ package com.personal.jobagent.application;
 
 import com.personal.jobagent.audit.AuditEntry;
 import com.personal.jobagent.audit.AuditLogWriter;
+import com.personal.jobagent.automation.AutomationPlanRepository;
+import com.personal.jobagent.automation.StandingAuthorizationService;
 import com.personal.jobagent.common.QuotaService;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.preferences.PreferenceSetRecord;
+import com.personal.jobagent.preferences.PreferenceSetRepository;
+import com.personal.jobagent.preferences.StandingAutoApplyPolicy;
 import com.personal.jobagent.security.OwnerContext;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
@@ -11,6 +16,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -58,28 +64,62 @@ public class ApprovalRulesController {
     private final OwnerContext ownerContext;
     private final QuotaService quotas;
     private final com.personal.jobagent.apply.ApplyPackageGuard packageGuard;
+    private final PreferenceSetRepository preferenceSets;
+    private final AutomationPlanRepository automationPlans;
 
     @org.springframework.beans.factory.annotation.Autowired
     public ApprovalRulesController(ApplicationDecisionService decisions,
                                    AuditLogWriter audit,
                                    OwnerContext ownerContext,
                                    QuotaService quotas,
-                                   org.springframework.beans.factory.ObjectProvider<com.personal.jobagent.apply.ApplyPackageGuard> packageGuard) {
+                                   org.springframework.beans.factory.ObjectProvider<com.personal.jobagent.apply.ApplyPackageGuard> packageGuard,
+                                   org.springframework.beans.factory.ObjectProvider<PreferenceSetRepository> preferenceSets,
+                                   org.springframework.beans.factory.ObjectProvider<AutomationPlanRepository> automationPlans) {
         this.decisions = decisions;
         this.audit = audit;
         this.ownerContext = ownerContext;
         this.quotas = quotas;
         this.packageGuard = packageGuard == null ? null : packageGuard.getIfAvailable();
+        this.preferenceSets = preferenceSets == null ? null : preferenceSets.getIfAvailable();
+        this.automationPlans = automationPlans == null ? null : automationPlans.getIfAvailable();
+    }
+
+    public ApprovalRulesController(ApplicationDecisionService decisions,
+                                   AuditLogWriter audit,
+                                   OwnerContext ownerContext,
+                                   QuotaService quotas,
+                                   org.springframework.beans.factory.ObjectProvider<com.personal.jobagent.apply.ApplyPackageGuard> packageGuard) {
+        this(decisions, audit, ownerContext, quotas, packageGuard, null, null);
     }
 
     public ApprovalRulesController(ApplicationDecisionService decisions,
                                    AuditLogWriter audit,
                                    OwnerContext ownerContext,
                                    QuotaService quotas) {
-        this(decisions, audit, ownerContext, quotas, null);
+        this(decisions, audit, ownerContext, quotas, null, null, null);
     }
 
-    public record RuleRequest(Boolean autoApproveEnabled, Integer minScore) {}
+    public record RuleRequest(
+            Boolean autoApproveEnabled,
+            Integer minScore,
+            Boolean standingAutoSubmitEnabled,
+            Integer standingMinScore,
+            Integer dailySubmitCap,
+            List<String> allowedCountries,
+            List<String> permittedRoles
+    ) {
+        public RuleRequest(Boolean autoApproveEnabled, Integer minScore) {
+            this(autoApproveEnabled, minScore, null, null, null, null, null);
+        }
+
+        boolean hasStandingUpdates() {
+            return standingAutoSubmitEnabled != null
+                    || standingMinScore != null
+                    || dailySubmitCap != null
+                    || allowedCountries != null
+                    || permittedRoles != null;
+        }
+    }
 
     @GetMapping
     public ResponseEntity<?> get() {
@@ -104,7 +144,24 @@ public class ApprovalRulesController {
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(body);
         }
 
-        return ResponseEntity.ok(readableBody(state, applicationMode));
+        Map<String, Object> body = readableBody(state, applicationMode);
+        if (preferenceSets != null) {
+            PreferenceSetRecord prefs = preferenceSets.findActiveByProfileId(profileId).orElse(null);
+            StandingAutoApplyPolicy policy = prefs == null
+                    ? StandingAutoApplyPolicy.disabled()
+                    : StandingAutoApplyPolicy.fromExtraFilters(prefs.extraFilters());
+            QuotaService.QuotaCheckResult submitQuota = quotas.check(
+                    profileId, StandingAuthorizationService.STANDING_SUBMIT_QUOTA_KEY);
+            int cap = policy.dailySubmitCap();
+            int remaining = Math.max(0, cap - (int) submitQuota.used());
+            Map<String, Object> standingMap = new LinkedHashMap<>(policy.toMap());
+            standingMap.put("dailySubmitQuota", Map.of(
+                    "used", submitQuota.used(),
+                    "limit", cap,
+                    "remaining", remaining));
+            body.put("standingAutoSubmit", standingMap);
+        }
+        return ResponseEntity.ok(body);
     }
 
     /**
@@ -142,23 +199,94 @@ public class ApprovalRulesController {
             return ResponseEntity.badRequest().body(Map.of("error", "a profile is required"));
         }
         try {
+            if (request.standingMinScore() != null
+                    && (request.standingMinScore() < 1 || request.standingMinScore() > 100)) {
+                return ResponseEntity.badRequest().body(Map.of("error", "standingMinScore must be between 1 and 100"));
+            }
+            if (request.dailySubmitCap() != null
+                    && (request.dailySubmitCap() < 1 || request.dailySubmitCap() > StandingAutoApplyPolicy.MAX_DAILY_SUBMIT_CAP)) {
+                return ResponseEntity.badRequest().body(Map.of("error",
+                        "dailySubmitCap must be between 1 and " + StandingAutoApplyPolicy.MAX_DAILY_SUBMIT_CAP));
+            }
+
             ApplicationDecisionService.RuleState before = decisions.ruleState(profileId);
             ApplicationDecisionService.UserApprovalRule saved =
                     decisions.saveRule(profileId, request.autoApproveEnabled(), request.minScore());
-            if (packageGuard != null && (!saved.autoApproveEnabled()
-                    || (before.availability() == ApplicationDecisionService.RuleAvailability.CONFIGURED
-                        && before.rule() != null && saved.minScore() > before.rule().minScore()))) {
-                packageGuard.invalidateForProfile(profileId, "approval rule disabled or threshold raised");
+
+            StandingAutoApplyPolicy savedStanding = null;
+            boolean standingTightened = false;
+            if (request.hasStandingUpdates()) {
+                if (preferenceSets == null) {
+                    return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                            .body(Map.of("error", "preferences repository is unavailable"));
+                }
+                PreferenceSetRecord existing = preferenceSets.findActiveByProfileId(profileId).orElse(null);
+                if (existing == null) {
+                    return ResponseEntity.badRequest()
+                            .body(Map.of("error", "an active preference set is required to update standing auto-submit settings"));
+                }
+                StandingAutoApplyPolicy prev = StandingAutoApplyPolicy.fromExtraFilters(existing.extraFilters());
+                boolean nextEnabled = request.standingAutoSubmitEnabled() != null
+                        ? request.standingAutoSubmitEnabled() : prev.enabled();
+                int nextScore = request.standingMinScore() != null
+                        ? request.standingMinScore() : prev.minScore();
+                int nextCap = request.dailySubmitCap() != null
+                        ? request.dailySubmitCap() : prev.dailySubmitCap();
+                List<String> nextCountries = request.allowedCountries() != null
+                        ? request.allowedCountries() : prev.allowedCountries();
+                List<String> nextRoles = request.permittedRoles() != null
+                        ? request.permittedRoles() : prev.permittedRoles();
+                savedStanding = new StandingAutoApplyPolicy(
+                        nextEnabled, nextScore, nextCap, nextCountries, nextRoles, prev.requireConfirmedSponsorship());
+                standingTightened = (!nextEnabled && prev.enabled())
+                        || nextScore > prev.minScore()
+                        || request.allowedCountries() != null
+                        || request.permittedRoles() != null;
+
+                Map<String, Object> nextExtra = new LinkedHashMap<>(
+                        existing.extraFilters() != null ? existing.extraFilters() : Map.of());
+                nextExtra.put(StandingAutoApplyPolicy.EXTRA_FILTERS_KEY, savedStanding.toMap());
+                PreferenceSetRecord updatedPrefs = new PreferenceSetRecord(
+                        existing.id(), existing.profileId(), existing.titles(), existing.keywordsInclude(),
+                        existing.keywordsExclude(), existing.requiredSkills(), existing.locationsAllowed(),
+                        existing.remoteTypes(), existing.employmentTypes(), existing.experienceLevels(),
+                        existing.salaryMinGbp(), existing.sponsorshipPolicy(), existing.companySizePref(),
+                        existing.industryPref(), existing.applicationMode(), existing.scoringWeights(),
+                        nextExtra, existing.isActive());
+                preferenceSets.update(existing.id(), updatedPrefs);
+            }
+
+            boolean tightened = !saved.autoApproveEnabled()
+                    || standingTightened
+                    || (before != null && before.availability() == ApplicationDecisionService.RuleAvailability.CONFIGURED
+                        && before.rule() != null && saved.minScore() > before.rule().minScore());
+            if (tightened) {
+                if (packageGuard != null) {
+                    packageGuard.invalidateForProfile(profileId, "approval rule disabled or tightened");
+                } else if (automationPlans != null) {
+                    automationPlans.invalidateApprovalsForProfile(profileId);
+                }
+            }
+
+            Map<String, Object> auditDetails = new LinkedHashMap<>();
+            auditDetails.put("autoApproveEnabled", saved.autoApproveEnabled());
+            auditDetails.put("minScore", saved.minScore());
+            if (savedStanding != null) {
+                auditDetails.put("standingAutoSubmitEnabled", savedStanding.enabled());
+                auditDetails.put("standingMinScore", savedStanding.minScore());
+                auditDetails.put("dailySubmitCap", savedStanding.dailySubmitCap());
             }
             audit.write(new AuditEntry(ownerContext.actorOr("user"), "APPROVAL_RULE_UPDATED", "PROFILE",
-                    profileId, null,
-                    Map.of("autoApproveEnabled", saved.autoApproveEnabled(), "minScore", saved.minScore()),
+                    profileId, null, auditDetails,
                     httpRequest.getRemoteAddr(), UuidV7.generate()));
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("availability", ApplicationDecisionService.RuleAvailability.CONFIGURED.name());
             body.put("configured", true);
             body.put("autoApproveEnabled", saved.autoApproveEnabled());
             body.put("minScore", saved.minScore());
+            if (savedStanding != null) {
+                body.put("standingAutoSubmit", savedStanding.toMap());
+            }
             return ResponseEntity.ok(body);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));

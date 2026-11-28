@@ -316,8 +316,12 @@ for (const adapter of ['GREENHOUSE', 'ASHBY', 'WORKDAY', 'UNIVERSAL']) {
         assert.equal(res[scenario.submitField]?.confirmed, false);
         assert.equal(res[scenario.submitField]?.category, 'SUBMIT_APPROVAL_WITHDRAWN');
         const out = computePlanOutcome(scenario.plan, res);
-        assert.equal(out.outcome, 'RECONCILIATION_REQUIRED');
+        assert.equal(out.outcome, 'HUMAN_REQUIRED');
+        assert.notEqual(out.outcome, 'RECONCILIATION_REQUIRED');
         assert.notEqual(out.outcome, 'SUBMITTED');
+        assert.equal(out.result?.[0]?.type, 'AUTHORIZATION_REFUSED');
+        assert.equal(out.result?.[0]?.code, 'SUBMIT_APPROVAL_WITHDRAWN');
+        assert.equal(out.result?.[0]?.clicked, false);
       }
 
       // 4. Backend refuses with 409 DUPLICATE_PRE_SUBMIT_ATTEMPT -> 0 clicks, PRIOR_ATTEMPT_UNVERIFIED
@@ -497,9 +501,11 @@ for (const adapter of ['GREENHOUSE', 'ASHBY', 'WORKDAY', 'UNIVERSAL']) {
             eventSinkFn: async () => {},
           });
           assert.equal(scenario.getClicks(), clicksBefore, `${adapter}: HTTP 409 ELIGIBILITY_CONSTRAINT_FAILED must execute 0 clicks`);
-          assert.equal(cycle409.outcome, 'RECONCILIATION_REQUIRED');
-          assert.equal(completeBodies[0].outcome, 'RECONCILIATION_REQUIRED');
+          assert.equal(cycle409.outcome, 'HUMAN_REQUIRED');
+          assert.equal(completeBodies[0].outcome, 'HUMAN_REQUIRED');
+          assert.equal(completeBodies[0].result[0].type, 'AUTHORIZATION_REFUSED');
           assert.equal(completeBodies[0].result[0].category, 'ELIGIBILITY_CONSTRAINT_FAILED');
+          assert.equal(completeBodies[0].result[0].clicked, false);
         } finally {
           await new Promise((resolve) => server.close(resolve));
         }

@@ -859,6 +859,196 @@ public class AutomationPlanRepository {
         return findById(id);
     }
 
+    public Optional<UUID> findProfileId(UUID id) {
+        if (id == null) return Optional.empty();
+        List<UUID> rows = db.query(
+                "select profile_id from automation_plans where id = ?",
+                (rs, n) -> (UUID) rs.getObject(1), id);
+        return rows.stream().findFirst();
+    }
+
+    public boolean hasOtherSubmittedOrFencedForJob(UUID profileId, UUID jobId, UUID excludePlanId) {
+        if (profileId == null || jobId == null || excludePlanId == null) {
+            return false;
+        }
+        Boolean exists = db.queryForObject("""
+                select exists(
+                    select 1 from automation_plans p
+                    join applications a on a.id = p.application_id
+                    where a.profile_id = ? and a.job_id = ? and p.id <> ?
+                      and (
+                          p.status = 'SUBMITTED'
+                          or exists (
+                              select 1 from automation_steps s
+                              where s.plan_id = p.id
+                                and (s.step_key = 'pre-submit-attempting'
+                                     or coalesce(s.result->>'phase', '') = 'PRE_SUBMIT_ATTEMPTING')
+                          )
+                      )
+                )
+                """, Boolean.class, profileId, jobId, excludePlanId);
+        return Boolean.TRUE.equals(exists);
+    }
+
+    /**
+     * Stage 3I Phase 8: Returns an unfenced submit attempt that was refused prior to any
+     * browser click back to {@code AWAITING_APPROVAL}, clearing {@code submit_approved=false},
+     * stripping submit steps and {@code authorizationMode}, and preserving the structured
+     * refusal outcome. Never touches plans that already recorded a pre-submit attempt checkpoint.
+     */
+    @Transactional
+    public boolean returnUnfencedSubmitToAwaitingApproval(UUID id, List<Object> result) {
+        if (id == null || hasPreSubmitAttemptCheckpoint(id)) {
+            return false;
+        }
+        try {
+            String value = json.writeValueAsString(result == null ? List.of() : result);
+            return db.update("""
+                    update automation_plans
+                    set status = 'AWAITING_APPROVAL',
+                        submit_approved = false,
+                        heartbeat_at = null,
+                        result = ?::jsonb,
+                        plan = case
+                            when jsonb_typeof(plan->'steps') = 'array' then
+                                jsonb_set(plan - 'authorizationMode', '{steps}',
+                                    coalesce((
+                                        select jsonb_agg(s order by ord)
+                                        from jsonb_array_elements(plan->'steps') with ordinality as t(s, ord)
+                                        where s->>'type' not in (
+                                            'REAL_SUBMIT_CLICK', 'ASHBY_SUBMIT_CLICK',
+                                            'WORKDAY_SUBMIT_CLICK', 'UNIVERSAL_SUBMIT_CLICK', 'MOCK_SUBMIT')
+                                    ), '[]'::jsonb))
+                            else plan - 'authorizationMode'
+                        end,
+                        updated_at = now()
+                    where id = ? and status = 'RUNNING'
+                      and not exists (
+                          select 1 from automation_steps
+                          where plan_id = ?
+                            and (step_key = 'pre-submit-attempting'
+                                 or coalesce(result->>'phase', '') = 'PRE_SUBMIT_ATTEMPTING')
+                      )
+                    """, value, id, id) == 1;
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to return unfenced submit plan to awaiting approval", e);
+        }
+    }
+
+    /**
+     * Stage 3I Phase 8: Fails a plan prior to execution when apply-time posting liveness
+     * confirms the target job is closed/deleted or unsafe.
+     */
+    @Transactional
+    public boolean failClosedBeforeClaim(UUID id, String expectedFromStatus, List<Object> result) {
+        if (id == null || hasPreSubmitAttemptCheckpoint(id)) {
+            return false;
+        }
+        try {
+            String value = json.writeValueAsString(result == null ? List.of() : result);
+            return db.update("""
+                    update automation_plans
+                    set status = 'FAILED',
+                        submit_approved = false,
+                        heartbeat_at = null,
+                        result = ?::jsonb,
+                        updated_at = now()
+                    where id = ? and status = ?
+                      and not exists (
+                          select 1 from automation_steps
+                          where plan_id = ?
+                            and (step_key = 'pre-submit-attempting'
+                                 or coalesce(result->>'phase', '') = 'PRE_SUBMIT_ATTEMPTING')
+                      )
+                    """, value, id, expectedFromStatus, id) == 1;
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to fail closed plan prior to execution", e);
+        }
+    }
+
+    /**
+     * Stage 3I Phase 8: Atomically promotes a validated Pass-1 plan from {@code AWAITING_APPROVAL}
+     * into a standing-authorized Pass-2 submission plan ({@code PREPARED}, {@code submit_approved=true},
+     * {@code authorizationMode="STANDING_AUTO_SUBMIT"}) with the adapter's single submit step appended.
+     * Refuses unless {@code status='AWAITING_APPROVAL' and submit_approved=false}, no submit step exists,
+     * no pre-submit checkpoint exists, and the application has not already been submitted.
+     */
+    @Transactional
+    public boolean authorizeStandingSubmission(UUID id, String planType) {
+        if (id == null || planType == null || hasPreSubmitAttemptCheckpoint(id)) {
+            return false;
+        }
+        PlanRow current = findById(id).orElse(null);
+        if (current == null || !"AWAITING_APPROVAL".equals(current.status()) || current.submitApproved()) {
+            return false;
+        }
+        Map<String, Object> stored = current.plan() == null ? Map.of() : current.plan();
+        if (!planType.equals(stored.get("planType")) || !(stored.get("steps") instanceof List<?> existingSteps)) {
+            return false;
+        }
+        for (Object o : existingSteps) {
+            if (o instanceof Map<?, ?> step) {
+                Object type = step.get("type");
+                if ("REAL_SUBMIT_CLICK".equals(type) || "ASHBY_SUBMIT_CLICK".equals(type)
+                        || "WORKDAY_SUBMIT_CLICK".equals(type) || "UNIVERSAL_SUBMIT_CLICK".equals(type)
+                        || "MOCK_SUBMIT".equals(type)) {
+                    return false;
+                }
+            }
+        }
+        Map<String, Object> submitStep = switch (planType) {
+            case "GREENHOUSE" -> Map.of(
+                    "id", "real-submit-click",
+                    "type", "REAL_SUBMIT_CLICK",
+                    "policy", "AUTO",
+                    "params", Map.of("selector", "button[type=\"submit\"]"));
+            case "ASHBY" -> Map.of(
+                    "id", "ashby-submit-click",
+                    "type", "ASHBY_SUBMIT_CLICK",
+                    "policy", "AUTO",
+                    "params", Map.of());
+            case "WORKDAY" -> Map.of(
+                    "id", "workday-submit-click",
+                    "type", "WORKDAY_SUBMIT_CLICK",
+                    "policy", "AUTO",
+                    "params", Map.of());
+            case "UNIVERSAL" -> Map.of(
+                    "id", "universal-submit-click",
+                    "type", "UNIVERSAL_SUBMIT_CLICK",
+                    "policy", "AUTO",
+                    "params", Map.of("selector", "[data-robin-submit]", "phase", UniversalExecutionPhase.PRE_SUBMIT_ATTEMPTING.name()));
+            default -> null;
+        };
+        if (submitStep == null) {
+            return false;
+        }
+        List<Object> newSteps = new java.util.ArrayList<>(existingSteps);
+        newSteps.add(submitStep);
+        Map<String, Object> updated = new java.util.LinkedHashMap<>(stored);
+        updated.put("steps", newSteps);
+        updated.put("authorizationMode", "STANDING_AUTO_SUBMIT");
+        try {
+            return db.update("""
+                    update automation_plans
+                    set plan = ?::jsonb,
+                        submit_approved = true,
+                        status = 'PREPARED',
+                        heartbeat_at = null,
+                        updated_at = now()
+                    where id = ? and status = 'AWAITING_APPROVAL' and submit_approved = false
+                      and not exists (
+                          select 1 from automation_steps
+                          where plan_id = ?
+                            and (step_key = 'pre-submit-attempting'
+                                 or coalesce(result->>'phase', '') = 'PRE_SUBMIT_ATTEMPTING')
+                      )
+                      and not """ + "\n" + SUBMIT_STEP_EXISTS_SQL + APPLICATION_NOT_ALREADY_SUBMITTED_SQL,
+                    json.writeValueAsString(updated), id, id) == 1;
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to persist standing-authorized submission step", e);
+        }
+    }
+
     private PlanRow mapRow(java.sql.ResultSet rs) throws java.sql.SQLException {
         return new PlanRow(
                 (UUID) rs.getObject(1),

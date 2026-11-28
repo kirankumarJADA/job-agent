@@ -231,6 +231,10 @@ public class ApplicationTrackingService {
             followUp.put("status", "NONE");
         }
         out.put("followUp", followUp);
+        out.put("reconciliationScope", mapOf(
+                "employerStatusSource", "EMAIL_AND_RECEIPT_ONLY",
+                "employerPortalPollingSupported", false,
+                "note", "Employer lifecycle progression (acknowledgement, interview, rejection, offer) is reconciled solely from linked employer emails and verified submission receipts; Robin does not poll external employer portals automatically."));
         out.put("computedAt", Instant.now().toString());
         return Optional.of(out);
     }

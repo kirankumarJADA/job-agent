@@ -32,13 +32,33 @@ public class AddressGuard {
     }
 
     private final Resolver resolver;
+    private final boolean allowLoopbackForTesting;
 
     public AddressGuard() {
-        this(InetAddress::getAllByName);
+        this(InetAddress::getAllByName, false);
     }
 
     public AddressGuard(Resolver resolver) {
+        this(resolver, false);
+    }
+
+    private AddressGuard(Resolver resolver, boolean allowLoopbackForTesting) {
         this.resolver = resolver;
+        this.allowLoopbackForTesting = allowLoopbackForTesting;
+    }
+
+    /**
+     * Test-only factory that permits explicit loopback HTTP/HTTPS URIs
+     * ({@code 127.0.0.1} / {@code localhost} resolving strictly to loopback)
+     * while preserving full SSRF refusal for RFC 1918, metadata, and link-local
+     * addresses.
+     */
+    public static AddressGuard allowingLoopbackForTesting() {
+        return new AddressGuard(InetAddress::getAllByName, true);
+    }
+
+    public static AddressGuard allowingLoopbackForTesting(Resolver resolver) {
+        return new AddressGuard(resolver, true);
     }
 
     /** @throws UnsafeAddressException when the URI must not be fetched */
@@ -53,12 +73,33 @@ public class AddressGuard {
     public java.util.List<InetAddress> checkAndResolve(URI uri) {
         if (uri == null) throw new UnsafeAddressException("missing URL");
         String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
-        if (!scheme.equals("https")) throw new UnsafeAddressException("only https URLs are fetched");
-        if (uri.getRawUserInfo() != null) throw new UnsafeAddressException("URLs with credentials are refused");
-        if (uri.getPort() != -1 && uri.getPort() != 443) throw new UnsafeAddressException("non-standard ports are refused");
         String host = uri.getHost();
         if (host == null || host.isBlank()) throw new UnsafeAddressException("URL has no host");
         String h = host.toLowerCase(Locale.ROOT);
+        if (uri.getRawUserInfo() != null) throw new UnsafeAddressException("URLs with credentials are refused");
+
+        boolean candidateLoopback = allowLoopbackForTesting
+                && ("http".equals(scheme) || "https".equals(scheme))
+                && ("localhost".equals(h) || h.endsWith(".localhost") || "127.0.0.1".equals(h) || "[::1]".equals(h) || "::1".equals(h));
+        if (candidateLoopback) {
+            InetAddress[] addresses;
+            try {
+                String normalizedHost = h.startsWith("[") && h.endsWith("]") ? h.substring(1, h.length() - 1) : h;
+                addresses = resolver.resolve(normalizedHost);
+            } catch (UnknownHostException e) {
+                throw new UnsafeAddressException("host does not resolve");
+            }
+            if (addresses == null || addresses.length == 0) throw new UnsafeAddressException("host does not resolve");
+            for (InetAddress address : addresses) {
+                if (!address.isLoopbackAddress()) {
+                    throw new UnsafeAddressException("test loopback host resolved outside loopback");
+                }
+            }
+            return java.util.List.of(addresses);
+        }
+
+        if (!scheme.equals("https")) throw new UnsafeAddressException("only https URLs are fetched");
+        if (uri.getPort() != -1 && uri.getPort() != 443) throw new UnsafeAddressException("non-standard ports are refused");
         if (h.startsWith("[") || h.matches("[0-9.]+") || h.contains(":")) {
             throw new UnsafeAddressException("IP-literal hosts are refused");
         }

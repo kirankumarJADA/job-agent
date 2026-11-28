@@ -1016,6 +1016,21 @@ function resolveOptionValue(control, answerText) {
 }
 
 /**
+ * Stage 3I Phase 8: Legal declarations, certifications, accuracy attestations,
+ * terms/privacy acknowledgements, and background-check consent controls MUST
+ * never be auto-checked or auto-answered under standing or assisted automation.
+ * When required, they emit a {@code PROHIBITED_DECLARATION} required gap that
+ * halts autonomous submission for explicit human review.
+ */
+export function isProhibitedDeclaration(normalizedLabel, control = {}) {
+  const hay = normalizeQuestionLabel(
+    `${normalizedLabel || ''} ${control?.ariaLabel || ''} ${control?.nameAttr || ''} ${control?.idAttr || ''}`
+  );
+  if (!hay) return false;
+  return /\b(i\s+(hereby\s+)?(certify|declare|attest|affirm|acknowledge|agree|consent|confirm)|under\s+penalty|true\s+and\s+(accurate|complete)|accurate\s+and\s+complete|background\s+check|criminal\s+(record|history|background)|terms\s+(of\s+(use|service)|and\s+conditions)|privacy\s+(policy|notice)|candidate\s+declaration|e-?signature|digital\s+signature)\b/.test(hay);
+}
+
+/**
  * Pure deterministic planner over inspected DOM controls + verified candidate package.
  * Never fabricates data, never falls back on guessed EEO/sponsorship answers,
  * never trusts draft answers, and preserves explicit required gaps for candidate input.
@@ -1052,6 +1067,29 @@ export function planUniversalControls(inspected, pkg = {}) {
 
     if (isProtectedDemographic(normalizedLabel) || isProtectedDemographic(combined)) {
       unsupported.push({ key: normalizedLabel || control.controlId, label, reason: 'Protected/EEO field is never auto-filled' });
+      continue;
+    }
+
+    if (isProhibitedDeclaration(normalizedLabel, control)) {
+      if (control.required) {
+        requiredGaps.push({
+          questionKey: control.nameAttr || control.idAttr || `declaration_${control.controlId}`,
+          questionText: label || control.nameAttr || control.idAttr || `Declaration ${control.controlId}`,
+          htmlType,
+          requiredState: 'REQUIRED',
+          category: 'PROHIBITED_DECLARATION',
+          prohibitedDeclaration: true,
+          options: control.options ?? [],
+          reason: 'Legal certification / declaration requires explicit candidate review and halts autonomous submission',
+        });
+      } else {
+        unsupported.push({
+          key: normalizedLabel || control.controlId,
+          label,
+          category: 'PROHIBITED_DECLARATION',
+          reason: 'Optional legal declaration is never auto-checked',
+        });
+      }
       continue;
     }
 

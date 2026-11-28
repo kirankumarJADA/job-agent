@@ -66,6 +66,8 @@ public class AutomationController {
     private final MaintenanceModeService maintenanceMode;
     private final SubmissionCompletionService submissions;
     private final PreSubmitAuthorizationService preSubmitAuthorization;
+    private final PostingLivenessService livenessService;
+    private final StandingAuthorizationService standingAuthorizationService;
 
     @Autowired
     public AutomationController(AutomationPlanRepository plans,
@@ -85,7 +87,9 @@ public class AutomationController {
                                 @Autowired(required = false) SubmissionCompletionService submissions,
                                 @Autowired(required = false) UniversalBrowserPlanService universalPlans,
                                 @Autowired(required = false) com.personal.jobagent.qa.ApplicationAnswerRepository answerRepository,
-                                @Autowired(required = false) PreSubmitAuthorizationService preSubmitAuthorization) {
+                                @Autowired(required = false) PreSubmitAuthorizationService preSubmitAuthorization,
+                                @Autowired(required = false) PostingLivenessService livenessService,
+                                @Autowired(required = false) StandingAuthorizationService standingAuthorizationService) {
         this.plans = plans;
         this.audit = audit;
         this.ownerContext = ownerContext;
@@ -104,6 +108,31 @@ public class AutomationController {
         this.universalPlans = universalPlans;
         this.answerRepository = answerRepository;
         this.preSubmitAuthorization = preSubmitAuthorization;
+        this.livenessService = livenessService;
+        this.standingAuthorizationService = standingAuthorizationService;
+    }
+
+    public AutomationController(AutomationPlanRepository plans,
+                                AuditLogWriter audit,
+                                OwnerContext ownerContext,
+                                String workerToken,
+                                ExecutionPackageService executionPackages,
+                                NotificationService notifications,
+                                AutomationMetrics metrics,
+                                com.personal.jobagent.apply.ApplyReadinessService applyReadiness,
+                                ApplyDocumentSelector documentSelector,
+                                com.personal.jobagent.application.ApplicationStatusService applicationStatus,
+                                GreenhouseExecutionPlanService greenhousePlans,
+                                AshbyExecutionPlanService ashbyPlans,
+                                WorkdayExecutionPlanService workdayPlans,
+                                MaintenanceModeService maintenanceMode,
+                                SubmissionCompletionService submissions,
+                                UniversalBrowserPlanService universalPlans,
+                                com.personal.jobagent.qa.ApplicationAnswerRepository answerRepository,
+                                PreSubmitAuthorizationService preSubmitAuthorization) {
+        this(plans, audit, ownerContext, workerToken, executionPackages, notifications, metrics,
+                applyReadiness, documentSelector, applicationStatus, greenhousePlans, ashbyPlans, workdayPlans,
+                maintenanceMode, submissions, universalPlans, answerRepository, preSubmitAuthorization, null, null);
     }
 
     public AutomationController(AutomationPlanRepository plans,
@@ -327,6 +356,18 @@ public class AutomationController {
         }
         if (!machineOrLocalDev()) {
             return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
+        }
+        if (livenessService != null) {
+            PostingLivenessService.LivenessResult liveness = livenessService.evaluateForPlan(id);
+            if (liveness.blocksExecution()) {
+                List<Object> payload = new java.util.ArrayList<>();
+                payload.add(Map.of("type", "LIVENESS_FAILED", "code", liveness.code(), "detail", liveness.detail()));
+                plans.failClosedBeforeClaim(id, "PREPARED", payload);
+                return ResponseEntity.status(409).body(Map.of(
+                        "status", "FAILED",
+                        "code", liveness.code(),
+                        "error", liveness.detail()));
+            }
         }
         return plans.claim(id) ? ResponseEntity.ok(Map.of("status", "RUNNING"))
                 : ResponseEntity.status(409).body(Map.of("error", "plan is not PREPARED"));
@@ -688,14 +729,31 @@ public class AutomationController {
         if (!machineOrLocalDev()) {
             return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
         }
-        // Phase 15 defence in depth: a plan whose last step is a real
-        // submission click can never resolve to HUMAN_REQUIRED/AWAITING_APPROVAL
-        // — the worker's own outcome.js never sends that combination any more
-        // (see computePlanOutcome), but this refuses it here too, since
-        // AWAITING_APPROVAL would otherwise be re-approvable through the
-        // normal review flow for a plan that may already have reached the
-        // employer.
+        // Phase 15 defence in depth + Stage 3I Phase 8 pre-fence withdrawal recovery:
+        // If a real click already happened (or an un-marked submit plan ended without an
+        // explicit pre-fence AUTHORIZATION_REFUSED), refuse HUMAN_REQUIRED and insist on
+        // RECONCILIATION_REQUIRED. However, when the backend pre-submit fence refused prior
+        // to ANY browser click (no checkpoint exists + AUTHORIZATION_REFUSED clicked=false),
+        // cleanly restore the plan to AWAITING_APPROVAL with submit_approved=false and submit
+        // steps stripped instead of misclassifying as PRIOR_ATTEMPT_UNVERIFIED reconciliation.
+        boolean preFenceRefusal = "HUMAN_REQUIRED".equals(outcome)
+                && isPreFenceAuthorizationRefusal(r.result())
+                && !plans.hasPreSubmitAttemptCheckpoint(id);
         if ("HUMAN_REQUIRED".equals(outcome) && isRealSubmitAttempt(id)) {
+            if (preFenceRefusal) {
+                boolean restored = plans.returnUnfencedSubmitToAwaitingApproval(
+                        id, r.result() == null ? List.of() : new java.util.ArrayList<Object>(r.result()));
+                if (!restored) {
+                    return ResponseEntity.status(409).body(Map.of("error", "illegal or unsafe transition"));
+                }
+                audit.write(new AuditEntry(ownerContext.actorOr("worker"),
+                        "AUTOMATION_PLAN_PRE_FENCE_WITHDRAWN", "AUTOMATION_PLAN", id,
+                        null, Map.of("detail", r.detail() == null ? "" : r.detail(), "clicked", false),
+                        null, UuidV7.generate()));
+                metrics.planOutcome("HUMAN_REQUIRED");
+                notifyPlanOutcome(id, "HUMAN_REQUIRED", r.detail());
+                return ResponseEntity.noContent().build();
+            }
             return ResponseEntity.status(400).body(Map.of(
                     "error", "a real submission attempt can never resolve to HUMAN_REQUIRED; report RECONCILIATION_REQUIRED instead"));
         }
@@ -718,6 +776,11 @@ public class AutomationController {
                 null, Map.of("detail", r.detail() == null ? "" : r.detail()), null, UuidV7.generate()));
         metrics.planOutcome(outcome);
         notifyPlanOutcome(id, outcome, r.detail());
+        if ("HUMAN_REQUIRED".equals(outcome)
+                && !preFenceRefusal
+                && standingAuthorizationService != null) {
+            standingAuthorizationService.tryAutoAuthorizeAfterPreparation(id);
+        }
         return ResponseEntity.noContent().build();
     }
 
@@ -892,32 +955,72 @@ public class AutomationController {
         if (!machineOrLocalDev()) {
             return ResponseEntity.status(403).body(Map.of("error", "worker authentication required"));
         }
-        return plans.claimNext()
-                .<ResponseEntity<?>>map(plan -> {
-                    int requeueCount = plans.manualRequeueCount(plan.id());
-                    List<Map<String, Object>> steps = plans.findSteps(plan.id());
-                    if (requeueCount <= 0 && steps.isEmpty() && !"UNIVERSAL".equals(planTypeOf(plan))) {
-                        return ResponseEntity.ok(plan);
-                    }
-                    Map<String, Object> body = new java.util.LinkedHashMap<>();
-                    body.put("id", plan.id());
-                    body.put("applicationId", plan.applicationId());
-                    body.put("targetUrl", plan.targetUrl());
-                    body.put("status", plan.status());
-                    body.put("plan", plan.plan());
-                    body.put("result", plan.result());
-                    body.put("submitApproved", plan.submitApproved());
-                    body.put("heartbeatAt", plan.heartbeatAt());
-                    body.put("updatedAt", plan.updatedAt());
-                    if (requeueCount > 0) {
-                        body.put("requeueCount", requeueCount);
-                    }
-                    if (!steps.isEmpty()) {
-                        body.put("completedSteps", steps);
-                    }
-                    return ResponseEntity.ok(body);
-                })
-                .orElseGet(() -> ResponseEntity.noContent().build());
+        AutomationPlanRepository.PlanRow claimed = null;
+        for (int attempt = 0; attempt < 10; attempt++) {
+            var next = plans.claimNext().orElse(null);
+            if (next == null) {
+                return ResponseEntity.noContent().build();
+            }
+            if (livenessService != null) {
+                PostingLivenessService.LivenessResult liveness = livenessService.evaluateForPlan(next.id());
+                if (liveness.blocksExecution()) {
+                    List<Object> payload = new java.util.ArrayList<>();
+                    payload.add(Map.of("type", "LIVENESS_FAILED", "code", liveness.code(), "detail", liveness.detail()));
+                    plans.failClosedBeforeClaim(next.id(), "RUNNING", payload);
+                    continue;
+                }
+            }
+            claimed = next;
+            break;
+        }
+        if (claimed == null) {
+            return ResponseEntity.noContent().build();
+        }
+        AutomationPlanRepository.PlanRow plan = claimed;
+        int requeueCount = plans.manualRequeueCount(plan.id());
+        List<Map<String, Object>> steps = plans.findSteps(plan.id());
+        if (requeueCount <= 0 && steps.isEmpty() && !"UNIVERSAL".equals(planTypeOf(plan))) {
+            return ResponseEntity.ok(plan);
+        }
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("id", plan.id());
+        body.put("applicationId", plan.applicationId());
+        body.put("targetUrl", plan.targetUrl());
+        body.put("status", plan.status());
+        body.put("plan", plan.plan());
+        body.put("result", plan.result());
+        body.put("submitApproved", plan.submitApproved());
+        body.put("heartbeatAt", plan.heartbeatAt());
+        body.put("updatedAt", plan.updatedAt());
+        if (requeueCount > 0) {
+            body.put("requeueCount", requeueCount);
+        }
+        if (!steps.isEmpty()) {
+            body.put("completedSteps", steps);
+        }
+        return ResponseEntity.ok(body);
+    }
+
+    private static boolean isPreFenceAuthorizationRefusal(List<?> result) {
+        if (result == null || result.isEmpty()) {
+            return false;
+        }
+        for (Object item : result) {
+            if (item instanceof Map<?, ?> map) {
+                Object type = map.get("type");
+                Object denied = map.get("authorizationDenied");
+                Object clicked = map.get("clicked");
+                Object code = map.get("code") != null ? map.get("code") : map.get("category");
+                if ("AUTHORIZATION_REFUSED".equals(type)
+                        && Boolean.TRUE.equals(denied)
+                        && !Boolean.TRUE.equals(clicked)
+                        && !"DUPLICATE_PRE_SUBMIT_ATTEMPT".equals(code)
+                        && !"PRIOR_ATTEMPT_UNVERIFIED".equals(code)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     @PostMapping("/plans/{id}/review")

@@ -3,10 +3,17 @@ package com.personal.jobagent.application;
 import com.personal.jobagent.common.AutomationMetrics;
 import com.personal.jobagent.common.QuotaService;
 import com.personal.jobagent.common.UuidV7;
+import com.personal.jobagent.jobs.HardFilterResult;
+import com.personal.jobagent.jobs.HardFilterService;
+import com.personal.jobagent.jobs.JobRecord;
+import com.personal.jobagent.jobs.JobRepository;
+import com.personal.jobagent.preferences.PreferenceSetRecord;
 import com.personal.jobagent.preferences.PreferenceSetRepository;
+import com.personal.jobagent.preferences.StandingAutoApplyPolicy;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -116,22 +123,40 @@ public class ApplicationDecisionService {
     @Value("${app.migration.manual-review-only:false}")
     private boolean manualReviewOnly = false;
 
+    @Value("${app.decisions.strict-auto-apply:false}")
+    private boolean strictAutoApply = false;
+
     private final PreferenceSetRepository preferenceSets;
     private final QuotaService quotaService;
     private final JdbcTemplate db;
     private final AutomationMetrics metrics;
     private final ApprovalRuleHealthMonitor health;
+    private final HardFilterService hardFilters;
+    private final JobRepository jobRepository;
+
+    @Autowired
+    public ApplicationDecisionService(PreferenceSetRepository preferenceSets,
+                                      QuotaService quotaService,
+                                      JdbcTemplate db,
+                                      AutomationMetrics metrics,
+                                      ApprovalRuleHealthMonitor health,
+                                      @Autowired(required = false) HardFilterService hardFilters,
+                                      @Autowired(required = false) JobRepository jobRepository) {
+        this.preferenceSets = preferenceSets;
+        this.quotaService = quotaService;
+        this.db = db;
+        this.metrics = metrics;
+        this.health = health;
+        this.hardFilters = hardFilters;
+        this.jobRepository = jobRepository;
+    }
 
     public ApplicationDecisionService(PreferenceSetRepository preferenceSets,
                                       QuotaService quotaService,
                                       JdbcTemplate db,
                                       AutomationMetrics metrics,
                                       ApprovalRuleHealthMonitor health) {
-        this.preferenceSets = preferenceSets;
-        this.quotaService = quotaService;
-        this.db = db;
-        this.metrics = metrics;
-        this.health = health;
+        this(preferenceSets, quotaService, db, metrics, health, null, null);
     }
 
     /**
@@ -231,6 +256,16 @@ public class ApplicationDecisionService {
                     "NEEDS_REVIEW", "Automatic approval disabled by user rule");
         }
 
+        // Stage 3I Phase 8: Strict eligibility enforcement before automatic application creation.
+        // Whenever standing autonomous submission or strict-auto-apply is enabled (or sponsorship /
+        // country restrictions are explicitly configured), missing or ambiguous job metadata routes
+        // to NEEDS_REVIEW without consuming daily quota.
+        String strictRejection = strictEligibilityFailure(profileId, jobId);
+        if (strictRejection != null) {
+            return record(profileId, jobId, matchScore, recommendation, mode,
+                    "NEEDS_REVIEW", strictRejection);
+        }
+
         // ── 4. ASSISTED mode: a conservative floor applies ──
         // With no rule the mode's own high-confidence floor (85) is the bar,
         // which is stricter than the APPLY threshold and is the documented
@@ -315,6 +350,51 @@ public class ApplicationDecisionService {
         // application, it must release against this same day, however much
         // real time (and possibly a midnight rollover) has passed by then.
         return new DecisionResult(result.decision(), result.reason(), result.matchScore(), reservation.periodStart());
+    }
+
+    private String strictEligibilityFailure(UUID profileId, UUID jobId) {
+        if (hardFilters == null || jobRepository == null) {
+            return null;
+        }
+        PreferenceSetRecord prefs = preferenceSets.findActiveByProfileId(profileId).orElse(null);
+        if (prefs == null) {
+            return null;
+        }
+        StandingAutoApplyPolicy standingPolicy = StandingAutoApplyPolicy.fromExtraFilters(prefs.extraFilters());
+        List<String> countries = standingPolicy.effectiveAllowedCountries(prefs);
+        boolean enforceFullStrict = strictAutoApply || standingPolicy.enabled();
+        boolean sponsorshipRequired = "REQUIRED".equalsIgnoreCase(prefs.sponsorshipPolicy())
+                || "SPONSORSHIP_REQUIRED".equalsIgnoreCase(prefs.sponsorshipPolicy());
+        if (!enforceFullStrict && countries.isEmpty() && !sponsorshipRequired) {
+            return null;
+        }
+        JobRecord job = jobRepository.findById(jobId).orElse(null);
+        if (job == null) {
+            return "Job details unavailable for strict auto-apply verification";
+        }
+        if (enforceFullStrict) {
+            HardFilterResult strict = hardFilters.evaluateStrict(job, prefs, countries);
+            if (!strict.passed()) {
+                return "Strict auto-apply review required: " + strict.reasons().stream()
+                        .map(HardFilterResult.FilterReason::message)
+                        .findFirst().orElse("missing or unmatched preference requirements");
+            }
+            if (!standingPolicy.matchesPermittedRole(job.title(), prefs)) {
+                return "Strict auto-apply review required: job title outside permitted roles";
+            }
+            return null;
+        }
+        // Even outside standing-submit mode, explicit country lists and unconfirmed sponsorship route uncertain matches to review.
+        HardFilterResult strict = hardFilters.evaluateStrict(job, prefs, countries);
+        if (!strict.passed()) {
+            var highRiskReason = strict.reasons().stream()
+                    .filter(r -> "COUNTRY".equals(r.criterion()) || "SPONSORSHIP".equals(r.criterion()))
+                    .findFirst();
+            if (highRiskReason.isPresent()) {
+                return "Strict auto-apply review required: " + highRiskReason.get().message();
+            }
+        }
+        return null;
     }
 
     /** Whether the migration guard ({@code app.migration.manual-review-only}) is on. */

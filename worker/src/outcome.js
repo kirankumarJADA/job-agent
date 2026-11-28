@@ -92,12 +92,48 @@ function submissionEvidenceResult(planType, submitResult) {
   return [entry];
 }
 
+function authorizationRefusedOutcome(planType, submitResult) {
+  const code = typeof submitResult?.authorizationCode === 'string' && submitResult.authorizationCode.trim()
+    ? submitResult.authorizationCode.trim()
+    : (typeof submitResult?.category === 'string' && submitResult.category.trim()
+        ? submitResult.category.trim()
+        : 'PRE_SUBMIT_AUTHORIZATION_REFUSED');
+  const evidence = submitResult?.evidence ?? 'pre-submit authorization was refused before clicking submit';
+  return {
+    outcome: 'HUMAN_REQUIRED',
+    detail: `Pre-submit authorization refused before any browser click [${code}]: ${evidence}`,
+    result: [{
+      type: 'AUTHORIZATION_REFUSED',
+      planType,
+      category: code,
+      code,
+      authorizationDenied: true,
+      clicked: false,
+      evidence,
+    }],
+  };
+}
+
+function isPreFenceWithdrawalOrDenial(submitResult) {
+  if (!submitResult || submitResult.confirmed || submitResult.clicked === true) {
+    return false;
+  }
+  if (submitResult.authorizationDenied !== true) {
+    return false;
+  }
+  const code = submitResult.authorizationCode ?? submitResult.category;
+  return code !== 'DUPLICATE_PRE_SUBMIT_ATTEMPT' && code !== 'PRIOR_ATTEMPT_UNVERIFIED';
+}
+
 export function computePlanOutcome(plan, runResult) {
   const isSubmitAttempt = plan.planType === 'GREENHOUSE' && plan.steps.at(-1)?.type === 'REAL_SUBMIT_CLICK';
   if (isSubmitAttempt) {
     const submitResult = runResult.submitResult;
     if (submitResult?.confirmed) {
       return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: submissionEvidenceResult('GREENHOUSE', submitResult) };
+    }
+    if (isPreFenceWithdrawalOrDenial(submitResult)) {
+      return authorizationRefusedOutcome('GREENHOUSE', submitResult);
     }
     // Phase 15: never HUMAN_REQUIRED (which the backend's own precondition
     // now treats as a plain, re-approvable preparation outcome) — a real
@@ -122,6 +158,9 @@ export function computePlanOutcome(plan, runResult) {
     if (submitResult?.confirmed) {
       return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: submissionEvidenceResult('ASHBY', submitResult) };
     }
+    if (isPreFenceWithdrawalOrDenial(submitResult)) {
+      return authorizationRefusedOutcome('ASHBY', submitResult);
+    }
     // Phase 15: same reasoning as the GREENHOUSE branch above.
     return {
       outcome: 'RECONCILIATION_REQUIRED',
@@ -137,6 +176,9 @@ export function computePlanOutcome(plan, runResult) {
     if (submitResult?.confirmed) {
       return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: submissionEvidenceResult('WORKDAY', submitResult) };
     }
+    if (isPreFenceWithdrawalOrDenial(submitResult)) {
+      return authorizationRefusedOutcome('WORKDAY', submitResult);
+    }
     return {
       outcome: 'RECONCILIATION_REQUIRED',
       detail: `Submit click completed but was not confirmed [${submitResult?.category ?? 'UNKNOWN'}]: ${submitResult?.evidence
@@ -150,6 +192,9 @@ export function computePlanOutcome(plan, runResult) {
     const submitResult = runResult.universalSubmitResult;
     if (submitResult?.confirmed) {
       return { outcome: 'SUBMITTED', detail: `Submission confirmed: ${submitResult.evidence}`, result: submissionEvidenceResult('UNIVERSAL', submitResult) };
+    }
+    if (isPreFenceWithdrawalOrDenial(submitResult)) {
+      return authorizationRefusedOutcome('UNIVERSAL', submitResult);
     }
     return {
       outcome: 'RECONCILIATION_REQUIRED',

@@ -14,6 +14,7 @@ import com.personal.jobagent.jobs.HardFilterService;
 import com.personal.jobagent.jobs.JobRecord;
 import com.personal.jobagent.preferences.PreferenceSetRecord;
 import com.personal.jobagent.preferences.PreferenceSetRepository;
+import com.personal.jobagent.preferences.StandingAutoApplyPolicy;
 import com.personal.jobagent.track.EmployerDomainPolicy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -247,6 +248,10 @@ public class PreSubmitAuthorizationService {
             return AuthorizationOutcome.conflict("APPLICATION_ALREADY_SUBMITTED",
                     "another plan for this application has already been submitted");
         }
+        if (plans.hasOtherSubmittedOrFencedForJob(ctx.planProfileId, ctx.job.id(), planId)) {
+            return AuthorizationOutcome.conflict("DUPLICATE_PRE_SUBMIT_ATTEMPT",
+                    "another application by this candidate for the same job is already submitted or in flight");
+        }
 
         Map<String, Object> planMap = parseJsonMap(ctx.planJson);
         String planType = stringOrNull(planMap.get("planType"));
@@ -358,13 +363,17 @@ public class PreSubmitAuthorizationService {
 
         PreferenceSetRecord prefs = preferenceSets.findActiveByProfileId(ctx.planProfileId).orElse(null);
         DecisionRow decisionRow = loadDecisionRow(ctx.planProfileId, ctx.job.id());
-        boolean standingAutoFlow = "CONTROLLED_AUTO".equals(ctx.appMode)
+        Map<String, Object> planMap = parseJsonMap(ctx.planJson);
+        boolean standingSubmitMode = "STANDING_AUTO_SUBMIT".equals(stringOrNull(planMap.get("authorizationMode")));
+        boolean standingAutoFlow = standingSubmitMode
+                || "CONTROLLED_AUTO".equals(ctx.appMode)
                 || (decisionRow != null && "AUTO_APPLY".equals(decisionRow.decision()));
 
         if (standingAutoFlow) {
-            if (prefs == null || "MANUAL".equals(prefs.applicationMode())) {
+            if (prefs == null || "MANUAL".equals(prefs.applicationMode())
+                    || (standingSubmitMode && !"CONTROLLED_AUTO".equalsIgnoreCase(prefs.applicationMode()))) {
                 return AuthorizationOutcome.conflict("STANDING_PERMISSION_WITHDRAWN",
-                        "candidate switched application mode to MANUAL or removed active preferences");
+                        "candidate switched application mode or removed active preferences");
             }
             ApplicationDecisionService.RuleState rule = decisions.ruleState(ctx.planProfileId);
             if (rule.availability() == ApplicationDecisionService.RuleAvailability.UNREADABLE) {
@@ -376,16 +385,34 @@ public class PreSubmitAuthorizationService {
                 return AuthorizationOutcome.conflict("STANDING_PERMISSION_WITHDRAWN",
                         "candidate disabled standing auto-approval rules");
             }
-            Integer score = decisionRow != null ? decisionRow.matchScore() : loadMatchScore(ctx.planProfileId, ctx.job.id());
-            if (score != null && score < rule.rule().minScore()) {
+            StandingAutoApplyPolicy standingPolicy = StandingAutoApplyPolicy.fromExtraFilters(prefs.extraFilters());
+            if (standingSubmitMode && !standingPolicy.enabled()) {
                 return AuthorizationOutcome.conflict("STANDING_PERMISSION_WITHDRAWN",
-                        "job match score " + score + " is now below standing minimum " + rule.rule().minScore());
+                        "candidate disabled standing autonomous submission");
             }
-            HardFilterResult filter = hardFilters.evaluate(ctx.job, prefs);
+            Integer score = decisionRow != null ? decisionRow.matchScore() : loadMatchScore(ctx.planProfileId, ctx.job.id());
+            int requiredMinScore = standingSubmitMode
+                    ? Math.max(rule.rule().minScore(), standingPolicy.minScore())
+                    : rule.rule().minScore();
+            if (standingSubmitMode && score == null) {
+                return AuthorizationOutcome.conflict("STANDING_PERMISSION_WITHDRAWN",
+                        "missing verified match score for standing autonomous submission");
+            }
+            if (score != null && score < requiredMinScore) {
+                return AuthorizationOutcome.conflict("STANDING_PERMISSION_WITHDRAWN",
+                        "job match score " + score + " is now below standing minimum " + requiredMinScore);
+            }
+            HardFilterResult filter = standingSubmitMode
+                    ? hardFilters.evaluateStrict(ctx.job, prefs, standingPolicy.effectiveAllowedCountries(prefs))
+                    : hardFilters.evaluate(ctx.job, prefs);
             if (!filter.passed()) {
                 return AuthorizationOutcome.conflict("ELIGIBILITY_CONSTRAINT_FAILED",
                         filter.reasons().stream().map(HardFilterResult.FilterReason::message).findFirst()
                                 .orElse("job no longer satisfies standing preference constraints"));
+            }
+            if (standingSubmitMode && !standingPolicy.matchesPermittedRole(ctx.job.title(), prefs)) {
+                return AuthorizationOutcome.conflict("ELIGIBILITY_CONSTRAINT_FAILED",
+                        "job title is outside standing permitted roles");
             }
         } else if (prefs != null) {
             // Even on candidate-queued ASSISTED/MANUAL flows, fail closed on hard deal-breakers
