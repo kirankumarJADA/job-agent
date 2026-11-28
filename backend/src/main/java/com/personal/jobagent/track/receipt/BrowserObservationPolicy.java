@@ -124,7 +124,7 @@ public final class BrowserObservationPolicy {
     }
 
     /** host[:port] of an absolute URL or origin, lower-case, with the scheme's default port dropped. */
-    static String authority(String url) {
+    public static String authority(String url) {
         if (url == null) return null;
         try {
             URI u = URI.create(url.strip());

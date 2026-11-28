@@ -142,6 +142,8 @@ public final class TrackTimelineMapper {
                     new Neutral("FORM_REVIEWED", "You reviewed the filled application form", "YOU");
             case "ASHBY_SUBMIT_APPROVED", "UNIVERSAL_SUBMIT_APPROVED" -> new Neutral("PACKAGE_APPROVED",
                     "You approved the package for submission — a separate authorization step is still required before anything is sent", "YOU");
+            case "STANDING_SUBMIT_AUTHORIZED" -> new Neutral("STANDING_SUBMIT_AUTHORIZED",
+                    "Approved automatically under your standing autonomous submission rules", "YOU");
             case "UNIVERSAL_SUBMIT_QUEUED" -> new Neutral("SUBMISSION_QUEUED",
                     "You queued the approved application for submission", "YOU");
             case "PACKAGE_APPROVAL_INVALIDATED" -> new Neutral("PACKAGE_APPROVAL_WITHDRAWN",

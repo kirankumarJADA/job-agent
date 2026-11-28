@@ -8,10 +8,12 @@ import com.personal.jobagent.automation.UniversalBrowserPlanService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.net.InetAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.time.Instant;
@@ -36,6 +38,7 @@ public class AtsHandoffService {
     private final TransactionTemplate transactionTemplate;
     private final ApplicationStatusService applicationStatus;
     private final UniversalBrowserPlanService universalPlans;
+    private final boolean allowLocalTestHosts;
 
     @Autowired
     public AtsHandoffService(HandoffSessionRepository handoffRepository,
@@ -43,13 +46,24 @@ public class AtsHandoffService {
                              @Autowired(required = false) AuditLogWriter audit,
                              @Autowired(required = false) TransactionTemplate transactionTemplate,
                              @Autowired(required = false) ApplicationStatusService applicationStatus,
-                             @Autowired(required = false) UniversalBrowserPlanService universalPlans) {
+                             @Autowired(required = false) UniversalBrowserPlanService universalPlans,
+                             @Value("${app.sandbox.allow-local-test-hosts:false}") boolean allowLocalTestHosts) {
         this.handoffRepository = handoffRepository;
         this.planRepository = planRepository;
         this.audit = audit;
         this.transactionTemplate = transactionTemplate;
         this.applicationStatus = applicationStatus;
         this.universalPlans = universalPlans;
+        this.allowLocalTestHosts = allowLocalTestHosts;
+    }
+
+    public AtsHandoffService(HandoffSessionRepository handoffRepository,
+                             AutomationPlanRepository planRepository,
+                             AuditLogWriter audit,
+                             TransactionTemplate transactionTemplate,
+                             ApplicationStatusService applicationStatus,
+                             UniversalBrowserPlanService universalPlans) {
+        this(handoffRepository, planRepository, audit, transactionTemplate, applicationStatus, universalPlans, false);
     }
 
     public AtsHandoffService(HandoffSessionRepository handoffRepository,
@@ -57,14 +71,14 @@ public class AtsHandoffService {
                              AuditLogWriter audit,
                              TransactionTemplate transactionTemplate,
                              ApplicationStatusService applicationStatus) {
-        this(handoffRepository, planRepository, audit, transactionTemplate, applicationStatus, null);
+        this(handoffRepository, planRepository, audit, transactionTemplate, applicationStatus, null, false);
     }
 
     public AtsHandoffService(HandoffSessionRepository handoffRepository,
                              AutomationPlanRepository planRepository,
                              AuditLogWriter audit,
                              TransactionTemplate transactionTemplate) {
-        this(handoffRepository, planRepository, audit, transactionTemplate, null, null);
+        this(handoffRepository, planRepository, audit, transactionTemplate, null, null, false);
     }
 
     /**
@@ -95,7 +109,15 @@ public class AtsHandoffService {
         return false;
     }
 
+    public void validateConfiguredTargetUrl(String targetUrl) {
+        validateTargetUrl(targetUrl, allowLocalTestHosts);
+    }
+
     public static void validateTargetUrl(String targetUrl) {
+        validateTargetUrl(targetUrl, false);
+    }
+
+    public static void validateTargetUrl(String targetUrl, boolean allowLocalTestHosts) {
         if (targetUrl == null || targetUrl.isBlank()) {
             throw new IllegalArgumentException("Target URL must not be null or blank");
         }
@@ -112,15 +134,34 @@ public class AtsHandoffService {
         if (!uri.isAbsolute()) {
             throw new IllegalArgumentException("Target URL must be absolute");
         }
-        if (!"https".equalsIgnoreCase(uri.getScheme())) {
-            throw new IllegalArgumentException("Target URL scheme must be HTTPS (got: " + uri.getScheme() + ")");
-        }
         String host = uri.getHost();
         if (host == null || host.isBlank()) {
             throw new IllegalArgumentException("Target URL must contain a valid host");
         }
+        String scheme = uri.getScheme();
+        if (!"https".equalsIgnoreCase(scheme)) {
+            if (!(allowLocalTestHosts && "http".equalsIgnoreCase(scheme) && isExplicitLoopbackHost(host))) {
+                throw new IllegalArgumentException("Target URL scheme must be HTTPS (got: " + scheme + ")");
+            }
+        }
         if (uri.getUserInfo() != null || (uri.getRawAuthority() != null && uri.getRawAuthority().contains("@"))) {
             throw new IllegalArgumentException("Target URL must not contain embedded credentials");
+        }
+    }
+
+    private static boolean isExplicitLoopbackHost(String host) {
+        String normalized = host.toLowerCase(java.util.Locale.ROOT);
+        if (normalized.startsWith("[") && normalized.endsWith("]")) {
+            normalized = normalized.substring(1, normalized.length() - 1);
+        }
+        if (!"localhost".equals(normalized) && !"127.0.0.1".equals(normalized) && !"::1".equals(normalized)) {
+            return false;
+        }
+        try {
+            InetAddress addr = InetAddress.getByName(normalized);
+            return addr.isLoopbackAddress() && !addr.isLinkLocalAddress() && !addr.isSiteLocalAddress();
+        } catch (Exception e) {
+            return false;
         }
     }
 
@@ -134,7 +175,7 @@ public class AtsHandoffService {
         if (ownerProfileId == null || planId == null || applicationId == null) {
             throw new IllegalArgumentException("ownerProfileId, planId, and applicationId are required");
         }
-        validateTargetUrl(targetUrl);
+        validateTargetUrl(targetUrl, allowLocalTestHosts);
 
         // Invariant: automation_plans.application_id == requested applicationId
         AutomationPlanRepository.PlanRow plan = planRepository.findById(planId)

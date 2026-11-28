@@ -97,6 +97,20 @@ public class AutomationPlanRepository {
                 (rs, n) -> mapRow(rs), id, ownerProfileId).stream().findFirst();
     }
 
+    /** Returns the job_id linked to a plan's application, if present. */
+    public Optional<UUID> findJobIdByPlanId(UUID id) {
+        if (id == null) {
+            return Optional.empty();
+        }
+        return db.query("""
+                        select a.job_id
+                        from automation_plans p
+                        join applications a on a.id = p.application_id
+                        where p.id = ?
+                        """,
+                (rs, n) -> (UUID) rs.getObject(1), id).stream().findFirst();
+    }
+
     /** Internal read. Caller must have established worker authentication. */
     public Optional<PlanRow> findById(UUID id) {
         return db.query("select " + PLAN_COLUMNS + " from automation_plans where id=?",

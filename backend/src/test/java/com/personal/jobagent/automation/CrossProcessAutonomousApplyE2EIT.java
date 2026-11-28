@@ -261,7 +261,7 @@ class CrossProcessAutonomousApplyE2EIT {
         awaitPlanStatus(declPlanId, "AWAITING_APPROVAL", Duration.ofSeconds(25));
         awaitCondition(() -> {
             Integer n = jdbc.queryForObject(
-                    "select count(*) from audit_logs where entity_id = ? and action = 'STANDING_SUBMIT_DEFERRED' and details->>'reasonCode' = 'PROHIBITED_DECLARATION'",
+                    "select count(*) from audit_logs where entity_id = ? and action = 'STANDING_SUBMIT_DEFERRED' and after_state->>'reasonCode' = 'PROHIBITED_DECLARATION'",
                     Integer.class, declPlanId);
             return n != null && n >= 1;
         }, Duration.ofSeconds(5), "STANDING_SUBMIT_DEFERRED audit entry");
@@ -297,34 +297,43 @@ class CrossProcessAutonomousApplyE2EIT {
         UUID happyPlanId = createPackage(happyApp.appId());
         Process happyWorker = startWorkerProcess(backendBaseUrl() + "/api/v1/automation/plans/claim-next");
         awaitPlanStatus(happyPlanId, "SUBMITTED", Duration.ofSeconds(35));
+        awaitCondition(() -> "APPLICATION_SUBMITTED".equals(jdbc.queryForObject(
+                "select status from applications where id = ?", String.class, happyApp.appId())),
+                Duration.ofSeconds(5), "application APPLICATION_SUBMITTED mirror update");
         happyWorker.destroyForcibly();
 
         assertThat(fixtureA.diagnostics().get("acceptedSubmissions")).isEqualTo(1);
         assertThat(fenceCount(happyPlanId)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("select status from applications where id = ?", String.class, happyApp.appId()))
-                .isEqualTo("APPLICATION_SUBMITTED");
         assertThat(jdbc.queryForObject("select count(*) from submission_evidence where application_id = ?", Integer.class, happyApp.appId()))
                 .isEqualTo(1);
         assertThat(jdbc.queryForObject(
                 "select count(*) from audit_logs where entity_id = ? and action = 'STANDING_SUBMIT_AUTHORIZED'",
                 Integer.class, happyPlanId)).isEqualTo(1);
 
-        // Verify TRACK surface preserves trust & honest scope
-        HttpResponse<String> trackRes = candidateGet("/api/v1/track/applications/" + happyApp.appId());
-        assertThat(trackRes.statusCode()).isEqualTo(200);
+        // Verify TRACK and receipt surfaces preserve trust & honest scope
+        HttpResponse<String> trackRes = candidateGet("/api/v1/applications/" + happyApp.appId() + "/track");
+        assertThat(trackRes.statusCode()).as("track body=%s", trackRes.body()).isEqualTo(200);
         Map<?, ?> track = json.readValue(trackRes.body(), Map.class);
+        assertThat(track.get("status")).isEqualTo("APPLIED");
+        assertThat(track.get("basis")).isEqualTo("UNVERIFIED");
         Map<?, ?> submission = (Map<?, ?>) track.get("submission");
-        assertThat(submission.get("state")).isEqualTo("APPLIED");
+        assertThat(submission.get("state")).isEqualTo("UNVERIFIED");
         assertThat(submission.get("verificationLevel")).isEqualTo("BROWSER_OBSERVED");
         Map<?, ?> scope = (Map<?, ?>) track.get("reconciliationScope");
         assertThat(scope.get("employerStatusSource")).isEqualTo("EMAIL_AND_RECEIPT_ONLY");
         assertThat(scope.get("employerPortalPollingSupported")).isEqualTo(false);
+
+        HttpResponse<String> receiptRes = candidateGet("/api/v1/applications/" + happyApp.appId() + "/receipt");
+        assertThat(receiptRes.statusCode()).as("receipt body=%s", receiptRes.body()).isEqualTo(200);
+        Map<?, ?> receipt = json.readValue(receiptRes.body(), Map.class);
+        assertThat(receipt.get("verificationLevel")).isEqualTo("BROWSER_OBSERVED");
+        assertThat(((Map<?, ?>) receipt.get("reconciliation")).get("required")).isEqualTo(false);
     }
 
     @Test
     void scenarioB_revokedAuthorizationPreFenceReturnsCleanlyToAwaitingApprovalWithZeroClicksOrReconciliation() throws Exception {
         fixtureA.configure(Map.of("includeProhibitedDeclaration", false, "includeUnknownQuestion", false));
-        String targetUrl = fixtureA.origin + "/careers/apply";
+        String targetUrl = fixtureA.origin + "/careers/apply?role=xproc-revoke";
         SeededApp app = seedEligibleApplication("xproc-revoke", targetUrl, true);
         UUID planId = createPackage(app.appId());
 
@@ -365,7 +374,7 @@ class CrossProcessAutonomousApplyE2EIT {
     @Test
     void scenarioC_duplicateWorkerProcessesAndSecondApplicationForSameJobSubmitOnceOnly() throws Exception {
         fixtureA.configure(Map.of("includeProhibitedDeclaration", false, "includeUnknownQuestion", false));
-        String targetUrl = fixtureA.origin + "/careers/apply";
+        String targetUrl = fixtureA.origin + "/careers/apply?role=xproc-dup";
         SeededApp app = seedEligibleApplication("xproc-dup", targetUrl, true);
         UUID planId = createPackage(app.appId());
         promoteToStandingPass2(planId, app, targetUrl);
@@ -379,19 +388,21 @@ class CrossProcessAutonomousApplyE2EIT {
         assertThat(fixtureA.diagnostics().get("acceptedSubmissions")).isEqualTo(1);
         assertThat(fenceCount(planId)).isEqualTo(1);
 
-        // Even if a second application/plan exists for the SAME job_id, pre-submit fence blocks with 409 DUPLICATE_PRE_SUBMIT_ATTEMPT
-        UUID secondAppId = UUID.randomUUID();
-        jdbc.update("""
+        // 1. Database partial unique index applications_profile_job_live_uq prevents a second live application row for the same (profile_id, job_id)
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> jdbc.update("""
                 insert into applications (id, job_id, profile_id, mode, identity_key, status)
                 values (?, ?, ?, 'CONTROLLED_AUTO', ?, 'READY_TO_APPLY')
-                """, secondAppId, app.jobId(), devProfileId, "dup-second-" + secondAppId);
+                """, UUID.randomUUID(), app.jobId(), devProfileId, "dup-live-" + UUID.randomUUID()))
+                .isInstanceOf(org.springframework.dao.DuplicateKeyException.class);
+
+        // 2. Even if a second RUNNING/approved plan is inserted for the SAME application/job, pre-submit fence blocks with 409 APPLICATION_ALREADY_SUBMITTED
         UUID secondPlanId = UuidV7.generate();
         Map<String, Object> dupPlanJson = json.readValue(
                 jdbc.queryForObject("select plan::text from automation_plans where id = ?", String.class, planId), Map.class);
         jdbc.update("""
                 insert into automation_plans (id, application_id, profile_id, target_url, status, plan, submit_approved, idempotency_key, created_at, updated_at)
                 values (?, ?, ?, ?, 'RUNNING', ?::jsonb, true, ?, now(), now())
-                """, secondPlanId, secondAppId, devProfileId, targetUrl,
+                """, secondPlanId, app.appId(), devProfileId, targetUrl,
                 json.writeValueAsString(dupPlanJson), "dup-plan-" + secondPlanId);
 
         HttpResponse<String> dupFence = workerPost("/api/v1/automation/plans/" + secondPlanId + "/steps", Map.of(
@@ -404,13 +415,15 @@ class CrossProcessAutonomousApplyE2EIT {
                         "stepType", "UNIVERSAL_SUBMIT_CLICK",
                         "currentUrl", targetUrl)));
         assertThat(dupFence.statusCode()).isEqualTo(409);
+        assertThat(dupFence.body()).containsAnyOf("APPLICATION_ALREADY_SUBMITTED", "APPLICATION_NOT_ELIGIBLE");
         assertThat(fenceCount(secondPlanId)).isZero();
+        retirePlan(secondPlanId);
     }
 
     @Test
     void scenarioD_workerCrashAfterFenceQuarantinesSafelyAndRestartNeverClicksSecondTime() throws Exception {
         fixtureA.configure(Map.of("includeProhibitedDeclaration", false, "includeUnknownQuestion", false));
-        String targetUrl = fixtureA.origin + "/careers/apply";
+        String targetUrl = fixtureA.origin + "/careers/apply?role=xproc-crash";
         SeededApp app = seedEligibleApplication("xproc-crash", targetUrl, true);
         UUID planId = createPackage(app.appId());
         promoteToStandingPass2(planId, app, targetUrl);
@@ -457,7 +470,7 @@ class CrossProcessAutonomousApplyE2EIT {
     @Test
     void scenarioE_backendUnreachableForFenceFailsClosedWithZeroClicks() throws Exception {
         fixtureA.configure(Map.of("includeProhibitedDeclaration", false, "includeUnknownQuestion", false));
-        String targetUrl = fixtureA.origin + "/careers/apply";
+        String targetUrl = fixtureA.origin + "/careers/apply?role=xproc-unavail";
         SeededApp app = seedEligibleApplication("xproc-unavail", targetUrl, true);
         UUID planId = createPackage(app.appId());
         promoteToStandingPass2(planId, app, targetUrl);
@@ -485,8 +498,8 @@ class CrossProcessAutonomousApplyE2EIT {
     @Test
     void scenarioF_wrongEmployerDomainOrOffOriginTargetRefusesSubmission() throws Exception {
         // Application bound to fixtureA, but pre-submit fence reports currentUrl on fixtureB (different port/origin)
-        String targetUrl = fixtureA.origin + "/careers/apply";
-        String wrongUrl = fixtureB.origin + "/careers/apply";
+        String targetUrl = fixtureA.origin + "/careers/apply?role=xproc-domain";
+        String wrongUrl = fixtureB.origin + "/careers/apply?role=xproc-domain";
         SeededApp app = seedEligibleApplication("xproc-domain", targetUrl, true);
         UUID planId = createPackage(app.appId());
         promoteToStandingPass2(planId, app, targetUrl);
@@ -512,7 +525,7 @@ class CrossProcessAutonomousApplyE2EIT {
     @Test
     void scenarioG_captchaPausesWithHandoffWithoutBypassAndResumesSafely() throws Exception {
         fixtureA.configure(Map.of("captchaMode", "page2", "includeUnknownQuestion", false));
-        String targetUrl = fixtureA.origin + "/careers/apply";
+        String targetUrl = fixtureA.origin + "/careers/apply?role=xproc-captcha";
         SeededApp app = seedEligibleApplication("xproc-captcha", targetUrl, true);
         UUID planId = createPackage(app.appId());
 
@@ -538,54 +551,130 @@ class CrossProcessAutonomousApplyE2EIT {
 
     @Test
     void scenarioH_tamperedAndOffOriginSubmissionEvidenceIsRefusedNeverMarkingSubmitted() throws Exception {
-        String targetUrl = fixtureA.origin + "/careers/apply";
-        SeededApp app = seedEligibleApplication("xproc-tamper", targetUrl, true);
-        UUID planId = createPackage(app.appId());
-        promoteToStandingPass2(planId, app, targetUrl);
-        assertThat(planRepository.claim(planId)).isTrue();
+        // 1. Forged off-origin finalOrigin (even when canonically self-signed with valid evidenceSha256) -> 422, NEVER SUBMITTED
+        String offOriginUrl = fixtureA.origin + "/careers/apply?role=xproc-tamper-1";
+        SeededApp app1 = seedEligibleApplication("xproc-tamper-1", offOriginUrl, true);
+        UUID offOriginPlanId = createPackage(app1.appId());
+        promoteToStandingPass2(offOriginPlanId, app1, offOriginUrl);
+        assertThat(planRepository.claim(offOriginPlanId)).isTrue();
         assertThat(planRepository.recordPreSubmitAttemptIfAbsent(
-                planId, 99, "RUNNING", Map.of("phase", "PRE_SUBMIT_ATTEMPTING"), null)).isTrue();
+                offOriginPlanId, 99, "RUNNING", Map.of("phase", "PRE_SUBMIT_ATTEMPTING"), null)).isTrue();
 
-        // Forge rawEvidence claiming evil off-origin finalOrigin
-        String forgedRaw = json.writeValueAsString(Map.of(
+        Map<String, Object> offOriginBody = new LinkedHashMap<>();
+        offOriginBody.put("schemaVersion", "robin-submission-evidence-v2");
+        offOriginBody.put("atsPlatform", "UNIVERSAL");
+        offOriginBody.put("attemptCorrelation", Map.of(
+                "planId", offOriginPlanId.toString(),
+                "applicationId", app1.appId().toString(),
+                "jobId", app1.jobId().toString()));
+        offOriginBody.put("observedAt", Instant.now().toString());
+        offOriginBody.put("redirectChain", List.of(Map.of("host", "127.0.0.1", "status", 302)));
+        offOriginBody.put("finalOrigin", fixtureB.origin);
+        offOriginBody.put("confirmationNumber", "CONF-FORGED-01");
+        offOriginBody.put("employerVerification", "NOT_VERIFIED_BY_BROWSER");
+        offOriginBody.put("documents", Map.of());
+        String offOriginRaw = signEvidenceV2(offOriginBody);
+
+        assertForgeRefused422(offOriginPlanId, app1.appId(), offOriginRaw, "Spoofed off-origin finalOrigin");
+
+        // 2. Replayed/mismatched attemptCorrelation (valid digest + same fixtureA origin, wrong jobId/applicationId) -> 422, NEVER SUBMITTED
+        String replayUrl = fixtureA.origin + "/careers/apply?role=xproc-tamper-2";
+        SeededApp app2 = seedEligibleApplication("xproc-tamper-2", replayUrl, true);
+        UUID replayPlanId = createPackage(app2.appId());
+        promoteToStandingPass2(replayPlanId, app2, replayUrl);
+        assertThat(planRepository.claim(replayPlanId)).isTrue();
+        assertThat(planRepository.recordPreSubmitAttemptIfAbsent(
+                replayPlanId, 99, "RUNNING", Map.of("phase", "PRE_SUBMIT_ATTEMPTING"), null)).isTrue();
+
+        Map<String, Object> replayBody = new LinkedHashMap<>();
+        replayBody.put("schemaVersion", "robin-submission-evidence-v2");
+        replayBody.put("atsPlatform", "UNIVERSAL");
+        replayBody.put("attemptCorrelation", Map.of(
+                "planId", replayPlanId.toString(),
+                "applicationId", UUID.randomUUID().toString(),
+                "jobId", UUID.randomUUID().toString()));
+        replayBody.put("observedAt", Instant.now().toString());
+        replayBody.put("redirectChain", List.of(Map.of("host", "127.0.0.1", "status", 200)));
+        replayBody.put("finalOrigin", fixtureA.origin);
+        replayBody.put("confirmationNumber", "CONF-REPLAY-02");
+        replayBody.put("employerVerification", "NOT_VERIFIED_BY_BROWSER");
+        replayBody.put("documents", Map.of());
+        String replayRaw = signEvidenceV2(replayBody);
+
+        assertForgeRefused422(replayPlanId, app2.appId(), replayRaw, "Replayed cross-application correlation");
+
+        // 3. Unsealed v2 payload missing evidenceSha256 (fake "digest" key) -> 422, NEVER SUBMITTED
+        String unsealedUrl = fixtureA.origin + "/careers/apply?role=xproc-tamper-3";
+        SeededApp app3 = seedEligibleApplication("xproc-tamper-3", unsealedUrl, true);
+        UUID unsealedPlanId = createPackage(app3.appId());
+        promoteToStandingPass2(unsealedPlanId, app3, unsealedUrl);
+        assertThat(planRepository.claim(unsealedPlanId)).isTrue();
+        assertThat(planRepository.recordPreSubmitAttemptIfAbsent(
+                unsealedPlanId, 99, "RUNNING", Map.of("phase", "PRE_SUBMIT_ATTEMPTING"), null)).isTrue();
+
+        String unsealedRaw = json.writeValueAsString(Map.of(
                 "schemaVersion", "robin-submission-evidence-v2",
                 "digest", "0".repeat(64),
                 "attemptCorrelation", Map.of(
-                        "planId", planId.toString(),
-                        "applicationId", app.appId().toString(),
-                        "jobId", app.jobId().toString()),
-                "employerVerification", "NOT_VERIFIED_BY_BROWSER",
-                "finalOrigin", fixtureB.origin,
-                "redirectChain", List.of(Map.of("url", fixtureB.origin + "/confirm", "host", "127.0.0.1")),
-                "confirmation", Map.of("confirmationId", "FAKE-123", "signals", List.of("TEXT_ONLY")),
+                        "planId", unsealedPlanId.toString(),
+                        "applicationId", app3.appId().toString(),
+                        "jobId", app3.jobId().toString()),
+                "finalOrigin", fixtureA.origin,
                 "documents", Map.of()));
+        assertForgeRefused422(unsealedPlanId, app3.appId(), unsealedRaw, "Unsealed v2 payload missing evidenceSha256");
 
+        // 4. Candidate browser session with CSRF cannot self-report SUBMITTED -> 403
+        String selfUrl = fixtureA.origin + "/careers/apply?role=xproc-tamper-4";
+        SeededApp app4 = seedEligibleApplication("xproc-tamper-4", selfUrl, true);
+        UUID selfReportPlanId = createPackage(app4.appId());
+        promoteToStandingPass2(selfReportPlanId, app4, selfUrl);
+        assertThat(planRepository.claim(selfReportPlanId)).isTrue();
+        HttpResponse<String> candidateForge = candidatePost("/api/v1/automation/plans/" + selfReportPlanId + "/complete", Map.of(
+                "outcome", "SUBMITTED",
+                "detail", "Candidate forged self-submit"));
+        assertThat(candidateForge.statusCode()).isEqualTo(403);
+        assertThat(jdbc.queryForObject("select status from applications where id = ?", String.class, app4.appId()))
+                .isNotEqualTo("APPLICATION_SUBMITTED");
+        assertThat(jdbc.queryForObject("select count(*) from submission_evidence where application_id = ?", Integer.class, app4.appId()))
+                .isZero();
+    }
+
+    private void assertForgeRefused422(UUID planId, UUID appId, String rawEvidence, String detail) throws Exception {
         HttpResponse<String> res = workerPost("/api/v1/automation/plans/" + planId + "/complete", Map.of(
                 "outcome", "SUBMITTED",
-                "detail", "Spoofed off-origin confirmation",
+                "detail", detail,
                 "result", List.of(Map.of(
                         "type", "SUBMISSION_EVIDENCE",
                         "planType", "UNIVERSAL",
                         "confirmed", true,
                         "category", "CONFIRMED",
-                        "evidence", "Spoofed banner",
-                        "rawEvidence", forgedRaw,
+                        "signals", List.of("UNIVERSAL_CONFIRMATION_DOM_MATCHED"),
+                        "evidence", detail,
+                        "rawEvidence", rawEvidence,
                         "observedAt", Instant.now().toString()))));
-
-        assertThat(res.statusCode()).isEqualTo(422);
+        assertThat(res.statusCode()).as("complete body=%s", res.body()).isEqualTo(422);
         assertThat(jdbc.queryForObject("select status from automation_plans where id = ?", String.class, planId))
                 .isEqualTo("RECONCILIATION_REQUIRED");
-        assertThat(jdbc.queryForObject("select status from applications where id = ?", String.class, app.appId()))
+        assertThat(jdbc.queryForObject("select status from applications where id = ?", String.class, appId))
                 .isNotEqualTo("APPLICATION_SUBMITTED");
-        assertThat(jdbc.queryForObject("select count(*) from submission_evidence where application_id = ?", Integer.class, app.appId()))
+        assertThat(jdbc.queryForObject("select count(*) from submission_evidence where application_id = ?", Integer.class, appId))
                 .isZero();
+    }
+
+    private String signEvidenceV2(Map<String, Object> body) throws Exception {
+        String unsignedCanonical = com.personal.jobagent.track.receipt.CanonicalJson.write(json.valueToTree(body));
+        String sha = HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(unsignedCanonical.getBytes(StandardCharsets.UTF_8)));
+        Map<String, Object> signed = new LinkedHashMap<>(body);
+        signed.put("evidenceSha256", sha);
+        return com.personal.jobagent.track.receipt.CanonicalJson.write(json.valueToTree(signed));
     }
 
     @Test
     void applyTimeLivenessAndLockConcurrencyBehaveCorrectlyEndToEnd() throws Exception {
         // 1. Apply-time liveness: HTTP 404 closed posting -> claim-next marks FAILED (JOB_POSTING_CLOSED), returns 204
         fixtureA.configure(Map.of("postingClosedHttpStatus", 404));
-        SeededApp closedApp = seedEligibleApplication("xproc-404", fixtureA.origin + "/careers/apply", true);
+        SeededApp closedApp = seedEligibleApplication("xproc-404", fixtureA.origin + "/careers/apply?role=xproc-404", true);
         UUID closedPlanId = createPackage(closedApp.appId());
         HttpResponse<String> claim404 = workerPost("/api/v1/automation/plans/claim-next", Map.of());
         assertThat(claim404.statusCode()).isEqualTo(204);
@@ -597,7 +686,7 @@ class CrossProcessAutonomousApplyE2EIT {
 
         // 2. Apply-time liveness: login wall -> INCONCLUSIVE, claims cleanly without marking closed
         fixtureA.configure(Map.of("postingClosedHttpStatus", 200, "loginWallOnGet", true));
-        SeededApp loginApp = seedEligibleApplication("xproc-login", fixtureA.origin + "/careers/apply", true);
+        SeededApp loginApp = seedEligibleApplication("xproc-login", fixtureA.origin + "/careers/apply?role=xproc-login", true);
         UUID loginPlanId = createPackage(loginApp.appId());
         HttpResponse<String> claimLogin = workerPost("/api/v1/automation/plans/claim-next", Map.of());
         assertThat(claimLogin.statusCode()).isEqualTo(200);
@@ -610,9 +699,10 @@ class CrossProcessAutonomousApplyE2EIT {
 
         // 3. Deterministic concurrency: withdraw-approval racing pre-submit fence preserves mutual exclusion
         fixtureA.configure(Map.of("loginWallOnGet", false));
-        SeededApp raceApp = seedEligibleApplication("xproc-race", fixtureA.origin + "/careers/apply", true);
+        String raceUrl = fixtureA.origin + "/careers/apply?role=xproc-race";
+        SeededApp raceApp = seedEligibleApplication("xproc-race", raceUrl, true);
         UUID racePlanId = createPackage(raceApp.appId());
-        promoteToStandingPass2(racePlanId, raceApp, fixtureA.origin + "/careers/apply");
+        promoteToStandingPass2(racePlanId, raceApp, raceUrl);
         assertThat(planRepository.claim(racePlanId)).isTrue();
 
         ExecutorService pool = Executors.newFixedThreadPool(2);

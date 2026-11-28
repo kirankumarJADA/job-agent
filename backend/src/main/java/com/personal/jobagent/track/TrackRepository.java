@@ -659,7 +659,7 @@ public class TrackRepository {
                        (select min(al.created_at) from audit_logs al
                          where al.entity_type = 'AUTOMATION_PLAN' and al.entity_id = p.id
                            and al.action in ('GREENHOUSE_SUBMIT_APPROVED', 'ASHBY_SUBMIT_APPROVED', 'WORKDAY_SUBMIT_APPROVED',
-                                             'UNIVERSAL_SUBMIT_APPROVED')) as approved_at
+                                             'UNIVERSAL_SUBMIT_APPROVED', 'STANDING_SUBMIT_AUTHORIZED')) as approved_at
                 from automation_plans p join applications a on a.id = p.application_id and a.profile_id = p.profile_id
                 where a.profile_id = ?""" + appFilter, (ResultSet rs) -> {
             Instant fence = instant(rs, "fence_at");

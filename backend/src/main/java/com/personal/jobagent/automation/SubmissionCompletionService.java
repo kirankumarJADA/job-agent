@@ -1,14 +1,18 @@
 package com.personal.jobagent.automation;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.personal.jobagent.audit.AuditEntry;
 import com.personal.jobagent.audit.AuditLogWriter;
 import com.personal.jobagent.common.UuidV7;
 import com.personal.jobagent.track.ApplicationReceiptService;
+import com.personal.jobagent.track.receipt.BrowserObservationPolicy;
 import com.personal.jobagent.track.receipt.SubmissionEvidenceRepository;
 import com.personal.jobagent.track.receipt.SubmissionEvidenceRepository.NewEvidence;
 import com.personal.jobagent.track.receipt.SubmissionEvidenceRepository.StoredEvidence;
+import com.personal.jobagent.track.receipt.UniversalSubmissionEvidence;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -74,17 +78,29 @@ public class SubmissionCompletionService {
     private final AuditLogWriter audit;
     private final TransactionTemplate tx;
     private final ApplicationReceiptService receipts;
+    private final ObjectMapper json;
+
+    @Autowired
+    public SubmissionCompletionService(AutomationPlanRepository plans,
+                                       SubmissionEvidenceRepository evidence,
+                                       AuditLogWriter audit,
+                                       PlatformTransactionManager transactionManager,
+                                       ApplicationReceiptService receipts,
+                                       @Autowired(required = false) ObjectMapper json) {
+        this.plans = plans;
+        this.evidence = evidence;
+        this.audit = audit;
+        this.tx = new TransactionTemplate(transactionManager);
+        this.receipts = receipts;
+        this.json = json != null ? json : new ObjectMapper();
+    }
 
     public SubmissionCompletionService(AutomationPlanRepository plans,
                                        SubmissionEvidenceRepository evidence,
                                        AuditLogWriter audit,
                                        PlatformTransactionManager transactionManager,
                                        ApplicationReceiptService receipts) {
-        this.plans = plans;
-        this.evidence = evidence;
-        this.audit = audit;
-        this.tx = new TransactionTemplate(transactionManager);
-        this.receipts = receipts;
+        this(plans, evidence, audit, transactionManager, receipts, new ObjectMapper());
     }
 
     /**
@@ -107,24 +123,27 @@ public class SubmissionCompletionService {
         }
 
         Validation v = validate(planType, reported);
-        if (!v.valid()) {
+        String invalidReason = v.valid()
+                ? validateRawEvidenceForPlan(planId, plan, planType, stringOrNull(v.entry().get("rawEvidence")))
+                : v.reason();
+        if (invalidReason != null) {
             List<Object> reconciliation = List.of(Map.of(
                     "type", "SUBMISSION_RECONCILIATION",
                     "planType", planType,
                     "category", MISSING_EVIDENCE_CATEGORY,
-                    "evidence", truncate("SUBMITTED was reported without valid structured evidence (" + v.reason()
+                    "evidence", truncate("SUBMITTED was reported without valid structured evidence (" + invalidReason
                             + "); worker detail: " + (detail == null ? "" : detail), MAX_EVIDENCE_TEXT)));
             Boolean moved = tx.execute(status -> {
                 boolean ok = plans.transitionWithResult(planId, "RUNNING", "RECONCILIATION_REQUIRED", reconciliation);
                 if (ok) {
                     audit.write(new AuditEntry(workerPrincipal, "AUTOMATION_PLAN_RECONCILIATION_REQUIRED",
                             "AUTOMATION_PLAN", planId, null,
-                            Map.of("reason", MISSING_EVIDENCE_CATEGORY, "detail", v.reason()), null, UuidV7.generate()));
+                            Map.of("reason", MISSING_EVIDENCE_CATEGORY, "detail", invalidReason), null, UuidV7.generate()));
                 }
                 return ok;
             });
             return Boolean.TRUE.equals(moved)
-                    ? new Result(Outcome.RECONCILIATION_REQUIRED, v.reason(), null, null)
+                    ? new Result(Outcome.RECONCILIATION_REQUIRED, invalidReason, null, null)
                     : Result.illegal("plan state changed");
         }
 
@@ -245,6 +264,63 @@ public class SubmissionCompletionService {
             return Validation.invalid("rawEvidence must be a string");
         }
         return new Validation(true, null, e);
+    }
+
+    private String validateRawEvidenceForPlan(UUID planId, AutomationPlanRepository.PlanRow plan,
+                                            String planType, String rawEvidence) {
+        if (rawEvidence == null) {
+            return null;
+        }
+        UniversalSubmissionEvidence.Parsed parsed = UniversalSubmissionEvidence.parse(rawEvidence, json);
+        if ("UNIVERSAL".equals(planType)) {
+            if (parsed.kind() == UniversalSubmissionEvidence.Kind.UNPARSEABLE) {
+                return "rawEvidence is malformed and cannot be parsed";
+            }
+            if (parsed.kind() == UniversalSubmissionEvidence.Kind.UNKNOWN_VERSION) {
+                return "rawEvidence uses an unsupported schemaVersion";
+            }
+        }
+        if (parsed.isV2()) {
+            if (parsed.digest() == UniversalSubmissionEvidence.DigestStatus.ABSENT) {
+                return "rawEvidence v2 payload is missing canonical evidenceSha256";
+            }
+            if (parsed.planId() == null || !planId.equals(parsed.planId())
+                    || parsed.applicationId() == null || !plan.applicationId().equals(parsed.applicationId())) {
+                return "rawEvidence attemptCorrelation does not match target plan/application";
+            }
+            UUID expectedJobId = resolveJobId(planId, plan);
+            if (expectedJobId != null && (parsed.jobId() == null || !expectedJobId.equals(parsed.jobId()))) {
+                return "rawEvidence attemptCorrelation does not match target job";
+            }
+            String expectedAuthority = BrowserObservationPolicy.authority(plan.targetUrl());
+            String finalAuthority = BrowserObservationPolicy.authority(parsed.finalOrigin());
+            if (expectedAuthority == null || finalAuthority == null || !expectedAuthority.equals(finalAuthority)) {
+                return "rawEvidence finalOrigin is missing or off-origin from plan targetUrl";
+            }
+        }
+        return null;
+    }
+
+    private UUID resolveJobId(UUID planId, AutomationPlanRepository.PlanRow plan) {
+        if (plan.plan() != null) {
+            Object corrObj = plan.plan().get("correlation");
+            if (corrObj instanceof Map<?, ?> corr) {
+                UUID id = parseUuid(corr.get("jobId"));
+                if (id != null) return id;
+            }
+            UUID topLevel = parseUuid(plan.plan().get("jobId"));
+            if (topLevel != null) return topLevel;
+        }
+        return plans.findJobIdByPlanId(planId).orElse(null);
+    }
+
+    private static UUID parseUuid(Object raw) {
+        if (raw == null) return null;
+        try {
+            return UUID.fromString(String.valueOf(raw).trim());
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     private static List<String> signalsOf(Map<String, Object> entry) {

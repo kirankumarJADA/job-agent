@@ -765,6 +765,16 @@ class ApplicationReceiptIT {
         assertThat(trustStore.verifiedApproval(devProfileId, UUID.randomUUID(), genuine)).isEmpty();
         assertThat(trustStore.verifiedApproval(otherProfileId, applicationId, genuine)).isEmpty();
         assertThat(trustStore.ownsPlan(otherProfileId, applicationId, genuine)).isFalse();
+
+        // A bare SYSTEM STANDING_SUBMIT_AUTHORIZED row without a prior candidate-actor standing opt-in fails closed.
+        UUID forgedStanding = seedPlan(devProfileId, applicationId, WORKDAY_JOB_URL, "READY_TO_SUBMIT", true,
+                "ab-7:" + applicationId,
+                Map.of("planType", "WORKDAY", "authorizationMode", "STANDING_AUTO_SUBMIT", "steps", List.of()),
+                List.of());
+        audit.write(new AuditEntry("SYSTEM", "STANDING_SUBMIT_AUTHORIZED", "AUTOMATION_PLAN", forgedStanding, null,
+                Map.of("planType", "WORKDAY", "authorizationMode", "STANDING_AUTO_SUBMIT", "approvedForSubmission", true),
+                null, UuidV7.generate()));
+        assertThat(trustStore.verifiedApproval(devProfileId, applicationId, forgedStanding)).isEmpty();
     }
 
     // ── preserved behaviour: history, isolation, redaction ──────────────

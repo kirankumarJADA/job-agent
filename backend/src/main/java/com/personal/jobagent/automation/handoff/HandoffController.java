@@ -2,6 +2,7 @@ package com.personal.jobagent.automation.handoff;
 
 import com.personal.jobagent.security.OwnerContext;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -19,11 +20,20 @@ public class HandoffController {
 
     private final AtsHandoffService handoffService;
     private final OwnerContext ownerContext;
+    private final boolean allowLocalTestHosts;
 
     @Autowired
-    public HandoffController(AtsHandoffService handoffService, OwnerContext ownerContext) {
+    public HandoffController(
+            AtsHandoffService handoffService,
+            OwnerContext ownerContext,
+            @Value("${app.sandbox.allow-local-test-hosts:false}") boolean allowLocalTestHosts) {
         this.handoffService = handoffService;
         this.ownerContext = ownerContext;
+        this.allowLocalTestHosts = allowLocalTestHosts;
+    }
+
+    public HandoffController(AtsHandoffService handoffService, OwnerContext ownerContext) {
+        this(handoffService, ownerContext, false);
     }
 
     public record InitiateRequest(
@@ -226,7 +236,7 @@ public class HandoffController {
         }
 
         try {
-            AtsHandoffService.validateTargetUrl(req.targetUrl());
+            AtsHandoffService.validateTargetUrl(req.targetUrl(), allowLocalTestHosts);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", "Invalid target URL: " + e.getMessage()));
         }

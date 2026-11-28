@@ -250,6 +250,7 @@ public class StandingAuthorizationService {
         details.put("applicationId", plan.applicationId().toString());
         details.put("planType", planType);
         details.put("authorizationMode", "STANDING_AUTO_SUBMIT");
+        details.put("approvedForSubmission", true);
         details.put("matchScore", scoreCheck.score());
         details.put("effectiveMinScore", scoreCheck.effectiveMinScore());
         details.put("dailyQuotaUsed", (int) reservation.used());

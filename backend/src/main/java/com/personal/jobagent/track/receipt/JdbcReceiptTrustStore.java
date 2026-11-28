@@ -57,12 +57,34 @@ public class JdbcReceiptTrustStore implements ReceiptTrustStore {
               and ap.profile_id = ?
               and ap.submit_approved = true
               and al.entity_type = 'AUTOMATION_PLAN'
-              and al.action in ('GREENHOUSE_SUBMIT_APPROVED', 'ASHBY_SUBMIT_APPROVED', 'WORKDAY_SUBMIT_APPROVED', 'UNIVERSAL_SUBMIT_APPROVED')
-              and al.action = coalesce(ap.plan ->> 'planType', 'GREENHOUSE') || '_SUBMIT_APPROVED'
               and al.after_state is not null
-              and (al.after_state ->> 'approvedForSubmission') = 'true'
-              and (lower(trim(al.actor)) = lower(trim(u.email)) or al.actor = u.id::text or al.actor = p.id::text)
-              and lower(trim(al.actor)) not in ('worker', 'system', 'anonymous', 'service', 'user')
+              and (
+                (
+                  al.action in ('GREENHOUSE_SUBMIT_APPROVED', 'ASHBY_SUBMIT_APPROVED', 'WORKDAY_SUBMIT_APPROVED', 'UNIVERSAL_SUBMIT_APPROVED')
+                  and al.action = coalesce(ap.plan ->> 'planType', 'GREENHOUSE') || '_SUBMIT_APPROVED'
+                  and (al.after_state ->> 'approvedForSubmission') = 'true'
+                  and (lower(trim(al.actor)) = lower(trim(u.email)) or al.actor = u.id::text or al.actor = p.id::text)
+                  and lower(trim(al.actor)) not in ('worker', 'system', 'anonymous', 'service', 'user')
+                )
+                or (
+                  al.action = 'STANDING_SUBMIT_AUTHORIZED'
+                  and coalesce(ap.plan ->> 'authorizationMode', '') = 'STANDING_AUTO_SUBMIT'
+                  and coalesce(al.after_state ->> 'planType', '') = coalesce(ap.plan ->> 'planType', 'GREENHOUSE')
+                  and coalesce(al.after_state ->> 'authorizationMode', '') = 'STANDING_AUTO_SUBMIT'
+                  and (al.after_state ->> 'approvedForSubmission') = 'true'
+                  and exists (
+                    select 1 from audit_logs opt
+                    where opt.entity_type = 'PROFILE'
+                      and opt.entity_id = p.id
+                      and opt.action = 'APPROVAL_RULE_UPDATED'
+                      and opt.after_state is not null
+                      and (opt.after_state ->> 'standingAutoSubmitEnabled') = 'true'
+                      and (lower(trim(opt.actor)) = lower(trim(u.email)) or opt.actor = u.id::text or opt.actor = p.id::text)
+                      and lower(trim(opt.actor)) not in ('worker', 'system', 'anonymous', 'service', 'user')
+                      and opt.created_at <= al.created_at
+                  )
+                )
+              )
             order by al.created_at desc
             limit 1
             """;
